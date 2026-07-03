@@ -1,0 +1,34 @@
+{
+  "name": "zswap-da",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "packages/contracts-midnight/contract-offer-files"
+  ],
+  "scripts": {
+    "fix:celestia": "bun run scripts/patch-macos-celestia.ts",
+    "predev": "bun run scripts/patch-macos-celestia.ts",
+    "dev": "NODE_ENV=development bunx orchestrator start",
+    "pretest": "bun run scripts/patch-macos-celestia.ts",
+    "start:mainnet": "bun run start.mainnet.ts",
+    "test": "bun run packages/tests/run-tests.ts",
+    "seed:market": "bun run packages/tests/seed-market.ts",
+    "build:midnight": "bun run --filter @zswap-da/contract-offer-files compact",
+    "build:pgtypes": "bun run --filter @zswap-da/database pgtyped:update"
+  },
+  "dependencies": {
+    "@effectstream/celestia": "0.101.0",
+    "@effectstream/midnight-contracts": "0.101.0",
+    "@effectstream/orchestrator": "0.101.0",
+    "@electric-sql/pglite": "^0.3.14",
+    "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
+    "@scure/bip39": "^2.2.0",
+    "wait-on": "8.0.3"
+  },
+  "effectstream": {
+    "default": "start.dev.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13"
+  }
+}

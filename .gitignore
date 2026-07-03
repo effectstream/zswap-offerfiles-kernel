@@ -1,0 +1,15 @@
+node_modules/
+packages/batcher/batcher-data/
+packages/contracts-midnight/contract-offer-files/src/managed/
+packages/contracts-midnight/midnight-level-db-deploy/
+
+# Runtime logs from the dev stack
+*-debug.log
+
+# Preview Docker test setup — not for commit
+Dockerfile
+docker-compose.yml
+docker/
+.env
+.dockerignore
+mnemonic-to-seed.ts

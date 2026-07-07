@@ -193,6 +193,21 @@ monorepo at
 
 ## API
 
+**Full request/response reference with curl examples: [API.md](API.md).** The
+table below is a quick index; API.md documents every field, error code, the
+batcher endpoints, and direct Celestia access.
+
+There are **two ways** to post and read offers:
+
+- **Via this backend (recommended for apps):** `POST /api/zswap/submit` validates
+  an offer (structure + ZK proofs + liveness) *before* any Celestia fee, then
+  forwards it; `GET /api/zswaps` returns validated, indexed, liveness-checked
+  offers. See API.md.
+- **Directly on Celestia:** post with `blob.Submit` / read with `blob.GetAll`
+  against the same Celestia node — the backend is a convenience layer, not a
+  gatekeeper. Use for archival/mirroring or independent verification. See
+  [API.md → Direct Celestia access](API.md#direct-celestia-access-bypassing-this-backend).
+
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/zswaps?limit&offset&token&direction` | Active swap offers + their gives/wants. |
@@ -201,6 +216,10 @@ monorepo at
 | `GET` | `/api/midnight/config` | Public Midnight config the browser contract client needs. |
 | `POST` | `/api/zswap/submit` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, else forward to the batcher → Celestia. |
 | `GET` | `/api/events` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
+
+Beyond the above, the node also serves `GET /health`, `GET /api/health/sync`,
+`GET /api/zswap/status`, `GET /api/pairs`, `GET /api/quote`, and
+`GET /api/chart/{stats,history}` — all detailed in [API.md](API.md).
 
 ## Celestia data retention (read before relying on history)
 

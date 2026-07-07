@@ -185,7 +185,11 @@ Returns the current live offer book — offers published to Celestia, validated,
     "transaction_hex": "zswapoffer1...",
     "metadata_created_at": "2026-06-01T12:00:00.000Z",
     "metadata_expires_at": null,
-    "ttl_seconds": 3600,
+    "metadata_maker_note": null,
+    "auth_signer_public_key": null,
+    "auth_signature": null,
+    "auth_scheme": null,
+    "ttl_seconds": "3600",
     "created_at": "2026-06-01T12:00:05.123Z",
     "gives": [
       { "token": "0000000000000000000000000000000000000000000000000000000000000000", "amount": "1000000" }
@@ -202,7 +206,11 @@ Returns the current live offer book — offers published to Celestia, validated,
 | `transaction_hex` | The raw `zswapoffer1…` blob. Pass directly to the Midnight contract for settlement. |
 | `gives` | Tokens the maker is offering |
 | `wants` | Tokens the maker is requesting |
-| `ttl_seconds` | Offer lifetime in seconds from `metadata_created_at` |
+| `ttl_seconds` | Offer lifetime in seconds from `metadata_created_at`, as a **string** |
+| `metadata_maker_note` | Optional free-text note from the maker (`null` when none) |
+| `auth_signer_public_key`, `auth_signature`, `auth_scheme` | Optional maker signature over the offer (all `null` when unsigned) |
+
+All string/number fields are returned as-is from the DB; numeric-looking values (`celestia_height`, `ttl_seconds`, token `amount`) are **strings** to preserve full precision.
 
 ```bash
 # All open offers giving NIGHT:
@@ -233,7 +241,7 @@ curl "http://host:9999/api/zswap/status?blob=zswapoffer1..."
 
 #### `GET /api/pairs`
 
-All known trading pairs, combining historical fill data from `pair_stats` with live open-offer counts. Use this to populate a pair picker or market list.
+All known trading pairs, combining historical fill data from `pair_stats` with live open-offer counts. Use this to populate a pair picker or market list. Pairs are keyed by **token color only** — resolve display names separately via `GET /api/known-tokens`.
 
 ```bash
 curl http://host:9999/api/pairs
@@ -242,15 +250,23 @@ curl http://host:9999/api/pairs
 ```json
 [
   {
-    "base":       "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569",
-    "quote":      "0000000000000000000000000000000000000000000000000000000000000000",
-    "base_name":  "TESTTOKENA",
-    "quote_name": "NIGHT",
-    "open_count": 6,
-    "last_price": 12.5
+    "pair_key":       "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569|0000000000000000000000000000000000000000000000000000000000000000",
+    "base_color":     "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569",
+    "quote_color":    "0000000000000000000000000000000000000000000000000000000000000000",
+    "trade_count":    12,
+    "last_price":     12.5,
+    "last_traded_at": "2026-06-01T12:00:00.000Z",
+    "open_count":     6
   }
 ]
 ```
+
+| Field | Description |
+|---|---|
+| `pair_key` | `base_color\|quote_color` — the stable pair identifier |
+| `trade_count` | Number of filled (consumed) offers for this pair |
+| `last_price`, `last_traded_at` | From the most recent fill; **`null` until the pair has traded** |
+| `open_count` | Live open offers for this pair right now |
 
 ---
 
@@ -362,6 +378,34 @@ Price quote for a token swap, backed by the `token_prices` table. On first reque
 curl "http://host:9999/api/quote?from_token=0000...0000&to_token=70ce...b569&from_amount=1000000"
 ```
 
+**Response**
+
+```json
+{
+  "from_token":          "0000...0000",
+  "to_token":            "70ce...b569",
+  "from_amount":         "1000000",
+  "market_rate":         1.4623555716999876,
+  "suggested_to_amount": "1425796",
+  "to_amount":           "1425796",
+  "implied_rate":        1.425796,
+  "discount":            0.025,
+  "sponsored":           true,
+  "from_usd":            1.46,
+  "to_usd":              1.42
+}
+```
+
+| Field | Description |
+|---|---|
+| `market_rate` | Reference price `to/from` from the `token_prices` table |
+| `suggested_to_amount` | `from_amount × market_rate` at the reference price (string, base units) |
+| `to_amount` | The quoted receive amount — your `to_amount` if supplied, else `suggested_to_amount` |
+| `implied_rate` | Effective `to_amount / from_amount` you'd be trading at |
+| `discount` | Fractional gap below `market_rate` (e.g. `0.025` = 2.5% under market) |
+| `sponsored` | `true` when the implied rate is at least the sponsorship discount below market (the batcher's fee-sponsorship policy hook) |
+| `from_usd`, `to_usd` | USD value of each leg at the reference price |
+
 ---
 
 #### `GET /api/chart/stats?base=<A>&quote=<B>`
@@ -424,6 +468,11 @@ data: {"type":"offer_rejected","code":"ROOT_UNKNOWN","reason":"...","celestiaHei
 
 data: {"type":"token_minted","name":"MYTOKEN","color":"...","kind":"shielded","timestamp":...}
 ```
+
+`timestamp` (ms epoch) is added by the server to every event. `offer_consumed`
+carries **either** `nullifier` (shielded input spent) **or** `unshieldedSpend`
+(`{owner, intentHash, outputNo}`, unshielded UTXO spent) depending on which coin
+was consumed — handle both.
 
 ---
 
@@ -593,3 +642,93 @@ curl -s "http://host:9999/api/zswaps?limit=5" | jq '.[0]'
 # Stream lifecycle events while waiting for settlement
 curl -N http://host:9999/api/events
 ```
+
+---
+
+## Direct Celestia access (bypassing this backend)
+
+Every offer is just a blob in one Celestia namespace, so you can post and read
+the DA layer directly — the node/batcher are a convenience layer, not a
+gatekeeper. Talk JSON-RPC 2.0 to the **same Celestia node** the stack uses
+(`CELESTIA_RPC_URL`, default `http://127.0.0.1:26658`), with
+`Authorization: Bearer $CELESTIA_AUTH_TOKEN` (omit the header on QuickNode —
+auth is embedded in the URL).
+
+**When to use which path:**
+
+| | Via this backend | Directly on Celestia |
+|---|---|---|
+| **Post** | `POST /api/zswap/submit` — validates structure + proofs + liveness **before** any fee | `blob.Submit` — you pay the TIA fee even for a bad blob; the indexer re-validates and drops it (emitting `offer_rejected`) |
+| **Read** | `GET /api/zswaps` — validated, indexed, liveness-checked, named | `blob.GetAll` — raw bytes; re-validate yourself with `@zswap-da/validator` |
+
+Prefer the REST paths for apps. Reach for direct access for archival/mirroring,
+independent verification, or posting without trusting an operator.
+
+### Namespace
+
+The offer namespace is `CELESTIA_NAMESPACE` (hex, default
+`000000000000deadbeef`). Celestia's RPC wants it base64-encoded as a 29-byte
+array — 1 version byte (`0x00`) + 28-byte ID, right-aligned:
+
+```bash
+# 000000000000deadbeef →
+NS_B64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAN6tvu8="
+
+# derive it for any namespace:
+bun -e 'const h=process.argv[1].replace(/^0x/,"");const b=new Uint8Array(29);const x=(h.match(/.{1,2}/g)??[]).map(n=>parseInt(n,16));b.set(x,29-x.length);console.log(Buffer.from(b).toString("base64"))' 000000000000deadbeef
+```
+
+### Post an offer — `blob.Submit`
+
+The blob `data` is the `zswapoffer1…` string, UTF-8 → base64. `share_version` is
+`0`. The second param is the tx config (`fee` in utia, `gasLimit`); on mainnet
+add `gas_price`/`max_gas_price` to skip the on-chain estimator (avoids 429s).
+
+```bash
+BLOB="zswapoffer1..."
+DATA_B64=$(printf %s "$BLOB" | base64 | tr -d '\n')
+
+curl -s -X POST "$CELESTIA_RPC_URL" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CELESTIA_AUTH_TOKEN" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"blob.Submit\",
+       \"params\":[[{\"namespace\":\"$NS_B64\",\"data\":\"$DATA_B64\",\"share_version\":0}],
+                   {\"fee\":2000,\"gasLimit\":100000}]}"
+# → {"jsonrpc":"2.0","id":1,"result":1234567}   ← the inclusion height
+```
+
+The indexer sees this blob on its next Celestia poll and, if it validates, the
+offer appears at `GET /api/zswaps` and streams as `offer_indexed` on
+`/api/events` — no difference from an offer posted via the API, because it *is*
+the same blob.
+
+### Read offers — `blob.GetAll`
+
+Fetch every namespace blob at a given height (params: `[height, [namespaceB64]]`):
+
+```bash
+HEIGHT=1234567
+curl -s -X POST "$CELESTIA_RPC_URL" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CELESTIA_AUTH_TOKEN" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"blob.GetAll\",
+       \"params\":[$HEIGHT,[\"$NS_B64\"]]}" \
+| jq -r '.result[].data' | while read -r d; do echo "$d" | base64 -d; echo; done
+#   ↑ each result[].data is base64 → decode to recover the zswapoffer1… string
+```
+
+`blob.GetAll` returns `null` (not an error) for a height with no namespace blobs.
+To scan a range, walk heights from your deployment block to the chain tip:
+
+```bash
+# current tip
+curl -s -X POST "$CELESTIA_RPC_URL" -H "Authorization: Bearer $CELESTIA_AUTH_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"header.NetworkHead","params":[]}' \
+| jq -r '.result.header.height'
+```
+
+Reading raw blobs gives you **unvalidated** bytes — anyone can post to the
+namespace. Re-run `validateZswapOffer` from `@zswap-da/validator` before trusting
+one, exactly as the indexer does. And mind the retention window: Celestia prunes
+blob data after ~7 days (see [Celestia data retention](README.md#celestia-data-retention-read-before-relying-on-history)),
+so historical reads need an archival endpoint or a mirror, not a default node.

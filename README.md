@@ -2,7 +2,10 @@
 
 A decentralized token swap platform that combines **Midnight Network** (privacy-preserving ZK contracts) with **Celestia** (data availability layer). Users create atomic swap offers that are published to Celestia, indexed by the sync node, and completed on Midnight.
 
-This repo is the **backend**: sync node, batcher, contracts, database, validator, and e2e tests. The browser frontend lives in `paima-engine/templates/zswap-da` — see [Frontend](#frontend).
+This repo is the **backend**: sync node, batcher, contracts, database, validator, and e2e tests. It is frontend-agnostic — an example browser frontend lives in the [effectstream monorepo](https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da) (see [Frontend](#frontend)).
+
+- **Backend (this repo):** https://github.com/effectstream/zswap-offerfiles-kernel
+- **Example frontend:** https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da
 
 ## Quick Start
 
@@ -33,14 +36,20 @@ patches it.
 
 ## Frontend
 
-The Vite + Midnight-wallet frontend lives in `paima-engine/templates/zswap-da`
-and runs against this stack. Clone `paima-engine` as a **sibling** of this repo
-(the frontend resolves `@zswap-da/contract-offer-files` via a relative `file:`
-dependency), start this repo's dev stack first (it compiles the Compact
-contract), then start the frontend:
+An **example** Vite + Midnight-wallet frontend lives in the effectstream
+monorepo (formerly `paima-engine`) at
+[`templates/zswap-da`](https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da).
+It runs against this stack and doubles as a reference for wiring your own UI to
+this backend.
+
+Check out the effectstream monorepo as a **sibling** of this repo (the frontend
+resolves `@zswap-da/contract-offer-files` via a relative `file:` dependency).
+Start this repo's dev stack first (it compiles the Compact contract), then start
+the frontend:
 
 ```bash
-cd ../paima-engine/templates/zswap-da
+git clone git@github.com:effectstream/effectstream.git     # if not already checked out
+cd effectstream/templates/zswap-da
 bun install
 bun run dev   # vite on :10600
 ```
@@ -140,8 +149,9 @@ zswap-offerfile-kernel/
 │   └── tests/                                # @zswap-da/tests
 ```
 
-The frontend (React + Vite + Midnight wallet) lives in
-`paima-engine/templates/zswap-da`.
+The example frontend (React + Vite + Midnight wallet) lives in the effectstream
+monorepo at
+[`templates/zswap-da`](https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da).
 
 ## Key files
 

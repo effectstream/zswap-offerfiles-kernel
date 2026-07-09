@@ -4,7 +4,7 @@
 // serve primitives, not an in-memory shortcut.
 
 import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer } from "mip-zswap-offer";
+import { decodeOffer } from "@zswap-da/mip5-offer-files";
 
 const API = process.env["ZSWAP_API"] ?? "http://127.0.0.1:9999";
 

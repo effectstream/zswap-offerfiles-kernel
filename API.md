@@ -67,7 +67,7 @@ SEEN_NULLIFIER_TTL_SECONDS=2592000      # prune unmatched nullifier rows after N
 Celestia DA                    Midnight
      │                               │
      │  every blob in namespace      │  every block: nullifiers,
-     │  → decoded as zswapoffer1…    │  unshielded UTXOs, Merkle roots
+     │  → decoded as swapoffer1…    │  unshielded UTXOs, Merkle roots
      ▼                               ▼
          ┌─────────────────────────────┐
          │   ZSwap-DA indexer (node)   │
@@ -83,7 +83,7 @@ Celestia DA                    Midnight
 
 **Offer lifecycle:**
 
-1. A maker encodes a `zswapoffer1…` blob and POSTs it to `/api/zswap/submit`.
+1. A maker encodes a `swapoffer1…` blob and POSTs it to `/api/zswap/submit`.
 2. The node validates it, then forwards it to the batcher which publishes it as a Celestia blob.
 3. The Celestia indexer picks up the blob and re-validates it deterministically. On success the offer lands in `offer_file`.
 4. When any input coin is spent on Midnight (nullifier seen or unshielded UTXO consumed), the offer moves to `offer_file_history` with `archive_reason = 'CONSUMED'`.
@@ -182,7 +182,7 @@ Returns the current live offer book — offers published to Celestia, validated,
   {
     "id": 42,
     "celestia_height": "12231800",
-    "transaction_hex": "zswapoffer1...",
+    "transaction_hex": "swapoffer1...",
     "metadata_created_at": "2026-06-01T12:00:00.000Z",
     "metadata_expires_at": null,
     "metadata_maker_note": null,
@@ -203,7 +203,7 @@ Returns the current live offer book — offers published to Celestia, validated,
 
 | Field | Description |
 |---|---|
-| `transaction_hex` | The raw `zswapoffer1…` blob. Pass directly to the Midnight contract for settlement. |
+| `transaction_hex` | The raw `swapoffer1…` blob. Pass directly to the Midnight contract for settlement. |
 | `gives` | Tokens the maker is offering |
 | `wants` | Tokens the maker is requesting |
 | `ttl_seconds` | Offer lifetime in seconds from `metadata_created_at`, as a **string** |
@@ -223,16 +223,16 @@ curl "http://host:9999/api/zswaps?token=0000000000000000000000000000000000000000
 
 Single-blob status lookup. Use this to reconcile a "My Trades" list on startup without fetching the full offer book.
 
-**Query parameter:** `blob` — the `zswapoffer1…` string.
+**Query parameter:** `blob` — the `swapoffer1…` string.
 
 ```bash
-curl "http://host:9999/api/zswap/status?blob=zswapoffer1..."
+curl "http://host:9999/api/zswap/status?blob=swapoffer1..."
 ```
 
 **Response**
 
 ```json
-{ "blob": "zswapoffer1...", "status": "open" }
+{ "blob": "swapoffer1...", "status": "open" }
 ```
 
 `status` is one of `"open"` | `"completed"` | `"expired"` | `"not_found"`.
@@ -334,18 +334,18 @@ curl -X POST http://host:9999/api/known-tokens \
 
 #### `POST /api/zswap/submit`
 
-Validate and forward a `zswapoffer1…` blob to Celestia DA via the batcher. This is the recommended submission path — structure and coin liveness are verified before any Celestia fee is incurred.
+Validate and forward a `swapoffer1…` blob to Celestia DA via the batcher. This is the recommended submission path — structure and coin liveness are verified before any Celestia fee is incurred.
 
 ```bash
 curl -X POST http://host:9999/api/zswap/submit \
   -H "Content-Type: application/json" \
-  -d '{"blob":"zswapoffer1..."}'
+  -d '{"blob":"swapoffer1..."}'
 ```
 
 **Success `200`**
 
 ```json
-{ "success": true, "blob": "zswapoffer1...", "result": { ... } }
+{ "success": true, "blob": "swapoffer1...", "result": { ... } }
 ```
 
 **Error `400`**
@@ -356,7 +356,7 @@ curl -X POST http://host:9999/api/zswap/submit \
 
 | Error code | Meaning |
 |---|---|
-| `INVALID_FORMAT` | Blob is not a valid `zswapoffer1…` encoding |
+| `INVALID_FORMAT` | Blob is not a valid `swapoffer1…` encoding |
 | `INVALID_PROOF` | Cryptographic proof verification failed |
 | `NULLIFIER_SPENT` | A shielded input coin is already spent on Midnight |
 | `UTXO_NOT_LIVE` | An unshielded UTXO was spent or was never created on-chain |
@@ -502,7 +502,7 @@ Returns `500` if `MIDNIGHT_CONTRACT_ADDRESS` is not set.
 
 ## Batcher API — port 3334
 
-The batcher accepts `zswapoffer1…` blobs, validates them, and publishes them as Celestia blobs. In normal usage you go through `/api/zswap/submit` on the node (which calls the batcher internally). Direct batcher access is for advanced integrations.
+The batcher accepts `swapoffer1…` blobs, validates them, and publishes them as Celestia blobs. In normal usage you go through `/api/zswap/submit` on the node (which calls the batcher internally). Direct batcher access is for advanced integrations.
 
 Base URL: `http://<host>:3334`  
 Swagger UI: `http://<host>:3334/documentation`
@@ -551,7 +551,7 @@ Submit a blob directly to the batcher queue. Structure and cryptographic proofs 
 ```json
 {
   "data": {
-    "input": "zswapoffer1...",
+    "input": "swapoffer1...",
     "target": "midnight-balancer",
     "address": "mn1...",
     "addressType": 0
@@ -598,9 +598,11 @@ Shielded and unshielded NIGHT share the same color (`0x0000…0000`) and differ 
 
 ---
 
-## Encoding offers (`zswapoffer1…`)
+## Encoding offers (`swapoffer1…`)
 
-Offer blobs are produced by the Midnight browser SDK. The encoding bundles the ZSwap transaction structure plus the cryptographic proofs required for settlement. Use `encodeOffer` / `validateZswapOffer` from `@zswap-da/validator` rather than constructing the binary format by hand.
+Offer blobs follow **MIP-0005** (HRP `swapoffer`). The encoding bundles a proven Midnight `Transaction` plus the cryptographic proofs required for settlement. Use `encodeOffer` / `decodeOffer` from `@zswap-da/mip5-offer-files` (also re-exported by `@zswap-da/validator`) rather than constructing the binary format by hand.
+
+P2P swap semantics (gives/wants derivation, two-sided rule, on-chain/off-chain payload types) live in `@zswap-da/mip6-p2p-swaps` (**MIP-0006**). Full DA/API alignment (raw `OnchainOfferPayload` on Celestia, `OffchainOfferPayload` responses) is deferred — Celestia still carries the bech32 string in this template.
 
 The decoded offer contains:
 
@@ -616,7 +618,7 @@ All of these are checked by `/api/zswap/submit` before any Celestia fee is incur
 ### Manual submission (curl)
 
 ```bash
-BLOB="zswapoffer1..."
+BLOB="swapoffer1..."
 
 # Recommended: submit through the node (validates + forwards to batcher)
 curl -s -X POST http://host:9999/api/zswap/submit \
@@ -680,12 +682,12 @@ bun -e 'const h=process.argv[1].replace(/^0x/,"");const b=new Uint8Array(29);con
 
 ### Post an offer — `blob.Submit`
 
-The blob `data` is the `zswapoffer1…` string, UTF-8 → base64. `share_version` is
+The blob `data` is the `swapoffer1…` string, UTF-8 → base64. `share_version` is
 `0`. The second param is the tx config (`fee` in utia, `gasLimit`); on mainnet
 add `gas_price`/`max_gas_price` to skip the on-chain estimator (avoids 429s).
 
 ```bash
-BLOB="zswapoffer1..."
+BLOB="swapoffer1..."
 DATA_B64=$(printf %s "$BLOB" | base64 | tr -d '\n')
 
 curl -s -X POST "$CELESTIA_RPC_URL" \
@@ -714,7 +716,7 @@ curl -s -X POST "$CELESTIA_RPC_URL" \
   -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"blob.GetAll\",
        \"params\":[$HEIGHT,[\"$NS_B64\"]]}" \
 | jq -r '.result[].data' | while read -r d; do echo "$d" | base64 -d; echo; done
-#   ↑ each result[].data is base64 → decode to recover the zswapoffer1… string
+#   ↑ each result[].data is base64 → decode to recover the swapoffer1… string
 ```
 
 `blob.GetAll` returns `null` (not an error) for a height with no namespace blobs.

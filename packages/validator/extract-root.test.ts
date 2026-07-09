@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Buffer } from "node:buffer";
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer } from "mip-zswap-offer";
+import { decodeOffer } from "@zswap-da/mip5-offer-files";
 
 import {
   canonicalRootHex,

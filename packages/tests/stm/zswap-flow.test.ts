@@ -10,7 +10,7 @@ import type { Client } from "pg";
 import { assert, API_PORT } from "../helpers.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer, encodeOffer } from "mip-zswap-offer";
+import { decodeOffer, encodeOffer } from "@zswap-da/mip5-offer-files";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { mintTestTokens } from "../../contracts-midnight/mint-test-tokens.ts";

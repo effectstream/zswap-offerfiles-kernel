@@ -15,7 +15,7 @@
 //   bun packages/tests/ring-swap-e2e.ts [N]   # default N=2
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { encodeOffer } from "mip-zswap-offer";
+import { encodeOffer } from "@zswap-da/mip5-offer-files";
 import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";

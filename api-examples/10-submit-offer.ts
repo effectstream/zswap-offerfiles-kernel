@@ -5,7 +5,7 @@
 //   2. Picks give/want tokens: GIVE_TOKEN/WANT_TOKEN env vars, or colors from
 //      09-mint.ts output (/tmp/zswap-minted-tokens.json), or first two known tokens.
 //   3. Calls wallet.initSwap() → finalizeTransaction() to produce a signed offer.
-//   4. Encodes it as a zswapoffer1… blob.
+//   4. Encodes it as a swapoffer1… blob.
 //   5. POSTs to /api/zswap/submit (validates crypto + liveness, then forwards to batcher).
 //   6. Polls /api/zswap/status until status = "open" (landed in Celestia + indexed).
 //
@@ -21,7 +21,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { config, get, post, header } from "./config.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
-import { encodeOffer } from "mip-zswap-offer";
+import { encodeOffer } from "@zswap-da/mip5-offer-files";
 
 globalThis.WebSocket = WebSocket;
 

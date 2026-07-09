@@ -1,0 +1,15 @@
+{
+  "name": "@zswap-da/mip6-p2p-swaps",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MIP-0006 Peer-to-Peer Atomic Swaps — payload types, gives/wants derivation, two-sided rule.",
+  "type": "module",
+  "exports": "./mod.ts",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/ledger-v8": "8.0.3",
+    "@zswap-da/mip5-offer-files": "workspace:*"
+  }
+}

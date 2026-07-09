@@ -35,7 +35,7 @@
     "@scure/base": "^2.0.0",
     "@sinclair/typebox": "^0.34.30",
     "effection": "^3.5.0",
-    "mip-zswap-offer": "github:effectstream/mip-zswap-offer#main",
+    "@zswap-da/mip5-offer-files": "workspace:*",
     "@fastify/rate-limit": "^10.0.0",
     "rxjs": "^7.8.2"
   }

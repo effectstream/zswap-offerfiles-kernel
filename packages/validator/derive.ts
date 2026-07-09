@@ -1,8 +1,15 @@
-import { addressFromKey } from "@midnight-ntwrk/ledger-v8";
-import type { TokenType, UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
 import { Buffer } from "node:buffer";
+import { addressFromKey } from "@midnight-ntwrk/ledger-v8";
+import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
+import {
+  deriveTokenLegs,
+  UnknownTokenTagError,
+} from "@zswap-da/mip6-p2p-swaps";
 
 import type { OfferLeg, UnshieldedSpendRef } from "./types.ts";
+
+// Re-export so existing validator consumers keep a single import path.
+export { UnknownTokenTagError };
 
 // Normalize a value that may be a Uint8Array or a hex string into lowercase
 // hex (no `0x` prefix). ledger-v8 returns nullifiers / owner keys / intent
@@ -81,42 +88,27 @@ export function collectUnshieldedSpends(
   return spends;
 }
 
-// Thrown when a token carries a tag other than shielded/unshielded/dust.
-export class UnknownTokenTagError extends Error {
-  constructor(public readonly tag: string) {
-    super(`Unknown token tag "${tag}"`);
-    this.name = "UnknownTokenTagError";
-  }
-}
-
-// Derive give/want legs from the transaction's per-segment imbalances, merged
-// across the guaranteed segment + every intent/fallible segment. A positive
-// merged delta is a give (surplus the maker provides); negative is a want.
-// `dust` is ignored; any other unexpected tag throws UnknownTokenTagError.
+/**
+ * Untagged gives/wants for DB/API compatibility.
+ *
+ * Delegates to MIP-0006 `deriveTokenLegs`, then merges by token color only
+ * (dropping SHIELDED/UNSHIELDED) so `offer_file_tokens` uniqueness
+ * `(offer_file_id, token_color, direction)` is preserved. Callers that need
+ * layer tags should use `@zswap-da/mip6-p2p-swaps` directly.
+ */
 export function deriveLegs(
   tx: UnprovenTransaction,
 ): { gives: OfferLeg[]; wants: OfferLeg[] } {
-  const intentKeys = (tx as any).intents
-    ? Array.from((tx as any).intents.keys() as Iterable<number>)
-    : [];
-  const fallibleKeys = tx.fallibleOffer
-    ? Array.from(tx.fallibleOffer.keys() as Iterable<number>)
-    : [];
-  const segmentIds = Array.from(
-    new Set<number>([0, ...intentKeys, ...fallibleKeys]),
-  );
+  const { gives: taggedGives, wants: taggedWants } = deriveTokenLegs(tx);
 
+  // Re-merge by color: same hex on both layers net against each other, matching
+  // the pre-MIP6 validator behavior and the DB unique key.
   const merged = new Map<string, bigint>();
-  for (const segId of segmentIds) {
-    for (const [tokenType, delta] of tx.imbalances(segId)) {
-      const tt = tokenType as TokenType;
-      if (tt.tag === "dust") continue;
-      if (tt.tag !== "shielded" && tt.tag !== "unshielded") {
-        throw new UnknownTokenTagError(String((tt as any).tag));
-      }
-      const token = tt.raw.toLowerCase();
-      merged.set(token, (merged.get(token) ?? 0n) + delta);
-    }
+  for (const g of taggedGives) {
+    merged.set(g.token, (merged.get(g.token) ?? 0n) + BigInt(g.amount));
+  }
+  for (const w of taggedWants) {
+    merged.set(w.token, (merged.get(w.token) ?? 0n) - BigInt(w.amount));
   }
 
   const gives: OfferLeg[] = [];

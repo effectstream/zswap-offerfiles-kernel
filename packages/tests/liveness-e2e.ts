@@ -8,7 +8,7 @@
 
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { encodeOffer } from "mip-zswap-offer";
+import { encodeOffer } from "@zswap-da/mip5-offer-files";
 import pg from "pg";
 
 const API = "http://127.0.0.1:9999";

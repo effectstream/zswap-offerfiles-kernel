@@ -1,0 +1,15 @@
+{
+  "name": "@zswap-da/mip5-offer-files",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MIP-0005 Offer Files — bech32m codec for proven Midnight Transactions (HRP swapoffer).",
+  "type": "module",
+  "exports": "./mod.ts",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/ledger-v8": "8.0.3",
+    "@scure/base": "^2.0.0"
+  }
+}

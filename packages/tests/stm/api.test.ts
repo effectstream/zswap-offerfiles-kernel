@@ -11,7 +11,7 @@
 import type { Client } from "pg";
 import { assert, API_PORT } from "../helpers.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { encodeOffer } from "mip-zswap-offer";
+import { encodeOffer } from "@zswap-da/mip5-offer-files";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { joinOfferFiles, mintShielded } from "../lib/offer-files.ts";

@@ -7,8 +7,8 @@ export type MidnightLedgerSnapshot = {
   lastMintAmount: bigint;
 };
 
-// Note: offer-blob parsing lives in mip-zswap-offer now.
-// Use deserializeOffer() / validateOffer() from that package.
+// Note: offer-blob parsing lives in @zswap-da/mip5-offer-files (MIP-0005).
+// Use decodeOffer() / offerFromBech32() from that package.
 
 export function normalizeHex32(value: string): string {
   const clean = value.trim().toLowerCase().replace(/^0x/, "");

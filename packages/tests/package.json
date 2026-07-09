@@ -18,7 +18,7 @@
     "@zswap-da/contract-offer-files": "workspace:*",
     "@zswap-da/validator": "workspace:*",
     "effection": "^3.5.0",
-    "mip-zswap-offer": "github:effectstream/mip-zswap-offer#main",
+    "@zswap-da/mip5-offer-files": "workspace:*",
     "pg": "^8.14.0",
     "rxjs": "^7.8.2"
   },

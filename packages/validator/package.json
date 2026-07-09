@@ -12,6 +12,7 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "@scure/base": "^2.0.0",
-    "mip-zswap-offer": "github:effectstream/mip-zswap-offer#main"
+    "@zswap-da/mip5-offer-files": "workspace:*",
+    "@zswap-da/mip6-p2p-swaps": "workspace:*"
   }
 }

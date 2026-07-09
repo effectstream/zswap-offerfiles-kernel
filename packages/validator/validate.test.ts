@@ -7,7 +7,7 @@ import {
   Transaction,
   WellFormedStrictness,
 } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer, OFFER_HRP } from "mip-zswap-offer";
+import { decodeOffer, OFFER_HRP } from "@zswap-da/mip5-offer-files";
 
 import {
   buildStrictness,
@@ -20,7 +20,7 @@ import {
 const NO_REF = undefined as unknown as LedgerState;
 const TBLOCK = new Date(0);
 
-// Build a syntactically valid bech32m `zswapoffer1…` blob wrapping arbitrary
+// Build a syntactically valid bech32m `swapoffer1…` blob wrapping arbitrary
 // bytes (decodeOffer does pure bech32m, so this passes encoding but not
 // deserialization).
 function craftBlob(byteLen: number): string {
@@ -94,7 +94,7 @@ describe("config helpers", () => {
 // ── Cryptographic + liveness path (step 5–6) ──────────────────────────────
 //
 // These require a REAL proven offer; ZK proofs cannot be synthesized. Drop a
-// Lace-made `zswapoffer1…` string into packages/validator/fixtures/valid-offer.bech32
+// Lace-made `swapoffer1…` string into packages/validator/fixtures/valid-offer.bech32
 // (and set ZSWAP_TEST_NETWORK_ID if the offer's network is not "undeployed"),
 // then these activate automatically. See fixtures/README.md.
 const FIXTURE = join(import.meta.dir, "fixtures", "valid-offer.bech32");

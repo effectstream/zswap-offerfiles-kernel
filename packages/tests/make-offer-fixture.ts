@@ -19,7 +19,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
-import { encodeOffer } from "mip-zswap-offer";
+import { encodeOffer } from "@zswap-da/mip5-offer-files";
 import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
 
 const FIXTURE_PATH = join(

@@ -23,6 +23,7 @@
     "@electric-sql/pglite": "^0.3.14",
     "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
     "@scure/bip39": "^2.2.0",
+    "@zswap-da/mip5-offer-files": "workspace:*",
     "wait-on": "8.0.3"
   },
   "effectstream": {

@@ -274,7 +274,7 @@ export const apiRouter: StartConfigApiRouter = async function (
     return { blob: rows[0].transaction_hex, status: rows[0].status };
   });
 
-  // POST /api/zswap/submit — fully validate a `zswapoffer1…` blob, then forward
+  // POST /api/zswap/submit — fully validate a `swapoffer1…` blob, then forward
   // it to Celestia DA via the batcher. We validate here so the frontend gets
   // fast, specific feedback; the batcher's validateInput hook re-validates as
   // the authoritative pre-fee gate. The frontend produces the blob via

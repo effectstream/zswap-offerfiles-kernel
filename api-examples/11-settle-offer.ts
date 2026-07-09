@@ -9,13 +9,13 @@
 //
 // Env overrides:
 //   TAKER_SEED=<64-hex>     taker wallet seed (must have enough NIGHT for dust fees)
-//   OFFER_BLOB=zswapoffer1… specific offer to settle; defaults to first open offer
+//   OFFER_BLOB=swapoffer1… specific offer to settle; defaults to first open offer
 
 import { config, get, header } from "./config.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer } from "mip-zswap-offer";
+import { decodeOffer } from "@zswap-da/mip5-offer-files";
 
 globalThis.WebSocket = WebSocket;
 

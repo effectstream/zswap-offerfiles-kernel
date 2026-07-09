@@ -11,6 +11,7 @@
         "@electric-sql/pglite": "^0.3.14",
         "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
         "@scure/bip39": "^2.2.0",
+        "@zswap-da/mip5-offer-files": "workspace:*",
         "wait-on": "8.0.3",
       },
       "devDependencies": {
@@ -84,6 +85,22 @@
         "@paima/pgtyped-cli": "^2.4.5",
       },
     },
+    "packages/mip5-offer-files": {
+      "name": "@zswap-da/mip5-offer-files",
+      "version": "0.1.0",
+      "dependencies": {
+        "@midnight-ntwrk/ledger-v8": "8.0.3",
+        "@scure/base": "^2.0.0",
+      },
+    },
+    "packages/mip6-p2p-swaps": {
+      "name": "@zswap-da/mip6-p2p-swaps",
+      "version": "0.1.0",
+      "dependencies": {
+        "@midnight-ntwrk/ledger-v8": "8.0.3",
+        "@zswap-da/mip5-offer-files": "workspace:*",
+      },
+    },
     "packages/node": {
       "name": "@zswap-da/node",
       "version": "0.1.0",
@@ -110,9 +127,9 @@
         "@sinclair/typebox": "^0.34.30",
         "@zswap-da/contract-offer-files": "workspace:*",
         "@zswap-da/database": "workspace:*",
+        "@zswap-da/mip5-offer-files": "workspace:*",
         "@zswap-da/validator": "workspace:*",
         "effection": "^3.5.0",
-        "mip-zswap-offer": "github:effectstream/mip-zswap-offer#main",
         "rxjs": "^7.8.2",
       },
     },
@@ -129,9 +146,9 @@
         "@noble/hashes": "^1.8.0",
         "@scure/base": "^2.0.0",
         "@zswap-da/contract-offer-files": "workspace:*",
+        "@zswap-da/mip5-offer-files": "workspace:*",
         "@zswap-da/validator": "workspace:*",
         "effection": "^3.5.0",
-        "mip-zswap-offer": "github:effectstream/mip-zswap-offer#main",
         "pg": "^8.14.0",
         "rxjs": "^7.8.2",
       },
@@ -147,7 +164,8 @@
         "@noble/curves": "^1.9.7",
         "@noble/hashes": "^1.8.0",
         "@scure/base": "^2.0.0",
-        "mip-zswap-offer": "github:effectstream/mip-zswap-offer#main",
+        "@zswap-da/mip5-offer-files": "workspace:*",
+        "@zswap-da/mip6-p2p-swaps": "workspace:*",
       },
     },
   },
@@ -818,6 +836,10 @@
 
     "@zswap-da/database": ["@zswap-da/database@workspace:packages/database"],
 
+    "@zswap-da/mip5-offer-files": ["@zswap-da/mip5-offer-files@workspace:packages/mip5-offer-files"],
+
+    "@zswap-da/mip6-p2p-swaps": ["@zswap-da/mip6-p2p-swaps@workspace:packages/mip6-p2p-swaps"],
+
     "@zswap-da/node": ["@zswap-da/node@workspace:packages/node"],
 
     "@zswap-da/tests": ["@zswap-da/tests@workspace:packages/tests"],
@@ -1363,8 +1385,6 @@
     "minimist": ["minimist@1.2.8", "", {}, "sha512-2yyAR8qBkN3YuheJanUpWC5U3bb5osDywNB8RzDVlDwDHbocAJveqqj1u8+SVD7jkWT4yvsHCpWqqWqAxb0zCA=="],
 
     "minipass": ["minipass@7.1.3", "", {}, "sha512-tEBHqDnIoM/1rXME1zgka9g6Q2lcoCkxHLuc7ODJ5BxbP5d4c2Z5cGgtXAku59200Cx7diuHTOYfSBD8n6mm8A=="],
-
-    "mip-zswap-offer": ["mip-zswap-offer@github:effectstream/mip-zswap-offer#32377f4", { "peerDependencies": { "@midnight-ntwrk/ledger-v8": "*", "@noble/curves": "^1.0.0 || ^2.0.0", "@noble/hashes": "^1.0.0 || ^2.0.0", "@scure/base": "^1.1.0 || ^2.0.0" }, "optionalPeers": ["@midnight-ntwrk/ledger-v8"] }, "effectstream-mip-zswap-offer-32377f4", "sha512-pmokkKfv9IMm/Gp4NeBvoq3FleFt60NOgfk54zvSNJi76BgRUIUqfsulypICPGDpt0hVT04hruU+85jQR1ZOkw=="],
 
     "mock-socket": ["mock-socket@9.3.1", "", {}, "sha512-qxBgB7Qa2sEQgHFjj0dSigq7fX4k6Saisd5Nelwp2q8mlbAFh5dHV9JTTlF8viYJLSSWgMCZFUom8PJcMNBoJw=="],
 

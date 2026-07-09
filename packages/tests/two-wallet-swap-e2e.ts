@@ -19,7 +19,7 @@
 
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { decodeOffer, encodeOffer } from "mip-zswap-offer";
+import { decodeOffer, encodeOffer } from "@zswap-da/mip5-offer-files";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";

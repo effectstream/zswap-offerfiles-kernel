@@ -1,6 +1,7 @@
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer, OFFER_HRP } from "mip-zswap-offer";
+import { decodeOffer, OFFER_HRP } from "@zswap-da/mip5-offer-files";
+import { isTwoSidedSwap } from "@zswap-da/mip6-p2p-swaps";
 
 import {
   collectNullifiers,
@@ -50,7 +51,7 @@ export function validateZswapOffer(
     return {
       ok: false,
       code: "BAD_ENCODING",
-      reason: "not a zswapoffer bech32m string",
+      reason: "not a swapoffer bech32m string",
     };
   }
   let rawTx: Uint8Array;
@@ -126,7 +127,8 @@ export function validateZswapOffer(
       unshieldedSpends,
     };
   }
-  if (gives.length === 0 || wants.length === 0) {
+  // MIP-0006 two-sided rule (give-only / want-only offers are not swaps).
+  if (!isTwoSidedSwap(gives, wants)) {
     return {
       ok: false,
       code: "NOT_A_SWAP",

@@ -30,19 +30,23 @@ export function useContract(connectedApi: ConnectedAPI | null) {
     setLoading(true)
     setError(null)
     const promise = (async () => {
+      console.debug('[mint] ensure: fetching midnight config')
       const cfg = await api.midnightConfig()
       // Override proof server from VITE_PROOF_SERVER_URL.
       const merged: MidnightConfig = {
         ...cfg,
         proofServerUri: PROOF_SERVER_URL || cfg.proofServerUri,
       }
+      console.debug('[mint] ensure: config', merged)
       setConfig(merged)
       const status = await connectedApi.getConnectionStatus()
+      console.debug('[mint] ensure: wallet connection status', status)
       if (status.status !== 'connected') throw new Error('Browser wallet is not connected')
       if (status.networkId !== cfg.networkId) {
         throw new Error(`Network mismatch: wallet="${status.networkId}" backend="${cfg.networkId}"`)
       }
       const laceCfg = await connectedApi.getConfiguration().catch(() => null)
+      console.debug('[mint] ensure: lace config', laceCfg)
       if (laceCfg?.indexerUri && cfg.indexerUri && !indexersMatch(laceCfg.indexerUri, cfg.indexerUri)) {
         throw new Error(
           `Lace indexer mismatch: wallet="${laceCfg.indexerUri}" backend="${cfg.indexerUri}". ` +
@@ -50,7 +54,9 @@ export function useContract(connectedApi: ConnectedAPI | null) {
           `point Lace undeployed indexer at the backend URI, reconnect, then retry.`,
         )
       }
+      console.debug('[mint] ensure: connecting browser contract')
       const result = await connectBrowserContract(connectedApi, merged)
+      console.debug('[mint] ensure: contract connected')
       setConnected(result)
       return result
     })()
@@ -58,6 +64,7 @@ export function useContract(connectedApi: ConnectedAPI | null) {
     try {
       return await promise
     } catch (e: any) {
+      console.debug('[mint] ensure: failed', e?.message ?? String(e))
       setError(e?.message ?? String(e))
       throw e
     } finally {
@@ -73,7 +80,9 @@ export function useContract(connectedApi: ConnectedAPI | null) {
     name: string,
   ): Promise<MintResult> => {
     const { contract } = await ensure()
+    console.debug('[mint] mintShielded: calling callTx.mint_shielded', { amount, nonce })
     const txData: any = await (contract as any).callTx.mint_shielded(domainSep, amount, nonce)
+    console.debug('[mint] mintShielded: callTx returned', { public: txData.public })
     const colorBytes = txData.private?.result?.color as Uint8Array | undefined
     if (!colorBytes) throw new Error('mint_shielded: missing color')
     const color = Array.from(colorBytes, (b) => b.toString(16).padStart(2, '0')).join('')
@@ -93,11 +102,13 @@ export function useContract(connectedApi: ConnectedAPI | null) {
     const parsed = MidnightBech32m.parse(unshieldedAddress)
     const decoded = parsed.decode(UnshieldedAddress, (cfg ?? config)!.networkId as any)
     const recipientBytes = new Uint8Array(decoded.data)
+    console.debug('[mint] mintUnshielded: calling callTx.mint_unshielded', { amount, unshieldedAddress })
     const txData: any = await (contract as any).callTx.mint_unshielded(
       domainSep,
       amount,
       { bytes: recipientBytes },
     )
+    console.debug('[mint] mintUnshielded: callTx returned', { public: txData.public })
     const colorBytes = txData.private?.result as Uint8Array | undefined
     if (!colorBytes) throw new Error('mint_unshielded: missing color')
     const color = Array.from(colorBytes, (b) => b.toString(16).padStart(2, '0')).join('')

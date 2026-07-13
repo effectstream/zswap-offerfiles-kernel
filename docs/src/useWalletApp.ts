@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   connectInjected,
   connectLocal,
@@ -9,7 +9,14 @@ import {
   type WalletState,
 } from './wallet'
 import { useContract } from './useContract'
-import { MINT_AMOUNT, MINTABLE_TOKENS, NIGHT_COLOR, type MintableToken } from './mintable'
+import {
+  domainSepFromName,
+  MINT_AMOUNT,
+  NIGHT_COLOR,
+  PRESET_TOKENS,
+  type MintableKind,
+  type MintableToken,
+} from './mintable'
 import { api, type KnownToken, type MidnightConfig } from './api'
 
 export type WalletStatus = 'disconnected' | 'connecting' | 'connected'
@@ -44,13 +51,24 @@ export function useWalletApp() {
       const tokens = await api.knownTokens()
       setKnown(tokens)
       const map: Record<string, string> = {}
-      for (const t of MINTABLE_TOKENS) {
-        const hit = tokens.find((k) => t.aliases.includes(k.name) || t.aliases.includes(k.name.toUpperCase()))
-        if (hit) map[t.id] = hit.token_color.toLowerCase()
-      }
+      for (const t of tokens) map[t.name] = t.token_color.toLowerCase()
       setColorById((prev) => ({ ...prev, ...map }))
     } catch { /* node down */ }
   }, [])
+
+  // Preset shortcuts ∪ whatever this network's node already knows about (minus
+  // NIGHT) — same-named tokens dedupe, so a preset already minted here just
+  // shows its real color instead of a second placeholder entry.
+  const mintable = useMemo<MintableToken[]>(() => {
+    const byName = new Map(PRESET_TOKENS.map((t) => [t.name, t]))
+    for (const k of known) {
+      if (k.token_color.toLowerCase() === NIGHT_COLOR) continue
+      if (!byName.has(k.name)) {
+        byName.set(k.name, { name: k.name, kind: k.kind as MintableKind, domainSep: domainSepFromName(k.name) })
+      }
+    }
+    return Array.from(byName.values())
+  }, [known])
 
   const refreshBalances = useCallback(async () => {
     if (!connected) return
@@ -111,7 +129,7 @@ export function useWalletApp() {
   }, [])
 
   const balanceFor = useCallback((token: MintableToken): string => {
-    const color = colorById[token.id]
+    const color = colorById[token.name]
     if (!color || !wstate) return '0'
     const bag = token.kind === 'shielded' ? wstate.shieldedBalances : wstate.unshieldedBalances
     return bag[color] ?? bag[color.toLowerCase()] ?? '0'
@@ -130,19 +148,22 @@ export function useWalletApp() {
       setError('Minting requires Lace (browser wallet). Connect Lace, not the local seed wallet.')
       return
     }
-    setMintingId(token.id)
+    setMintingId(token.name)
     setMintMsg(null)
     setError(null)
+    console.debug('[mint] start', { kind: token.kind, name: token.name })
     try {
       const res = token.kind === 'shielded'
         ? await contract.mintShielded(token.domainSep, MINT_AMOUNT, BigInt(Date.now()), token.name)
         : await contract.mintUnshielded(token.domainSep, MINT_AMOUNT, token.name)
-      setColorById((prev) => ({ ...prev, [token.id]: res.color.toLowerCase() }))
+      console.debug('[mint] done', { name: token.name, color: res.color, txHash: res.txHash })
+      setColorById((prev) => ({ ...prev, [token.name]: res.color.toLowerCase() }))
       setMintMsg(`Minted +${MINT_AMOUNT} ${token.name} · color ${res.color.slice(0, 12)}…`)
       await refreshKnown()
       // Give Lace a moment to index, then refresh.
       setTimeout(() => { refreshBalances() }, 2000)
     } catch (e: any) {
+      console.debug('[mint] failed', { name: token.name, error: e?.message ?? String(e) })
       setError(e?.message ?? String(e))
     } finally {
       setMintingId(null)
@@ -156,6 +177,7 @@ export function useWalletApp() {
     error,
     injected,
     known,
+    mintable,
     colorById,
     mintingId,
     mintMsg,

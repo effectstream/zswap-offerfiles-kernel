@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { API_BASE, BATCHER_URL, PROOF_SERVER_URL } from './config'
 import { useDebugger } from './Debugger'
 import { api, type Offer } from './api'
-import { MINTABLE_TOKENS } from './mintable'
 import { buildMakerOfferBlob } from './makerOffer'
 import { buildSettlementTxHex } from './takerSettle'
 import { indexersMatch } from './wallet'
@@ -86,16 +85,16 @@ export function UploadPanel({
   wallet: WalletApp
 }) {
   const dbg = useDebugger()
-  const [giveId, setGiveId] = useState('shieldedA')
-  const [wantId, setWantId] = useState('shieldedB')
+  const [giveId, setGiveId] = useState('WBTC')
+  const [wantId, setWantId] = useState('WETH')
   const [giveAmt, setGiveAmt] = useState('100')
   const [wantAmt, setWantAmt] = useState('100')
   const [building, setBuilding] = useState(false)
   const [buildErr, setBuildErr] = useState<string | null>(null)
   const [buildOk, setBuildOk] = useState<string | null>(null)
 
-  const giveTok = MINTABLE_TOKENS.find((t) => t.id === giveId)!
-  const wantTok = MINTABLE_TOKENS.find((t) => t.id === wantId)!
+  const giveTok = wallet.mintable.find((t) => t.name === giveId)!
+  const wantTok = wallet.mintable.find((t) => t.name === wantId)!
   const giveBal = wallet.balanceFor(giveTok)
   const wantBal = wallet.balanceFor(wantTok)
   const giveColor = wallet.colorById[giveId]
@@ -264,7 +263,7 @@ export function UploadPanel({
         <h3>Build from wallet balances</h3>
         <p>
           Uses Lace <code>makeIntent</code> with <code>payFees: false</code> (same path as the example frontend).
-          Tokens: TestTokenA / TestTokenB (shielded) and TestTokenU (unshielded).
+          Tokens listed are whatever this network already knows about, plus faucet presets.
         </p>
 
         {wallet.status !== 'connected' ? (
@@ -277,8 +276,8 @@ export function UploadPanel({
               <div className="field">
                 <label>Give (you spend)</label>
                 <select value={giveId} onChange={(e) => setGiveId(e.target.value)}>
-                  {MINTABLE_TOKENS.map((t) => (
-                    <option key={t.id} value={t.id}>
+                  {wallet.mintable.map((t) => (
+                    <option key={t.name} value={t.name}>
                       {t.name} ({t.kind}) · bal {wallet.balanceFor(t)}
                     </option>
                   ))}
@@ -297,8 +296,8 @@ export function UploadPanel({
               <div className="field">
                 <label>Want (you receive)</label>
                 <select value={wantId} onChange={(e) => setWantId(e.target.value)}>
-                  {MINTABLE_TOKENS.map((t) => (
-                    <option key={t.id} value={t.id}>
+                  {wallet.mintable.map((t) => (
+                    <option key={t.name} value={t.name}>
                       {t.name} ({t.kind}) · bal {wallet.balanceFor(t)}
                     </option>
                   ))}

@@ -1,4 +1,4 @@
-import { MINTABLE_TOKENS, MINT_AMOUNT, NIGHT_COLOR } from './mintable'
+import { MINT_AMOUNT, NIGHT_COLOR } from './mintable'
 import { PROOF_SERVER_URL } from './config'
 import type { WalletApp } from './useWalletApp'
 
@@ -60,12 +60,6 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
         <>
           <div className="card">
             <h3>Lace ↔ node network</h3>
-            <p>
-              Mint submits via the batcher to <em>this</em> node&apos;s Midnight.
-              Offer proofs come from Lace&apos;s own indexer. If those differ, the
-              page can show balances Lace knows while Lace UI / <code>makeIntent</code> disagree —
-              and submit returns <code>ROOT_UNKNOWN</code>.
-            </p>
             {wallet.wstate.laceConfig ? (
               <>
                 <div className="wallet-row">
@@ -102,15 +96,6 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
                     <code>{wallet.nodeMidnight?.indexerUri ?? 'http://127.0.0.1:8088/api/v3/graphql'}</code>
                     {' '}(and matching WS), reconnect, remint, then rebuild offers.
                     <code>networkId=undeployed</code> alone is not enough.
-                  </div>
-                )}
-                {wallet.laceIndexerOk && (
-                  <div className="callout ok">
-                    Lace indexer matches this node (v3/v4 are aliases). Custom test tokens usually do
-                    <strong> not</strong> appear as named assets in the Lace UI — Lace mostly lists NIGHT.
-                    This page reads raw color→amount from <code>getShieldedBalances</code> /{' '}
-                    <code>getUnshieldedBalances</code>. Mints also skip Lace&apos;s submit path (batcher),
-                    so they may be missing from Lace tx history even when balances here are correct.
                   </div>
                 )}
               </>
@@ -157,13 +142,16 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
           </div>
 
           <div className="card">
-            <h3>Mintable test tokens</h3>
-            <p>Fixed separators from the offer-files faucet. Each mint adds <code>+{String(MINT_AMOUNT)}</code>.</p>
-            {MINTABLE_TOKENS.map((t) => {
+            <h3>Mintable tokens</h3>
+            <p>
+              Preset shortcuts plus whatever <code>/api/known-tokens</code> already has for this
+              network. Each mint adds <code>+{String(MINT_AMOUNT)}</code>.
+            </p>
+            {wallet.mintable.map((t) => {
               const bal = wallet.balanceFor(t)
-              const color = wallet.colorById[t.id]
+              const color = wallet.colorById[t.name]
               return (
-                <div className="wallet-row" key={t.id}>
+                <div className="wallet-row" key={t.name}>
                   <div>
                     <div className="name">{t.name} <span className="meta-line">({t.kind})</span></div>
                     <div className="meta-line">
@@ -174,10 +162,10 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
                   <button
                     className="btn primary"
                     type="button"
-                    disabled={!wallet.canMint || wallet.mintingId === t.id || wallet.contractLoading}
+                    disabled={!wallet.canMint || wallet.mintingId === t.name || wallet.contractLoading}
                     onClick={() => wallet.mint(t)}
                   >
-                    {wallet.mintingId === t.id ? 'Minting…' : `Mint +${String(MINT_AMOUNT)}`}
+                    {wallet.mintingId === t.name ? 'Minting…' : `Mint +${String(MINT_AMOUNT)}`}
                   </button>
                 </div>
               )

@@ -12,7 +12,7 @@
 //   bun packages/tests/api-roundtrip-swap-e2e.ts
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -101,14 +101,14 @@ try {
     shieldedKeys(p0),
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
-  const blob0 = encodeOffer((await p0.wallet.finalizeTransaction(r0.transaction)).serialize());
+  const blob0 = OfferFiles.encode((await p0.wallet.finalizeTransaction(r0.transaction)).serialize());
   const r1 = await p1.wallet.initSwap(
     { shielded: { [T1]: AMT } },
     [{ type: "shielded", outputs: [{ type: T0, amount: AMT, receiverAddress: p1Addr }] } as any],
     shieldedKeys(p1),
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
-  const blob1 = encodeOffer((await p1.wallet.finalizeTransaction(r1.transaction)).serialize());
+  const blob1 = OfferFiles.encode((await p1.wallet.finalizeTransaction(r1.transaction)).serialize());
 
   // ── PUSH both offers via the API → Celestia → indexed ──
   const offersBefore = await count("offer_file");

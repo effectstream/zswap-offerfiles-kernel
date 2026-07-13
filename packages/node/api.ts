@@ -283,7 +283,7 @@ export const apiRouter: StartConfigApiRouter = async function (
   // it to Celestia DA via the batcher. We validate here so the frontend gets
   // fast, specific feedback; the batcher's validateInput hook re-validates as
   // the authoritative pre-fee gate. The frontend produces the blob via
-  // encodeOffer().
+  // OfferFiles.encode().
   server.post(
     "/api/zswap/submit",
     {

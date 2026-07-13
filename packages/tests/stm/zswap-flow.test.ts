@@ -10,7 +10,7 @@ import type { Client } from "pg";
 import { assert, API_PORT } from "../helpers.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer, encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { mintTestTokens } from "../../contracts-midnight/mint-test-tokens.ts";
@@ -118,7 +118,7 @@ export async function zswapFlowTest(db: Client): Promise<void> {
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const offerFinalized = await wallet.finalizeTransaction(recipe.transaction);
-    const blob = encodeOffer(offerFinalized.serialize());
+    const blob = OfferFiles.encode(offerFinalized.serialize());
     console.log(
       `[lifecycle] offer: give ${GIVE_AMOUNT} of A(${colors.shieldedA.slice(0, 8)}…), ` +
         `want ${WANT_AMOUNT} of B(${colors.shieldedB.slice(0, 8)}…)`,
@@ -151,7 +151,7 @@ export async function zswapFlowTest(db: Client): Promise<void> {
 
     // ── 5. Taker settles: balance + submit to Midnight ──
     console.log("[lifecycle] balancing + settling the A↔B offer on Midnight…");
-    const offerTx = Transaction.deserialize("signature", "proof", "binding", decodeOffer(blob));
+    const offerTx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(blob));
     const balRecipe = await (wallet as any).balanceFinalizedTransaction(offerTx, keys, {
       ttl: new Date(Date.now() + 30 * 60_000),
     });

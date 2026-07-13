@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Buffer } from "node:buffer";
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
 import {
   canonicalRootHex,
@@ -84,7 +84,7 @@ const FIXTURE = join(import.meta.dir, "fixtures", "valid-offer.bech32");
 describe.skipIf(!existsSync(FIXTURE))("extractInputRoot — real fixture", () => {
   test("yields a 33-byte 0x73 root for the fixture offer", () => {
     const blob = readFileSync(FIXTURE, "utf8").trim();
-    const tx = Transaction.deserialize("signature", "proof", "binding", decodeOffer(blob)) as any;
+    const tx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(blob)) as any;
     const roots = extractOfferInputRoots(tx);
     expect(roots.length).toBeGreaterThan(0);
     for (const r of roots) {

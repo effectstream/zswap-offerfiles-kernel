@@ -17,7 +17,7 @@
 //   bun packages/tests/unshielded-swap-e2e.ts
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 import { MidnightBech32m, UnshieldedAddress } from "@midnight-ntwrk/wallet-sdk-address-format";
 import pg from "pg";
@@ -173,7 +173,7 @@ try {
   // Submit both for indexing (the unshielded-give offer also exercises the
   // validator's unshielded existence/spent legs at the submit gate).
   for (const [label, off] of [["P0(shielded-give)", offer0], ["P1(unshielded-give)", offer1]] as const) {
-    const blob = encodeOffer(off.serialize());
+    const blob = OfferFiles.encode(off.serialize());
     let sub = await submitOffer(blob);
     for (let r = 0; r < 24 && sub.status === 400 && sub.body?.error === "ROOT_UNKNOWN"; r++) {
       await sleep(5000);

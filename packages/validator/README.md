@@ -14,7 +14,7 @@ timestamp, and (optionally) liveness checks.
 
 ## Pipeline (`validate.ts`)
 
-1. `BAD_ENCODING` — bech32m `swapoffer1…` via MIP-0005 (`@zswap-da/mip5-offer-files`)
+1. `BAD_ENCODING` — bech32m `swapoffer1…` via MIP-0005 (`@effectstream/mip-zswap-offer/mip5`)
 2. `TOO_LARGE` — decoded size ≤ `maxBytes`
 3. `BAD_DESERIALIZE` — `Transaction.deserialize("signature","proof","binding")`
 4. structural — `NO_SPENDABLE_INPUT` / `NOT_A_SWAP` (MIP-0006 two-sided) / `UNKNOWN_TOKEN`

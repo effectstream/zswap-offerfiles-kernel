@@ -1,10 +1,7 @@
 import { Buffer } from "node:buffer";
 import { addressFromKey } from "@midnight-ntwrk/ledger-v8";
 import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
-import {
-  deriveTokenLegs,
-  UnknownTokenTagError,
-} from "@zswap-da/mip6-p2p-swaps";
+import { P2pAtomicSwaps, UnknownTokenTagError } from "@effectstream/mip-zswap-offer/mip6";
 
 import type { OfferLeg, UnshieldedSpendRef } from "./types.ts";
 
@@ -91,15 +88,15 @@ export function collectUnshieldedSpends(
 /**
  * Untagged gives/wants for DB/API compatibility.
  *
- * Delegates to MIP-0006 `deriveTokenLegs`, then merges by token color only
- * (dropping SHIELDED/UNSHIELDED) so `offer_file_tokens` uniqueness
+ * Delegates to MIP-0006 `P2pAtomicSwaps.deriveTokenLegs`, then merges by token
+ * color only (dropping SHIELDED/UNSHIELDED) so `offer_file_tokens` uniqueness
  * `(offer_file_id, token_color, direction)` is preserved. Callers that need
- * layer tags should use `@zswap-da/mip6-p2p-swaps` directly.
+ * layer tags should use `@effectstream/mip-zswap-offer/mip6` directly.
  */
 export function deriveLegs(
   tx: UnprovenTransaction,
 ): { gives: OfferLeg[]; wants: OfferLeg[] } {
-  const { gives: taggedGives, wants: taggedWants } = deriveTokenLegs(tx);
+  const { gives: taggedGives, wants: taggedWants } = P2pAtomicSwaps.deriveTokenLegs(tx);
 
   // Re-merge by color: same hex on both layers net against each other, matching
   // the pre-MIP6 validator behavior and the DB unique key.

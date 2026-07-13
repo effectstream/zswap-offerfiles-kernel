@@ -19,7 +19,7 @@
 
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { decodeOffer, encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -150,7 +150,7 @@ try {
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   const offerFinalized = await maker.wallet.finalizeTransaction(recipe.transaction);
-  const blob = encodeOffer(offerFinalized.serialize());
+  const blob = OfferFiles.encode(offerFinalized.serialize());
 
   // ── 5. Submit → batcher → Celestia (retry while the node syncs the root) ──
   let sub = await submitOffer(blob);
@@ -167,7 +167,7 @@ try {
 
   // ── 7. TAKER (genesis: holds X + dust) balances + settles on Midnight ──
   console.log("[2wallet] genesis (taker) balancing + settling the offer…");
-  const offerTx = Transaction.deserialize("signature", "proof", "binding", decodeOffer(blob));
+  const offerTx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(blob));
   const balRecipe = await (genesis.wallet as any).balanceFinalizedTransaction(offerTx, shieldedKeys(genesis), {
     ttl: new Date(Date.now() + 30 * 60_000),
   });

@@ -18,7 +18,7 @@
 //   bun packages/tests/root-unknown-negative-e2e.ts
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -89,7 +89,7 @@ try {
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   const finalized = await genesis.wallet.finalizeTransaction(recipe.transaction);
-  const blob = encodeOffer(finalized.serialize());
+  const blob = OfferFiles.encode(finalized.serialize());
 
   // 2. Confirm it's a VALID, well-formed offer (structure + crypto) + read its root.
   const v = validateZswapOffer(blob, {

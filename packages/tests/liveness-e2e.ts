@@ -8,7 +8,7 @@
 
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
 
 const API = "http://127.0.0.1:9999";
@@ -72,7 +72,7 @@ try {
     { shieldedSecretKeys: result.zswapSecretKeys, dustSecretKey: result.dustSecretKey },
     { ttl: new Date(Date.now() + 1800_000), payFees: false },
   );
-  blob = encodeOffer((await result.wallet.finalizeTransaction(recipe.transaction)).serialize());
+  blob = OfferFiles.encode((await result.wallet.finalizeTransaction(recipe.transaction)).serialize());
 } finally { await result.wallet.stop().catch(() => {}); }
 
 // The node must ingest the root the offer proved against; retry while it syncs.

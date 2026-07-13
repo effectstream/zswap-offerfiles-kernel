@@ -29,4 +29,4 @@ so the reference state matches.
 
 `valid-offer.bech32` is committed — it is a public, intentionally-unbalanced
 open offer for a throwaway devnet coin and contains no secrets. The string
-uses the MIP-0005 HRP `swapoffer` (via `@zswap-da/mip5-offer-files`).
+uses the MIP-0005 HRP `swapoffer` (via `@effectstream/mip-zswap-offer/mip5`).

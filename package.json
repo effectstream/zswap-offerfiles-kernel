@@ -3,7 +3,8 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "packages/contracts-midnight/contract-offer-files"
+    "packages/contracts-midnight/contract-offer-files",
+    "docs"
   ],
   "scripts": {
     "fix:celestia": "bun run scripts/patch-macos-celestia.ts",
@@ -14,7 +15,10 @@
     "test": "bun run packages/tests/run-tests.ts",
     "seed:market": "bun run packages/tests/seed-market.ts",
     "build:midnight": "bun run --filter @zswap-da/contract-offer-files compact",
-    "build:pgtypes": "bun run --filter @zswap-da/database pgtyped:update"
+    "build:pgtypes": "bun run --filter @zswap-da/database pgtyped:update",
+    "docs:dev": "bun run --filter @zswap-da/docs-playground dev",
+    "docs:build": "bun run --filter @zswap-da/docs-playground build",
+    "docs:preview": "bun run --filter @zswap-da/docs-playground preview"
   },
   "dependencies": {
     "@effectstream/celestia": "0.101.1",

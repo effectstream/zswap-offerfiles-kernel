@@ -609,9 +609,9 @@ Shielded and unshielded NIGHT share the same color (`0x0000…0000`) and differ 
 
 ## Encoding offers (`swapoffer1…`)
 
-Offer blobs follow **MIP-0005** (HRP `swapoffer`). The encoding bundles a proven Midnight `Transaction` plus the cryptographic proofs required for settlement. Use `encodeOffer` / `decodeOffer` from `@zswap-da/mip5-offer-files` (also re-exported by `@zswap-da/validator`) rather than constructing the binary format by hand.
+Offer blobs follow **MIP-0005** (HRP `swapoffer`). The encoding bundles a proven Midnight `Transaction` plus the cryptographic proofs required for settlement. Use `OfferFiles.encode` / `OfferFiles.decode` from `@effectstream/mip-zswap-offer/mip5` (also re-exported by `@zswap-da/validator`) rather than constructing the binary format by hand.
 
-P2P swap semantics (gives/wants derivation, two-sided rule, on-chain/off-chain payload types) live in `@zswap-da/mip6-p2p-swaps` (**MIP-0006**). Full DA/API alignment (raw `OnchainOfferPayload` on Celestia, `OffchainOfferPayload` responses) is deferred — Celestia still carries the bech32 string in this template.
+P2P swap semantics (gives/wants derivation, two-sided rule, on-chain/off-chain payload types) live in `@effectstream/mip-zswap-offer/mip6` (**MIP-0006**). Full DA/API alignment (raw `OnchainOfferPayload` on Celestia, `OffchainOfferPayload` responses) is deferred — Celestia still carries the bech32 string in this template.
 
 The decoded offer contains:
 

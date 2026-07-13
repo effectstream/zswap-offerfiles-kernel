@@ -7,7 +7,7 @@ import {
   Transaction,
   WellFormedStrictness,
 } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer, OFFER_HRP } from "@zswap-da/mip5-offer-files";
+import { OfferFiles, OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
 
 import {
   buildStrictness,
@@ -21,7 +21,7 @@ const NO_REF = undefined as unknown as LedgerState;
 const TBLOCK = new Date(0);
 
 // Build a syntactically valid bech32m `swapoffer1…` blob wrapping arbitrary
-// bytes (decodeOffer does pure bech32m, so this passes encoding but not
+// bytes (OfferFiles.decode does pure bech32m, so this passes encoding but not
 // deserialization).
 function craftBlob(byteLen: number): string {
   return bech32m.encode(OFFER_HRP, bech32m.toWords(new Uint8Array(byteLen).fill(7)), false);
@@ -119,7 +119,7 @@ describe.skipIf(!hasFixture)("validateZswapOffer — crypto + liveness (real fix
   });
 
   test("enforceBalancing=true rejects the same open offer (proves false is required)", () => {
-    const raw = decodeOffer(blob);
+    const raw = OfferFiles.decode(blob);
     const tx = Transaction.deserialize("signature", "proof", "binding", raw);
     const strict = new WellFormedStrictness();
     strict.enforceBalancing = true;
@@ -131,7 +131,7 @@ describe.skipIf(!hasFixture)("validateZswapOffer — crypto + liveness (real fix
   });
 
   test("tampered proof bytes are rejected (PROOF_INVALID or BAD_DESERIALIZE)", () => {
-    const raw = decodeOffer(blob);
+    const raw = OfferFiles.decode(blob);
     const tampered = Uint8Array.from(raw);
     // Flip bytes deep in the blob (proof region) to corrupt the ZK proof.
     const at = Math.floor(tampered.length * 0.8);

@@ -17,7 +17,7 @@
 //   bun packages/tests/unshielded-only-swap-e2e.ts
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -122,7 +122,7 @@ try {
   console.log(`${TAG} offer imbalances (expect give U0 + want U1): ${describeImbalances(offer0 as any)}`);
 
   // ── Index it via the API (proves the unshielded existence/spend legs at the gate) ──
-  const blob = encodeOffer(offer0.serialize());
+  const blob = OfferFiles.encode(offer0.serialize());
   let sub = await submitOffer(blob);
   for (let r = 0; r < 24 && sub.status === 400 && (sub.body?.error === "UTXO_UNKNOWN" || sub.body?.error === "ROOT_UNKNOWN"); r++) {
     await sleep(5000);

@@ -4,7 +4,7 @@
 // serve primitives, not an in-memory shortcut.
 
 import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
 const API = process.env["ZSWAP_API"] ?? "http://127.0.0.1:9999";
 
@@ -51,6 +51,6 @@ export function reconstructOffer(transactionHex: string): FinalizedTransaction {
     "signature",
     "proof",
     "binding",
-    decodeOffer(transactionHex),
+    OfferFiles.decode(transactionHex),
   ) as unknown as FinalizedTransaction;
 }

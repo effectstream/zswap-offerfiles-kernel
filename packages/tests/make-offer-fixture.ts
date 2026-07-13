@@ -19,7 +19,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
 
 const FIXTURE_PATH = join(
@@ -99,7 +99,7 @@ async function main(): Promise<void> {
     console.log(`[fixture] proved in ${Math.round(performance.now() - t0)}ms`);
 
     const raw = finalized.serialize();
-    const blob = encodeOffer(raw);
+    const blob = OfferFiles.encode(raw);
     console.log(`[fixture] offer blob: ${blob.slice(0, 48)}… (${raw.length} bytes)`);
 
     // The point of the exercise: a real proven offer must pass the shipped

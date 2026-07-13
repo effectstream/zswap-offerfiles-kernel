@@ -11,7 +11,7 @@
 import type { Client } from "pg";
 import { assert, API_PORT } from "../helpers.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { joinOfferFiles, mintShielded } from "../lib/offer-files.ts";
@@ -115,7 +115,7 @@ export async function apiTest(db: Client): Promise<void> {
       shieldedKeys(p0),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
-    const blob0 = encodeOffer(
+    const blob0 = OfferFiles.encode(
       (await p0.wallet.finalizeTransaction(r0.transaction)).serialize(),
     );
     const r1 = await p1.wallet.initSwap(
@@ -129,7 +129,7 @@ export async function apiTest(db: Client): Promise<void> {
       shieldedKeys(p1),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
-    const blob1 = encodeOffer(
+    const blob1 = OfferFiles.encode(
       (await p1.wallet.finalizeTransaction(r1.transaction)).serialize(),
     );
 

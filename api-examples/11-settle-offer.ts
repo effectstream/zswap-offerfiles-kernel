@@ -15,7 +15,7 @@ import { config, get, header } from "./config.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
 globalThis.WebSocket = WebSocket;
 
@@ -62,7 +62,7 @@ const keys = { shieldedSecretKeys: zswapSecretKeys, dustSecretKey };
 
 // ── 4. Balance and finalize ───────────────────────────────────────────────────
 console.log("Balancing settlement transaction (proving…)");
-const offerTx = Transaction.deserialize("signature", "proof", "binding", decodeOffer(blob));
+const offerTx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(blob));
 
 const balRecipe = await (wallet as any).balanceFinalizedTransaction(offerTx, keys, {
   ttl: new Date(Date.now() + 30 * 60_000),

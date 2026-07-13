@@ -1,7 +1,7 @@
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer, OFFER_HRP } from "@zswap-da/mip5-offer-files";
-import { isTwoSidedSwap } from "@zswap-da/mip6-p2p-swaps";
+import { OfferFiles, OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
+import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 
 import {
   collectNullifiers,
@@ -56,7 +56,7 @@ export function validateZswapOffer(
   }
   let rawTx: Uint8Array;
   try {
-    rawTx = decodeOffer(blob);
+    rawTx = OfferFiles.decode(blob);
   } catch (e) {
     return {
       ok: false,
@@ -128,7 +128,7 @@ export function validateZswapOffer(
     };
   }
   // MIP-0006 two-sided rule (give-only / want-only offers are not swaps).
-  if (!isTwoSidedSwap(gives, wants)) {
+  if (!P2pAtomicSwaps.isTwoSided(gives, wants)) {
     return {
       ok: false,
       code: "NOT_A_SWAP",

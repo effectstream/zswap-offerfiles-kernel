@@ -9,6 +9,16 @@ import { indexersMatch } from './wallet'
 import type { WalletApp } from './useWalletApp'
 
 const NIGHT = '0000000000000000000000000000000000000000000000000000000000000000'
+const MIP_NPM = 'https://www.npmjs.com/package/@effectstream/mip-zswap-offer'
+
+function MipNpmLink({ note }: { note: string }) {
+  return (
+    <p className="mip-ref">
+      {note}{' '}
+      <a href={MIP_NPM} target="_blank" rel="noreferrer">@effectstream/mip-zswap-offer</a>
+    </p>
+  )
+}
 
 function short(s: string, n = 24) {
   return !s ? '' : s.length <= n ? s : s.slice(0, n) + '…'
@@ -39,6 +49,7 @@ export function OverviewPanel() {
       <div className="callout warn">
         Accepting is not a REST call with a raw <code>swapoffer1…</code> blob. Build a token-balanced finalized Midnight tx, then POST it to <code>midnight-balancer</code>.
       </div>
+      <MipNpmLink note="Offer blobs (MIP-0005) and swap semantics (MIP-0006) are implemented in" />
     </div>
   )
 }
@@ -247,6 +258,7 @@ export function UploadPanel({
     <div className="panel">
       <h2>Upload offer</h2>
       <p className="lead">Build a maker offer from your mintable test-token balances, then submit the <code>swapoffer1…</code> blob.</p>
+      <MipNpmLink note="MIP-0005 bech32m encoding + MIP-0006 two-sided give/want legs — see" />
 
       <div className="card">
         <h3>Build from wallet balances</h3>
@@ -420,6 +432,7 @@ export function AcceptPanel({
     <div className="panel">
       <h2>Accept / settle offer</h2>
       <p className="lead">Load the open book, then hand a token-balanced finalized tx to the batcher.</p>
+      <MipNpmLink note="MIP-0005 decode of the maker blob + MIP-0006 imbalance-derived legs — see" />
       <div className="card">
         <h3>Open offer book</h3>
         <div className="actions" style={{ marginBottom: 10 }}>
@@ -514,6 +527,7 @@ export function StatusPanel({ blob, setBlob }: { blob: string; setBlob: (v: stri
   return (
     <div className="panel">
       <h2>Offer status</h2>
+      <MipNpmLink note="Status lookups take a MIP-0005 swapoffer blob — codec in" />
       <div className="card">
         <h3><span className="method get">GET</span><span className="path">/api/zswap/status</span></h3>
         <div className="field">
@@ -659,6 +673,7 @@ export function ReadPanel() {
     <div className="panel">
       <h2>Read APIs</h2>
       <p className="lead">Offers, tokens, pairs, market data, Midnight config.</p>
+      <MipNpmLink note="Indexed offers expose MIP-0006 derived gives/wants — see" />
       <ReadPanels />
     </div>
   )
@@ -684,6 +699,7 @@ export function BatcherPanel() {
         Direct batcher endpoints. Swagger:{' '}
         <a href={`${BATCHER_URL}/documentation`} target="_blank" rel="noreferrer">{BATCHER_URL}/documentation</a>
       </p>
+      <MipNpmLink note="Celestia send-input expects a MIP-0005 swapoffer blob — see" />
       <div className="card">
         <div className="actions">
           <button className="btn primary" type="button" onClick={() => dbg.call('GET', `${BATCHER_URL}/health`)}>Health</button>

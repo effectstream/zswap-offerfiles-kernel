@@ -21,7 +21,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { config, get, post, header } from "./config.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
 globalThis.WebSocket = WebSocket;
 
@@ -102,7 +102,7 @@ const recipe = await wallet.initSwap(
   { ttl, payFees: false },
 );
 const offerFinalized = await wallet.finalizeTransaction(recipe.transaction);
-const blob = encodeOffer(offerFinalized.serialize());
+const blob = OfferFiles.encode(offerFinalized.serialize());
 
 console.log(`Encoded blob: ${blob.slice(0, 40)}…  (${blob.length} chars)`);
 

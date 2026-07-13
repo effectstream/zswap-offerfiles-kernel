@@ -15,7 +15,7 @@
 //   bun packages/tests/ring-swap-e2e.ts [N]   # default N=2
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
@@ -149,7 +149,7 @@ try {
   // ── 5. Submit each offer → Celestia → indexed ──
   const offerIds: number[] = [];
   for (let i = 0; i < N; i++) {
-    const blob = encodeOffer(finalizedOffers[i].serialize());
+    const blob = OfferFiles.encode(finalizedOffers[i].serialize());
     let sub = await submitOffer(blob);
     for (let r = 0; r < 24 && sub.status === 400 && sub.body?.error === "ROOT_UNKNOWN"; r++) {
       await sleep(5000);

@@ -11,7 +11,7 @@
 // directly comparable — the foundation for a verified byte-slice extractor.
 
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { Buffer } from "node:buffer";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";

@@ -12,7 +12,7 @@
 //   bun packages/tests/full-lifecycle-e2e.ts
 
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import { decodeOffer, encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -94,7 +94,7 @@ try {
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   const offerFinalized = await wallet.finalizeTransaction(recipe.transaction);
-  const blob = encodeOffer(offerFinalized.serialize());
+  const blob = OfferFiles.encode(offerFinalized.serialize());
   console.log(`[lifecycle] offer: give ${GIVE_AMOUNT} of A(${colors.shieldedA.slice(0, 8)}…), want ${WANT_AMOUNT} of B(${colors.shieldedB.slice(0, 8)}…)`);
 
   // ── 3. Submit → batcher → Celestia ──
@@ -108,7 +108,7 @@ try {
 
   // ── 5. Taker settles: balance the finalized offer + submit to Midnight ──
   console.log("[lifecycle] balancing + settling the A↔B offer on Midnight…");
-  const offerTx = Transaction.deserialize("signature", "proof", "binding", decodeOffer(blob));
+  const offerTx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(blob));
   const balRecipe = await (wallet as any).balanceFinalizedTransaction(offerTx, keys, {
     ttl: new Date(Date.now() + 30 * 60_000),
   });
@@ -153,7 +153,7 @@ try {
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const uFinalized = await wallet.finalizeTransaction(uRecipe.transaction);
-    const uBlob = encodeOffer(uFinalized.serialize());
+    const uBlob = OfferFiles.encode(uFinalized.serialize());
     const uSub = await submitOffer(uBlob);
     if (uSub.status !== 200) {
       // Known wallet-SDK limitation: the facade's initSwap does not fully sign
@@ -166,7 +166,7 @@ try {
     }
     if (uSub.status === 200) {
       check("STRETCH: unshielded-give offer accepted (existence check passed)", true);
-      const uOfferTx = Transaction.deserialize("signature", "proof", "binding", decodeOffer(uBlob));
+      const uOfferTx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(uBlob));
       const uBal = await (wallet as any).balanceFinalizedTransaction(uOfferTx, keys, { ttl: new Date(Date.now() + 30 * 60_000) });
       const uSettle = await wallet.finalizeRecipe(uBal);
       await (wallet as any).submitTransaction(uSettle);

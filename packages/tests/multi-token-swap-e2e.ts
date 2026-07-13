@@ -10,7 +10,7 @@
 //   bun packages/tests/multi-token-swap-e2e.ts
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { encodeOffer } from "@zswap-da/mip5-offer-files";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
@@ -78,7 +78,7 @@ async function submitOffer(blob: string): Promise<{ status: number; body: any }>
 }
 
 async function submitIndexed(finalized: FinalizedTransaction): Promise<void> {
-  const blob = encodeOffer(finalized.serialize());
+  const blob = OfferFiles.encode(finalized.serialize());
   let sub = await submitOffer(blob);
   for (let r = 0; r < 24 && sub.status === 400 && sub.body?.error === "ROOT_UNKNOWN"; r++) {
     await sleep(5000);

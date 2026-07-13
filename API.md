@@ -4,6 +4,15 @@ ZSwap-DA is a dual-chain indexer and offer relay for shielded DEX swaps. It watc
 
 This document targets application developers who want to interact with the endpoints directly, submit ZSwap offers to Celestia, or drive settlement transactions on Midnight programmatically.
 
+**Interactive playground:** `bun run docs:dev` →
+[`http://localhost:10601/docs/`](http://localhost:10601/docs/) (Vite + React),
+or `bun run docs:build` and open
+[`http://localhost:9999/docs`](http://localhost:9999/docs). Debug offer upload
+(`POST /api/zswap/submit`), browse the open book, poll status, stream SSE,
+settle via the batcher's `midnight-balancer` target, and connect a wallet to
+inspect balances / mint test tokens (`VITE_PROOF_SERVER_URL`, default
+`http://localhost:6300`).
+
 ---
 
 ## Environments

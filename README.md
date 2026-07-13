@@ -20,7 +20,9 @@ wallet), so e2e swaps have real multi-token inventory and the unshielded
 liveness sets receive on-chain events.
 
 - API: http://localhost:9999
+- API playground: `bun run docs:dev` → http://localhost:10601/docs/ (or build + http://localhost:9999/docs)
 - Batcher: http://localhost:3334
+- Proof server: http://localhost:6300 (`VITE_PROOF_SERVER_URL`)
 - Orchestrator API: http://localhost:4747
 
 ### macOS note
@@ -157,7 +159,7 @@ monorepo at
 
 | Package | Files |
 |---------|-------|
-| `node/` | `main.{dev,mainnet}.ts`, `config.{dev,mainnet}.ts`, `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `zk-assets.ts` (`/keys/*`, `/zkir/*` static ZK assets), `zswap-logic.ts`, `batcher-client.ts`, `event-bus.ts` |
+| `node/` | `main.{dev,mainnet}.ts`, `config.{dev,mainnet}.ts`, `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `docs.ts` (`GET /docs` serves Vite playground dist), `zk-assets.ts` (`/keys/*`, `/zkir/*` static ZK assets), `zswap-logic.ts`, `batcher-client.ts`, `event-bus.ts` |
 | `database/` | `mod.ts` (re-exports), `migration-order.ts`, `migrations/000-init.sql`, `migrations/001-spent-sets.sql` (`spent_*` liveness sets), `migrations/002-liveness-sets.sql` (`created_unshielded` + windowed `known_roots`), `sql/queries.sql` (+ generated `queries.queries.ts`) |
 | `validator/` | `validate.ts` (pipeline), `derive.ts`, `refstate.ts`, `types.ts`, `README.md`, `scripts/check-preview-indexer.ts` |
 | `batcher/` | `batcher.{dev,mainnet}.ts`, `config.ts`, `midnight-balancing.ts`, `celestia.ts` (`ZswapCelestiaAdapter.validateInput` — pre-fee offer gate) |
@@ -193,8 +195,13 @@ monorepo at
 
 ## API
 
-**Full request/response reference with curl examples: [API.md](API.md).** The
-table below is a quick index; API.md documents every field, error code, the
+**Interactive playground (try upload / settle / wallet mint live):**
+`bun run docs:dev` → [http://localhost:10601/docs/](http://localhost:10601/docs/)
+(Vite + React). After `bun run docs:build`, the node also serves it at
+[http://localhost:9999/docs](http://localhost:9999/docs). Proof server URL comes
+from `VITE_PROOF_SERVER_URL` (local default `http://localhost:6300`).
+**Full request/response reference with curl examples: [API.md](API.md).**
+The table below is a quick index; API.md documents every field, error code, the
 batcher endpoints, and direct Celestia access.
 
 There are **two ways** to post and read offers:

@@ -27,6 +27,7 @@ import { quoteWithPrices, priceOf } from "./market-mock.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
+import { registerDocsRoutes } from "./docs.ts";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
 
@@ -48,6 +49,9 @@ export const apiRouter: StartConfigApiRouter = async function (
   // lives in its own repo and fetches these from this API instead of staging
   // copies into its public/ dir).
   registerZkAssetRoutes(server);
+
+  // GET /docs — interactive API playground (upload + accept/settle debugger).
+  registerDocsRoutes(server);
 
   // Update pair_stats after each CONSUMED archive. The state machine fires
   // offer_consumed after the archive transaction commits; this listener keeps
@@ -252,7 +256,8 @@ export const apiRouter: StartConfigApiRouter = async function (
   // Uses effectstream.effectstream_blocks for NTP and
   // effectstream.sync_protocol_pagination for parallel chains.
   // Chain tips are fetched from the Midnight indexer / Celestia RPC and cached 60 s.
-  server.get("/api/health/sync", async () => {
+  // Exempt from the 60/min API budget — UIs poll this as a liveness probe.
+  server.get("/api/health/sync", { config: { rateLimit: false } }, async () => {
     return getSyncStatus(dbConn);
   });
 
@@ -337,9 +342,26 @@ export const apiRouter: StartConfigApiRouter = async function (
       for (const root of validation.inputRoots ?? []) {
         const known = await isKnownRoot.run({ root }, dbConn);
         if (known.length === 0) {
+          const tip = await getSyncStatus(dbConn).catch(() => null as any);
+          const rootsMeta = tip?.sets?.known_roots;
           return reply.code(400).send({
             error: "ROOT_UNKNOWN",
             reason: `input merkle root not a known recent chain root: ${root}`,
+            hint:
+              "Lace proved against a Merkle root this node has never synced. " +
+              "Usually Lace's indexer URI differs from this node even when networkId matches " +
+              `(node networkId=${MIDNIGHT_NETWORK_ID}, indexer=${midnightNetworkConfig.indexer}). ` +
+              "In Lace → undeployed, set indexer to this node's indexer, mint there, rebuild the offer. " +
+              "Retrying the same blob will not help if the root is foreign.",
+            diagnostics: {
+              offerRoot: root,
+              nodeNetworkId: MIDNIGHT_NETWORK_ID,
+              nodeIndexerUri: midnightNetworkConfig.indexer,
+              knownRootsTotal: rootsMeta?.total ?? null,
+              knownRootsLatestHeight: rootsMeta?.latest_height ?? null,
+              midnightTip: tip?.midnight?.tip ?? null,
+              midnightSynced: tip?.midnight?.current ?? null,
+            },
           });
         }
       }

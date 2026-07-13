@@ -2,6 +2,8 @@ node_modules/
 packages/batcher/batcher-data/
 packages/contracts-midnight/contract-offer-files/src/managed/
 packages/contracts-midnight/midnight-level-db-deploy/
+docs/dist/
+docs/node_modules/
 
 # Runtime logs from the dev stack
 *-debug.log

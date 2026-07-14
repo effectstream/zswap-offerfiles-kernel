@@ -94,6 +94,12 @@ main { overflow-y: auto; padding: 20px 24px 40px; }
 .btn.primary:hover { border-color: var(--accent); }
 .btn.danger { color: var(--err); border-color: #5c2424; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.spin {
+  display: inline-block; width: 11px; height: 11px; margin-right: 7px;
+  border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%;
+  vertical-align: -1px; animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 .callout {
   border-left: 3px solid var(--info); background: #121820; padding: 10px 12px;
   margin: 12px 0; color: var(--muted); font-size: 13px;

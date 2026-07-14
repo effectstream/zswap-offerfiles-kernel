@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { BATCHER_URL } from '../config'
 import { useDebugger } from '../Debugger'
 import { api } from '../api'
-import { MipNpmLink } from './shared'
+import { BusyButton, MipNpmLink } from './shared'
 
 export function BatcherPanel() {
   const dbg = useDebugger()
@@ -39,18 +39,18 @@ export function BatcherPanel() {
           <textarea value={raw} onChange={(e) => setRaw(e.target.value)} spellCheck={false} style={{ minHeight: 180 }} />
         </div>
         <div className="actions">
-          <button className="btn primary" type="button" onClick={() => {
+          <BusyButton busyLabel="Sending — waiting for receipt…" onClick={() => {
             try {
               const body = JSON.parse(raw)
               if (!body?.data?.timestamp) {
                 body.data = body.data || {}
                 body.data.timestamp = String(Date.now())
               }
-              dbg.call(api.batcherSend(body))
+              return dbg.call(api.batcherSend(body))
             } catch (e: any) {
               alert('Invalid JSON: ' + e.message)
             }
-          }}>Send raw</button>
+          }}>Send raw</BusyButton>
         </div>
       </div>
     </div>

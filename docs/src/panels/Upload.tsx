@@ -4,7 +4,7 @@ import { api, run } from '../api'
 import { buildMakerOfferBlob } from '../wallet/makerOffer'
 import { preflightLaceIndexer } from '../wallet/wallet'
 import type { WalletApp } from '../wallet/useWalletApp'
-import { MipNpmLink } from './shared'
+import { BusyButton, MipNpmLink } from './shared'
 
 export function UploadPanel({
   blob,
@@ -278,17 +278,17 @@ export function UploadPanel({
           <button className="btn" type="button" disabled={submitting} onClick={() => submit(true)}>
             Submit + poll status
           </button>
-          <button className="btn" type="button" onClick={() => {
+          <BusyButton className="btn" busyLabel="Sending — waiting for receipt…" onClick={() => {
             const b = blob.trim()
             if (!b) return alert('Paste a blob first.')
-            dbg.call(api.batcherSend({
+            return dbg.call(api.batcherSend({
               data: {
                 input: b, target: 'celestia', address: 'celestia', addressType: -1,
                 signature: '', timestamp: String(Date.now()),
               },
               confirmationLevel: 'wait-receipt',
             }))
-          }}>Send to Celestia target</button>
+          }}>Send to Celestia target</BusyButton>
         </div>
         {submitMsg && <div className="callout">{submitMsg}</div>}
         <div className="callout warn">

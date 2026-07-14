@@ -4,7 +4,7 @@ import { api, type Offer } from '../api'
 import { buildSettlementTxHex } from '../wallet/takerSettle'
 import { preflightLaceIndexer } from '../wallet/wallet'
 import type { WalletApp } from '../wallet/useWalletApp'
-import { MipNpmLink } from './shared'
+import { BusyButton, MipNpmLink } from './shared'
 
 function short(s: string, n = 24) {
   return !s ? '' : s.length <= n ? s : s.slice(0, n) + '…'
@@ -140,10 +140,10 @@ export function AcceptPanel({
           <textarea value={settleHex} onChange={(e) => setSettleHex(e.target.value)} placeholder="deadbeef..." spellCheck={false} />
         </div>
         <div className="actions">
-          <button className="btn primary" type="button" onClick={() => {
+          <BusyButton busyLabel="Settling — waiting for receipt…" onClick={() => {
             const hex = settleHex.trim().replace(/^0x/, '')
             if (!hex) return alert('Paste tx hex first.')
-            dbg.call(api.batcherSend({
+            return dbg.call(api.batcherSend({
               data: {
                 address: 'midnight-balancer', addressType: -1,
                 input: JSON.stringify({ tx: hex, txStage: 'finalized' }),
@@ -151,7 +151,7 @@ export function AcceptPanel({
               },
               confirmationLevel: 'wait-receipt',
             }))
-          }}>Settle via batcher</button>
+          }}>Settle via batcher</BusyButton>
           <button className="btn" type="button" onClick={() => {
             const b = blob.trim()
             if (!b) return alert('Select an offer or paste a blob.')

@@ -72,18 +72,14 @@ function createWalletProvider(
     getCoinPublicKey: () => coinPublicKey,
     getEncryptionPublicKey: () => encryptionPublicKey,
     async balanceTx(tx: UnboundTransaction): Promise<FinalizedTransaction> {
-      console.debug('[mint] walletProvider.balanceTx: asking Lace to balance+sign')
       const serialized = toHex(tx.serialize())
       const { tx: balancedHex } = await connectedApi.balanceUnsealedTransaction(serialized, { payFees: false })
-      console.debug('[mint] walletProvider.balanceTx: signed by Lace')
       return LedgerV8Transaction.deserialize('signature', 'proof', 'binding', fromHex(balancedHex)) as FinalizedTransaction
     },
     async submitTx(tx: FinalizedTransaction): Promise<TransactionId> {
       const serializedHex = toHex(tx.serialize())
       const identifiers = (tx as any).identifiers?.() as string[] | undefined
-      console.debug('[mint] walletProvider.submitTx: posting to batcher', { batcherUrl: BATCHER_URL })
       await submitToBatcher(serializedHex, coinPublicKey as unknown as string)
-      console.debug('[mint] walletProvider.submitTx: batcher accepted')
       const identifier = identifiers?.[0]
       if (!identifier) throw new Error('ledger tx returned no identifiers')
       return identifier as TransactionId
@@ -119,22 +115,6 @@ async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig
   const zkConfigProvider = new FetchZkConfigProvider<OfferFilesCircuits>(API_BASE, safeFetch.bind(window))
   // VITE_PROOF_SERVER_URL wins over whatever /api/midnight/config reports.
   const proofServerUri = PROOF_SERVER_URL || config.proofServerUri
-  console.debug('[mint] buildProviders: proof server', proofServerUri)
-  const baseProofProvider = httpClientProofProvider(proofServerUri, zkConfigProvider)
-  const proofProvider = {
-    ...baseProofProvider,
-    proveTx: async (unprovenTx: any, proveTxConfig?: any) => {
-      console.debug('[mint] proofProvider.proveTx: requesting proof', { proofServerUri })
-      try {
-        const proven = await baseProofProvider.proveTx(unprovenTx, proveTxConfig)
-        console.debug('[mint] proofProvider.proveTx: proof received')
-        return proven
-      } catch (e: any) {
-        console.debug('[mint] proofProvider.proveTx: failed', e?.message ?? String(e))
-        throw e
-      }
-    },
-  }
 
   return {
     privateStateProvider: levelPrivateStateProvider({
@@ -142,7 +122,7 @@ async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig
       accountId: coinPublicKeyHex,
     } as any),
     zkConfigProvider,
-    proofProvider,
+    proofProvider: httpClientProofProvider(proofServerUri, zkConfigProvider),
     publicDataProvider: indexerPublicDataProvider(config.indexerUri, config.indexerWsUri),
     walletProvider,
     midnightProvider: walletProvider,

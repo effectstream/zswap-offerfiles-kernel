@@ -151,19 +151,16 @@ export function useWalletApp() {
     setMintingId(token.name)
     setMintMsg(null)
     setError(null)
-    console.debug('[mint] start', { kind: token.kind, name: token.name })
     try {
       const res = token.kind === 'shielded'
         ? await contract.mintShielded(token.domainSep, MINT_AMOUNT, BigInt(Date.now()), token.name)
         : await contract.mintUnshielded(token.domainSep, MINT_AMOUNT, token.name)
-      console.debug('[mint] done', { name: token.name, color: res.color, txHash: res.txHash })
       setColorById((prev) => ({ ...prev, [token.name]: res.color.toLowerCase() }))
       setMintMsg(`Minted +${MINT_AMOUNT} ${token.name} · color ${res.color.slice(0, 12)}…`)
       await refreshKnown()
       // Give Lace a moment to index, then refresh.
       setTimeout(() => { refreshBalances() }, 2000)
     } catch (e: any) {
-      console.debug('[mint] failed', { name: token.name, error: e?.message ?? String(e) })
       setError(e?.message ?? String(e))
     } finally {
       setMintingId(null)

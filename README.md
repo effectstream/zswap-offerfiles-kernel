@@ -7,6 +7,9 @@ This repo is the **backend**: sync node, batcher, contracts, database, validator
 - **Backend (this repo):** https://github.com/effectstream/zswap-offerfiles-kernel
 - **Example frontend:** https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da
 
+Deployed app (preview network): https://zswap.zkdojo.com
+Check deployed API playground: https://api-zswap.zkdojo.com/docs
+
 ## Quick Start
 
 ```bash

@@ -17,7 +17,7 @@ import {
   type MintableKind,
   type MintableToken,
 } from './mintable'
-import { api, type KnownToken, type MidnightConfig } from './api'
+import { api, run, type KnownToken, type MidnightConfig } from '../api'
 
 export type WalletStatus = 'disconnected' | 'connecting' | 'connected'
 
@@ -48,7 +48,7 @@ export function useWalletApp() {
 
   const refreshKnown = useCallback(async () => {
     try {
-      const tokens = await api.knownTokens()
+      const tokens = await run(api.knownTokens())
       setKnown(tokens)
       const map: Record<string, string> = {}
       for (const t of tokens) map[t.name] = t.token_color.toLowerCase()
@@ -82,7 +82,7 @@ export function useWalletApp() {
   useEffect(() => {
     discoverInjected().then(setInjected).catch(() => setInjected([]))
     refreshKnown()
-    api.midnightConfig().then(setNodeMidnight).catch(() => setNodeMidnight(null))
+    run(api.midnightConfig()).then(setNodeMidnight).catch(() => setNodeMidnight(null))
   }, [refreshKnown])
 
   useEffect(() => {
@@ -173,7 +173,6 @@ export function useWalletApp() {
     wstate,
     error,
     injected,
-    known,
     mintable,
     colorById,
     mintingId,

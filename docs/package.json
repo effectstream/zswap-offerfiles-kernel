@@ -11,9 +11,8 @@
   "dependencies": {
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "@noble/curves": "^1.9.7",
-    "@noble/hashes": "^1.8.0",
     "@scure/base": "^2.0.0",
+    "@effectstream/mip-zswap-offer": "0.2.0",
     "@midnight-ntwrk/ledger-v8": "8.0.3",
     "@midnight-ntwrk/dapp-connector-api": "4.0.1",
     "@midnight-ntwrk/compact-js": "2.5.0",

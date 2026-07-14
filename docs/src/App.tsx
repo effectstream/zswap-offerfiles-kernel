@@ -1,18 +1,17 @@
 import { useEffect, useState } from 'react'
 import { API_BASE, BATCHER_URL, PROOF_SERVER_URL } from './config'
+import { api, run } from './api'
 import { DebuggerAside, DebuggerProvider, useDebugger } from './Debugger'
-import { WalletStage } from './WalletStage'
-import { useWalletApp } from './useWalletApp'
-import {
-  AcceptPanel,
-  BatcherPanel,
-  EventsPanel,
-  HealthPanel,
-  OverviewPanel,
-  ReadPanel,
-  StatusPanel,
-  UploadPanel,
-} from './Panels'
+import { useWalletApp } from './wallet/useWalletApp'
+import { OverviewPanel } from './panels/Overview'
+import { WalletStage } from './panels/WalletStage'
+import { HealthPanel } from './panels/Health'
+import { UploadPanel } from './panels/Upload'
+import { AcceptPanel } from './panels/Accept'
+import { StatusPanel } from './panels/Status'
+import { EventsPanel } from './panels/Events'
+import { ReadPanel } from './panels/Read'
+import { BatcherPanel } from './panels/Batcher'
 
 type PanelId =
   | 'overview'
@@ -52,6 +51,8 @@ const NAV: { group: string; items: { id: PanelId; label: string; hint: string }[
   },
 ]
 
+const healthBadge = (s: string) => ({ label: s, cls: s === 'ok' ? 'ok' : s === 'syncing' ? 'syncing' : 'err' })
+
 function AppInner() {
   const [panel, setPanel] = useState<PanelId>('wallet')
   const [blob, setBlob] = useState('')
@@ -65,15 +66,10 @@ function AppInner() {
   // and would re-fire this into a /api/health/sync storm → RATE_LIMITED).
   useEffect(() => {
     let cancelled = false
-    fetch(`${API_BASE}/api/health/sync`)
-      .then((r) => r.json())
+    run(api.sync())
       .then((data) => {
         if (cancelled || !data?.status) return
-        const s = data.status as string
-        setHealth({
-          label: s,
-          cls: s === 'ok' ? 'ok' : s === 'syncing' ? 'syncing' : 'err',
-        })
+        setHealth(healthBadge(data.status))
       })
       .catch(() => {})
     return () => { cancelled = true }
@@ -88,12 +84,9 @@ function AppInner() {
           <label>Batcher <code>{BATCHER_URL}</code></label>
           <label>Proof <code>{PROOF_SERVER_URL}</code></label>
           <button className="btn" type="button" onClick={async () => {
-            await call('GET', `${API_BASE}/health`)
-            const r = await call('GET', `${API_BASE}/api/health/sync`)
-            if (r.parsed?.status) {
-              const s = r.parsed.status
-              setHealth({ label: s, cls: s === 'ok' ? 'ok' : s === 'syncing' ? 'syncing' : 'err' })
-            }
+            await call(api.health())
+            const r = await call(api.sync())
+            if (r.parsed?.status) setHealth(healthBadge(r.parsed.status))
           }}>Check health</button>
           <span className={`badge ${health.cls}`}><span className="dot" />{health.label}</span>
           {wallet.status === 'connected' && (

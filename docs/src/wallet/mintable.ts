@@ -8,12 +8,6 @@ export type MintableToken = {
   domainSep: Uint8Array
 }
 
-export const MAX_TOKEN_NAME_LENGTH = 16
-
-export function sanitizeName(v: string): string {
-  return v.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, MAX_TOKEN_NAME_LENGTH)
-}
-
 const FAUCET_PREFIX = 'zswap-da-faucet:'
 
 /** Deterministic 32-byte domain separator from a token name — same derivation

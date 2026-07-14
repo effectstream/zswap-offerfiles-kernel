@@ -22,6 +22,7 @@
       "name": "@zswap-da/docs-playground",
       "version": "0.1.0",
       "dependencies": {
+        "@effectstream/mip-zswap-offer": "0.2.0",
         "@effectstream/wallets": "0.101.1",
         "@midnight-ntwrk/compact-js": "2.5.0",
         "@midnight-ntwrk/dapp-connector-api": "4.0.1",
@@ -35,8 +36,6 @@
         "@midnight-ntwrk/midnight-js-types": "4.0.2",
         "@midnight-ntwrk/midnight-js-utils": "4.0.2",
         "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
-        "@noble/curves": "^1.9.7",
-        "@noble/hashes": "^1.8.0",
         "@scure/base": "^2.0.0",
         "@zswap-da/contract-offer-files": "workspace:*",
         "react": "^19.2.0",

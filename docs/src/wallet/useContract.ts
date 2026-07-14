@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConnectedAPI } from '@midnight-ntwrk/dapp-connector-api'
 import { MidnightBech32m, UnshieldedAddress } from '@midnight-ntwrk/wallet-sdk-address-format'
-import { api, type MidnightConfig } from './api'
+import { api, run, type MidnightConfig } from '../api'
 import { connectBrowserContract, type ConnectedContract } from './browserContract'
-import { PROOF_SERVER_URL } from './config'
-import { indexersMatch } from './wallet'
+import { PROOF_SERVER_URL } from '../config'
+import { preflightLaceIndexer } from './wallet'
+import { toHex } from '../hex'
 
 export type MintResult = { color: string; txHash: string }
 
@@ -30,7 +31,7 @@ export function useContract(connectedApi: ConnectedAPI | null) {
     setLoading(true)
     setError(null)
     const promise = (async () => {
-      const cfg = await api.midnightConfig()
+      const { cfg, laceIndexerUri, mismatch } = await preflightLaceIndexer(connectedApi)
       // Override proof server from VITE_PROOF_SERVER_URL.
       const merged: MidnightConfig = {
         ...cfg,
@@ -42,10 +43,9 @@ export function useContract(connectedApi: ConnectedAPI | null) {
       if (status.networkId !== cfg.networkId) {
         throw new Error(`Network mismatch: wallet="${status.networkId}" backend="${cfg.networkId}"`)
       }
-      const laceCfg = await connectedApi.getConfiguration().catch(() => null)
-      if (laceCfg?.indexerUri && cfg.indexerUri && !indexersMatch(laceCfg.indexerUri, cfg.indexerUri)) {
+      if (mismatch) {
         throw new Error(
-          `Lace indexer mismatch: wallet="${laceCfg.indexerUri}" backend="${cfg.indexerUri}". ` +
+          `Lace indexer mismatch: wallet="${laceIndexerUri}" backend="${cfg.indexerUri}". ` +
           `Mint would land on this node via the batcher, but Lace balances/UI sync elsewhere — ` +
           `point Lace undeployed indexer at the backend URI, reconnect, then retry.`,
         )
@@ -76,9 +76,9 @@ export function useContract(connectedApi: ConnectedAPI | null) {
     const txData: any = await (contract as any).callTx.mint_shielded(domainSep, amount, nonce)
     const colorBytes = txData.private?.result?.color as Uint8Array | undefined
     if (!colorBytes) throw new Error('mint_shielded: missing color')
-    const color = Array.from(colorBytes, (b) => b.toString(16).padStart(2, '0')).join('')
+    const color = toHex(colorBytes)
     const txHash: string = txData.public?.txHash ?? ''
-    try { await api.registerToken(color, name, 'shielded') } catch { /* already registered */ }
+    try { await run(api.registerToken(color, name, 'shielded')) } catch { /* already registered */ }
     return { color, txHash }
   }, [ensure])
 
@@ -100,9 +100,9 @@ export function useContract(connectedApi: ConnectedAPI | null) {
     )
     const colorBytes = txData.private?.result as Uint8Array | undefined
     if (!colorBytes) throw new Error('mint_unshielded: missing color')
-    const color = Array.from(colorBytes, (b) => b.toString(16).padStart(2, '0')).join('')
+    const color = toHex(colorBytes)
     const txHash: string = txData.public?.txHash ?? ''
-    try { await api.registerToken(color, name, 'unshielded') } catch { /* already registered */ }
+    try { await run(api.registerToken(color, name, 'unshielded')) } catch { /* already registered */ }
     return { color, txHash }
   }, [connectedApi, ensure, config])
 

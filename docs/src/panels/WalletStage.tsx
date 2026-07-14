@@ -1,6 +1,6 @@
-import { MINT_AMOUNT, NIGHT_COLOR } from './mintable'
-import { PROOF_SERVER_URL } from './config'
-import type { WalletApp } from './useWalletApp'
+import { MINT_AMOUNT, NIGHT_COLOR } from '../wallet/mintable'
+import { PROOF_SERVER_URL } from '../config'
+import type { WalletApp } from '../wallet/useWalletApp'
 
 function short(a: string | null | undefined, n = 18) {
   if (!a) return '—'

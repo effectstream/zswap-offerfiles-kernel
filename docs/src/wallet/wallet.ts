@@ -1,7 +1,7 @@
 import type { ConnectedAPI } from '@midnight-ntwrk/dapp-connector-api'
 import { walletLogin, allInjectedWallets } from '@effectstream/wallets'
-import { api } from './api'
-import { NETWORK_ID, PROOF_SERVER_URL } from './config'
+import { api, run, type MidnightConfig } from '../api'
+import { NETWORK_ID, PROOF_SERVER_URL } from '../config'
 
 const MODE_MIDNIGHT = 3
 
@@ -49,6 +49,21 @@ export function indexersMatch(a: string, b: string): boolean {
   return normalizeIndexerUri(a) === normalizeIndexerUri(b)
 }
 
+/** Shared preflight for anything that proves via Lace (makeIntent, mint):
+ *  fetch the node's midnight config and compare Lace's indexer against it.
+ *  A mismatch means Lace proves against a foreign merkle root → ROOT_UNKNOWN. */
+export async function preflightLaceIndexer(connectedApi: ConnectedAPI): Promise<{
+  cfg: MidnightConfig
+  laceIndexerUri: string | null
+  mismatch: boolean
+}> {
+  const cfg = await run(api.midnightConfig())
+  const laceCfg = await connectedApi.getConfiguration?.().catch(() => null)
+  const laceIndexerUri = laceCfg?.indexerUri ?? null
+  const mismatch = Boolean(laceIndexerUri && cfg.indexerUri && !indexersMatch(laceIndexerUri, cfg.indexerUri))
+  return { cfg, laceIndexerUri, mismatch }
+}
+
 const stringify = (m: Record<string, bigint> | undefined): Record<string, string> => {
   const out: Record<string, string> = {}
   for (const [t, a] of Object.entries(m ?? {})) out[t] = String(a)
@@ -85,7 +100,7 @@ export async function connectInjected(name?: string): Promise<Connected> {
 /** Built-in JS wallet (undeployed). Good for balance inspection; mint needs Lace. */
 export async function connectLocal(seed?: string): Promise<Connected> {
   const { MidnightLocalConnector } = await import('@effectstream/wallets/midnight-local')
-  const cfg = await api.midnightConfig().catch(() => null)
+  const cfg = await run(api.midnightConfig()).catch(() => null)
   const host = typeof location !== 'undefined' ? location.hostname : '127.0.0.1'
   const networkUrls = {
     indexer: cfg?.indexerUri ?? `http://${host}:8088/api/v3/graphql`,

@@ -12,24 +12,8 @@
 import type { ConnectedAPI } from '@midnight-ntwrk/dapp-connector-api'
 import { Transaction as LedgerV8Transaction } from '@midnight-ntwrk/ledger-v8'
 import { type NetworkId, setNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
-import { bech32m } from '@scure/base'
-
-const OFFER_HRP = 'swapoffer'
-const NO_LIMIT = false as unknown as number
-
-function decodeOffer(encoded: string): Uint8Array {
-  const { prefix, words } = bech32m.decode(encoded as `${string}1${string}`, NO_LIMIT)
-  if (prefix !== OFFER_HRP) throw new Error(`Expected HRP "${OFFER_HRP}", got "${prefix}"`)
-  return Uint8Array.from(bech32m.fromWords(words))
-}
-
-const toHex = (data: Uint8Array) => Array.from(data, (b) => b.toString(16).padStart(2, '0')).join('')
-const fromHex = (hex: string) => {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex
-  const out = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
-  return out
-}
+import { OfferFiles } from '@effectstream/mip-zswap-offer/mip5'
+import { fromHex, toHex } from '../hex'
 
 /** Pick the single segment carrying the swap's asset imbalances. */
 function pickSwapSegment(makerTx: any): { segId: number; imbalances: Map<any, bigint> } {
@@ -106,7 +90,7 @@ export async function buildSettlementTxHex(
   offerBech32m: string,
 ): Promise<string> {
   setNetworkId(networkId as NetworkId)
-  const rawBytes = decodeOffer(offerBech32m.trim())
+  const rawBytes = OfferFiles.decode(offerBech32m.trim())
   const makerTx = LedgerV8Transaction.deserialize('signature', 'proof', 'binding', rawBytes)
 
   const swap = pickSwapSegment(makerTx)

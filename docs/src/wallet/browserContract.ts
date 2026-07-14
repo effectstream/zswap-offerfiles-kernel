@@ -21,8 +21,9 @@ import { CompiledContract } from '@midnight-ntwrk/compact-js'
 import { type NetworkId, setNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
 import { parseCoinPublicKeyToHex, parseEncPublicKeyToHex } from '@midnight-ntwrk/midnight-js-utils'
 import { OfferFilesContract, witnesses } from '@zswap-da/contract-offer-files'
-import { API_BASE, BATCHER_TARGET, BATCHER_URL, PROOF_SERVER_URL } from './config'
-import type { MidnightConfig } from './api'
+import { API_BASE, BATCHER_TARGET, BATCHER_URL, PROOF_SERVER_URL } from '../config'
+import type { MidnightConfig } from '../api'
+import { fromHex, toHex } from '../hex'
 
 export type OfferFilesCircuits = 'mint_shielded' | 'mint_unshielded' | 'incrementNoun'
 const PRIVATE_STATE_ID = 'offerFilesPrivateState'
@@ -32,14 +33,6 @@ type Found = FoundContract<OfferFilesContract.Contract>
 export type ConnectedContract = {
   contract: Found
   config: MidnightConfig
-}
-
-const toHex = (data: Uint8Array) => Array.from(data, (b) => b.toString(16).padStart(2, '0')).join('')
-const fromHex = (hex: string) => {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex
-  const out = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
-  return out
 }
 
 async function submitToBatcher(serializedTxHex: string, address: string) {

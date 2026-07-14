@@ -1,6 +1,14 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import type { ApiRequest } from './api'
 
 type HistoryEntry = { method: string; url: string; status: number | null; ok: boolean; ms: number }
+
+type CallResult<T> = {
+  status: number | null
+  ok: boolean
+  responseText: string
+  parsed: T | null
+}
 
 type DebuggerState = {
   reqMeta: string
@@ -18,12 +26,8 @@ type DebuggerState = {
     responseText: string
   }) => void
   clear: () => void
-  call: (method: string, url: string, body?: unknown) => Promise<{
-    status: number | null
-    ok: boolean
-    responseText: string
-    parsed: any
-  }>
+  /** Debugger transport: takes an `api.*` request descriptor, logs it in the aside. */
+  call: <T>(req: ApiRequest<T>) => Promise<CallResult<T>>
 }
 
 const Ctx = createContext<DebuggerState | null>(null)
@@ -49,7 +53,7 @@ export function DebuggerProvider({ children }: { children: ReactNode }) {
     setReqMeta('—'); setReqBody(''); setResMeta('—'); setResBody(''); setHistory([])
   }, [])
 
-  const call = useCallback(async (method: string, url: string, body?: unknown) => {
+  const call = useCallback(async <T,>({ method, url, body }: ApiRequest<T>) => {
     const t0 = performance.now()
     let status: number | null = null
     let ok = false
@@ -70,7 +74,7 @@ export function DebuggerProvider({ children }: { children: ReactNode }) {
     }
     const ms = Math.round(performance.now() - t0)
     setLast({ method, url, body, status, ms, ok, responseText })
-    let parsed: any = null
+    let parsed: T | null = null
     try { parsed = JSON.parse(responseText) } catch { /* */ }
     return { status, ok, responseText, parsed }
   }, [setLast])

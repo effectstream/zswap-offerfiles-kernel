@@ -4,14 +4,10 @@
 
 import type { Client } from "pg";
 import { assert } from "../helpers.ts";
-import {
-  count,
-  createdUnshieldedShrank,
-  offerArchivedConsumed,
-  waitFor,
-} from "../lib/db.ts";
+import { count, offerArchivedConsumed, waitFor } from "../lib/db.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
+import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { joinOfferFiles, mintUnshielded } from "../lib/offer-files.ts";
@@ -38,6 +34,24 @@ const MINT = 1_000_000_000n;
 const AMT = 1_000n;
 const M0_SEED = "0000000000000000000000000000000000000000000000000000000000000050";
 const M1_SEED = "0000000000000000000000000000000000000000000000000000000000000051";
+
+/** Canonical hex owner as stored in created_unshielded by the STM. */
+const ownerHex = (mnAddr: string): string =>
+  MidnightBech32m.parse(mnAddr).data.toString("hex").toLowerCase();
+
+type MintUtxo = { owner: string; intent_hash: string; output_no: number };
+
+async function mintUtxosGone(db: Client, refs: MintUtxo[]): Promise<boolean> {
+  for (const r of refs) {
+    const res = await db.query(
+      `SELECT 1 FROM created_unshielded
+       WHERE owner = $1 AND intent_hash = $2 AND output_no = $3`,
+      [r.owner, r.intent_hash, r.output_no],
+    );
+    if (res.rows.length > 0) return false;
+  }
+  return refs.length > 0;
+}
 
 export async function unshieldedOnlyTest(db: Client): Promise<void> {
   setNetworkId(net.id as any);
@@ -79,7 +93,19 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
     );
     await assert("U0/U1 minted (UnshieldedCreate primitive)", async () => createdOk);
 
-    const afterMintCreated = await count(db, "created_unshielded");
+    const mintOwners = [ownerHex(m0.unshieldedAddress), ownerHex(m1.unshieldedAddress)];
+    const mintRows = (
+      await db.query<MintUtxo>(
+        `SELECT owner, intent_hash, output_no FROM created_unshielded
+         WHERE owner = ANY($1::text[])`,
+        [mintOwners],
+      )
+    ).rows;
+    await assert(
+      "mint UTXOs recorded for M0/M1",
+      async () => mintRows.length >= 2,
+    );
+
     const m0HasU0 = (await waitForUnshielded(m0, U0, AMT, 36)) >= AMT;
     const m1HasU1 = (await waitForUnshielded(m1, U1, AMT, 36)) >= AMT;
     await assert("M0 holds U0, M1 holds U1", async () => m0HasU0 && m1HasU1);
@@ -147,14 +173,14 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
     const settle = await settleViaBatcher(balancedTx as any);
     await assert("batcher settled unshielded swap", async () => settle.ok);
 
-    // Both unshielded UTXOs spent → created_unshielded shrinks (DELETE on spend)
+    // Mint UTXOs spent whole (change is new rows) → those triples DELETE'd
     const spentOk = await waitFor(
-      "created_unshielded shrank by 2",
-      async () => createdUnshieldedShrank(db, afterMintCreated, 2),
+      "mint UTXOs deleted from created_unshielded",
+      async () => mintUtxosGone(db, mintRows),
       36,
     );
     await assert(
-      "created_unshielded shrank (both legs spent)",
+      "mint UTXOs gone from created_unshielded (both legs spent)",
       async () => spentOk,
     );
 

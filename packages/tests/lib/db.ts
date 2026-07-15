@@ -68,15 +68,3 @@ export async function offersGone(db: Client, ids: number[]): Promise<boolean> {
   );
   return res.rows.length === 0;
 }
-
-/**
- * Unshielded spend is modeled as DELETE from created_unshielded (no spent_* table).
- * Returns true when the live-set count dropped by at least `delta`.
- */
-export async function createdUnshieldedShrank(
-  db: Client,
-  before: number,
-  delta = 1,
-): Promise<boolean> {
-  return (await count(db, "created_unshielded")) <= before - delta;
-}

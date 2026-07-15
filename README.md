@@ -111,14 +111,30 @@ A complete dev → mainnet env template lives at `.env.mainnet.example`.
 bun run test
 ```
 
-Runs Phase A (infrastructure assertions: Celestia consensus/bridge, Midnight node/indexer) and Phase B (state-machine + DB + API). **Phase B is currently stubbed** — the original SDK-flow and API tests assumed a backend-wallet completion path that has since been removed, and need to be rewritten on top of the browser/batcher flow. See the TODO comments in `packages/tests/stm/*.test.ts` and the original implementation in git history (`templates/zswap-da/e2e/run-tests.ts` before the migration).
+Boots the same undeployed stack as `bun run dev` (PGlite `:5432`, Midnight
+node/indexer/proof-server, Celestia, sync `:9999`, batcher `:3334`) via
+`packages/tests/start.test.ts`, then runs:
+
+| Phase | Coverage |
+|-------|----------|
+| **A** | Celestia + Midnight readiness |
+| **B** | Offer build → submit → index → settle, asserting **PGlite** deltas |
+
+Phase B cases (`packages/tests/stm/`):
+
+1. **zswap-flow** — shielded A↔B, wallet settle → `offer_file` → history `CONSUMED`, `nullifiers`↑, `known_roots` advanced
+2. **api** — two opposing makers via `/api/zswap/submit`, merge + batcher settle, balances; negatives `BAD_ENCODING` / `NULLIFIER_SPENT` never index
+3. **multi-token** — multi-give `{T0,T1}` ↔ multi-want `T2`, batcher settle
+4. **unshielded-only** — unshielded↔unshielded; spend shrinks `created_unshielded` (no `spent_*` table)
+5. **root-unknown** — well-formed offer rejected with `ROOT_UNKNOWN`; `offer_file` unchanged
+
+Shared DB helpers: `packages/tests/lib/db.ts` (`nullifiers`, `created_unshielded`, archive `CONSUMED`).
 
 ### Standalone swap e2e scripts
 
-These run against a live `bun run dev` stack and exercise the full
-batcher-settled swap path — makers post unbalanced offers (`payFees:false`, so
-**no participant needs dust**), a solver assembles a token-balanced transaction,
-and the batcher adds dust + submits. Shared helpers live in `packages/tests/lib/`.
+These expect a live `bun run dev` stack. Multi-token, unshielded-only, and
+root-unknown are thin wrappers over the Phase B modules above. Shared helpers
+live in `packages/tests/lib/`.
 
 ```bash
 bun packages/tests/ring-swap-e2e.ts 2        # A↔B swap (2-cycle), batcher-settled
@@ -168,7 +184,7 @@ monorepo at
 | `batcher/` | `batcher.{dev,mainnet}.ts`, `config.ts`, `midnight-balancing.ts`, `celestia.ts` (`ZswapCelestiaAdapter.validateInput` — pre-fee offer gate) |
 | `contracts-midnight/` | `package.json` (scripts for `launchMidnight`), `deploy.ts`, `contract-offer-files/` (Compact source + compiled output) |
 | `contracts-celestia/` | `package.json` (`celestia-{node,bridge,fund}:*` scripts), `fund-bridge.ts` |
-| `tests/` | `run-tests.ts`, `start.test.ts` (test orchestrator), `helpers.ts`, `infra/{celestia,midnight}-ready.test.ts`, `stm/{zswap-flow,api}.test.ts` |
+| `tests/` | `run-tests.ts`, `start.test.ts` (test orchestrator), `helpers.ts`, `lib/db.ts`, `infra/{celestia,midnight}-ready.test.ts`, `stm/{zswap-flow,api,multi-token,unshielded-only,root-unknown}.test.ts` |
 
 ## Services & ports
 

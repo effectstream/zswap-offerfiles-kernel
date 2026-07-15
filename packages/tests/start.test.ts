@@ -35,6 +35,16 @@ export default {
       },
     ),
 
+    {
+      name: "midnight-mint-test-tokens",
+      description: "Mint test tokens (2 shielded + 1 unshielded) via the offer-files contract",
+      cwd: path.join(root, "packages/contracts-midnight"),
+      args: ["run", "mint-test-tokens.ts"],
+      waitToExit: true,
+      // NOT critical: a mint hiccup must not tear the test stack down.
+      dependsOn: [MidnightNames.CONTRACT_DEPLOY],
+    },
+
     ...launchCelestia(
       "@zswap-da/contracts-celestia",
       { cwd: path.join(root, "packages/contracts-celestia") },

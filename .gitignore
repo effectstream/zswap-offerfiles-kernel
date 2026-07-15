@@ -4,6 +4,7 @@ packages/contracts-midnight/contract-offer-files/src/managed/
 packages/contracts-midnight/midnight-level-db-deploy/
 docs/dist/
 docs/node_modules/
+midnight-level-db*
 
 # Runtime logs from the dev stack
 *-debug.log

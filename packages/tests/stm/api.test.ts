@@ -5,11 +5,17 @@
 // Flow: mint T0/T1 → fund P0/P1 makers → push offers via /api/zswap/submit
 //   → wait for Celestia indexing → read back from GET /api/zswaps
 //   → reconstruct from API blob → merge + settle via batcher
-//   → verify spent_nullifiers + archival + balances
+//   → verify nullifiers + archival + balances
 //   → negative: corrupted blob rejected; spent offer re-submit rejected.
 
 import type { Client } from "pg";
-import { assert, API_PORT } from "../helpers.ts";
+import { assert } from "../helpers.ts";
+import {
+  count,
+  nullifiersGrew,
+  offersGone,
+  waitFor,
+} from "../lib/db.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
@@ -42,21 +48,6 @@ const P1_SEED = "000000000000000000000000000000000000000000000000000000000000003
 
 export async function apiTest(db: Client): Promise<void> {
   setNetworkId(net.id as any);
-
-  const count = async (t: string): Promise<number> =>
-    Number((await db.query(`SELECT count(*)::int n FROM ${t}`)).rows[0].n);
-
-  async function waitFor(
-    fn: () => Promise<boolean>,
-    tries = 36,
-    ms = 5000,
-  ): Promise<boolean> {
-    for (let i = 0; i < tries; i++) {
-      if (await fn()) return true;
-      await sleep(ms);
-    }
-    return false;
-  }
 
   async function submitAndWaitRoot(blob: string, label: string): Promise<{ status: number; body: any }> {
     let sub = await submitOffer(blob);
@@ -134,12 +125,13 @@ export async function apiTest(db: Client): Promise<void> {
     );
 
     // Push both offers via API → Celestia → indexed
-    const offersBefore = await count("offer_file");
+    const offersBefore = await count(db, "offer_file");
     console.log(`${TAG} pushing 2 offers via /api/zswap/submit…`);
     await submitAndWaitRoot(blob0, "P0 offer (give T0 / want T1)");
     await submitAndWaitRoot(blob1, "P1 offer (give T1 / want T0)");
     const indexedOk = await waitFor(
-      async () => (await count("offer_file")) >= offersBefore + 2,
+      "2 offers indexed",
+      async () => (await count(db, "offer_file")) >= offersBefore + 2,
       24,
     );
     await assert("2 offers indexed (reached Celestia + STM)", async () => indexedOk);
@@ -174,7 +166,7 @@ export async function apiTest(db: Client): Promise<void> {
         "reconstructed both offers from API blob",
         async () => reconstructed.length === 2,
       );
-    } catch (e) {
+    } catch {
       await assert("reconstructed both offers from API blob", async () => false);
       return;
     }
@@ -186,7 +178,7 @@ export async function apiTest(db: Client): Promise<void> {
       "merged tx from API data is token-balanced",
       async () => nonDustImbalances(merged).length === 0,
     );
-    const spentBefore = await count("spent_nullifiers");
+    const spentBefore = await count(db, "nullifiers");
     const settle = await settleViaBatcher(merged);
     await assert(
       "batcher settled tx reconstructed from API/Celestia data",
@@ -194,27 +186,41 @@ export async function apiTest(db: Client): Promise<void> {
     );
 
     const spentOk = await waitFor(
-      async () => (await count("spent_nullifiers")) >= spentBefore + 2,
+      "nullifiers += 2",
+      async () => nullifiersGrew(db, spentBefore, 2),
       36,
     );
     await assert(
-      "spent_nullifiers grew by 2 (both offers consumed)",
+      "nullifiers grew by 2 (both offers consumed)",
       async () => spentOk,
     );
 
-    const ids = apiOffers.map((o) => o.id).join(",");
+    const ids = apiOffers.map((o) => o.id);
     const archivedOk = await waitFor(
-      async () =>
-        (await db.query(`SELECT id FROM offer_file WHERE id IN (${ids})`)).rows.length === 0,
+      "both offers archived",
+      async () => offersGone(db, ids),
       36,
     );
     await assert("both offers archived after settlement", async () => archivedOk);
+
+    // Confirm CONSUMED reason for each
+    for (const id of ids) {
+      const hist = await db.query(
+        `SELECT archive_reason FROM offer_file_history WHERE id = $1`,
+        [id],
+      );
+      await assert(
+        `offer ${id} archive_reason=CONSUMED`,
+        async () => hist.rows[0]?.archive_reason === "CONSUMED",
+      );
+    }
+
     await assert("P0 received T1", async () => (await waitForShielded(p0, T1, AMT, 24)) >= AMT);
     await assert("P1 received T0", async () => (await waitForShielded(p1, T0, AMT, 24)) >= AMT);
 
     // ── NEGATIVE 1: corrupted blob rejected and never reaches Celestia ──
     console.log(`${TAG} NEGATIVE: submitting a corrupted offer blob…`);
-    const beforeBad1 = await count("offer_file");
+    const beforeBad1 = await count(db, "offer_file");
     const corrupted = blob0.slice(0, blob0.length - 12) + "deadbeef0000";
     const badRes1 = await submitOffer(corrupted);
     await assert(
@@ -224,12 +230,12 @@ export async function apiTest(db: Client): Promise<void> {
     await sleep(8000);
     await assert(
       "corrupted offer NEVER reached Celestia (not indexed)",
-      async () => (await count("offer_file")) === beforeBad1,
+      async () => (await count(db, "offer_file")) === beforeBad1,
     );
 
     // ── NEGATIVE 2: re-submit a consumed offer → NULLIFIER_SPENT ──
     console.log(`${TAG} NEGATIVE: re-submitting the already-settled P0 offer…`);
-    const beforeBad2 = await count("offer_file");
+    const beforeBad2 = await count(db, "offer_file");
     const badRes2 = await submitOffer(blob0);
     await assert(
       "spent-offer re-submit rejected (NULLIFIER_SPENT)",
@@ -239,7 +245,7 @@ export async function apiTest(db: Client): Promise<void> {
     await sleep(8000);
     await assert(
       "spent-offer re-submit NEVER reached Celestia (not indexed)",
-      async () => (await count("offer_file")) === beforeBad2,
+      async () => (await count(db, "offer_file")) === beforeBad2,
     );
   } finally {
     await p0.wallet.stop().catch(() => {});

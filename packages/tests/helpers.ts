@@ -25,12 +25,26 @@ const testResults = {
   count: 0,
   passed: 0,
   failed: 0,
+  failures: [] as string[],
 };
+
+function recordFail(testName: string, detail?: string): void {
+  testResults.failed++;
+  const label = detail ? `${testName} (${detail})` : testName;
+  testResults.failures.push(label);
+  console.log(`[FAIL] ${label}`);
+}
 
 export function printSummary() {
   console.log(`\n[Summary]`);
   console.log(`  ${testResults.passed} tests passed`);
   console.log(`  ${testResults.failed} tests failed`);
+  if (testResults.failures.length > 0) {
+    console.log(`\n[Failed]`);
+    for (const name of testResults.failures) {
+      console.log(`  - ${name}`);
+    }
+  }
 }
 
 export function anyError(): boolean {
@@ -50,16 +64,14 @@ export async function assert(
   try {
     const result = await check();
     if (!result) {
-      testResults.failed++;
-      console.log(`[FAIL] ${testName}`);
+      recordFail(testName);
       return false;
     }
     testResults.passed++;
     console.log(`[PASS] ${testName}`);
     return true;
   } catch (e) {
-    testResults.failed++;
-    console.log(`[FAIL] ${testName}`);
+    recordFail(testName);
     console.error("[ERROR]", e);
     return false;
   }
@@ -83,8 +95,7 @@ export async function assertSQL<RowType>(
         await delay(retryDelay);
         remainingTime -= retryDelay;
         if (remainingTime <= 0) {
-          testResults.failed++;
-          console.log(`[FAIL] ${testName} (timeout waiting for data)`);
+          recordFail(testName, "timeout waiting for data");
           console.error("[TIMEOUT] Data in DB:", res.rows);
           return res.rows;
         }
@@ -92,8 +103,7 @@ export async function assertSQL<RowType>(
       }
 
       if (!check(res.rows)) {
-        testResults.failed++;
-        console.log(`[FAIL] ${testName}`);
+        recordFail(testName);
         console.error("[CHECK_ERROR] Data in DB:", res.rows);
         return res.rows;
       }
@@ -105,8 +115,7 @@ export async function assertSQL<RowType>(
       await delay(retryDelay);
       remainingTime -= retryDelay;
       if (remainingTime <= 0) {
-        testResults.failed++;
-        console.log(`[FAIL] ${testName} (error)`);
+        recordFail(testName, "error");
         console.error("[ERROR]", e);
         return [];
       }
@@ -117,6 +126,13 @@ export async function assertSQL<RowType>(
 
 let orchestratorProc: ReturnType<typeof Bun.spawn> | null = null;
 
+/** Noisy chain processes — keep assert output readable during `bun run test`. */
+const SILENCED_PROCESSES = [
+  "celestia-devnet",
+  "midnight-node",
+  "midnight-indexer",
+].join(",");
+
 export async function startInfrastructure(launcherPath: string): Promise<void> {
   const cliPath = path.resolve(
     import.meta.dirname!,
@@ -124,12 +140,22 @@ export async function startInfrastructure(launcherPath: string): Promise<void> {
   );
   const cwd = path.resolve(import.meta.dirname!, "../..");
   console.log(`Starting test infrastructure (${cliPath})`);
-  orchestratorProc = Bun.spawn(["bun", cliPath, "start", launcherPath], {
-    cwd,
-    stdout: "inherit",
-    stderr: "inherit",
-    env: { ...process.env },
-  });
+  console.log(`Silencing process logs: ${SILENCED_PROCESSES}`);
+  orchestratorProc = Bun.spawn(
+    [
+      "bun",
+      cliPath,
+      "start",
+      launcherPath,
+      `--silence=${SILENCED_PROCESSES}`,
+    ],
+    {
+      cwd,
+      stdout: "inherit",
+      stderr: "inherit",
+      env: { ...process.env },
+    },
+  );
 }
 
 export async function stopInfrastructure(): Promise<void> {
@@ -217,7 +243,7 @@ export async function waitForHealth(timeoutMs = 120_000): Promise<void> {
   throw new Error("Sync node health check failed");
 }
 
-export function getDBConnection(): Client {
+export async function getDBConnection(): Promise<Client> {
   const client = new pg.Client({
     host: DB_HOST,
     user: DB_USER,
@@ -225,7 +251,49 @@ export function getDBConnection(): Client {
     database: DB_NAME,
     port: DB_PORT,
   });
-  client.connect(() => {});
   client.on("error", (err: Error) => console.error("DB error:", err));
+  await client.connect();
   return client;
+}
+
+/** Tables created by sync-node migrations (000-init + 002-liveness-sets). */
+const REQUIRED_TABLES = [
+  "offer_file",
+  "nullifiers",
+  "known_roots",
+  "created_unshielded",
+] as const;
+
+/**
+ * Poll until the sync node has applied migrations that Phase B needs.
+ * `/health` can return ok before schema is fully present.
+ */
+export async function waitForMigrations(
+  db: Client,
+  timeoutMs = 120_000,
+): Promise<void> {
+  console.log("Waiting for DB migrations (known_roots, nullifiers, …)…");
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const missing: string[] = [];
+      for (const table of REQUIRED_TABLES) {
+        const res = await db.query<{ exists: string | null }>(
+          `SELECT to_regclass($1) AS exists`,
+          [`public.${table}`],
+        );
+        if (!res.rows[0]?.exists) missing.push(table);
+      }
+      if (missing.length === 0) {
+        console.log("DB migrations ready.");
+        return;
+      }
+    } catch {
+      // PGlite / connection not ready yet
+    }
+    await delay(500);
+  }
+  throw new Error(
+    `DB migrations not applied within ${timeoutMs / 1000}s (need ${REQUIRED_TABLES.join(", ")})`,
+  );
 }

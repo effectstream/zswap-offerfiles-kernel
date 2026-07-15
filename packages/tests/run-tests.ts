@@ -8,6 +8,7 @@ import {
   startInfrastructure,
   stopInfrastructure,
   waitForHealth,
+  waitForMigrations,
   waitForOrchestrator,
   waitForProcess,
 } from "./helpers.ts";
@@ -55,13 +56,28 @@ async function main(): Promise<void> {
     });
     console.log("Offer-files contract deployed.");
 
+    // Startup mint runs in parallel with sync; wait so Phase B doesn't race it.
+    try {
+      await waitForProcess("midnight-mint-test-tokens", {
+        waitForExit: true,
+        timeoutMs: 300_000,
+      });
+      console.log("Startup test-token mint finished.");
+    } catch (e) {
+      console.warn(
+        `Startup mint did not finish cleanly: ${e instanceof Error ? e.message : String(e)} (continuing)`,
+      );
+    }
+
     await waitForProcess("sync");
     await waitForHealth();
     console.log("Sync node is healthy.\n");
 
-    // ── Phase B: State Machine / DB ─────────────────────────────────────────
+    db = await getDBConnection();
+    await waitForMigrations(db);
+
+    // ── Phase B: State Machine / DB / offer build + settle ──────────────────
     console.log("\n--- Phase B: STM / DB / API ---\n");
-    db = getDBConnection();
 
     const { zswapFlowTest } = await import("./stm/zswap-flow.test.ts");
     await zswapFlowTest(db);
@@ -69,14 +85,22 @@ async function main(): Promise<void> {
     const { apiTest } = await import("./stm/api.test.ts");
     await apiTest(db);
 
-    printSummary();
+    const { multiTokenTest } = await import("./stm/multi-token.test.ts");
+    await multiTokenTest(db);
+
+    const { unshieldedOnlyTest } = await import("./stm/unshielded-only.test.ts");
+    await unshieldedOnlyTest(db);
+
+    const { rootUnknownTest } = await import("./stm/root-unknown.test.ts");
+    await rootUnknownTest(db);
   } catch (e) {
-    printSummary();
     console.error(e);
+    process.exitCode = 1;
   } finally {
-    if (db) await db.end();
+    printSummary();
+    if (db) await db.end().catch(() => {});
     await stopInfrastructure();
-    if (anyError()) process.exit(1);
+    if (anyError() || process.exitCode) process.exit(1);
     process.exit(0);
   }
 }

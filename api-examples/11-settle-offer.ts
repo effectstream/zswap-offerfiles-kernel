@@ -11,7 +11,7 @@
 //   TAKER_SEED=<64-hex>     taker wallet seed (must have enough NIGHT for dust fees)
 //   OFFER_BLOB=swapoffer1… specific offer to settle; defaults to first open offer
 
-import { config, get, header } from "./config.ts";
+import { config, get, post, header } from "./config.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
@@ -45,9 +45,11 @@ if (!blob) {
     console.error("No open offers. Submit one first with 09-submit-offer.ts.");
     process.exit(1);
   }
-  blob    = offers[0].transaction_hex;
+  // The list is blob-free — fetch the blob by content hash.
+  const detail = await get<any>(`/api/zswaps/${offers[0].offer_hash}`);
+  blob    = detail.blob;
   offerId = offers[0].id;
-  console.log(`Using offer id=${offerId}  celestia=#${offers[0].celestia_height}`);
+  console.log(`Using offer ${offers[0].offer_hash}  celestia=#${offers[0].celestia_height}`);
   console.log(`  gives: ${JSON.stringify(offers[0].gives)}`);
   console.log(`  wants: ${JSON.stringify(offers[0].wants)}\n`);
 } else {
@@ -80,7 +82,7 @@ console.log(`\n✅  Settlement submitted: ${txHash}…`);
 console.log("\nWaiting for offer to be archived (nullifier consumed)…");
 for (let i = 0; i < 36; i++) {
   await sleep(5_000);
-  const { status } = await get<any>(`/api/zswap/status?blob=${encodeURIComponent(blob)}`);
+  const { status } = await post<any>("/api/zswap/status", { blob });
   console.log(`  status: ${status}`);
   if (status === "completed") {
     console.log("✅  Offer archived as CONSUMED — settlement confirmed.");

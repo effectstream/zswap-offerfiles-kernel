@@ -236,15 +236,18 @@ There are **two ways** to post and read offers:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/api/zswaps?limit&offset&token&direction` | Active swap offers + their gives/wants. |
+| `GET` | `/api/zswaps?limit&offset&token&direction` | Active swap offers + their gives/wants. Blob-free: rows carry `offer_hash` (sha256 of the raw offer bytes — stable across nodes, unlike local row ids). |
+| `GET` | `/api/zswaps/:hash` | One offer **including its `swapoffer1…` blob**, by content hash. Resolves archived offers with their final status. |
+| `GET` | `/api/zswaps/:hash/status` | Lightweight status probe by content hash. |
+| `POST` | `/api/zswap/status` | Status by blob (`{blob}` or `{blobs: […]}`) — POST body because real blobs are 16–25 KB. |
 | `GET` | `/api/known-tokens` | Token color → name registry. |
 | `POST` | `/api/known-tokens` | Register a token name/color/kind. |
 | `GET` | `/api/midnight/config` | Public Midnight config the browser contract client needs. |
-| `POST` | `/api/zswap/submit` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, else forward to the batcher → Celestia. |
+| `POST` | `/api/zswap/submit` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, `409` on duplicate, else forward to the batcher → Celestia. Returns the offer's `offer_hash`. |
 | `GET` | `/api/events` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
 
 Beyond the above, the node also serves `GET /health`, `GET /api/health/sync`,
-`GET /api/zswap/status`, `GET /api/pairs`, `GET /api/quote`, and
+`GET /api/pairs`, `GET /api/quote`, and
 `GET /api/chart/{stats,history}` — all detailed in [API.md](API.md).
 
 ## Celestia data retention (read before relying on history)

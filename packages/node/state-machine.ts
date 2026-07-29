@@ -8,16 +8,18 @@ import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
 import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { offerHashFromBlob } from "./offer-hash.ts";
 
 import {
   insertKnownToken,
-  insertOfferFile,
+  insertOfferFileWithHash,
+  getOfferStatusByHash,
   insertOfferFileNullifier,
   insertOfferFileUnshieldedSpend,
   insertOfferFileToken,
-  archiveOfferByNullifier,
-  archiveOfferByUnshieldedSpend,
-  archiveOfferByIdTtl,
+  archiveOfferByNullifierWithHash,
+  archiveOfferByUnshieldedSpendWithHash,
+  archiveOfferByIdTtlWithHash,
   upsertNullifier,
   markNullifierMatched,
   findUnmatchedNullifier,
@@ -118,7 +120,7 @@ stm.addStateTransition("midnight-nullifier", function* (data) {
       height: data.blockHeight,
     });
 
-    const archived = yield* World.resolve(archiveOfferByNullifier, {
+    const archived = yield* World.resolve(archiveOfferByNullifierWithHash, {
       nullifier,
     });
     if (archived.length === 0) {
@@ -181,7 +183,7 @@ stm.addStateTransition("midnight-unshielded-spend", function* (data) {
       output_no: outputNo,
     });
 
-    const archived = yield* World.resolve(archiveOfferByUnshieldedSpend, {
+    const archived = yield* World.resolve(archiveOfferByUnshieldedSpendWithHash, {
       owner,
       intent_hash: intentHash,
       output_no: outputNo,
@@ -372,11 +374,37 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     }
   }
 
+  // ── Dedup (MIP-0006: duplicates SHOULD be rejected) ──
+  // offer_hash is content-addressed (sha256 of the raw tx bytes), so the same
+  // offer re-published — same maker retrying, or a relay replaying the blob —
+  // resolves to the same hash on every node regardless of local ids. Checks
+  // history too: a consumed/expired offer must not be resurrected by replay.
+  const offerHash = offerHashFromBlob(raw);
+  const existing = yield* World.resolve(getOfferStatusByHash, {
+    offer_hash: offerHash,
+  });
+  if (existing.length > 0) {
+    console.warn("[ZSWAP] Rejected offer: duplicate", {
+      offerHash,
+      status: existing[0].status,
+      celestiaHeight: data.blockHeight,
+    });
+    emitAppEvent({
+      type: "offer_rejected",
+      code: "DUPLICATE_OFFER",
+      reason: `offer already indexed with status '${existing[0].status}'`,
+      offerHash,
+      celestiaHeight: data.blockHeight,
+    });
+    return;
+  }
+
   try {
     // ── Insert offer ──
-    const offerFileRes = yield* World.resolve(insertOfferFile, {
+    const offerFileRes = yield* World.resolve(insertOfferFileWithHash, {
       celestia_height: data.blockHeight,
       transaction_hex: raw,
+      offer_hash: offerHash,
       metadata_created_at: new Date(data.blockTimestamp).toISOString(),
       metadata_expires_at: null,
       metadata_maker_note: null,
@@ -457,7 +485,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     for (const nullifierStr of nullifierStrs) {
       const seen = yield* World.resolve(findUnmatchedNullifier, { nullifier: nullifierStr });
       if (seen.length === 0) continue;
-      const archived = yield* World.resolve(archiveOfferByNullifier, { nullifier: nullifierStr });
+      const archived = yield* World.resolve(archiveOfferByNullifierWithHash, { nullifier: nullifierStr });
       yield* World.resolve(markNullifierMatched, { nullifier: nullifierStr });
       for (const row of archived) {
         emitAppEvent({ type: "offer_consumed", offerId: row.id, nullifier: nullifierStr });
@@ -480,7 +508,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     });
 
     console.log(`[ZSWAP] Saved at Celestia block ${data.blockHeight}`);
-    emitAppEvent({ type: "offer_indexed", offerId: offerFileId, celestiaHeight: data.blockHeight, gives, wants });
+    emitAppEvent({ type: "offer_indexed", offerId: offerFileId, offerHash, celestiaHeight: data.blockHeight, gives, wants });
   } catch (e) {
     console.error("[ZSWAP] Failed to save offer file", e);
   }
@@ -502,7 +530,7 @@ stm.addStateTransition("zswap-ttl-cleanup", function* (data) {
   const { offerId } = data.parsedInput;
 
   try {
-    const archived = yield* World.resolve(archiveOfferByIdTtl, {
+    const archived = yield* World.resolve(archiveOfferByIdTtlWithHash, {
       offer_file_id: offerId,
     });
 

@@ -3,8 +3,6 @@ import rateLimit from "@fastify/rate-limit";
 
 import {
   getKnownTokens,
-  getOfferFiles,
-  getOfferFileTokens,
   insertKnownToken,
   isNullifierSpent,
   isUnshieldedCreated,
@@ -16,6 +14,11 @@ import {
   getPairs,
   getZswapStatusByBlob,
   upsertPairStatsByOfferId,
+  getOpenOffersPage,
+  getOfferTokensForOffers,
+  getOfferByHash,
+  getOfferStatusByHash,
+  getOfferTokensAny,
 } from "@zswap-da/database";
 
 import { MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, midnightContract } from "./env.ts";
@@ -28,8 +31,11 @@ import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
+import { offerHashFromBlob, backfillOfferHashes } from "./offer-hash.ts";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
+
+type OfferLegDto = { token: string; amount: string };
 
 export const apiRouter: StartConfigApiRouter = async function (
   server: any,
@@ -44,6 +50,33 @@ export const apiRouter: StartConfigApiRouter = async function (
       reason: "Too many requests — please wait before retrying.",
     }),
   });
+
+  // The runtime installs a blanket 500 error handler; override it here so
+  // request errors keep their real status. Fastify schema-validation failures
+  // (error.validation) and anything carrying a 4xx statusCode (rate limit,
+  // bad-request throws) must not surface as server faults.
+  server.setErrorHandler((error: any, request: any, reply: any) => {
+    if (error?.validation) {
+      return reply
+        .code(400)
+        .send({ error: "VALIDATION", reason: error.message });
+    }
+    const status = Number(error?.statusCode);
+    if (Number.isFinite(status) && status >= 400 && status < 500) {
+      return reply
+        .code(status)
+        .send({ error: error?.error ?? "BAD_REQUEST", reason: error?.message });
+    }
+    console.error("[API] Unhandled error:", request?.url, error);
+    return reply
+      .code(500)
+      .send({ error: "INTERNAL", reason: error?.message ?? "Unknown error" });
+  });
+
+  // Rows indexed before 005-offer-hash.sql get their content hash on boot.
+  backfillOfferHashes(dbConn).catch((e) =>
+    console.error("[OFFER_HASH] Backfill failed:", e),
+  );
 
   // GET /keys/*, /zkir/* — ZK assets for the browser prover (the frontend now
   // lives in its own repo and fetches these from this API instead of staging
@@ -67,7 +100,10 @@ export const apiRouter: StartConfigApiRouter = async function (
   };
   eventBus.on("app_event", onAppEvent);
 
-  // GET /api/zswaps — list ZSWAPs ordered by newest first, with optional filtering & pagination
+  // GET /api/zswaps — list open offers, newest first, with optional filtering
+  // & pagination. Deliberately does NOT include the offer blob: a single blob
+  // is ~16–25 KB of bech32m, so a 100-row page would be megabytes. Each row
+  // carries `offer_hash` — fetch the blob via GET /api/zswaps/:hash.
   server.get("/api/zswaps", async (request: any) => {
     const query = request?.query ?? {};
 
@@ -89,49 +125,99 @@ export const apiRouter: StartConfigApiRouter = async function (
         ? directionRaw
         : undefined;
 
-    const effectiveToken = token ?? "";
-    const effectiveDirection = direction ?? "ANY";
-
-    const offers = await getOfferFiles.run(
+    const offers = await getOpenOffersPage.run(
       {
-        token: effectiveToken,
-        direction: effectiveDirection,
+        token: token ?? "",
+        direction: direction ?? "ANY",
         limit,
         offset,
-      } as any,
+      },
       dbConn,
     );
+    if (offers.length === 0) return [];
 
-    const result: {
-      id: number;
-      celestia_height: string;
-      transaction_hex: string;
-      metadata_created_at: Date | null;
-      metadata_expires_at: Date | null;
-      metadata_maker_note: string | null;
-      auth_signer_public_key: string | null;
-      auth_signature: string | null;
-      auth_scheme: string | null;
-      created_at: Date | null;
-      gives: { token: string; amount: string }[];
-      wants: { token: string; amount: string }[];
-    }[] = [];
-
-    for (const offer of offers) {
-      const tokens = await getOfferFileTokens.run(
-        { offer_file_id: offer.id },
-        dbConn,
-      );
-      const gives = tokens
-        .filter((t) => t.direction === "GIVING")
-        .map((t) => ({ token: t.token_color, amount: t.amount }));
-      const wants = tokens
-        .filter((t) => t.direction === "WANTING")
-        .map((t) => ({ token: t.token_color, amount: t.amount }));
-      result.push({ ...offer, gives, wants });
+    // One batched legs query for the whole page instead of one per offer.
+    const legs = await getOfferTokensForOffers.run(
+      { offer_file_ids: offers.map((o) => o.id) },
+      dbConn,
+    );
+    const byOffer = new Map<number, { gives: OfferLegDto[]; wants: OfferLegDto[] }>();
+    for (const leg of legs) {
+      let entry = byOffer.get(leg.offer_file_id);
+      if (!entry) {
+        entry = { gives: [], wants: [] };
+        byOffer.set(leg.offer_file_id, entry);
+      }
+      const dto = { token: leg.token_color, amount: leg.amount };
+      if (leg.direction === "GIVING") entry.gives.push(dto);
+      else entry.wants.push(dto);
     }
 
-    return result;
+    return offers.map((offer) => ({
+      ...offer,
+      gives: byOffer.get(offer.id)?.gives ?? [],
+      wants: byOffer.get(offer.id)?.wants ?? [],
+    }));
+  });
+
+  // GET /api/zswaps/:hash — one offer, including its blob, by content hash
+  // (hex sha256 of the raw MIP-0005 transaction bytes; the MIP-0006 offerId).
+  // The hash — not the SERIAL id — is the lookup key because ids are local
+  // bookkeeping: two nodes indexing the same namespace assign different ids
+  // depending on ingestion order, filters, and restarts, while the content
+  // hash is identical everywhere. Looks through open offers first, then
+  // history, so a consumed/expired offer still resolves with its status.
+  server.get("/api/zswaps/:hash", async (request: any, reply: any) => {
+    const hash = String(request.params?.hash ?? "").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hash)) {
+      return reply.code(400).send({
+        error: "INVALID_HASH",
+        reason: "expected 64 hex chars (sha256 of the raw offer bytes)",
+      });
+    }
+    const rows = await getOfferByHash.run({ offer_hash: hash }, dbConn);
+    if (rows.length === 0) {
+      return reply.code(404).send({ error: "NOT_FOUND", offer_hash: hash });
+    }
+    const offer = rows[0];
+    const live = offer.status === "open";
+    const legs = await getOfferTokensAny.run(
+      { offer_file_id: offer.id, live },
+      dbConn,
+    );
+    const gives: OfferLegDto[] = [];
+    const wants: OfferLegDto[] = [];
+    for (const leg of legs) {
+      const dto = { token: leg.token_color, amount: leg.amount };
+      if (leg.direction === "GIVING") gives.push(dto);
+      else wants.push(dto);
+    }
+    return {
+      offer_hash: offer.offer_hash,
+      status: offer.status,
+      blob: offer.transaction_hex,
+      celestia_height: offer.celestia_height,
+      created_at: offer.created_at,
+      metadata_created_at: offer.metadata_created_at,
+      metadata_expires_at: offer.metadata_expires_at,
+      metadata_maker_note: offer.metadata_maker_note,
+      ttl_seconds: offer.ttl_seconds,
+      gives,
+      wants,
+    };
+  });
+
+  // GET /api/zswaps/:hash/status — lightweight status probe by content hash.
+  server.get("/api/zswaps/:hash/status", async (request: any, reply: any) => {
+    const hash = String(request.params?.hash ?? "").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hash)) {
+      return reply.code(400).send({
+        error: "INVALID_HASH",
+        reason: "expected 64 hex chars (sha256 of the raw offer bytes)",
+      });
+    }
+    const rows = await getOfferStatusByHash.run({ offer_hash: hash }, dbConn);
+    return { offer_hash: hash, status: rows[0]?.status ?? "not_found" };
   });
 
   server.get("/api/known-tokens", async () => {
@@ -152,12 +238,27 @@ export const apiRouter: StartConfigApiRouter = async function (
     return fallback;
   }
 
-  server.get("/api/quote", async (request: any) => {
+  const TOKEN_COLOR_RE = /^[0-9a-f]{64}$/;
+
+  server.get("/api/quote", async (request: any, reply: any) => {
     const q = request?.query ?? {};
     const fromToken = String((q as any).from_token ?? "").toLowerCase();
     const toToken = String((q as any).to_token ?? "").toLowerCase();
-    if (!fromToken || !toToken) {
-      throw new Error("from_token and to_token are required");
+    if (!TOKEN_COLOR_RE.test(fromToken) || !TOKEN_COLOR_RE.test(toToken)) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "from_token and to_token must be 64-hex token colors",
+      });
+    }
+    // Only quote registered tokens: quoting arbitrary colors would fabricate a
+    // market rate — and persist a fallback price row — for tokens that don't exist.
+    for (const color of [fromToken, toToken]) {
+      const known = await getTokenByColor.run({ token_color: color }, dbConn);
+      if (known.length === 0) {
+        return reply
+          .code(404)
+          .send({ error: "UNKNOWN_TOKEN", token: color });
+      }
     }
     const digits = (v: unknown) => String(v ?? "").replace(/[^0-9]/g, "");
     const fromAmount = BigInt(digits((q as any).from_amount) || "0");
@@ -171,20 +272,26 @@ export const apiRouter: StartConfigApiRouter = async function (
   // indexer DB: history = consumed offers (offer_file_history), stats = last/24h/
   // high/low/volume from those fills (mid of open offers as fallback).
   // Params: base, quote (hex colors).
-  const readPair = (request: any): { base: string; quote: string } => {
+  const readPair = (request: any): { base: string; quote: string } | null => {
     const q = request?.query ?? {};
     const base = String((q as any).base ?? "").toLowerCase();
     const quoteToken = String((q as any).quote ?? "").toLowerCase();
-    if (!base || !quoteToken) throw new Error("base and quote are required");
+    if (!base || !quoteToken) return null;
     return { base, quote: quoteToken };
   };
-  server.get("/api/chart/stats", async (request: any) => {
-    const { base, quote: quoteToken } = readPair(request);
-    return realStats(dbConn, base, quoteToken);
+  const PAIR_REQUIRED = {
+    error: "VALIDATION",
+    reason: "base and quote are required",
+  };
+  server.get("/api/chart/stats", async (request: any, reply: any) => {
+    const pair = readPair(request);
+    if (!pair) return reply.code(400).send(PAIR_REQUIRED);
+    return realStats(dbConn, pair.base, pair.quote);
   });
-  server.get("/api/chart/history", async (request: any) => {
-    const { base, quote: quoteToken } = readPair(request);
-    return realHistory(dbConn, base, quoteToken);
+  server.get("/api/chart/history", async (request: any, reply: any) => {
+    const pair = readPair(request);
+    if (!pair) return reply.code(400).send(PAIR_REQUIRED);
+    return realHistory(dbConn, pair.base, pair.quote);
   });
 
   // POST /api/known-tokens — register a token name/color pair. The browser-wallet
@@ -268,15 +375,62 @@ export const apiRouter: StartConfigApiRouter = async function (
     return getPairs.run(undefined, dbConn);
   });
 
-  // GET /api/zswap/status?blob=<hex> — single-blob status lookup for My Trades
-  // startup reconciliation. Returns { blob, status } where status is one of
-  // 'open' | 'completed' | 'expired' | 'not_found'.
+  // Status lookup for My Trades startup reconciliation. Returns
+  // { blob, status } with status 'open' | 'completed' | 'expired' | 'not_found'.
+  const statusForBlob = async (blob: string) => {
+    // Prefer the content hash — index-backed and immune to blob re-encoding.
+    try {
+      const hash = offerHashFromBlob(blob);
+      const rows = await getOfferStatusByHash.run({ offer_hash: hash }, dbConn);
+      if (rows.length > 0) return { blob, offer_hash: hash, status: rows[0].status };
+      // Fall through: legacy rows may predate the hash backfill.
+    } catch {
+      /* undecodable blob — try the literal-match fallback */
+    }
+    const rows = await getZswapStatusByBlob.run({ blob }, dbConn);
+    if (rows.length === 0) return { blob, status: "not_found" };
+    return { blob, status: rows[0].status };
+  };
+
+  // POST /api/zswap/status — body { blob } or { blobs: [...] }. POST because a
+  // real offer blob is 16–25 KB: far beyond what proxies accept in a query
+  // string (the GET variant 414s at nginx for any real offer).
+  server.post(
+    "/api/zswap/status",
+    {
+      schema: {
+        body: {
+          type: "object",
+          properties: {
+            blob: { type: "string" },
+            blobs: { type: "array", items: { type: "string" }, maxItems: 50 },
+          },
+        },
+      },
+    },
+    async (request: any, reply: any) => {
+      const { blob, blobs } = request.body ?? {};
+      if (typeof blob === "string" && blob.trim()) {
+        return statusForBlob(blob.trim());
+      }
+      if (Array.isArray(blobs) && blobs.length > 0) {
+        const statuses = [];
+        for (const b of blobs) statuses.push(await statusForBlob(String(b).trim()));
+        return { statuses };
+      }
+      return reply
+        .code(400)
+        .send({ error: "VALIDATION", reason: "provide blob or blobs[]" });
+    },
+  );
+
+  // GET /api/zswap/status?blob=<bech32m> — kept for short-blob callers and
+  // backward compatibility. Real offers must use the POST variant or
+  // GET /api/zswaps/:hash/status.
   server.get("/api/zswap/status", async (request: any, reply: any) => {
     const blob = String((request.query as any)?.blob ?? "").trim();
     if (!blob) return reply.code(400).send({ error: "blob query param required" });
-    const rows = await getZswapStatusByBlob.run({ blob }, dbConn);
-    if (rows.length === 0) return { blob, status: "not_found" };
-    return { blob: rows[0].transaction_hex, status: rows[0].status };
+    return statusForBlob(blob);
   });
 
   // POST /api/zswap/submit — fully validate a `swapoffer1…` blob, then forward
@@ -310,6 +464,23 @@ export const apiRouter: StartConfigApiRouter = async function (
         return reply
           .code(400)
           .send({ error: validation.code, reason: validation.reason });
+      }
+
+      // Dedup before paying a Celestia fee (MIP-0006: duplicates SHOULD be
+      // rejected). The STM would drop the replayed blob at index time anyway;
+      // rejecting here saves the maker the publication cost.
+      const offerHash = offerHashFromBlob(blob);
+      const existing = await getOfferStatusByHash.run(
+        { offer_hash: offerHash },
+        dbConn,
+      );
+      if (existing.length > 0) {
+        return reply.code(409).send({
+          error: "DUPLICATE_OFFER",
+          reason: `offer already indexed with status '${existing[0].status}'`,
+          offer_hash: offerHash,
+          status: existing[0].status,
+        });
       }
 
       // Liveness: never pay a Celestia fee for an offer whose coins are already
@@ -367,7 +538,9 @@ export const apiRouter: StartConfigApiRouter = async function (
       }
 
       const result = await submitBlobViaBatcher(blob);
-      return { success: true, blob, result };
+      // offer_hash is how the maker tracks this offer from now on:
+      // GET /api/zswaps/:hash once indexed.
+      return { success: true, offer_hash: offerHash, blob, result };
     },
   );
 

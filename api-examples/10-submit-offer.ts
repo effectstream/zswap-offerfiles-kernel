@@ -133,7 +133,8 @@ console.log("\nWaiting for offer to appear in the indexer…");
 let landed = false;
 for (let i = 0; i < 30; i++) {
   await sleep(5_000);
-  const { status } = await get<any>(`/api/zswap/status?blob=${encodeURIComponent(blob)}`);
+  // POST body — a real blob is 16-25 KB, beyond query-string limits.
+  const { status } = await post<any>("/api/zswap/status", { blob });
   console.log(`  [${i + 1}/30] status: ${status}`);
   if (status === "open") {
     landed = true;

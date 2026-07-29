@@ -34,7 +34,7 @@ import {
   nonDustImbalances,
   settleViaBatcher,
 } from "../lib/batcher.ts";
-import { getZswaps, reconstructOffer, submitOffer } from "../lib/api.ts";
+import { getZswaps, getZswapByHash, reconstructOffer, submitOffer } from "../lib/api.ts";
 
 globalThis.WebSocket = WebSocket;
 
@@ -157,11 +157,21 @@ export async function apiTest(db: Client): Promise<void> {
         wantColors.has(T1),
     );
 
-    // Reconstruct each offer tx from the API blob (Celestia round-trip data)
-    console.log(`${TAG} reconstructing offers from API transaction_hex…`);
+    // Every listed offer must carry its content hash (the list is blob-free).
+    await assert(
+      "API list rows carry offer_hash",
+      async () => apiOffers.every((o) => /^[0-9a-f]{64}$/.test(o.offer_hash ?? "")),
+    );
+
+    // Reconstruct each offer tx from the per-offer blob endpoint
+    // (GET /api/zswaps/:hash — Celestia round-trip data)
+    console.log(`${TAG} reconstructing offers from GET /api/zswaps/:hash…`);
     let reconstructed: ReturnType<typeof reconstructOffer>[];
     try {
-      reconstructed = apiOffers.map((o) => reconstructOffer(o.transaction_hex));
+      const details = await Promise.all(
+        apiOffers.map((o) => getZswapByHash(o.offer_hash!)),
+      );
+      reconstructed = details.map((d) => reconstructOffer(d.blob));
       await assert(
         "reconstructed both offers from API blob",
         async () => reconstructed.length === 2,

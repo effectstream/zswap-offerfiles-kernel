@@ -31,7 +31,16 @@ export async function submitOffer(blob: string): Promise<SubmitResult> {
 export interface ApiZswap {
   id: number;
   celestia_height: string;
-  transaction_hex: string;
+  offer_hash: string | null;
+  blob_chars: number;
+  gives: { token: string; amount: string }[];
+  wants: { token: string; amount: string }[];
+}
+
+export interface ApiZswapDetail {
+  offer_hash: string;
+  status: string;
+  blob: string;
   gives: { token: string; amount: string }[];
   wants: { token: string; amount: string }[];
 }
@@ -42,6 +51,13 @@ export async function getZswaps(params: { token?: string; limit?: number } = {})
   q.set("limit", String(params.limit ?? 100));
   const r = await fetch(`${API}/api/zswaps?${q.toString()}`);
   return (await r.json()) as ApiZswap[];
+}
+
+/** The list is blob-free; the blob is served per-offer by content hash. */
+export async function getZswapByHash(hash: string): Promise<ApiZswapDetail> {
+  const r = await fetch(`${API}/api/zswaps/${hash}`);
+  if (!r.ok) throw new Error(`GET /api/zswaps/${hash} -> ${r.status}`);
+  return (await r.json()) as ApiZswapDetail;
 }
 
 /** Rebuild a finalized offer tx from the blob the API serves (the same blob

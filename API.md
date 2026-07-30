@@ -64,9 +64,19 @@ EFFECTSTREAM_API_PORT=9999
 BATCHER_SUBMIT_URL=http://127.0.0.1:3334
 OFFER_TTL_SECONDS=2592000               # offer lifetime (seconds)
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
-ROOT_WINDOW_SECONDS=1209600             # known-roots retention window (14 days default)
-SEEN_NULLIFIER_TTL_SECONDS=2592000      # prune unmatched nullifier rows after N seconds
+ROOT_WINDOW_SECONDS=1209600             # known-roots retention window; SET THIS to the
+                                        # deployed chain's root-recency window (~3600 on
+                                        # current networks). Too wide ⇒ the book lists
+                                        # offers whose roots the chain already dropped.
 ```
+
+**Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
+
+| Set | Retention | Why |
+|---|---|---|
+| `nullifiers` | **Forever** | A shielded spend is permanent. Coin commitments stay in the Merkle tree after being spent, so a maker can always build a valid current-root proof for a long-spent coin — the nullifier is the only thing that catches it. There is intentionally no TTL. |
+| `created_unshielded` | **Live-set** | Create inserts, spend deletes; absence means "spent or never existed". Self-trimming, so no TTL is needed. |
+| `known_roots` | **TTL-limited** (`ROOT_WINDOW_SECONDS`) | Unlike a spend, a root's validity genuinely expires — the ledger only accepts proofs against roots inside its recency window, and we must mirror that. |
 
 ---
 

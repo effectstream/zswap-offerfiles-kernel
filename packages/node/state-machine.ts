@@ -25,7 +25,6 @@ import {
   upsertNullifier,
   markNullifierMatched,
   findUnmatchedNullifier,
-  pruneStaleNullifiers,
   isNullifierSpent,
   insertCreatedUnshielded,
   deleteCreatedUnshielded,
@@ -66,7 +65,6 @@ import {
   OFFER_MAX_BYTES,
   OFFER_TTL_SECONDS,
   ROOT_WINDOW_SECONDS,
-  SEEN_NULLIFIER_TTL_SECONDS,
 } from "./env.ts";
 
 // Normalize a value that may be a Uint8Array or a hex string into lowercase
@@ -129,13 +127,13 @@ stm.addStateTransition("midnight-nullifier", function* (data) {
     if (archived.length === 0) {
       // No offer indexed yet — early-arrival race. The row stays in
       // nullifiers with offer_matched=false; celestia-zswap will flip it
-      // when the offer arrives. TTL prune (below) cleans up strays.
+      // when the offer arrives. Either way the row is kept permanently.
       console.log(
         "[MIDNIGHT] Nullifier not matched yet — buffered in nullifiers",
         nullifier,
       );
     } else {
-      // Flip to matched so the row survives TTL prune.
+      // Flip to matched so the early-arrival lookup stops finding it.
       yield* World.resolve(markNullifierMatched, { nullifier });
       console.log("[MIDNIGHT] Archived offer(s) for nullifier", nullifier, archived);
       for (const row of archived) {
@@ -143,13 +141,15 @@ stm.addStateTransition("midnight-nullifier", function* (data) {
       }
     }
 
-    // Throttled prune: fire roughly once per ~1000 nullifier events to keep
-    // the table lean without hammering the DB on every event. Not exact —
-    // blockHeight is a proxy for "periodic enough".
-    if (data.blockHeight % 1000 === 0) {
-      const cutoff = new Date(Date.now() - SEEN_NULLIFIER_TTL_SECONDS * 1000);
-      yield* World.resolve(pruneStaleNullifiers, { cutoff_at: cutoff });
-    }
+    // NOTE: nullifiers are NEVER pruned. A spend is permanent, and this table
+    // is the double-spend record `isNullifierSpent` consults at ingestion, so
+    // it has to stay complete — the same invariant the ledger itself holds.
+    // A TTL used to prune `offer_matched = false` rows here; because the table
+    // records every nullifier on Midnight (most belonging to unrelated users,
+    // so unmatched forever), that TTL was deleting exactly the history the
+    // check depends on, letting long-spent coins back freshly published
+    // offers that can never settle. See known_roots for the opposite case: a
+    // root's validity really does expire, so that set IS TTL-limited.
   } catch (e) {
     console.error("[MIDNIGHT] Failed to archive offer for nullifier", nullifier, e);
   }

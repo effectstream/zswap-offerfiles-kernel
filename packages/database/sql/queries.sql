@@ -356,9 +356,6 @@ WHERE nullifier = :nullifier! AND offer_matched = false;
 /* @name IsNullifierSpent */
 SELECT 1 AS spent FROM nullifiers WHERE nullifier = :nullifier!;
 
-/* @name PruneStaleNullifiers */
-DELETE FROM nullifiers WHERE offer_matched = false AND recorded_at < :cutoff_at!;
-
 /* @name InsertCreatedUnshielded */
 INSERT INTO created_unshielded (owner, intent_hash, output_no, height)
 VALUES (:owner!, :intent_hash!, :output_no!, :height!)

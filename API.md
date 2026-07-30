@@ -674,6 +674,29 @@ The decoded offer contains:
 
 All of these are checked by `/api/zswap/submit` before any Celestia fee is incurred.
 
+### Ingestion pipeline (the critical path)
+
+Anyone can post any bytes to the shared Celestia namespace for the price of a blob fee, so the **STM ingestion ladder is the authoritative filter** — `/api/zswap/submit` and the batcher can both be bypassed. It is ordered cheapest-first so a blob that was never going to be indexed costs as little as possible:
+
+| # | Check | Cost | Rejects |
+|---|---|---|---|
+| 1 | HRP prefix `swapoffer1` | O(1) | random bytes |
+| 2 | **Encoded-length bound** | O(1) | oversized blobs, *before* decoding them |
+| 3 | bech32m charset + checksum | O(n) | corrupt / non-offer text |
+| 4 | Decoded size vs `OFFER_MAX_BYTES` | O(1) | oversized payloads |
+| 5 | `Transaction.deserialize` | O(n) | not a ledger transaction |
+| 6 | Structural: spendable input, two-sided legs (MIP-0006) | cheap | giveaways, non-swaps |
+| 7 | Merkle-root extraction | cheap byte parse | unreadable roots |
+| 8 | **Dedup** by content hash | one indexed probe | replays (open *and* archived) |
+| 9 | **Liveness**: nullifier unspent, UTXO live, root known | indexed probes | stale / un-settleable offers |
+| 10 | **`wellFormed`** — ZK proofs + signatures | **dominant cost** | forged offers |
+
+Crypto runs **last** because it is orders of magnitude more expensive than every other step: a replayed or stale blob must never reach it. Nothing is skipped — an offer is indexed only after `wellFormed` passes — so the ordering changes *which* rejection fires, never turning a rejection into an acceptance. Callers select this with `crypto: "defer"` on `validateZswapOffer` plus an explicit `verifyOfferCrypto(tx, opts)`; the default remains inline verification, which is what the batcher uses (it has no DB to consult and must know an offer is genuine before spending a fee).
+
+Rejected blobs additionally have their stored body scrubbed to `[JUNK]` in `effectstream.primitive_accounting` (the framework persists every fetched blob there permanently), keeping the audit trail — height, namespace, commitment, blob index — while dropping attacker-controlled bytes.
+
+Step 5 of the ideal ladder — *reject offers below a minimum value* — is **not implemented**: it needs a price oracle. MIP-0006 suggests the natural floor is the offer's own publication cost. The derived legs are available at that point in the pipeline, so the hook slot exists.
+
 ### Manual submission (curl)
 
 ```bash

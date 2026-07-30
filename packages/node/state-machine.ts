@@ -7,13 +7,14 @@ import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
-import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
 import { offerHashFromBlob } from "./offer-hash.ts";
 
 import {
   insertKnownToken,
   insertOfferFileWithHash,
   getOfferStatusByHash,
+  scrubPrimitiveAccountingPayload,
   insertOfferFileNullifier,
   insertOfferFileUnshieldedSpend,
   insertOfferFileToken,
@@ -279,29 +280,57 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   const { payload } = data.parsedInput;
   const raw = payload.suppliedValue;
 
-  // ── Validate the offer (structure + cryptographic proofs) ──
-  // Deterministic: the verdict is a pure function of (raw, refState, tblock).
-  // `tblock` is the Celestia block time and `refState` is a blank ledger state
-  // for the configured network, so it replays identically. Anyone can post a
-  // blob directly to the public Celestia namespace, so we must validate
-  // defensively even though /api/zswap/submit and the batcher also gate.
+  // Anyone can post any bytes to the public Celestia namespace for the price
+  // of a blob fee, so this transition is the real gate — /api/zswap/submit and
+  // the batcher can both be bypassed. It is ordered cheapest-first so that a
+  // blob which was never going to be indexed costs as little as possible:
+  //
+  //   HRP → length bound → bech32m → size → deserialize → two-sided → roots
+  //   → dedup (indexed) → liveness (indexed) → wellFormed (crypto, LAST)
+  //
+  // Crypto is deferred to the end deliberately: it is orders of magnitude more
+  // expensive than every other step, so a replayed or stale blob must never
+  // reach it. Nothing is skipped — an offer is only indexed once wellFormed
+  // passes — so this ordering can change which rejection fires, never turn a
+  // rejection into an acceptance.
+  //
+  // Rejected blobs also get their stored payload scrubbed (see rejectOffer):
+  // the framework persists every fetched blob in primitive_accounting forever,
+  // which is otherwise unbounded, attacker-controlled storage.
+  //
+  // Deterministic throughout: the verdict is a pure function of
+  // (raw, refState, tblock, indexed sets). `tblock` is the Celestia block time
+  // and `refState` is a blank ledger state for the configured network, so it
+  // replays identically.
+  const rejectOffer = function* (code: string, reason: string, extra: object = {}) {
+    console.warn("[ZSWAP] Rejected offer", {
+      code,
+      reason,
+      celestiaHeight: data.blockHeight,
+      ...extra,
+    });
+    // Same block, same transaction as the accounting INSERT — atomic.
+    yield* World.resolve(scrubPrimitiveAccountingPayload, {
+      block_height: data.blockHeight,
+      supplied_value: raw,
+    });
+    emitAppEvent({
+      type: "offer_rejected",
+      code,
+      reason,
+      celestiaHeight: data.blockHeight,
+      ...extra,
+    });
+  };
+
   const result = validateZswapOffer(raw, {
     refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(data.blockTimestamp),
     maxBytes: OFFER_MAX_BYTES,
+    crypto: "defer", // verified below, after the indexed checks
   });
   if (!result.ok) {
-    console.warn("[ZSWAP] Rejected offer", {
-      code: result.code,
-      reason: result.reason,
-      celestiaHeight: data.blockHeight,
-    });
-    emitAppEvent({
-      type: "offer_rejected",
-      code: result.code,
-      reason: result.reason,
-      celestiaHeight: data.blockHeight,
-    });
+    yield* rejectOffer(result.code ?? "INVALID", result.reason ?? "");
     return;
   }
 
@@ -314,6 +343,28 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   const gives = result.gives ?? [];
   const wants = result.wants ?? [];
 
+  // ── Dedup (MIP-0006: duplicates SHOULD be rejected) ── FIRST of the DB
+  // checks: one indexed probe on a hash we already have to compute, and the
+  // single most likely rejection under attack (replaying a valid blob is the
+  // cheapest way to make an indexer work). Never let a replay reach crypto.
+  //
+  // offer_hash is content-addressed (sha256 of the raw tx bytes), so the same
+  // offer re-published — same maker retrying, or a relay replaying the blob —
+  // resolves to the same hash on every node regardless of local ids. Checks
+  // history too: a consumed/expired offer must not be resurrected by replay.
+  const offerHash = offerHashFromBlob(raw);
+  const existing = yield* World.resolve(getOfferStatusByHash, {
+    offer_hash: offerHash,
+  });
+  if (existing.length > 0) {
+    yield* rejectOffer(
+      "DUPLICATE_OFFER",
+      `offer already indexed with status '${existing[0].status}'`,
+      { offerHash },
+    );
+    return;
+  }
+
   // ── Liveness: drop offers whose coins are already spent on chain ──
   // The midnight-* handlers ingest every consumed nullifier / unshielded UTXO
   // into the permanent spent_* sets, so these are a plain existence check. We
@@ -323,15 +374,11 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   for (const nullifier of nullifierStrs) {
     const spent = yield* World.resolve(isNullifierSpent, { nullifier });
     if (spent.length > 0) {
-      console.warn("[ZSWAP] Rejected offer: nullifier already spent", {
-        nullifier,
-        celestiaHeight: data.blockHeight,
-      });
-      emitAppEvent({
-        type: "offer_rejected",
-        code: "NULLIFIER_SPENT",
-        celestiaHeight: data.blockHeight,
-      });
+      yield* rejectOffer(
+        "NULLIFIER_SPENT",
+        `nullifier already spent: ${nullifier}`,
+        { offerHash },
+      );
       return;
     }
   }
@@ -342,15 +389,11 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   for (const s of unshieldedSpends) {
     const created = yield* World.resolve(isUnshieldedCreated, s);
     if (created.length === 0) {
-      console.warn("[ZSWAP] Rejected offer: unshielded UTXO not live (never created or already spent)", {
-        ...s,
-        celestiaHeight: data.blockHeight,
-      });
-      emitAppEvent({
-        type: "offer_rejected",
-        code: "UTXO_NOT_LIVE",
-        celestiaHeight: data.blockHeight,
-      });
+      yield* rejectOffer(
+        "UTXO_NOT_LIVE",
+        `unshielded UTXO not live (spent or never created): ${s.owner}/${s.intent_hash}/${s.output_no}`,
+        { offerHash },
+      );
       return;
     }
   }
@@ -361,41 +404,26 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   for (const root of result.inputRoots ?? []) {
     const known = yield* World.resolve(isKnownRoot, { root });
     if (known.length === 0) {
-      console.warn("[ZSWAP] Rejected offer: input merkle root unknown", {
-        root,
-        celestiaHeight: data.blockHeight,
-      });
-      emitAppEvent({
-        type: "offer_rejected",
-        code: "ROOT_UNKNOWN",
-        celestiaHeight: data.blockHeight,
-      });
+      yield* rejectOffer(
+        "ROOT_UNKNOWN",
+        `input merkle root not a known recent chain root: ${root}`,
+        { offerHash },
+      );
       return;
     }
   }
 
-  // ── Dedup (MIP-0006: duplicates SHOULD be rejected) ──
-  // offer_hash is content-addressed (sha256 of the raw tx bytes), so the same
-  // offer re-published — same maker retrying, or a relay replaying the blob —
-  // resolves to the same hash on every node regardless of local ids. Checks
-  // history too: a consumed/expired offer must not be resurrected by replay.
-  const offerHash = offerHashFromBlob(raw);
-  const existing = yield* World.resolve(getOfferStatusByHash, {
-    offer_hash: offerHash,
+  // ── Cryptographic verification — LAST, and mandatory ──
+  // Everything above read *claimed* data out of an unverified transaction;
+  // this is what makes it trustworthy. Deferred to here so that malformed,
+  // duplicate, and stale blobs are all discarded before paying for proof
+  // verification — but nothing is indexed without it.
+  const crypto = verifyOfferCrypto(result.tx!, {
+    refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
+    tblock: new Date(data.blockTimestamp),
   });
-  if (existing.length > 0) {
-    console.warn("[ZSWAP] Rejected offer: duplicate", {
-      offerHash,
-      status: existing[0].status,
-      celestiaHeight: data.blockHeight,
-    });
-    emitAppEvent({
-      type: "offer_rejected",
-      code: "DUPLICATE_OFFER",
-      reason: `offer already indexed with status '${existing[0].status}'`,
-      offerHash,
-      celestiaHeight: data.blockHeight,
-    });
+  if (!crypto.ok) {
+    yield* rejectOffer(crypto.code, crypto.reason, { offerHash });
     return;
   }
 

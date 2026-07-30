@@ -31,12 +31,57 @@ function safeIdentifiers(tx: UnprovenTransaction): string[] {
 }
 
 /**
+ * `bech32m` packs 8 bits into every 5-bit character, so the encoded string is
+ * always ~1.6× the payload, plus the `swapoffer1` HRP and the 6-char checksum.
+ * Anything longer than this bound cannot decode to <= maxBytes, so it can be
+ * rejected on the raw string — before spending the O(n) decode on a blob whose
+ * only purpose may be to make us do that work.
+ */
+function maxEncodedChars(maxBytes: number): number {
+  return Math.ceil((maxBytes * 8) / 5) + OFFER_HRP.length + 7;
+}
+
+/**
+ * Verify the offer's zero-knowledge proofs and signatures (`wellFormed`).
+ *
+ * This is the single most expensive operation in the pipeline — orders of
+ * magnitude above every other step — which is why `crypto: "defer"` exists:
+ * callers holding indexed rejection criteria (dedup, liveness) run those
+ * first and call this last, so replayed and stale blobs never reach it.
+ *
+ * It is also the step that makes everything else trustworthy: the legs,
+ * nullifiers, and roots read out of a transaction are merely *claimed* until
+ * this passes. Never index an offer without it.
+ */
+export function verifyOfferCrypto(
+  tx: UnprovenTransaction,
+  opts: Pick<ValidateOpts, "refState" | "tblock">,
+): { ok: true } | { ok: false; code: OfferRejectCode; reason: string } {
+  try {
+    tx.wellFormed(opts.refState, buildStrictness(), opts.tblock);
+    return { ok: true };
+  } catch (e) {
+    const m = errMsg(e);
+    return {
+      ok: false,
+      code: /signature/i.test(m) ? "SIGNATURE_INVALID" : "PROOF_INVALID",
+      reason: `wellFormed failed: ${m}`,
+    };
+  }
+}
+
+/**
  * Validate a ZSwap offer blob. Deterministic given (blob, refState, tblock) —
  * safe to call inside the state machine. Steps run cheap → expensive and stop
  * at the first failure:
  *
- *   1 encoding · 2 size · 3 deserialize · 4 structural/semantic · 5 crypto
- *   (wellFormed) · 6 liveness (optional sync) · 7 dedup (optional)
+ *   1 encoding (HRP → length bound → bech32m) · 2 size · 3 deserialize ·
+ *   4 structural/semantic · 5 root extraction · 6 liveness (optional sync) ·
+ *   7 dedup (optional) · 8 crypto (wellFormed)
+ *
+ * Crypto runs LAST so that every cheaper discriminator gets to reject first.
+ * With `crypto: "defer"` it is skipped entirely here and the caller runs
+ * `verifyOfferCrypto` after its own async dedup/liveness — see ValidateOpts.
  *
  * On success — and whenever deserialization succeeds — the derived
  * `tx/nullifiers/unshieldedSpends/gives/wants/identifiers` are returned so a
@@ -52,6 +97,18 @@ export function validateZswapOffer(
       ok: false,
       code: "BAD_ENCODING",
       reason: "not a swapoffer bech32m string",
+    };
+  }
+  // Length bound on the RAW STRING, before decoding: an oversized blob is
+  // rejected without doing the work it was trying to make us do.
+  const maxChars = maxEncodedChars(opts.maxBytes);
+  if (blob.length > maxChars) {
+    return {
+      ok: false,
+      code: "TOO_LARGE",
+      reason:
+        `encoded offer is ${blob.length} chars > max ${maxChars} ` +
+        `(cannot decode to <= ${opts.maxBytes} bytes)`,
     };
   }
   let rawTx: Uint8Array;
@@ -152,21 +209,14 @@ export function validateZswapOffer(
     identifiers,
   };
 
-  // ── 5. Cryptographic (rejects forged proofs / made-up coins) ──
-  try {
-    tx.wellFormed(opts.refState, buildStrictness(), opts.tblock);
-  } catch (e) {
-    const m = errMsg(e);
-    const code: OfferRejectCode = /signature/i.test(m)
-      ? "SIGNATURE_INVALID"
-      : "PROOF_INVALID";
-    return { ok: false, code, reason: `wellFormed failed: ${m}`, ...derived };
-  }
-
-  // ── 5b. Extract each shielded input's merkle root (fail-closed) ──
+  // ── 5. Extract each shielded input's merkle root (fail-closed) ──
   // The binding has no root getter, so we read it from the serialized input
   // (pinned zswap-input[v2] layout). A parse anomaly is rejected, not ignored:
   // a wrong root would otherwise match no known root anyway.
+  //
+  // This is a pure byte-parse of the already-deserialized tx — independent of
+  // proof verification — so it runs BEFORE crypto, letting the root-known
+  // liveness check (an indexed probe) reject aged-out offers for free.
   let inputRoots: string[];
   try {
     inputRoots = extractOfferInputRoots(tx);
@@ -235,6 +285,18 @@ export function validateZswapOffer(
   // ── 7. Dedup (optional) ──
   if (opts.seen && opts.seen(nullifiers, identifiers)) {
     return { ok: false, code: "DUPLICATE", reason: "offer already seen", ...derived };
+  }
+
+  // ── 8. Cryptographic — LAST, and only if the caller wants it inline ──
+  // Rejects forged proofs / made-up coins. Every cheaper check above has
+  // already had its chance, so a blob that was going to be discarded anyway
+  // never reaches this. `crypto: "defer"` hands the step to the caller, which
+  // MUST run verifyOfferCrypto() before acting on the offer.
+  if (opts.crypto !== "defer") {
+    const verdict = verifyOfferCrypto(tx, opts);
+    if (!verdict.ok) {
+      return { ok: false, code: verdict.code, reason: verdict.reason, ...derived };
+    }
   }
 
   return { ok: true, ...derived };

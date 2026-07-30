@@ -13,6 +13,7 @@ import {
   buildStrictness,
   getBlankRefState,
   validateZswapOffer,
+  verifyOfferCrypto,
 } from "./mod.ts";
 
 // A reference state is only consulted in step 5 (wellFormed); steps 1–4 never
@@ -58,6 +59,41 @@ describe("validateZswapOffer — size (step 2)", () => {
     });
     expect(r.ok).toBe(false);
     expect(r.code).toBe("TOO_LARGE");
+  });
+
+  // The DoS-relevant half: an oversized blob must be rejected on the raw
+  // string, without paying for the bech32m decode it was trying to buy.
+  test("oversized blob is rejected BEFORE decoding (no decode work spent)", () => {
+    const huge = `${OFFER_HRP}1` + "q".repeat(5_000_000);
+    let decodeCalls = 0;
+    const realDecode = OfferFiles.decode;
+    (OfferFiles as any).decode = (...args: unknown[]) => {
+      decodeCalls++;
+      return (realDecode as any).apply(OfferFiles, args);
+    };
+    try {
+      const r = validateZswapOffer(huge, {
+        refState: NO_REF,
+        tblock: TBLOCK,
+        maxBytes: 1_000_000,
+      });
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe("TOO_LARGE");
+      expect(decodeCalls).toBe(0);
+    } finally {
+      (OfferFiles as any).decode = realDecode;
+    }
+  });
+
+  test("a blob within the encoded-length bound still reaches the decoder", () => {
+    // Guards the bound itself: it must not be so tight that legitimate
+    // maximum-size offers get rejected before decoding.
+    const r = validateZswapOffer(craftBlob(1_000), {
+      refState: NO_REF,
+      tblock: TBLOCK,
+      maxBytes: 1_000,
+    });
+    expect(r.code).not.toBe("TOO_LARGE");
   });
 });
 
@@ -160,6 +196,58 @@ describe.skipIf(!hasFixture)("validateZswapOffer — crypto + liveness (real fix
     for (const root of r.inputRoots!) {
       expect(root.length).toBe(66);
       expect(root.startsWith("73")).toBe(true);
+    }
+  });
+
+  // ── crypto: "defer" — the DoS-relevant ordering ─────────────────────────
+  // Ingestion runs the cheap+indexed checks first and verifies proofs last,
+  // so replayed/stale blobs never pay for a wellFormed.
+
+  test('crypto:"defer" skips wellFormed entirely but still derives everything', () => {
+    const raw = OfferFiles.decode(blob);
+    const tx = Transaction.deserialize("signature", "proof", "binding", raw);
+    const proto = Object.getPrototypeOf(tx);
+    const realWellFormed = proto.wellFormed;
+    let calls = 0;
+    proto.wellFormed = function (...args: unknown[]) {
+      calls++;
+      return realWellFormed.apply(this, args);
+    };
+    try {
+      const deferred = validateZswapOffer(blob, { ...opts(), crypto: "defer" });
+      expect(deferred.ok).toBe(true);
+      expect(calls).toBe(0); // the expensive step was not paid for
+      // …and the caller still has everything needed for dedup + liveness.
+      expect(deferred.tx).toBeDefined();
+      expect(deferred.gives!.length).toBeGreaterThan(0);
+      expect(deferred.inputRoots!.length).toBeGreaterThan(0);
+
+      // Explicit verification then passes, and IS the expensive step.
+      const verdict = verifyOfferCrypto(deferred.tx!, opts());
+      expect(verdict.ok).toBe(true);
+      expect(calls).toBe(1);
+    } finally {
+      proto.wellFormed = realWellFormed;
+    }
+  });
+
+  test("deferring never accepts what inline verification would reject", () => {
+    // Tamper the proof region: inline mode rejects it, and deferred mode must
+    // reject it too — just at the explicit verifyOfferCrypto step instead.
+    const raw = OfferFiles.decode(blob);
+    const tampered = Uint8Array.from(raw);
+    const at = Math.floor(tampered.length * 0.8);
+    tampered[at] = tampered[at]! ^ 0xff;
+    const blob2 = bech32m.encode(OFFER_HRP, bech32m.toWords(tampered), false);
+
+    const inline = validateZswapOffer(blob2, opts());
+    expect(inline.ok).toBe(false);
+
+    const deferred = validateZswapOffer(blob2, { ...opts(), crypto: "defer" });
+    if (deferred.ok) {
+      // Structure survived the tamper; crypto must still catch it.
+      const verdict = verifyOfferCrypto(deferred.tx!, opts());
+      expect(verdict.ok).toBe(false);
     }
   });
 

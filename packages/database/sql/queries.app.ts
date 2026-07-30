@@ -600,6 +600,53 @@ export const archiveOfferByIdTtlWithHash = {
     ),
 };
 
+// ── Rejected-blob scrub (framework table) ──────────────────────────────────
+//
+// The framework persists EVERY blob it fetches from the namespace into
+// effectstream.primitive_accounting, permanently — the STM's own scheduled
+// input is deleted after processing, but this accounting row is not. Since
+// the Celestia namespace is permissionless, that is unbounded,
+// attacker-controlled storage: anyone can park megabytes in our DB for the
+// price of a blob fee, and every byte is copied again into the generated
+// md5(payload) column.
+//
+// So when the STM rejects an offer, it scrubs the stored body in the same
+// block transaction, keeping the audit trail (which height, which namespace,
+// which commitment, and that a blob was seen) while dropping the payload we
+// have already decided to discard. Replaying from Celestia re-fetches and
+// re-rejects identically, so this stays deterministic.
+//
+// Matching is by block height first (a handful of rows per height) and only
+// then by body, so the large comparison never runs table-wide.
+//
+// Load-bearing detail: primitive_accounting carries a UNIQUE index on
+// (primitive_name, effectstream_block_height, md5(payload)). Scrubbing two
+// blobs from the SAME block to the same "[JUNK]" marker is safe only because
+// the surrounding fields we keep — `commitment` (content-derived) and
+// `blobIndex` (position in the block) — still differ, so the recomputed
+// hashes stay distinct. Do not widen this scrub to drop those fields.
+export interface IScrubPrimitiveAccountingPayloadParams {
+  block_height: number;
+  supplied_value: string;
+}
+export type IScrubPrimitiveAccountingPayloadResult = void;
+export const scrubPrimitiveAccountingPayload = {
+  run: (params: IScrubPrimitiveAccountingPayloadParams, dbConn: any) =>
+    runQ<IScrubPrimitiveAccountingPayloadParams, IScrubPrimitiveAccountingPayloadResult>(
+      `UPDATE effectstream.primitive_accounting
+       SET payload = jsonb_set(
+             payload::jsonb,
+             '{payload,suppliedValue}',
+             '"[JUNK]"'::jsonb,
+             false
+           )::json
+       WHERE effectstream_block_height = :block_height!
+         AND payload->'payload'->>'suppliedValue' = :supplied_value!`,
+      params,
+      dbConn,
+    ),
+};
+
 // NOTE: status-by-blob lookups go through offerHashFromBlob() + the
 // getOfferStatusByHash index probe — never a literal transaction_hex
 // comparison. A TEXT-equality query here would seq-scan both offer tables

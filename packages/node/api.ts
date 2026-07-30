@@ -23,7 +23,7 @@ import {
 import { MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, midnightContract } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
-import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
 import { eventBus, emitAppEvent, type AppEvent } from "./event-bus.ts";
 import { quoteWithPrices, priceOf } from "./market-mock.ts";
 import { realStats, realHistory } from "./trade-data.ts";
@@ -451,11 +451,15 @@ export const apiRouter: StartConfigApiRouter = async function (
     async (request: any, reply: any) => {
       const { blob } = request.body;
 
-      // Structure + cryptographic proofs (steps 1–5).
+      // Structure only — proof verification is deferred to the end of this
+      // handler, after the indexed dedup/liveness probes, so a replayed or
+      // stale blob never costs a `wellFormed` (the pipeline's dominant cost).
+      // Same ordering as the STM; see the celestia-zswap transition.
       const validation = validateZswapOffer(blob, {
         refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
         tblock: new Date(),
         maxBytes: OFFER_MAX_BYTES,
+        crypto: "defer",
       });
       if (!validation.ok) {
         return reply
@@ -532,6 +536,17 @@ export const apiRouter: StartConfigApiRouter = async function (
             },
           });
         }
+      }
+
+      // Cryptographic verification — last and mandatory. Everything above read
+      // claimed data out of an unverified transaction; nothing is forwarded to
+      // the batcher (and so to a paid Celestia post) without this.
+      const crypto = verifyOfferCrypto(validation.tx!, {
+        refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
+        tblock: new Date(),
+      });
+      if (!crypto.ok) {
+        return reply.code(400).send({ error: crypto.code, reason: crypto.reason });
       }
 
       const result = await submitBlobViaBatcher(blob);

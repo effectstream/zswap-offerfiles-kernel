@@ -46,6 +46,13 @@ class ZswapCelestiaAdapter extends CelestiaAdapter {
     // the node's permanent spent_* sets). Adding subscription-based best-effort
     // liveness here (indexer unshieldedTransactions / nullifier search) is a
     // clean follow-up.
+    // Crypto runs INLINE here (the default), unlike the node's ingestion and
+    // submit paths which defer it behind indexed dedup/liveness probes. The
+    // batcher has no DB, so it has no cheaper discriminator to put first — and
+    // its whole job is deciding whether an offer is worth a Celestia fee, a
+    // question only proof verification answers. Note this gate is advisory for
+    // the network as a whole: makers can post to the namespace directly, so
+    // the STM ingestion ladder remains the authoritative filter.
     const result = validateZswapOffer(input.input, {
       refState: getBlankRefState(this.networkId),
       tblock: new Date(),

@@ -22,8 +22,6 @@ const {
   getOfferTokensAny,
   getOpenOffersPage,
   getOfferTokensForOffers,
-  getOffersMissingHash,
-  setOpenOfferHash,
 } = await import("@zswap-da/database");
 
 const PORT = 54333;
@@ -161,14 +159,18 @@ test("unique index rejects a second open offer with the same hash", async () => 
   await expect(insertOffer(HASH_A, "swapoffer1testblob-a2")).rejects.toThrow();
 });
 
-test("backfill queries find and fix rows missing a hash", async () => {
-  await client.query(
-    `INSERT INTO offer_file (id, celestia_height, transaction_hex, ttl_seconds)
-     VALUES (901, 1, 'swapoffer1legacy', 3600)`,
-  );
-  const missing = await getOffersMissingHash.run(undefined, client);
-  expect(missing.some((r) => r.id === 901 && r.live)).toBe(true);
-  await setOpenOfferHash.run({ id: 901, offer_hash: "c".repeat(64) }, client);
-  const after = await getOffersMissingHash.run(undefined, client);
-  expect(after.some((r) => r.id === 901)).toBe(false);
+test("page query uses the created_at index path, not a join scan (EXISTS plan)", async () => {
+  // Regression guard for the EXISTS rewrite: the unfiltered page must be a
+  // plain index scan on idx_offer_file_created_at with no join/unique node
+  // (the old DISTINCT + LEFT JOIN shape was ~12× slower and got worse with
+  // book size).
+  const r = await client.query(`EXPLAIN
+    SELECT o.id FROM offer_file o
+    WHERE ('' = '' OR EXISTS (
+      SELECT 1 FROM offer_file_tokens oft
+      WHERE oft.offer_file_id = o.id AND oft.token_color = ''))
+    ORDER BY o.created_at DESC LIMIT 100`);
+  const plan = r.rows.map((row: any) => row["QUERY PLAN"]).join("\n");
+  expect(plan).toContain("idx_offer_file_created_at");
+  expect(plan).not.toContain("Unique");
 });

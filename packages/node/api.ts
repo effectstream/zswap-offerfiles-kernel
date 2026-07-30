@@ -12,7 +12,6 @@ import {
   checkTokenNameExists,
   getTokenByColor,
   getPairs,
-  getZswapStatusByBlob,
   upsertPairStatsByOfferId,
   getOpenOffersPage,
   getOfferTokensForOffers,
@@ -31,7 +30,7 @@ import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
-import { offerHashFromBlob, backfillOfferHashes } from "./offer-hash.ts";
+import { offerHashFromBlob } from "./offer-hash.ts";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
 
@@ -72,11 +71,6 @@ export const apiRouter: StartConfigApiRouter = async function (
       .code(500)
       .send({ error: "INTERNAL", reason: error?.message ?? "Unknown error" });
   });
-
-  // Rows indexed before 005-offer-hash.sql get their content hash on boot.
-  backfillOfferHashes(dbConn).catch((e) =>
-    console.error("[OFFER_HASH] Backfill failed:", e),
-  );
 
   // GET /keys/*, /zkir/* — ZK assets for the browser prover (the frontend now
   // lives in its own repo and fetches these from this API instead of staging
@@ -377,19 +371,22 @@ export const apiRouter: StartConfigApiRouter = async function (
 
   // Status lookup for My Trades startup reconciliation. Returns
   // { blob, status } with status 'open' | 'completed' | 'expired' | 'not_found'.
+  //
+  // Always via the content hash — an indexed probe. Undecodable blobs are
+  // answered WITHOUT touching the DB: they can never have been indexed
+  // (ingestion requires a decodable blob), and any literal-match fallback
+  // would be an unindexable ~24 KB TEXT comparison — a free table-scan DoS
+  // for anyone POSTing junk.
   const statusForBlob = async (blob: string) => {
-    // Prefer the content hash — index-backed and immune to blob re-encoding.
+    let hash: string;
     try {
-      const hash = offerHashFromBlob(blob);
-      const rows = await getOfferStatusByHash.run({ offer_hash: hash }, dbConn);
-      if (rows.length > 0) return { blob, offer_hash: hash, status: rows[0].status };
-      // Fall through: legacy rows may predate the hash backfill.
+      hash = offerHashFromBlob(blob);
     } catch {
-      /* undecodable blob — try the literal-match fallback */
+      return { blob, status: "not_found" };
     }
-    const rows = await getZswapStatusByBlob.run({ blob }, dbConn);
-    if (rows.length === 0) return { blob, status: "not_found" };
-    return { blob, status: rows[0].status };
+    const rows = await getOfferStatusByHash.run({ offer_hash: hash }, dbConn);
+    if (rows.length === 0) return { blob, offer_hash: hash, status: "not_found" };
+    return { blob, offer_hash: hash, status: rows[0].status };
   };
 
   // POST /api/zswap/status — body { blob } or { blobs: [...] }. POST because a

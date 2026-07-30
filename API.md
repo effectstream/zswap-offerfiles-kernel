@@ -210,7 +210,7 @@ Returns the current live offer book — offers published to Celestia, validated,
 
 | Field | Description |
 |---|---|
-| `offer_hash` | **Content hash** — hex sha256 of the raw MIP-0005 transaction bytes (the bech32m-decoded blob). Identical on every node that indexes the same offer; use it, not `id`, for lookups. `null` only for legacy rows whose blob predates the current codec. |
+| `offer_hash` | **Content hash** — hex sha256 of the raw MIP-0005 transaction bytes (the bech32m-decoded blob). Identical on every node that indexes the same offer; use it, not `id`, for lookups. Set at ingestion for every indexed offer. |
 | `id` | Local row id. **Deployment-specific bookkeeping** — two nodes indexing the same namespace assign different ids. Never use it for cross-system references. |
 | `blob_chars` | Length of the bech32m blob served by `GET /api/zswaps/:hash` |
 | `gives` | Tokens the maker is offering |
@@ -286,6 +286,8 @@ curl -X POST http://host:9999/api/zswap/status \
 ```
 
 Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"open"` | `"completed"` | `"expired"` | `"not_found"`.
+
+Lookups resolve via the offer's content hash (an indexed probe). A blob that does not decode as a `swapoffer1…` string answers `"not_found"` **without touching the database** — undecodable blobs can never have been indexed, and this keeps junk submissions from costing more than a hash attempt.
 
 > `GET /api/zswap/status?blob=…` still exists for backward compatibility, but real offer blobs exceed proxy URI limits (nginx answers **414**) — use the POST variant or `GET /api/zswaps/:hash/status`.
 

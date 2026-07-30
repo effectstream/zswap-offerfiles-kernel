@@ -17,6 +17,13 @@
 // Run:  bun run packages/tests/seed-market.ts        (or: bun run seed:market)
 
 import pg from "pg";
+import { createHash } from "node:crypto";
+
+// Seed rows carry a placeholder blob, not a decodable swapoffer1… string, so
+// the real offerHashFromBlob() cannot apply. Hash the placeholder itself:
+// still unique + stable, which keeps the hash-addressed endpoints
+// (GET /api/zswaps/:hash) working against seeded data in the UI.
+const seedHash = (blob: string) => createHash("sha256").update(blob).digest("hex");
 
 const SEED_BASE = 9_000_000; // all seeded rows live at/above this id
 const HISTORY_BASE = 9_000_000;
@@ -93,9 +100,9 @@ async function seedHistory(p: (typeof PAIRS)[number]) {
     const { give, want } = legsFor(side, p.base.color, p.quote.color, baseAmt, price);
     const id = histId++;
     await q(
-      `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, created_at, ttl_seconds, archive_reason, archived_at)
-       VALUES ($1, $2, $3, $4, 3600, 'CONSUMED', $4)`,
-      [id, 1000 + id, `seed-hist-${id}`, at],
+      `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
+       VALUES ($1, $2, $3, $4, $5, 3600, 'CONSUMED', $5)`,
+      [id, 1000 + id, `seed-hist-${id}`, seedHash(`seed-hist-${id}`), at],
     );
     await q(
       `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction) VALUES
@@ -114,9 +121,9 @@ async function seedBook(p: (typeof PAIRS)[number], mid: number) {
     const { give, want } = legsFor(side, p.base.color, p.quote.color, baseAmt, price);
     const id = bookId++;
     await q(
-      `INSERT INTO offer_file (id, celestia_height, transaction_hex, created_at, ttl_seconds)
-       VALUES ($1, $2, $3, $4, 3600)`,
-      [id, 2000 + id, `seed-book-${id}`, nowIso],
+      `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds)
+       VALUES ($1, $2, $3, $4, $5, 3600)`,
+      [id, 2000 + id, `seed-book-${id}`, seedHash(`seed-book-${id}`), nowIso],
     );
     await q(
       `INSERT INTO offer_file_tokens (offer_file_id, token_color, amount, direction) VALUES

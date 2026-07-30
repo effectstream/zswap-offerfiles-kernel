@@ -8,7 +8,9 @@
 -- expose for cross-system lookups.
 --
 -- Computed in application code at ingestion (bech32m decode is not available
--- in SQL); NULL means a legacy row whose blob predates the current codec.
+-- in SQL) and set on every row the node writes. The column stays nullable
+-- only for out-of-band inserts (e.g. the seed-market demo script, which must
+-- supply its own hashes).
 ALTER TABLE offer_file ADD COLUMN IF NOT EXISTS offer_hash TEXT;
 ALTER TABLE offer_file_history ADD COLUMN IF NOT EXISTS offer_hash TEXT;
 

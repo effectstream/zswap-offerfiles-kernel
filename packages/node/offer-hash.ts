@@ -1,10 +1,5 @@
 import { createHash } from "node:crypto";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import {
-  getOffersMissingHash,
-  setOpenOfferHash,
-  setHistoryOfferHash,
-} from "@zswap-da/database";
 
 /**
  * Content-addressed offer identity (the MIP-0006 `offerId`): hex sha256 over
@@ -13,37 +8,12 @@ import {
  * display encodings; hashing the bech32m string would tie identity to a
  * re-encodable rendering.
  *
- * Throws when the blob is not a decodable `swapoffer1…` string.
+ * Set at ingestion for every indexed offer, so `offer_hash` is never NULL on
+ * rows this node writes. Throws when the blob is not a decodable
+ * `swapoffer1…` string — callers answer those without touching the DB (an
+ * undecodable blob can never be indexed, and probing the DB for it would
+ * open a junk-blob → table-scan DoS).
  */
 export function offerHashFromBlob(blob: string): string {
   return createHash("sha256").update(OfferFiles.decode(blob)).digest("hex");
-}
-
-/**
- * One-shot startup backfill for rows indexed before 005-offer-hash.sql.
- * Legacy blobs that no longer decode under the current codec (e.g. the old
- * `zswapoffer` HRP) are left NULL — they can't be content-addressed, only
- * listed and looked up by blob.
- */
-export async function backfillOfferHashes(dbConn: any): Promise<void> {
-  const rows = await getOffersMissingHash.run(undefined, dbConn);
-  if (rows.length === 0) return;
-  let done = 0;
-  let skipped = 0;
-  for (const row of rows) {
-    let hash: string;
-    try {
-      hash = offerHashFromBlob(row.transaction_hex);
-    } catch {
-      skipped++;
-      continue;
-    }
-    const setter = row.live ? setOpenOfferHash : setHistoryOfferHash;
-    await setter.run({ id: row.id, offer_hash: hash }, dbConn);
-    done++;
-  }
-  console.log(
-    `[OFFER_HASH] Backfilled ${done}/${rows.length} offer hashes` +
-      (skipped ? ` (${skipped} legacy blobs not decodable — left NULL)` : ""),
-  );
 }

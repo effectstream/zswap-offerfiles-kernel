@@ -90,18 +90,46 @@ function deriveStatus(ntpCurrent: number, lagSeconds: number): "ok" | "syncing" 
   return "ok";
 }
 
-export async function getSyncStatus(dbConn: any) {
-  const [ntpRows, pageRows, blockRows, nullifierRows, rootRows, unshieldedRows, lastOfferRows, midnightTip, celestiaTip] = await Promise.all([
-    getNtpCurrentBlock.run(undefined, dbConn),
-    getSyncProtocolPagination.run(undefined, dbConn),
-    getLatestEffectstreamBlock.run(undefined, dbConn),
+// The set-size stats are COUNT(*) + MAX(height) over append-only tables
+// (created_unshielded grows from genesis forever, nullifiers with every
+// spend). /api/health/sync is rate-limit-exempt and polled by UIs as a
+// liveness probe, so these scans must not run per request — cache them.
+// 15 s staleness is irrelevant for totals that only ever grow.
+const SET_STATS_TTL_MS = 15_000;
+type SetStats = { nullifiers: any; roots: any; unshielded: any };
+let setStatsCache: { value: SetStats; fetchedAt: number } | null = null;
+
+async function fetchSetStats(dbConn: any): Promise<SetStats> {
+  if (setStatsCache && Date.now() - setStatsCache.fetchedAt < SET_STATS_TTL_MS) {
+    return setStatsCache.value;
+  }
+  const [nullifierRows, rootRows, unshieldedRows] = await Promise.all([
     getNullifierStats.run(undefined, dbConn),
     getKnownRootStats.run(undefined, dbConn),
     getUnshieldedStats.run(undefined, dbConn),
+  ]);
+  const value = {
+    nullifiers: nullifierRows[0] ?? null,
+    roots: rootRows[0] ?? null,
+    unshielded: unshieldedRows[0] ?? null,
+  };
+  setStatsCache = { value, fetchedAt: Date.now() };
+  return value;
+}
+
+export async function getSyncStatus(dbConn: any) {
+  const [ntpRows, pageRows, blockRows, setStats, lastOfferRows, midnightTip, celestiaTip] = await Promise.all([
+    getNtpCurrentBlock.run(undefined, dbConn),
+    getSyncProtocolPagination.run(undefined, dbConn),
+    getLatestEffectstreamBlock.run(undefined, dbConn),
+    fetchSetStats(dbConn),
     getLastOffer.run(undefined, dbConn),
     fetchMidnightTip(),
     fetchCelestiaTip(),
   ]);
+  const nullifierRows = [setStats.nullifiers].filter(Boolean);
+  const rootRows = [setStats.roots].filter(Boolean);
+  const unshieldedRows = [setStats.unshielded].filter(Boolean);
 
   const ntpCurrent = Number(ntpRows[0]?.current ?? 0);
   const ntpTip = Math.floor((Date.now() - NTP_START_TIME) / BLOCK_TIME_MS);

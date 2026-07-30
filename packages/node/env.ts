@@ -98,6 +98,14 @@ export const OFFER_MAX_BYTES = parseInt(
   getEnv("OFFER_MAX_BYTES") ?? String(1024 * 1024),
 );
 
+// Demo token registry (POST /api/known-tokens). known_tokens is a manually
+// curated convenience table: the Midnight token-metadata standard is not live,
+// so any name written here is unverified and any operator can claim any name
+// for any color. Off by default — enable only for local dev and e2e, never on
+// a deployment whose data anyone trusts.
+export const ENABLE_TOKEN_REGISTRY =
+  (getEnv("ENABLE_TOKEN_REGISTRY") ?? "false").toLowerCase() === "true";
+
 // NOTE: there is deliberately no nullifier TTL. Shielded spends are permanent,
 // so the nullifier set must be complete for `isNullifierSpent` to be a sound
 // double-spend gate — see the note in the midnight-nullifier transition.

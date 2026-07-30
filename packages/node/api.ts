@@ -20,7 +20,7 @@ import {
   getOfferTokensAny,
 } from "@zswap-da/database";
 
-import { MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, midnightContract } from "./env.ts";
+import { ENABLE_TOKEN_REGISTRY, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, midnightContract } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
@@ -307,6 +307,14 @@ export const apiRouter: StartConfigApiRouter = async function (
       },
     },
     async (request: any, reply: any) => {
+      if (!ENABLE_TOKEN_REGISTRY) {
+        return reply.code(404).send({
+          error: "NOT_ENABLED",
+          reason:
+            "Token registry is disabled. Names here are unverified — set " +
+            "ENABLE_TOKEN_REGISTRY=true for local dev / e2e only.",
+        });
+      }
       const color = String(request.body.color).toLowerCase().replace(/^0x/, "");
       const name = String(request.body.name).trim().toUpperCase().slice(0, 16);
       const kind = String(request.body.kind);

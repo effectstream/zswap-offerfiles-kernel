@@ -11,7 +11,6 @@ import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-
 import { offerHashFromBlob } from "./offer-hash.ts";
 
 import {
-  insertKnownToken,
   insertOfferFileWithHash,
   getOfferStatusByHash,
   deleteRejectedAccountingRow,
@@ -493,25 +492,15 @@ stm.addStateTransition("celestia-zswap", function* (data) {
       });
     }
 
-    // ── Auto-register new token colors ──
-    // DEMO / TEMPORARY: known_tokens is a manually curated convenience table.
-    // The Midnight token-metadata standard is not yet live — names written here
-    // are placeholder abbreviations and MUST NOT be trusted as authoritative.
-    // Any token color appearing in this offer that isn't already in
-    // known_tokens gets a placeholder entry. ON CONFLICT DO NOTHING means
-    // existing entries (including the pre-seeded NIGHT token) are never
-    // overwritten. kind is always 'shielded': ZSwap offers are structurally
-    // shielded-only; unshielded tokens only appear inside Intent structures.
-    const seenColors = new Set<string>();
-    for (const t of [...gives, ...wants]) {
-      if (seenColors.has(t.token)) continue;
-      seenColors.add(t.token);
-      yield* World.resolve(insertKnownToken, {
-        token_color: t.token,
-        name: `${t.token.slice(0, 3)}...${t.token.slice(-3)}`,
-        kind: "shielded",
-      });
-    }
+    // NOTE: token colors are deliberately NOT auto-registered here. Indexing an
+    // offer used to write a placeholder row into known_tokens named
+    // `abc...def` and typed `shielded` unconditionally — a guess on both
+    // counts, since a color appearing in an offer says nothing about its name
+    // and unshielded legs are typed wrong by construction. Unverified names in
+    // a table clients read to label trades is exactly the kind of fabricated
+    // data a financial UI must not carry. Unknown colors now render as their
+    // raw color until a name is registered deliberately (see
+    // ENABLE_TOKEN_REGISTRY) or the Midnight token-metadata standard lands.
 
     // ── Reconcile against early-arrival buffer ──
     // If a Midnight consumption event was processed before this offer was

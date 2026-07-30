@@ -64,6 +64,7 @@ EFFECTSTREAM_API_PORT=9999
 BATCHER_SUBMIT_URL=http://127.0.0.1:3334
 OFFER_TTL_SECONDS=2592000               # offer lifetime (seconds)
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
+ENABLE_TOKEN_REGISTRY=false             # POST /api/known-tokens; names are UNVERIFIED — dev/e2e only
 ROOT_WINDOW_SECONDS=1209600             # known-roots retention window; SET THIS to the
                                         # deployed chain's root-recency window (~3600 on
                                         # current networks). Too wide ⇒ the book lists
@@ -359,7 +360,8 @@ New token colors are auto-registered when a valid offer containing them is index
 
 #### `POST /api/known-tokens`
 
-> **⚠️ Demo endpoint — do not use as a source of truth.**
+> **⚠️ Demo endpoint — disabled by default.**
+> Requires `ENABLE_TOKEN_REGISTRY=true`; otherwise returns `404 NOT_ENABLED`. Enable it for local dev and e2e only.
 > Registering a name here does not make it canonical. Any operator can write any name against any color. Wait for the official token-metadata standard before building user-facing trust on top of this endpoint.
 
 Register a human-readable name for a token color before any offers appear (e.g. immediately after a browser-wallet mint).

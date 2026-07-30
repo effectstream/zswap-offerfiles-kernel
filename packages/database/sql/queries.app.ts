@@ -624,9 +624,15 @@ export const archiveOfferByIdTtlWithHash = {
 // it back (only its own reproduction tests do). Deterministic: a replay
 // re-fetches, re-rejects, and re-deletes identically.
 //
-// Matching is by block height first (a handful of rows per height) and only
-// then by body, so the large comparison never runs table-wide.
+// The table's only usable index is
+// (primitive_name, effectstream_block_height, payload_hash), so BOTH leading
+// columns must be constrained: filtering on height alone still "uses" the
+// index but walks all of it, across every primitive's rows — measured 137×
+// the cost, and it grows with total node activity rather than with blob
+// volume. With primitive_name it is a two-column prefix seek down to the
+// handful of blobs at that height, and only then the body comparison.
 export interface IDeleteRejectedAccountingRowParams {
+  primitive_name: string;
   block_height: number;
   supplied_value: string;
 }
@@ -635,7 +641,8 @@ export const deleteRejectedAccountingRow = {
   run: (params: IDeleteRejectedAccountingRowParams, dbConn: any) =>
     runQ<IDeleteRejectedAccountingRowParams, IDeleteRejectedAccountingRowResult>(
       `DELETE FROM effectstream.primitive_accounting
-       WHERE effectstream_block_height = :block_height!
+       WHERE primitive_name = :primitive_name!
+         AND effectstream_block_height = :block_height!
          AND payload->'payload'->>'suppliedValue' = :supplied_value!`,
       params,
       dbConn,

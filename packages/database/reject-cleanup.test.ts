@@ -26,6 +26,9 @@ const PORT = 54335;
 let handle: { close: () => Promise<void> };
 let client: InstanceType<typeof pg.Client>;
 
+// Must match packages/node/env.ts CELESTIA_PRIMITIVE_NAME — the value the
+// framework stores in primitive_accounting.primitive_name.
+const PRIMITIVE = "ZswapBlob";
 const BIG_BLOB = "swapoffer1" + "q".repeat(24_000);
 const OTHER_BLOB = "swapoffer1" + "p".repeat(24_000);
 
@@ -43,7 +46,7 @@ async function insertBlob(height: number, blob: string, commitment: string, idx:
   await client.query(
     `INSERT INTO effectstream.primitive_accounting
        (primitive_name, effectstream_block_height, payload_type, payload)
-     VALUES ('celestia-zswap', $1, 'celestia-generic', $2::json)
+     VALUES ('${PRIMITIVE}', $1, 'celestia-generic', $2::json)
      ON CONFLICT (primitive_name, effectstream_block_height, payload_hash) DO NOTHING`,
     [height, accountingPayload(blob, commitment, idx)],
   );
@@ -98,7 +101,7 @@ afterAll(async () => {
 test("rejecting a blob removes its stored body entirely", async () => {
   await insertBlob(100, BIG_BLOB, "commit-a", 0);
   await deleteRejectedAccountingRow.run(
-    { block_height: 100, supplied_value: BIG_BLOB },
+    { primitive_name: PRIMITIVE, block_height: 100, supplied_value: BIG_BLOB },
     client,
   );
   expect(await suppliedValues(100)).toEqual([]);
@@ -108,7 +111,7 @@ test("delete only touches the matching blob, leaving accepted offers intact", as
   await insertBlob(300, BIG_BLOB, "commit-d", 0);
   await insertBlob(300, OTHER_BLOB, "commit-e", 1);
   await deleteRejectedAccountingRow.run(
-    { block_height: 300, supplied_value: BIG_BLOB },
+    { primitive_name: PRIMITIVE, block_height: 300, supplied_value: BIG_BLOB },
     client,
   );
   expect(await suppliedValues(300)).toEqual([OTHER_BLOB]);
@@ -118,7 +121,7 @@ test("delete is scoped to its block — the same blob at another height survives
   await insertBlob(400, BIG_BLOB, "commit-f", 0);
   await insertBlob(401, BIG_BLOB, "commit-g", 0);
   await deleteRejectedAccountingRow.run(
-    { block_height: 400, supplied_value: BIG_BLOB },
+    { primitive_name: PRIMITIVE, block_height: 400, supplied_value: BIG_BLOB },
     client,
   );
   expect(await suppliedValues(400)).toEqual([]);
@@ -127,7 +130,7 @@ test("delete is scoped to its block — the same blob at another height survives
 
 test("delete is idempotent (replay re-fetches, re-rejects, re-deletes)", async () => {
   await deleteRejectedAccountingRow.run(
-    { block_height: 100, supplied_value: BIG_BLOB },
+    { primitive_name: PRIMITIVE, block_height: 100, supplied_value: BIG_BLOB },
     client,
   );
   expect(await suppliedValues(100)).toEqual([]);
@@ -142,11 +145,27 @@ test("many rejected blobs in one block all delete (no unique-index interference)
   expect((await suppliedValues(500)).length).toBe(10);
   for (let i = 0; i < 10; i++) {
     await deleteRejectedAccountingRow.run(
-      { block_height: 500, supplied_value: `${BIG_BLOB}${i}` },
+      { primitive_name: PRIMITIVE, block_height: 500, supplied_value: `${BIG_BLOB}${i}` },
       client,
     );
   }
   expect(await suppliedValues(500)).toEqual([]);
+});
+
+test("delete seeks on BOTH leading index columns (primitive_name, height)", async () => {
+  // Regression guard. Constraining height alone still "uses" the unique index
+  // but walks all of it — across every primitive's rows, not just ours — which
+  // measured 137x the cost and grows with total node activity. The plan must
+  // show both columns in the Index Cond, never just the height.
+  const r = await client.query(
+    `EXPLAIN DELETE FROM effectstream.primitive_accounting
+     WHERE primitive_name = '${PRIMITIVE}' AND effectstream_block_height = 999
+       AND payload->'payload'->>'suppliedValue' = 'x'`,
+  );
+  const plan = r.rows.map((row: any) => row["QUERY PLAN"]).join("\n");
+  expect(plan).toContain("primitive_accounting_unique_payload_per_block");
+  expect(plan).toContain("primitive_name");
+  expect(plan).not.toContain("Seq Scan");
 });
 
 test("rejection counters aggregate per (height, code)", async () => {

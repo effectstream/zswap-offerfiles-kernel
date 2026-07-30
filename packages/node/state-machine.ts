@@ -61,6 +61,7 @@ import { grammar } from "./grammar.ts";
 import { extractMidnightLedgerSnapshot } from "./zswap-logic.ts";
 import { emitAppEvent } from "./event-bus.ts";
 import {
+  CELESTIA_PRIMITIVE_NAME,
   MIDNIGHT_NETWORK_ID,
   OFFER_MAX_BYTES,
   OFFER_TTL_SECONDS,
@@ -314,6 +315,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     // Same block, same transaction as the accounting INSERT — atomic. The
     // body goes; the fact and reason survive as an aggregated counter.
     yield* World.resolve(deleteRejectedAccountingRow, {
+      primitive_name: CELESTIA_PRIMITIVE_NAME,
       block_height: data.blockHeight,
       supplied_value: raw,
     });

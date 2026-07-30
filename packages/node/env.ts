@@ -2,6 +2,15 @@ import { getEnv } from "@effectstream/utils/runtime";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { readMidnightContract } from "@effectstream/midnight-contracts/read-contract";
 
+// Instance name of the Celestia blob primitive. This is the value the
+// framework writes to effectstream.primitive_accounting.primitive_name, and
+// that table's only usable index is
+// (primitive_name, effectstream_block_height, payload_hash) — so any query
+// against it MUST constrain primitive_name or it degrades into a full index
+// scan over every primitive's rows. Shared here so the config blocks and the
+// rejected-blob cleanup can never drift apart.
+export const CELESTIA_PRIMITIVE_NAME = "ZswapBlob";
+
 export const CELESTIA_RPC_URL = getEnv("CELESTIA_RPC_URL") ?? "http://127.0.0.1:26658";
 export const CELESTIA_NAMESPACE = getEnv("CELESTIA_NAMESPACE") ?? "000000000000deadbeef";
 export const CELESTIA_FEE = parseInt(getEnv("CELESTIA_FEE") ?? "2000");

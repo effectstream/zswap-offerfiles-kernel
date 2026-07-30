@@ -18,6 +18,7 @@ import {
   BLOCK_TIME_MS,
   CELESTIA_FETCH_CONCURRENCY,
   CELESTIA_NAMESPACE,
+  CELESTIA_PRIMITIVE_NAME,
   CELESTIA_POLLING_INTERVAL_MS,
   CELESTIA_RPC_URL,
   CELESTIA_START_HEIGHT,
@@ -127,7 +128,7 @@ export const config = new ConfigBuilder()
       .addPrimitive(
         (syncProtocols) => (syncProtocols as any).parallelCelestia,
         () => ({
-          name: "ZswapBlob",
+          name: CELESTIA_PRIMITIVE_NAME,
           type: PrimitiveTypeCelestiaGeneric,
           startBlockHeight: CELESTIA_START_BLOCK,
           namespace: CELESTIA_NAMESPACE,

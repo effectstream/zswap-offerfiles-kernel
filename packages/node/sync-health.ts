@@ -16,6 +16,7 @@ import {
   getKnownRootStats,
   getUnshieldedStats,
   getLastOffer,
+  getRecentRejections,
 } from "@zswap-da/database";
 
 interface CachedTip {
@@ -118,12 +119,13 @@ async function fetchSetStats(dbConn: any): Promise<SetStats> {
 }
 
 export async function getSyncStatus(dbConn: any) {
-  const [ntpRows, pageRows, blockRows, setStats, lastOfferRows, midnightTip, celestiaTip] = await Promise.all([
+  const [ntpRows, pageRows, blockRows, setStats, lastOfferRows, rejections, midnightTip, celestiaTip] = await Promise.all([
     getNtpCurrentBlock.run(undefined, dbConn),
     getSyncProtocolPagination.run(undefined, dbConn),
     getLatestEffectstreamBlock.run(undefined, dbConn),
     fetchSetStats(dbConn),
     getLastOffer.run(undefined, dbConn),
+    getRecentRejections.run({ limit: 20 }, dbConn),
     fetchMidnightTip(),
     fetchCelestiaTip(),
   ]);
@@ -205,5 +207,12 @@ export async function getSyncStatus(dbConn: any) {
           }
         : null,
     },
+    // Blobs the ingestion ladder discarded, aggregated per (height, code).
+    // The bodies are deleted; this is what makes namespace spam visible.
+    recent_rejections: rejections.map((r) => ({
+      celestia_height: r.celestia_height,
+      code: r.code,
+      count: r.count,
+    })),
   };
 }

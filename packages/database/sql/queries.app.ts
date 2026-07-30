@@ -600,7 +600,7 @@ export const archiveOfferByIdTtlWithHash = {
     ),
 };
 
-// ── Rejected-blob scrub (framework table) ──────────────────────────────────
+// ── Rejected-blob cleanup (framework table) ────────────────────────────────
 //
 // The framework persists EVERY blob it fetches from the namespace into
 // effectstream.primitive_accounting, permanently — the STM's own scheduled
@@ -610,38 +610,73 @@ export const archiveOfferByIdTtlWithHash = {
 // price of a blob fee, and every byte is copied again into the generated
 // md5(payload) column.
 //
-// So when the STM rejects an offer, it scrubs the stored body in the same
-// block transaction, keeping the audit trail (which height, which namespace,
-// which commitment, and that a blob was seen) while dropping the payload we
-// have already decided to discard. Replaying from Celestia re-fetches and
-// re-rejects identically, so this stays deterministic.
+// So when the STM rejects an offer, it DELETEs the row in the same block
+// transaction that created it. Blanking the body in place was the other
+// option; deleting wins because the row's only remaining value would have
+// been "a blob was seen here" — which offer_rejections records in bounded,
+// aggregated form, along with the reject reason the accounting row never
+// carried. Deleting also sidesteps the table's UNIQUE index on
+// (primitive_name, height, md5(payload)), which any in-place rewrite has to
+// avoid colliding with.
+//
+// Safe to delete: the insert is ON CONFLICT DO NOTHING, no foreign key
+// references the table, and nothing in the framework's production path reads
+// it back (only its own reproduction tests do). Deterministic: a replay
+// re-fetches, re-rejects, and re-deletes identically.
 //
 // Matching is by block height first (a handful of rows per height) and only
 // then by body, so the large comparison never runs table-wide.
-//
-// Load-bearing detail: primitive_accounting carries a UNIQUE index on
-// (primitive_name, effectstream_block_height, md5(payload)). Scrubbing two
-// blobs from the SAME block to the same "[JUNK]" marker is safe only because
-// the surrounding fields we keep — `commitment` (content-derived) and
-// `blobIndex` (position in the block) — still differ, so the recomputed
-// hashes stay distinct. Do not widen this scrub to drop those fields.
-export interface IScrubPrimitiveAccountingPayloadParams {
+export interface IDeleteRejectedAccountingRowParams {
   block_height: number;
   supplied_value: string;
 }
-export type IScrubPrimitiveAccountingPayloadResult = void;
-export const scrubPrimitiveAccountingPayload = {
-  run: (params: IScrubPrimitiveAccountingPayloadParams, dbConn: any) =>
-    runQ<IScrubPrimitiveAccountingPayloadParams, IScrubPrimitiveAccountingPayloadResult>(
-      `UPDATE effectstream.primitive_accounting
-       SET payload = jsonb_set(
-             payload::jsonb,
-             '{payload,suppliedValue}',
-             '"[JUNK]"'::jsonb,
-             false
-           )::json
+export type IDeleteRejectedAccountingRowResult = void;
+export const deleteRejectedAccountingRow = {
+  run: (params: IDeleteRejectedAccountingRowParams, dbConn: any) =>
+    runQ<IDeleteRejectedAccountingRowParams, IDeleteRejectedAccountingRowResult>(
+      `DELETE FROM effectstream.primitive_accounting
        WHERE effectstream_block_height = :block_height!
          AND payload->'payload'->>'suppliedValue' = :supplied_value!`,
+      params,
+      dbConn,
+    ),
+};
+
+// Aggregated rejection counter — what survives a discarded blob. Bounded by
+// (heights with a rejection) × (distinct codes), never by blob count, so it
+// cannot itself be inflated by spam. See migrations/006-offer-rejections.sql.
+export interface IRecordOfferRejectionParams {
+  celestia_height: NumberOrString;
+  code: string;
+}
+export type IRecordOfferRejectionResult = void;
+export const recordOfferRejection = {
+  run: (params: IRecordOfferRejectionParams, dbConn: any) =>
+    runQ<IRecordOfferRejectionParams, IRecordOfferRejectionResult>(
+      `INSERT INTO offer_rejections (celestia_height, code, count)
+       VALUES (:celestia_height!, :code!, 1)
+       ON CONFLICT (celestia_height, code)
+       DO UPDATE SET count = offer_rejections.count + 1`,
+      params,
+      dbConn,
+    ),
+};
+
+// Recent rejection activity, newest height first — the ops view of "is
+// something spamming the namespace, and with what?".
+export interface IGetRecentRejectionsParams { limit: number }
+export interface IGetRecentRejectionsResult {
+  celestia_height: NumberOrString;
+  code: string;
+  count: number;
+}
+export const getRecentRejections = {
+  run: (params: IGetRecentRejectionsParams, dbConn: any) =>
+    runQ<IGetRecentRejectionsParams, IGetRecentRejectionsResult>(
+      `SELECT celestia_height, code, count
+       FROM offer_rejections
+       ORDER BY celestia_height DESC, code
+       LIMIT :limit!`,
       params,
       dbConn,
     ),

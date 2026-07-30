@@ -14,7 +14,8 @@ import {
   insertKnownToken,
   insertOfferFileWithHash,
   getOfferStatusByHash,
-  scrubPrimitiveAccountingPayload,
+  deleteRejectedAccountingRow,
+  recordOfferRejection,
   insertOfferFileNullifier,
   insertOfferFileUnshieldedSpend,
   insertOfferFileToken,
@@ -294,9 +295,10 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   // passes — so this ordering can change which rejection fires, never turn a
   // rejection into an acceptance.
   //
-  // Rejected blobs also get their stored payload scrubbed (see rejectOffer):
-  // the framework persists every fetched blob in primitive_accounting forever,
-  // which is otherwise unbounded, attacker-controlled storage.
+  // Rejected blobs are also deleted from the framework's accounting table (see
+  // rejectOffer): it persists every fetched blob forever, which is otherwise
+  // unbounded, attacker-controlled storage. The rejection itself survives as a
+  // bounded per-(height, code) counter in offer_rejections.
   //
   // Deterministic throughout: the verdict is a pure function of
   // (raw, refState, tblock, indexed sets). `tblock` is the Celestia block time
@@ -309,10 +311,15 @@ stm.addStateTransition("celestia-zswap", function* (data) {
       celestiaHeight: data.blockHeight,
       ...extra,
     });
-    // Same block, same transaction as the accounting INSERT — atomic.
-    yield* World.resolve(scrubPrimitiveAccountingPayload, {
+    // Same block, same transaction as the accounting INSERT — atomic. The
+    // body goes; the fact and reason survive as an aggregated counter.
+    yield* World.resolve(deleteRejectedAccountingRow, {
       block_height: data.blockHeight,
       supplied_value: raw,
+    });
+    yield* World.resolve(recordOfferRejection, {
+      celestia_height: data.blockHeight,
+      code,
     });
     emitAppEvent({
       type: "offer_rejected",

@@ -86,33 +86,23 @@ export function collectUnshieldedSpends(
 }
 
 /**
- * Untagged gives/wants for DB/API compatibility.
+ * Layer-tagged gives/wants, verbatim from MIP-0006 `deriveTokenLegs`.
  *
- * Delegates to MIP-0006 `P2pAtomicSwaps.deriveTokenLegs`, then merges by token
- * color only (dropping SHIELDED/UNSHIELDED) so `offer_file_tokens` uniqueness
- * `(offer_file_id, token_color, direction)` is preserved. Callers that need
- * layer tags should use `@effectstream/mip-zswap-offer/mip6` directly.
+ * The codec already nets per (color, layer) and keeps layers separate — the
+ * authoritative semantics. An earlier revision re-merged by color only,
+ * which NETTED the same color across layers: a give of shielded X against a
+ * want of unshielded X cancelled out, misstating the offer's actual terms
+ * (and could flip a genuine two-sided offer into NOT_A_SWAP). The DB
+ * uniqueness now includes `kind`, so no merging is needed or wanted.
  */
 export function deriveLegs(
   tx: UnprovenTransaction,
 ): { gives: OfferLeg[]; wants: OfferLeg[] } {
-  const { gives: taggedGives, wants: taggedWants } = P2pAtomicSwaps.deriveTokenLegs(tx);
-
-  // Re-merge by color: same hex on both layers net against each other, matching
-  // the pre-MIP6 validator behavior and the DB unique key.
-  const merged = new Map<string, bigint>();
-  for (const g of taggedGives) {
-    merged.set(g.token, (merged.get(g.token) ?? 0n) + BigInt(g.amount));
-  }
-  for (const w of taggedWants) {
-    merged.set(w.token, (merged.get(w.token) ?? 0n) - BigInt(w.amount));
-  }
-
-  const gives: OfferLeg[] = [];
-  const wants: OfferLeg[] = [];
-  for (const [token, delta] of merged) {
-    if (delta > 0n) gives.push({ token, amount: delta.toString() });
-    else if (delta < 0n) wants.push({ token, amount: (-delta).toString() });
-  }
-  return { gives, wants };
+  const { gives, wants } = P2pAtomicSwaps.deriveTokenLegs(tx);
+  const tag = (l: { token: string; amount: string; type: string }): OfferLeg => ({
+    token: l.token,
+    amount: l.amount,
+    kind: l.type === "UNSHIELDED" ? "UNSHIELDED" : "SHIELDED",
+  });
+  return { gives: gives.map(tag), wants: wants.map(tag) };
 }

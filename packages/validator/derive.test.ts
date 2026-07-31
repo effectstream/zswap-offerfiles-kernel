@@ -106,8 +106,8 @@ describe("deriveLegs", () => {
       ]),
     });
     const { gives, wants } = deriveLegs(tx);
-    expect(gives).toEqual([{ token: "aabb", amount: "100" }]);
-    expect(wants).toEqual([{ token: "ccdd", amount: "50" }]);
+    expect(gives).toEqual([{ token: "aabb", amount: "100", kind: "UNSHIELDED" }]);
+    expect(wants).toEqual([{ token: "ccdd", amount: "50", kind: "SHIELDED" }]);
   });
 
   test("merges the same token across segments", () => {
@@ -119,8 +119,28 @@ describe("deriveLegs", () => {
       ]),
     });
     const { gives, wants } = deriveLegs(tx);
-    expect(gives).toEqual([{ token: "aa", amount: "100" }]);
-    expect(wants).toEqual([{ token: "bb", amount: "10" }]);
+    expect(gives).toEqual([{ token: "aa", amount: "100", kind: "UNSHIELDED" }]);
+    expect(wants).toEqual([{ token: "bb", amount: "10", kind: "SHIELDED" }]);
+  });
+
+  test("same color on BOTH layers stays two legs — never netted (MIP-0006)", () => {
+    // Pre-fix, deriveLegs re-merged by color and NETTED across layers: giving
+    // 100 unshielded X while wanting 40 shielded X collapsed to a single
+    // give of 60 X, misstating the offer's actual terms.
+    const tx = mockTx({
+      imbalances: new Map([
+        [
+          0,
+          new Map<any, bigint>([
+            [unshielded("aa"), 100n],
+            [shielded("aa"), -40n],
+          ]),
+        ],
+      ]),
+    });
+    const { gives, wants } = deriveLegs(tx);
+    expect(gives).toEqual([{ token: "aa", amount: "100", kind: "UNSHIELDED" }]);
+    expect(wants).toEqual([{ token: "aa", amount: "40", kind: "SHIELDED" }]);
   });
 
   test("throws UnknownTokenTagError on an unexpected tag", () => {

@@ -51,8 +51,8 @@ async function seedArchived(
     [id, 100 + id, `blob-${id}`, hashOf(id), reason],
   );
   await client.query(
-    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction)
-     VALUES ($1, $2, '10', 'GIVING'), ($1, $3, '20', 'WANTING')`,
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind)
+     VALUES ($1, $2, '10', 'GIVING', 'SHIELDED'), ($1, $3, '20', 'WANTING', 'SHIELDED')`,
     [id, BASE, QUOTE],
   );
   for (const n of nullifiers) {

@@ -14,7 +14,7 @@ const pg = (await import("pg")).default;
 const {
   migrationTable,
   insertOfferFileWithHash,
-  insertOfferFileToken,
+  insertOfferFileTokenWithKind,
   insertOfferFileNullifier,
   archiveOfferByNullifierWithHash,
   getOfferByHash,
@@ -51,12 +51,12 @@ async function insertOffer(hash: string, blob: string): Promise<number> {
     client,
   );
   const id = rows[0].id;
-  await insertOfferFileToken.run(
-    { offer_file_id: id, token_color: TOKEN_G, amount: "10", direction: "GIVING" },
+  await insertOfferFileTokenWithKind.run(
+    { offer_file_id: id, token_color: TOKEN_G, amount: "10", direction: "GIVING", kind: "SHIELDED" },
     client,
   );
-  await insertOfferFileToken.run(
-    { offer_file_id: id, token_color: TOKEN_W, amount: "5", direction: "WANTING" },
+  await insertOfferFileTokenWithKind.run(
+    { offer_file_id: id, token_color: TOKEN_W, amount: "5", direction: "WANTING", kind: "UNSHIELDED" },
     client,
   );
   return id;

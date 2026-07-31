@@ -105,8 +105,8 @@ async function seedHistory(p: (typeof PAIRS)[number]) {
       [id, 1000 + id, `seed-hist-${id}`, seedHash(`seed-hist-${id}`), at],
     );
     await q(
-      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction) VALUES
-       ($1,$2,$3,'GIVING'), ($1,$4,$5,'WANTING')`,
+      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind) VALUES
+       ($1,$2,$3,'GIVING','SHIELDED'), ($1,$4,$5,'WANTING','SHIELDED')`,
       [id, give[0], String(give[1]), want[0], String(want[1])],
     );
     fills++;
@@ -126,8 +126,8 @@ async function seedBook(p: (typeof PAIRS)[number], mid: number) {
       [id, 2000 + id, `seed-book-${id}`, seedHash(`seed-book-${id}`), nowIso],
     );
     await q(
-      `INSERT INTO offer_file_tokens (offer_file_id, token_color, amount, direction) VALUES
-       ($1,$2,$3,'GIVING'), ($1,$4,$5,'WANTING')`,
+      `INSERT INTO offer_file_tokens (offer_file_id, token_color, amount, direction, kind) VALUES
+       ($1,$2,$3,'GIVING','SHIELDED'), ($1,$4,$5,'WANTING','SHIELDED')`,
       [id, give[0], String(give[1]), want[0], String(want[1])],
     );
     n++;

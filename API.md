@@ -219,10 +219,10 @@ Returns the current live offer book — offers published to Celestia, validated,
     "ttl_seconds": "3600",
     "created_at": "2026-06-01T12:00:05.123Z",
     "gives": [
-      { "token": "0000000000000000000000000000000000000000000000000000000000000000", "amount": "1000000" }
+      { "token": "0000000000000000000000000000000000000000000000000000000000000000", "amount": "1000000", "kind": "UNSHIELDED" }
     ],
     "wants": [
-      { "token": "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569", "amount": "500000" }
+      { "token": "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569", "amount": "500000", "kind": "SHIELDED" }
     ]
   }],
   "next_cursor": null
@@ -234,8 +234,8 @@ Returns the current live offer book — offers published to Celestia, validated,
 | `offer_hash` | **Content hash** — hex sha256 of the raw MIP-0005 transaction bytes (the bech32m-decoded blob). Identical on every node that indexes the same offer; use it, not `id`, for lookups. Set at ingestion for every indexed offer. |
 | `id` | Local row id. **Deployment-specific bookkeeping** — two nodes indexing the same namespace assign different ids. Never use it for cross-system references. |
 | `blob_chars` | Length of the bech32m blob served by `GET /api/zswaps/:hash` |
-| `gives` | Tokens the maker is offering |
-| `wants` | Tokens the maker is requesting |
+| `gives` | Tokens the maker is offering. Each leg carries `kind` (`SHIELDED`/`UNSHIELDED`, MIP-0006 `TokenLeg.type`) — the same color on different value layers is two distinct legs, never netted |
+| `wants` | Tokens the maker is requesting (same leg shape) |
 | `ttl_seconds` | Offer lifetime in seconds from `metadata_created_at`, as a **string** |
 | `metadata_maker_note` | Optional free-text note from the maker (`null` when none) |
 
@@ -269,8 +269,8 @@ curl "http://host:9999/api/zswaps/9f2c4a...e1"
   "metadata_expires_at": null,
   "metadata_maker_note": null,
   "ttl_seconds": "3600",
-  "gives": [ { "token": "00…00", "amount": "1000000" } ],
-  "wants": [ { "token": "70ce…69", "amount": "500000" } ]
+  "gives": [ { "token": "00…00", "amount": "1000000", "kind": "UNSHIELDED" } ],
+  "wants": [ { "token": "70ce…69", "amount": "500000", "kind": "SHIELDED" } ]
 }
 ```
 

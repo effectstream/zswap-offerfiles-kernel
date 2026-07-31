@@ -172,10 +172,14 @@ export const getPairStats24h = {
                 CASE WHEN g.token_color = :base!
                      THEN w.amount::numeric ELSE g.amount::numeric END AS quote_amt
          FROM offer_file_history h
-         JOIN offer_file_tokens_history g
-           ON g.offer_file_id = h.id AND g.direction = 'GIVING'
-         JOIN offer_file_tokens_history w
-           ON w.offer_file_id = h.id AND w.direction = 'WANTING'
+         JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
+               FROM offer_file_tokens_history
+               WHERE direction = 'GIVING' AND token_color IN (:base!, :quote!)
+               GROUP BY 1, 2) g ON g.offer_file_id = h.id
+         JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
+               FROM offer_file_tokens_history
+               WHERE direction = 'WANTING' AND token_color IN (:base!, :quote!)
+               GROUP BY 1, 2) w ON w.offer_file_id = h.id
          WHERE h.archive_reason = 'CONSUMED'
            AND NOT ${cancelledPredicate("h.id")}
            AND g.amount::numeric > 0
@@ -229,8 +233,14 @@ export const getTradeHistory = {
               g.token_color AS g_color, g.amount AS g_amt,
               w.token_color AS w_color, w.amount AS w_amt
        FROM offer_file_history h
-       JOIN offer_file_tokens_history g ON g.offer_file_id = h.id AND g.direction = 'GIVING'
-       JOIN offer_file_tokens_history w ON w.offer_file_id = h.id AND w.direction = 'WANTING'
+       JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric)::text AS amount
+             FROM offer_file_tokens_history
+             WHERE direction = 'GIVING' AND token_color IN (:base!, :quote!)
+             GROUP BY 1, 2) g ON g.offer_file_id = h.id
+       JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric)::text AS amount
+             FROM offer_file_tokens_history
+             WHERE direction = 'WANTING' AND token_color IN (:base!, :quote!)
+             GROUP BY 1, 2) w ON w.offer_file_id = h.id
        WHERE h.archive_reason = 'CONSUMED'
          AND NOT ${cancelledPredicate("h.id")}
          AND ((g.token_color = :base! AND w.token_color = :quote!)
@@ -258,8 +268,14 @@ export const getOpenLegs = {
       `SELECT g.token_color AS g_color, g.amount AS g_amt,
               w.token_color AS w_color, w.amount AS w_amt
        FROM offer_file o
-       JOIN offer_file_tokens g ON g.offer_file_id = o.id AND g.direction = 'GIVING'
-       JOIN offer_file_tokens w ON w.offer_file_id = o.id AND w.direction = 'WANTING'
+       JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric)::text AS amount
+             FROM offer_file_tokens
+             WHERE direction = 'GIVING' AND token_color IN (:base!, :quote!)
+             GROUP BY 1, 2) g ON g.offer_file_id = o.id
+       JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric)::text AS amount
+             FROM offer_file_tokens
+             WHERE direction = 'WANTING' AND token_color IN (:base!, :quote!)
+             GROUP BY 1, 2) w ON w.offer_file_id = o.id
        WHERE ((g.token_color = :base! AND w.token_color = :quote!)
            OR (g.token_color = :quote! AND w.token_color = :base!))`,
       params,
@@ -332,9 +348,15 @@ export const upsertPairStatsByOfferId = {
            1,
            w.amount::numeric / NULLIF(g.amount::numeric, 0),
            NOW()
-       FROM offer_file_tokens_history g
-       JOIN offer_file_tokens_history w ON w.offer_file_id = g.offer_file_id AND w.direction = 'WANTING'
-       WHERE g.direction = 'GIVING' AND g.offer_file_id = :offer_id!
+       FROM (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
+             FROM offer_file_tokens_history
+             WHERE direction = 'GIVING' AND offer_file_id = :offer_id!
+             GROUP BY 1, 2) g
+       JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
+             FROM offer_file_tokens_history
+             WHERE direction = 'WANTING' AND offer_file_id = :offer_id!
+             GROUP BY 1, 2) w ON w.offer_file_id = g.offer_file_id
+       WHERE g.offer_file_id = :offer_id!
          AND NOT ${cancelledPredicate("g.offer_file_id")}
        ON CONFLICT (pair_key) DO UPDATE SET
            trade_count    = pair_stats.trade_count + 1,
@@ -486,6 +508,26 @@ export const insertNullifierWithTx = {
     ),
 };
 
+// Leg insert carrying the MIP-0006 layer tag. Supersedes the generated
+// InsertOfferFileToken (which predates the kind column) at the STM call site.
+export interface IInsertOfferFileTokenWithKindParams {
+  offer_file_id: number;
+  token_color: string;
+  amount: string;
+  direction: string;
+  kind: string;
+}
+export type IInsertOfferFileTokenWithKindResult = void;
+export const insertOfferFileTokenWithKind = {
+  run: (params: IInsertOfferFileTokenWithKindParams, dbConn: any) =>
+    runQ<IInsertOfferFileTokenWithKindParams, IInsertOfferFileTokenWithKindResult>(
+      `INSERT INTO offer_file_tokens (offer_file_id, token_color, amount, direction, kind)
+       VALUES (:offer_file_id!, :token_color!, :amount!, :direction!, :kind!)`,
+      params,
+      dbConn,
+    ),
+};
+
 // Open + archived in one probe: dedup gate at ingestion/submit, and the
 // status half of GET /api/zswaps/:hash.
 export interface IGetOfferStatusByHashParams { offer_hash: string }
@@ -554,14 +596,15 @@ export interface IGetOfferTokensAnyResult {
   token_color: string;
   amount: string;
   direction: string;
+  kind: string;
 }
 export const getOfferTokensAny = {
   run: (params: IGetOfferTokensAnyParams, dbConn: any) =>
     runQ<IGetOfferTokensAnyParams, IGetOfferTokensAnyResult>(
-      `SELECT token_color, amount, direction FROM offer_file_tokens
+      `SELECT token_color, amount, direction, kind FROM offer_file_tokens
        WHERE :live! AND offer_file_id = :offer_file_id!
        UNION ALL
-       SELECT token_color, amount, direction FROM offer_file_tokens_history
+       SELECT token_color, amount, direction, kind FROM offer_file_tokens_history
        WHERE NOT :live! AND offer_file_id = :offer_file_id!`,
       params,
       dbConn,
@@ -575,11 +618,12 @@ export interface IGetOfferTokensForOffersResult {
   token_color: string;
   amount: string;
   direction: string;
+  kind: string;
 }
 export const getOfferTokensForOffers = {
   run: (params: IGetOfferTokensForOffersParams, dbConn: any) =>
     runQ<IGetOfferTokensForOffersParams, IGetOfferTokensForOffersResult>(
-      `SELECT offer_file_id, token_color, amount, direction
+      `SELECT offer_file_id, token_color, amount, direction, kind
        FROM offer_file_tokens
        WHERE offer_file_id = ANY(:offer_file_ids!)`,
       params,
@@ -698,8 +742,8 @@ archived_offer AS (
     RETURNING id
 ),
 archived_tokens AS (
-    INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction)
-    SELECT offer_file_id, token_color, amount, direction
+    INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind)
+    SELECT offer_file_id, token_color, amount, direction, kind
     FROM offer_file_tokens
     WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
 ),

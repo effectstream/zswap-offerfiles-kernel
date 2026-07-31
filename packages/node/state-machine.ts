@@ -17,7 +17,7 @@ import {
   recordOfferRejection,
   insertOfferFileNullifier,
   insertOfferFileUnshieldedSpend,
-  insertOfferFileToken,
+  insertOfferFileTokenWithKind,
   archiveOfferByNullifierWithHash,
   archiveOfferByUnshieldedSpendWithHash,
   archiveOfferByIdTtlWithHash,
@@ -483,19 +483,21 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     // queries copy these into offer_file_tokens_history in one statement,
     // so they have to exist when the archive runs.
     for (const g of gives) {
-      yield* World.resolve(insertOfferFileToken, {
+      yield* World.resolve(insertOfferFileTokenWithKind, {
         offer_file_id: offerFileId,
         token_color: g.token,
         amount: g.amount,
         direction: "GIVING",
+        kind: g.kind,
       });
     }
     for (const w of wants) {
-      yield* World.resolve(insertOfferFileToken, {
+      yield* World.resolve(insertOfferFileTokenWithKind, {
         offer_file_id: offerFileId,
         token_color: w.token,
         amount: w.amount,
         direction: "WANTING",
+        kind: w.kind,
       });
     }
 

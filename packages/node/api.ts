@@ -35,7 +35,7 @@ import { offerHashFromBlob } from "./offer-hash.ts";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
 
-type OfferLegDto = { token: string; amount: string };
+type OfferLegDto = { token: string; amount: string; kind: string };
 
 export const apiRouter: StartConfigApiRouter = async function (
   server: any,
@@ -174,7 +174,7 @@ export const apiRouter: StartConfigApiRouter = async function (
         entry = { gives: [], wants: [] };
         byOffer.set(leg.offer_file_id, entry);
       }
-      const dto = { token: leg.token_color, amount: leg.amount };
+      const dto = { token: leg.token_color, amount: leg.amount, kind: leg.kind };
       if (leg.direction === "GIVING") entry.gives.push(dto);
       else entry.wants.push(dto);
     }
@@ -220,7 +220,7 @@ export const apiRouter: StartConfigApiRouter = async function (
     const gives: OfferLegDto[] = [];
     const wants: OfferLegDto[] = [];
     for (const leg of legs) {
-      const dto = { token: leg.token_color, amount: leg.amount };
+      const dto = { token: leg.token_color, amount: leg.amount, kind: leg.kind };
       if (leg.direction === "GIVING") gives.push(dto);
       else wants.push(dto);
     }

@@ -43,8 +43,8 @@ beforeAll(async () => {
       [i, 100 + i, `blob-${i}`, hashOf(i), String(minute)],
     );
     await client.query(
-      `INSERT INTO offer_file_tokens (offer_file_id, token_color, amount, direction)
-       VALUES ($1, $2, '10', 'GIVING')`,
+      `INSERT INTO offer_file_tokens (offer_file_id, token_color, amount, direction, kind)
+       VALUES ($1, $2, '10', 'GIVING', 'SHIELDED')`,
       [i, (i % 2 === 0 ? "a" : "b").repeat(64)],
     );
   }
@@ -93,10 +93,11 @@ describe("GET /api/zswaps — keyset pagination over HTTP", () => {
     );
   });
 
-  test("rows carry legs and no blob", async () => {
+  test("rows carry layer-tagged legs and no blob", async () => {
     const { body } = await getJson("/api/zswaps?limit=1");
     const offer = body.offers[0];
     expect(offer.gives.length).toBe(1);
+    expect(offer.gives[0].kind).toBe("SHIELDED"); // MIP-0006 TokenLeg.type
     expect(offer.transaction_hex).toBeUndefined();
     expect(offer.blob_chars).toBeGreaterThan(0);
   });

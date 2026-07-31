@@ -5,9 +5,9 @@
 import { config, header } from "./config.ts";
 
 header("SSE Event Stream");
-console.log(`Connecting to ${config.nodeUrl}/api/events  (Ctrl+C to stop)\n`);
+console.log(`Connecting to ${config.nodeUrl}/v1/offers/stream  (Ctrl+C to stop)\n`);
 
-const res = await fetch(`${config.nodeUrl}/api/events`);
+const res = await fetch(`${config.nodeUrl}/v1/offers/stream`);
 if (!res.ok || !res.body) {
   console.error(`Failed to connect: ${res.status}`);
   process.exit(1);

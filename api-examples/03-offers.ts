@@ -10,8 +10,8 @@ const params = new URLSearchParams({ limit: "10" });
 if (process.env.TOKEN)     params.set("token",     process.env.TOKEN);
 if (process.env.DIRECTION) params.set("direction", process.env.DIRECTION);
 
-const { offers, next_cursor } = await get<any>(`/api/zswaps?${params}`);
-print(`GET /api/zswaps?${params}`, { offers, next_cursor });
+const { offers, next_cursor } = await get<any>(`/v1/offers?${params}`);
+print(`GET /v1/offers?${params}`, { offers, next_cursor });
 
 if (offers.length === 0) {
   console.log("\nNo open offers found.");
@@ -28,11 +28,11 @@ if (offers.length === 0) {
   const first = offers[0];
   if (first?.offer_hash) {
     console.log(`\nStatus check for offer ${first.offer_hash.slice(0, 12)}…:`);
-    const status = await get<any>(`/api/zswaps/${first.offer_hash}/status`);
-    print("GET /api/zswaps/:hash/status", status);
+    const status = await get<any>(`/v1/offers/${first.offer_hash}/status`);
+    print("GET /v1/offers/:hash/status", status);
 
     console.log(`\nFull offer (with blob) for ${first.offer_hash.slice(0, 12)}…:`);
-    const detail = await get<any>(`/api/zswaps/${first.offer_hash}`);
-    print("GET /api/zswaps/:hash", { ...detail, blob: `${detail.blob.slice(0, 40)}… (${detail.blob.length} chars)` });
+    const detail = await get<any>(`/v1/offers/${first.offer_hash}`);
+    print("GET /v1/offers/:hash", { ...detail, blob: `${detail.blob.slice(0, 40)}… (${detail.blob.length} chars)` });
   }
 }

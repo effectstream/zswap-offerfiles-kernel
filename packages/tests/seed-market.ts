@@ -4,9 +4,9 @@
 //
 //   • Historic trades → offer_file_history (archive_reason='CONSUMED'): a
 //     coherent price random-walk over the last ~48h per pair. These back
-//     /api/chart/history and /api/chart/stats.
+//     /v1/chart/history and /v1/chart/stats.
 //   • Live order book → offer_file (+ offer_file_tokens): asks above / bids
-//     below each pair's mid. These back /api/zswaps → the on-screen order book.
+//     below each pair's mid. These back /v1/offers → the on-screen order book.
 //
 // All inserts are DIRECT SQL against the dev PGlite (127.0.0.1:5432). They are
 // DISPLAY-real: they render and price exactly like real offers, but the seeded
@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 // Seed rows carry a placeholder blob, not a decodable swapoffer1… string, so
 // the real offerHashFromBlob() cannot apply. Hash the placeholder itself:
 // still unique + stable, which keeps the hash-addressed endpoints
-// (GET /api/zswaps/:hash) working against seeded data in the UI.
+// (GET /v1/offers/:hash) working against seeded data in the UI.
 const seedHash = (blob: string) => createHash("sha256").update(blob).digest("hex");
 
 const SEED_BASE = 9_000_000; // all seeded rows live at/above this id

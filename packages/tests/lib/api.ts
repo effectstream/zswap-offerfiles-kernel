@@ -1,5 +1,5 @@
 // Node HTTP API helpers: submit offers and read them back. Reading offers back
-// from GET /api/zswaps (and reconstructing the tx from the blob the API serves)
+// from GET /v1/offers (and reconstructing the tx from the blob the API serves)
 // is the faithful path — it exercises the Celestia fetch + validate + index +
 // serve primitives, not an in-memory shortcut.
 
@@ -14,10 +14,10 @@ export interface SubmitResult {
 }
 
 export async function submitOffer(blob: string): Promise<SubmitResult> {
-  const r = await fetch(`${API}/api/zswap/submit`, {
+  const r = await fetch(`${API}/v1/offers`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ blob }),
+    body: JSON.stringify({ offer: blob }),
   });
   let body: any;
   try {
@@ -58,7 +58,7 @@ export async function getZswapsPage(
   if (params.token) q.set("token", params.token);
   if (params.after_hash) q.set("after_hash", params.after_hash);
   q.set("limit", String(params.limit ?? 100));
-  const r = await fetch(`${API}/api/zswaps?${q.toString()}`);
+  const r = await fetch(`${API}/v1/offers?${q.toString()}`);
   return (await r.json()) as ApiZswapsPage;
 }
 
@@ -69,8 +69,8 @@ export async function getZswaps(params: { token?: string; limit?: number } = {})
 
 /** The list is blob-free; the blob is served per-offer by content hash. */
 export async function getZswapByHash(hash: string): Promise<ApiZswapDetail> {
-  const r = await fetch(`${API}/api/zswaps/${hash}`);
-  if (!r.ok) throw new Error(`GET /api/zswaps/${hash} -> ${r.status}`);
+  const r = await fetch(`${API}/v1/offers/${hash}`);
+  if (!r.ok) throw new Error(`GET /v1/offers/${hash} -> ${r.status}`);
   return (await r.json()) as ApiZswapDetail;
 }
 

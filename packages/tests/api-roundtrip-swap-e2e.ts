@@ -1,7 +1,7 @@
 // API ROUND-TRIP swap e2e — the faithful end-to-end path:
 //
-//   makers PUSH offers via /api/zswap/submit → batcher → Celestia → indexed
-//   SOLVER READS the offers back from GET /api/zswaps and reconstructs each
+//   makers PUSH offers via /v1/offers → batcher → Celestia → indexed
+//   SOLVER READS the offers back from GET /v1/offers and reconstructs each
 //   tx from the served blob (transaction_hex), then merges + settles via the
 //   batcher. This validates the Celestia fetch + validate + index + serve
 //   primitives, not an in-memory shortcut.
@@ -112,14 +112,14 @@ try {
 
   // ── PUSH both offers via the API → Celestia → indexed ──
   const offersBefore = await count("offer_file");
-  console.log(`${TAG} pushing 2 offers via /api/zswap/submit…`);
+  console.log(`${TAG} pushing 2 offers via /v1/offers…`);
   await submitIndexed(blob0, "P0 offer (give T0 / want T1)");
   await submitIndexed(blob1, "P1 offer (give T1 / want T0)");
   const indexedOk = await waitFor("offers indexed", async () => (await count("offer_file")) >= offersBefore + 2, 24);
   check("2 offers indexed (reached Celestia + STM)", indexedOk);
 
   // ── READ the offers back from the API and reconstruct them ──
-  console.log(`${TAG} reading available zswaps back from GET /api/zswaps…`);
+  console.log(`${TAG} reading available zswaps back from GET /v1/offers…`);
   const myColors = new Set([T0, T1]);
   const apiOffers = (await getZswaps({ limit: 100 })).filter((o) =>
     o.gives.some((g) => myColors.has(g.token)) || o.wants.some((w) => myColors.has(w.token))
@@ -134,7 +134,7 @@ try {
 
   // Reconstruct each offer tx FROM the API blob (the Celestia round-trip data).
   // The list is blob-free; each blob is fetched by content hash.
-  console.log(`${TAG} reconstructing offers from GET /api/zswaps/:hash…`);
+  console.log(`${TAG} reconstructing offers from GET /v1/offers/:hash…`);
   let reconstructed;
   try {
     const details = await Promise.all(apiOffers.map((o) => getZswapByHash(o.offer_hash!)));

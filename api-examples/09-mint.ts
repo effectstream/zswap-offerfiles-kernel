@@ -1,11 +1,11 @@
 // 09-mint.ts — Mint test tokens into the wallet via the on-chain OfferFiles contract.
 //
 // What this does:
-//   1. Fetches /api/midnight/config (contract address, indexer, proof server).
+//   1. Fetches /v1/midnight/config (contract address, indexer, proof server).
 //   2. Builds the maker wallet (WALLET_SEED) and connects to the deployed contract.
 //   3. Calls mint_shielded twice (two distinct token colors, stable domain separators)
 //      and mint_unshielded once.
-//   4. Registers each color with /api/known-tokens for human-readable display.
+//   4. Registers each color with /v1/known-tokens for human-readable display.
 //   5. Writes the minted colors to /tmp/zswap-minted-tokens.json so 10-submit-offer
 //      and 11-settle-offer can consume them automatically.
 //
@@ -65,7 +65,7 @@ const midnightCfg = await get<{
   indexerWsUri: string;
   proofServerUri: string;
   networkId: string;
-}>("/api/midnight/config");
+}>("/v1/midnight/config");
 
 setNetworkId(midnightCfg.networkId as any);
 
@@ -157,7 +157,7 @@ const registrations = [
 console.log("Registering token names…");
 for (const r of registrations) {
   try {
-    await post("/api/known-tokens", r);
+    await post("/v1/known-tokens", r);
     console.log(`  ✅ ${r.name} registered`);
   } catch (e: any) {
     if (e.message?.includes("409") || e.message?.includes("already")) {

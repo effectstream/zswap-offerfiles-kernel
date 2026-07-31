@@ -8,7 +8,7 @@ This document targets application developers who want to interact with the endpo
 [`http://localhost:10601/docs/`](http://localhost:10601/docs/) (Vite + React),
 or `bun run docs:build` and open
 [`http://localhost:9999/docs`](http://localhost:9999/docs). Debug offer upload
-(`POST /api/zswap/submit`), browse the open book, poll status, stream SSE,
+(`POST /v1/offers`), browse the open book, poll status, stream SSE,
 settle via the batcher's `midnight-balancer` target, and connect a wallet to
 inspect balances / mint test tokens (`VITE_PROOF_SERVER_URL`, default
 `http://localhost:6300`).
@@ -68,7 +68,7 @@ BATCHER_SUBMIT_URL=http://127.0.0.1:3334
 OFFER_TTL_SECONDS=                      # offer lifetime; DEFAULTS to ROOT_WINDOW_SECONDS
                                         # (shielded fillability tracks the root window)
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
-ENABLE_TOKEN_REGISTRY=false             # POST /api/known-tokens; names are UNVERIFIED — dev/e2e only
+ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
 ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
                                         # 3600 (1 h) on all currently deployed networks;
                                         # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
@@ -110,7 +110,7 @@ Celestia DA                    Midnight
 
 **Offer lifecycle:**
 
-1. A maker encodes a `swapoffer1…` blob and POSTs it to `/api/zswap/submit`.
+1. A maker encodes a `swapoffer1…` blob and POSTs it to `/v1/offers`.
 2. The node validates it, then forwards it to the batcher which publishes it as a Celestia blob.
 3. The Celestia indexer picks up the blob and re-validates it deterministically. On success the offer lands in `offer_file`.
 4. When any input coin is spent on Midnight (nullifier seen or unshielded UTXO consumed), the offer moves to `offer_file_history` with `archive_reason = 'CONSUMED'`.
@@ -140,12 +140,12 @@ curl http://host:9999/health
 
 ---
 
-#### `GET /api/health/sync`
+#### `GET /v1/health/sync`
 
 Per-protocol sync progress. Use this to confirm the node is serving live data before submitting offers.
 
 ```bash
-curl http://host:9999/api/health/sync
+curl http://host:9999/v1/health/sync
 ```
 
 **Response**
@@ -191,7 +191,7 @@ On a fresh database the initial sync of 89 days of Midnight history takes approx
 
 ### Reading offers
 
-#### `GET /api/zswaps`
+#### `GET /v1/offers`
 
 Returns the current live offer book — offers published to Celestia, validated, and not yet consumed or expired.
 
@@ -204,7 +204,7 @@ Returns the current live offer book — offers published to Celestia, validated,
 | `limit` | integer | 100 | Max results (capped at 100). |
 | `after_hash` | hex string | — | Keyset cursor: the previous page's `next_cursor`. Malformed or unknown values answer `400 INVALID_CURSOR` (never a silent first page). There is **no `offset`** — cursors cost O(1) regardless of depth and are immune to concurrent inserts/archives shifting the page window. |
 
-**Response** — `{ "offers": [...], "next_cursor": "<hash>" | null }`, newest first. Pass `next_cursor` back as `after_hash` to fetch the next page; `null` means exhausted (a full final page returns a cursor whose follow-up fetch yields `{ "offers": [], "next_cursor": null }`). The list is **blob-free**: a single offer blob is 16–25 KB of bech32m, so a 100-row page carrying blobs would be megabytes. Each row instead carries `offer_hash`; fetch the blob per offer via `GET /api/zswaps/:hash`.
+**Response** — `{ "offers": [...], "next_cursor": "<hash>" | null }`, newest first. Pass `next_cursor` back as `after_hash` to fetch the next page; `null` means exhausted (a full final page returns a cursor whose follow-up fetch yields `{ "offers": [], "next_cursor": null }`). The list is **blob-free**: a single offer blob is 16–25 KB of bech32m, so a 100-row page carrying blobs would be megabytes. Each row instead carries `offer_hash`; fetch the blob per offer via `GET /v1/offers/:hash`.
 
 ```json
 {
@@ -232,7 +232,7 @@ Returns the current live offer book — offers published to Celestia, validated,
 |---|---|
 | `offer_hash` | **Content hash** — hex sha256 of the raw MIP-0005 transaction bytes (the bech32m-decoded blob). Identical on every node that indexes the same offer; use it, not `id`, for lookups. Set at ingestion for every indexed offer. |
 | `id` | Local row id. **Deployment-specific bookkeeping** — two nodes indexing the same namespace assign different ids. Never use it for cross-system references. |
-| `blob_chars` | Length of the bech32m blob served by `GET /api/zswaps/:hash` |
+| `blob_chars` | Length of the bech32m blob served by `GET /v1/offers/:hash` |
 | `gives` | Tokens the maker is offering. Each leg carries `kind` (`SHIELDED`/`UNSHIELDED`, MIP-0006 `TokenLeg.type`) — the same color on different value layers is two distinct legs, never netted |
 | `wants` | Tokens the maker is requesting (same leg shape) |
 | `ttl_seconds` | Offer lifetime in seconds from `metadata_created_at`, as a **string** |
@@ -241,17 +241,17 @@ All string/number fields are returned as-is from the DB; numeric-looking values 
 
 ```bash
 # All open offers giving NIGHT:
-curl "http://host:9999/api/zswaps?token=0000000000000000000000000000000000000000000000000000000000000000&direction=GIVING"
+curl "http://host:9999/v1/offers?token=0000000000000000000000000000000000000000000000000000000000000000&direction=GIVING"
 ```
 
 ---
 
-#### `GET /api/zswaps/:hash`
+#### `GET /v1/offers/:hash`
 
 One offer — **including its `swapoffer1…` blob** — addressed by content hash (the hex sha256 of the raw offer bytes, as served in list rows and submit responses). Resolves archived offers too, so a consumed/expired offer still returns with its final status.
 
 ```bash
-curl "http://host:9999/api/zswaps/9f2c4a...e1"
+curl "http://host:9999/v1/offers/9f2c4a...e1"
 ```
 
 **Response**
@@ -259,7 +259,7 @@ curl "http://host:9999/api/zswaps/9f2c4a...e1"
 ```json
 {
   "offer_hash": "9f2c4a…e1",
-  "status": "open",
+  "status": "live",
   "blob": "swapoffer1...",
   "celestia_height": "12231800",
   "created_at": "2026-06-01T12:00:05.123Z",
@@ -271,54 +271,54 @@ curl "http://host:9999/api/zswaps/9f2c4a...e1"
 }
 ```
 
-`status` is `"open"` | `"consumed"` | `"cancelled"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
+`status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
 
-#### `GET /api/zswaps/:hash/status`
+#### `GET /v1/offers/:hash/status`
 
 Lightweight status probe by content hash:
 
 ```json
-{ "offer_hash": "9f2c4a…e1", "status": "open" }
+{ "offer_hash": "9f2c4a…e1", "status": "live" }
 ```
 
-`status` is `"open"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"`.
+`status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"`.
 
 **Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's inputs in *one* Midnight transaction — so an archived offer whose nullifiers were spent across different transactions, or only partially spent, is reported `"cancelled"` with certainty: it can never have settled. `"consumed"` means all inputs left in a single transaction; for single-input offers (and unshielded-only offers, which have no nullifiers to group) this cannot be distinguished from the maker consolidating their own coins — output-commitment tracking (phase 2) tightens it to verified fills. Chart/trade data counts only `"consumed"` offers.
 
 ---
 
-#### `POST /api/zswap/status`
+#### `POST /v1/offers/status`
 
 Status lookup by blob, for reconciling a "My Trades" list on startup when only the blobs are held client-side. POST body — a real blob is 16–25 KB, beyond any practical query-string limit.
 
-**Body:** `{ "blob": "swapoffer1..." }`, or batched: `{ "blobs": ["swapoffer1...", ...] }` (max 50).
+**Body:** `{ "offer": "swapoffer1..." }`, or batched: `{ "blobs": ["swapoffer1...", ...] }` (max 50).
 
 ```bash
-curl -X POST http://host:9999/api/zswap/status \
+curl -X POST http://host:9999/v1/offers/status \
   -H 'Content-Type: application/json' \
-  -d '{"blob":"swapoffer1..."}'
+  -d '{"offer":"swapoffer1..."}'
 ```
 
 **Response**
 
 ```json
-{ "blob": "swapoffer1...", "offer_hash": "9f2c4a…e1", "status": "open" }
+{ "blob": "swapoffer1...", "offer_hash": "9f2c4a…e1", "status": "live" }
 ```
 
-Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"open"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"` (see *Fill vs cancel* above).
+Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"` (see *Fill vs cancel* above).
 
 Lookups resolve via the offer's content hash (an indexed probe). A blob that does not decode as a `swapoffer1…` string answers `"not_found"` **without touching the database** — undecodable blobs can never have been indexed, and this keeps junk submissions from costing more than a hash attempt.
 
-> `GET /api/zswap/status?blob=…` still exists for backward compatibility, but real offer blobs exceed proxy URI limits (nginx answers **414**) — use the POST variant or `GET /api/zswaps/:hash/status`.
+> `GET /v1/offers/status?blob=…` still exists for backward compatibility, but real offer blobs exceed proxy URI limits (nginx answers **414**) — use the POST variant or `GET /v1/offers/:hash/status`.
 
 ---
 
-#### `GET /api/pairs`
+#### `GET /v1/pairs`
 
-All known trading pairs, combining historical fill data from `pair_stats` with live open-offer counts. Use this to populate a pair picker or market list. Pairs are keyed by **token color only** — resolve display names separately via `GET /api/known-tokens`.
+All known trading pairs, combining historical fill data from `pair_stats` with live open-offer counts. Use this to populate a pair picker or market list. Pairs are keyed by **token color only** — resolve display names separately via `GET /v1/known-tokens`.
 
 ```bash
-curl http://host:9999/api/pairs
+curl http://host:9999/v1/pairs
 ```
 
 ```json
@@ -344,7 +344,7 @@ curl http://host:9999/api/pairs
 
 ---
 
-#### `GET /api/known-tokens`
+#### `GET /v1/known-tokens`
 
 > **⚠️ Demo endpoint — do not use as a source of truth.**
 > This registry is a temporary convenience feature for this demo. The official Midnight token-metadata standard is not yet live. Names and kinds stored here are manually curated and unverified. Do not rely on this endpoint for authoritative token information.
@@ -352,7 +352,7 @@ curl http://host:9999/api/pairs
 All registered token colors.
 
 ```bash
-curl http://host:9999/api/known-tokens
+curl http://host:9999/v1/known-tokens
 ```
 
 ```json
@@ -365,7 +365,7 @@ New token colors are auto-registered when a valid offer containing them is index
 
 ---
 
-#### `POST /api/known-tokens`
+#### `POST /v1/known-tokens`
 
 > **⚠️ Demo endpoint — disabled by default.**
 > Requires `ENABLE_TOKEN_REGISTRY=true`; otherwise returns `404 NOT_ENABLED`. Enable it for local dev and e2e only.
@@ -374,7 +374,7 @@ New token colors are auto-registered when a valid offer containing them is index
 Register a human-readable name for a token color before any offers appear (e.g. immediately after a browser-wallet mint).
 
 ```bash
-curl -X POST http://host:9999/api/known-tokens \
+curl -X POST http://host:9999/v1/known-tokens \
   -H "Content-Type: application/json" \
   -d '{"color":"70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569","name":"TESTTOKENA","kind":"shielded"}'
 ```
@@ -407,14 +407,14 @@ curl -X POST http://host:9999/api/known-tokens \
 
 ### Writing offers
 
-#### `POST /api/zswap/submit`
+#### `POST /v1/offers`
 
 Validate and forward a `swapoffer1…` blob to Celestia DA via the batcher. This is the recommended submission path — structure and coin liveness are verified before any Celestia fee is incurred.
 
 ```bash
-curl -X POST http://host:9999/api/zswap/submit \
+curl -X POST http://host:9999/v1/offers \
   -H "Content-Type: application/json" \
-  -d '{"blob":"swapoffer1..."}'
+  -d '{"offer":"swapoffer1..."}'
 ```
 
 **Success `200`**
@@ -423,7 +423,7 @@ curl -X POST http://host:9999/api/zswap/submit \
 { "success": true, "offer_hash": "9f2c4a…e1", "blob": "swapoffer1...", "result": { ... } }
 ```
 
-`offer_hash` is the offer's content hash — track it with `GET /api/zswaps/:hash` once indexed.
+`offer_hash` is the offer's content hash — track it with `GET /v1/offers/:hash` once indexed.
 
 **Error `400`**
 
@@ -440,13 +440,13 @@ curl -X POST http://host:9999/api/zswap/submit \
 | `ROOT_UNKNOWN` | The shielded input proves against a Merkle root outside the `ROOT_WINDOW_SECONDS` retention window |
 | `DUPLICATE_OFFER` (`409`) | Byte-identical offer already indexed (open **or** archived) — rejected before any Celestia fee |
 
-Validation consults the node's local state only — no live RPC calls are made. `ROOT_UNKNOWN` can fire while the node is still syncing (the root simply hasn't arrived yet). Retry once `/api/health/sync` reports `"status":"ok"`.
+Validation consults the node's local state only — no live RPC calls are made. `ROOT_UNKNOWN` can fire while the node is still syncing (the root simply hasn't arrived yet). Retry once `/v1/health/sync` reports `"status":"ok"`.
 
 ---
 
 ### Market data
 
-#### `GET /api/quote`
+#### `GET /v1/quote`
 
 Price quote for a token swap, backed by the `token_prices` table. On first request the deterministic fallback price is written; subsequent calls are consistent. Operators can override rows directly in the DB.
 
@@ -455,7 +455,7 @@ Both tokens must be registered in `known_tokens` — unknown colors answer `404 
 **Query parameters:** `from_token`, `to_token` (64-hex, no `0x`), `from_amount` (base units), optional `to_amount`.
 
 ```bash
-curl "http://host:9999/api/quote?from_token=0000...0000&to_token=70ce...b569&from_amount=1000000"
+curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from_amount=1000000"
 ```
 
 **Response**
@@ -488,12 +488,12 @@ curl "http://host:9999/api/quote?from_token=0000...0000&to_token=70ce...b569&fro
 
 ---
 
-#### `GET /api/chart/stats?base=<A>&quote=<B>`
+#### `GET /v1/chart/stats?base=<A>&quote=<B>`
 
 24-hour statistics for a pair derived from consumed (filled) offers. Falls back to the mid of current open offers when no fills exist yet.
 
 ```bash
-curl "http://host:9999/api/chart/stats?base=70ce...b569&quote=0000...0000"
+curl "http://host:9999/v1/chart/stats?base=70ce...b569&quote=0000...0000"
 ```
 
 ```json
@@ -511,7 +511,7 @@ curl "http://host:9999/api/chart/stats?base=70ce...b569&quote=0000...0000"
 
 ---
 
-#### `GET /api/chart/history?base=<A>&quote=<B>`
+#### `GET /v1/chart/history?base=<A>&quote=<B>`
 
 Last 120 fills (consumed offers) for a pair, newest first.
 
@@ -525,12 +525,12 @@ Last 120 fills (consumed offers) for a pair, newest first.
 
 ### Real-time events
 
-#### `GET /api/events`
+#### `GET /v1/offers/stream`
 
 Server-Sent Events stream for real-time offer lifecycle notifications. A comment-only keepalive (`: heartbeat`) is sent every 30 seconds.
 
 ```bash
-curl -N http://host:9999/api/events
+curl -N http://host:9999/v1/offers/stream
 ```
 
 **Event types**
@@ -558,12 +558,12 @@ was consumed — handle both.
 
 ### Midnight configuration
 
-#### `GET /api/midnight/config`
+#### `GET /v1/midnight/config`
 
 Public Midnight configuration the browser contract client needs. Never includes secrets.
 
 ```bash
-curl http://host:9999/api/midnight/config
+curl http://host:9999/v1/midnight/config
 ```
 
 ```json
@@ -582,7 +582,7 @@ Returns `500` if `MIDNIGHT_CONTRACT_ADDRESS` is not set.
 
 ## Batcher API — port 3334
 
-The batcher accepts `swapoffer1…` blobs, validates them, and publishes them as Celestia blobs. In normal usage you go through `/api/zswap/submit` on the node (which calls the batcher internally). Direct batcher access is for advanced integrations.
+The batcher accepts `swapoffer1…` blobs, validates them, and publishes them as Celestia blobs. In normal usage you go through `/v1/offers` on the node (which calls the batcher internally). Direct batcher access is for advanced integrations.
 
 Base URL: `http://<host>:3334`  
 Swagger UI: `http://<host>:3334/documentation`
@@ -693,11 +693,11 @@ The decoded offer contains:
 | `inputRoots` | Merkle roots against which the input proofs are made |
 | `gives` / `wants` | The token legs of the swap |
 
-All of these are checked by `/api/zswap/submit` before any Celestia fee is incurred.
+All of these are checked by `/v1/offers` before any Celestia fee is incurred.
 
 ### Ingestion pipeline (the critical path)
 
-Anyone can post any bytes to the shared Celestia namespace for the price of a blob fee, so the **STM ingestion ladder is the authoritative filter** — `/api/zswap/submit` and the batcher can both be bypassed. It is ordered cheapest-first so a blob that was never going to be indexed costs as little as possible:
+Anyone can post any bytes to the shared Celestia namespace for the price of a blob fee, so the **STM ingestion ladder is the authoritative filter** — `/v1/offers` and the batcher can both be bypassed. It is ordered cheapest-first so a blob that was never going to be indexed costs as little as possible:
 
 | # | Check | Cost | Rejects |
 |---|---|---|---|
@@ -716,7 +716,7 @@ Crypto runs **last** because it is orders of magnitude more expensive than every
 
 Rejected blobs are additionally **deleted** from `effectstream.primitive_accounting` in the same block transaction that created them. The framework persists every fetched blob there permanently, so on a permissionless namespace that is unbounded storage anyone can fill for the price of a blob fee.
 
-What survives is the *fact* of the rejection, aggregated in `offer_rejections` as one row per `(celestia_height, code)` and surfaced on `GET /api/health/sync` as `recent_rejections`. Aggregation is what makes that table safe to keep: its row count is bounded by heights × reject codes, never by the number of blobs posted — a million junk blobs in one block produce a single row with `count: 1000000`.
+What survives is the *fact* of the rejection, aggregated in `offer_rejections` as one row per `(celestia_height, code)` and surfaced on `GET /v1/health/sync` as `recent_rejections`. Aggregation is what makes that table safe to keep: its row count is bounded by heights × reject codes, never by the number of blobs posted — a million junk blobs in one block produce a single row with `count: 1000000`.
 
 Step 5 of the ideal ladder — *reject offers below a minimum value* — is **not implemented**: it needs a price oracle. MIP-0006 suggests the natural floor is the offer's own publication cost. The derived legs are available at that point in the pipeline, so the hook slot exists.
 
@@ -726,7 +726,7 @@ Step 5 of the ideal ladder — *reject offers below a minimum value* — is **no
 BLOB="swapoffer1..."
 
 # Recommended: submit through the node (validates + forwards to batcher)
-curl -s -X POST http://host:9999/api/zswap/submit \
+curl -s -X POST http://host:9999/v1/offers \
   -H "Content-Type: application/json" \
   -d "{\"blob\":\"$BLOB\"}" | jq .
 
@@ -744,13 +744,13 @@ curl -s -X POST http://host:3334/send-input \
   }' | jq .
 
 # Confirm the offer landed in the indexer (list is blob-free; note the offer_hash)
-curl -s "http://host:9999/api/zswaps?limit=5" | jq '.offers[0]'
+curl -s "http://host:9999/v1/offers?limit=5" | jq '.offers[0]'
 
 # Fetch the full offer (with blob) by its content hash
-curl -s "http://host:9999/api/zswaps/$(curl -s 'http://host:9999/api/zswaps?limit=1' | jq -r '.offers[0].offer_hash')" | jq .
+curl -s "http://host:9999/v1/offers/$(curl -s 'http://host:9999/v1/offers?limit=1' | jq -r '.offers[0].offer_hash')" | jq .
 
 # Stream lifecycle events while waiting for settlement
-curl -N http://host:9999/api/events
+curl -N http://host:9999/v1/offers/stream
 ```
 
 ---
@@ -768,8 +768,8 @@ auth is embedded in the URL).
 
 | | Via this backend | Directly on Celestia |
 |---|---|---|
-| **Post** | `POST /api/zswap/submit` — validates structure + proofs + liveness **before** any fee | `blob.Submit` — you pay the TIA fee even for a bad blob; the indexer re-validates and drops it (emitting `offer_rejected`) |
-| **Read** | `GET /api/zswaps` — validated, indexed, liveness-checked, named | `blob.GetAll` — raw bytes; re-validate yourself with `@zswap-da/validator` |
+| **Post** | `POST /v1/offers` — validates structure + proofs + liveness **before** any fee | `blob.Submit` — you pay the TIA fee even for a bad blob; the indexer re-validates and drops it (emitting `offer_rejected`) |
+| **Read** | `GET /v1/offers` — validated, indexed, liveness-checked, named | `blob.GetAll` — raw bytes; re-validate yourself with `@zswap-da/validator` |
 
 Prefer the REST paths for apps. Reach for direct access for archival/mirroring,
 independent verification, or posting without trusting an operator.
@@ -808,8 +808,8 @@ curl -s -X POST "$CELESTIA_RPC_URL" \
 ```
 
 The indexer sees this blob on its next Celestia poll and, if it validates, the
-offer appears at `GET /api/zswaps` and streams as `offer_indexed` on
-`/api/events` — no difference from an offer posted via the API, because it *is*
+offer appears at `GET /v1/offers` and streams as `offer_indexed` on
+`/v1/offers/stream` — no difference from an offer posted via the API, because it *is*
 the same blob.
 
 ### Read offers — `blob.GetAll`

@@ -82,7 +82,7 @@ test("insert + getOfferByHash returns the open offer with blob and legs", async 
   const id = await insertOffer(HASH_A, "swapoffer1testblob-a");
   const rows = await getOfferByHash.run({ offer_hash: HASH_A }, client);
   expect(rows.length).toBe(1);
-  expect(rows[0].status).toBe("open");
+  expect(rows[0].status).toBe("live");
   expect(rows[0].transaction_hex).toBe("swapoffer1testblob-a");
   const legs = await getOfferTokensAny.run({ offer_file_id: id, live: true }, client);
   expect(legs.length).toBe(2);
@@ -120,7 +120,7 @@ test("token/direction filters work on the page query", async () => {
 test("duplicate probe: getOfferStatusByHash sees the open offer", async () => {
   const rows = await getOfferStatusByHash.run({ offer_hash: HASH_A }, client);
   expect(rows.length).toBe(1);
-  expect(rows[0].status).toBe("open");
+  expect(rows[0].status).toBe("live");
 });
 
 test("archiveOfferByNullifierWithHash carries offer_hash into history", async () => {

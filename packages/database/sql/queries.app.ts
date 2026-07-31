@@ -527,7 +527,7 @@ export interface IGetOfferStatusByHashResult {
 export const getOfferStatusByHash = {
   run: (params: IGetOfferStatusByHashParams, dbConn: any) =>
     runQ<IGetOfferStatusByHashParams, IGetOfferStatusByHashResult>(
-      `SELECT id, 'open' AS status, NULL::text AS archive_reason
+      `SELECT id, 'live' AS status, NULL::text AS archive_reason
        FROM offer_file
        WHERE offer_hash = :offer_hash!
        UNION ALL
@@ -560,7 +560,7 @@ export const getOfferByHash = {
       `SELECT id, celestia_height, transaction_hex, offer_hash,
               metadata_created_at, metadata_expires_at,
               ttl_seconds, created_at,
-              'open' AS status, NULL::text AS archive_reason
+              'live' AS status, NULL::text AS archive_reason
        FROM offer_file
        WHERE offer_hash = :offer_hash!
        UNION ALL

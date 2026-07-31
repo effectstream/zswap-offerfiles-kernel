@@ -6,8 +6,8 @@
 //      09-mint.ts output (/tmp/zswap-minted-tokens.json), or first two known tokens.
 //   3. Calls wallet.initSwap() → finalizeTransaction() to produce a signed offer.
 //   4. Encodes it as a swapoffer1… blob.
-//   5. POSTs to /api/zswap/submit (validates crypto + liveness, then forwards to batcher).
-//   6. Polls /api/zswap/status until status = "open" (landed in Celestia + indexed).
+//   5. POSTs to /v1/offers (validates crypto + liveness, then forwards to batcher).
+//   6. Polls /v1/offers/status until status = "live" (landed in Celestia + indexed).
 //
 // Env overrides:
 //   WALLET_SEED=<64-hex>          maker wallet seed
@@ -30,7 +30,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 header("Submit Offer");
 
 // ── 1. Midnight config from node ──────────────────────────────────────────────
-const midnightCfg = await get<any>("/api/midnight/config");
+const midnightCfg = await get<any>("/v1/midnight/config");
 setNetworkId(midnightCfg.networkId as any);
 
 const networkUrls = {
@@ -53,14 +53,14 @@ if (!GIVE_TOKEN || !WANT_TOKEN) {
     WANT_TOKEN = WANT_TOKEN || minted.shieldedB;
     console.log("Using minted tokens from 09-mint.ts output.");
   } catch {
-    const tokens = await get<any[]>("/api/known-tokens");
+    const tokens = await get<any[]>("/v1/known-tokens");
     if (tokens.length < 2) {
       console.error("Need at least 2 tokens. Run 09-mint.ts first, or set GIVE_TOKEN/WANT_TOKEN.");
       process.exit(1);
     }
     GIVE_TOKEN = GIVE_TOKEN || tokens[0].token_color;
     WANT_TOKEN = WANT_TOKEN || tokens[1].token_color;
-    console.log("Using first two tokens from /api/known-tokens.");
+    console.log("Using first two tokens from /v1/known-tokens.");
   }
 }
 const GIVE_AMOUNT = BigInt(process.env.GIVE_AMOUNT ?? "500000");
@@ -107,11 +107,11 @@ const blob = OfferFiles.encode(offerFinalized.serialize());
 console.log(`Encoded blob: ${blob.slice(0, 40)}…  (${blob.length} chars)`);
 
 // ── 6. Submit to node ─────────────────────────────────────────────────────────
-console.log("\nSubmitting to /api/zswap/submit…");
+console.log("\nSubmitting to /v1/offers…");
 let submitResult: any;
 for (let attempt = 0; attempt < 12; attempt++) {
   try {
-    submitResult = await post("/api/zswap/submit", { blob });
+    submitResult = await post("/v1/offers", { offer: blob });
     break;
   } catch (e: any) {
     if (e.message?.includes("ROOT_UNKNOWN") && attempt < 11) {
@@ -134,9 +134,9 @@ let landed = false;
 for (let i = 0; i < 30; i++) {
   await sleep(5_000);
   // POST body — a real blob is 16-25 KB, beyond query-string limits.
-  const { status } = await post<any>("/api/zswap/status", { blob });
+  const { status } = await post<any>("/v1/offers/status", { offer: blob });
   console.log(`  [${i + 1}/30] status: ${status}`);
-  if (status === "open") {
+  if (status === "live") {
     landed = true;
     console.log("✅  Offer is live in the order book.");
     break;
@@ -156,7 +156,7 @@ if (!landed) {
 }
 
 // Write blob to a handoff file so run-all.ts can confirm and pass it to 11-settle-offer.
-writeFileSync("/tmp/zswap-last-offer.json", JSON.stringify({ blob, status: "open" }));
+writeFileSync("/tmp/zswap-last-offer.json", JSON.stringify({ blob, status: "live" }));
 console.log("\nBlob written to /tmp/zswap-last-offer.json");
 console.log("Blob for settlement (copy for 11-settle-offer.ts):");
 console.log(`  OFFER_BLOB="${blob}"`);

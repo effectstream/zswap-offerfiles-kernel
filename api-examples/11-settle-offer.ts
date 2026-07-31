@@ -24,7 +24,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 header("Settle Offer");
 
 // ── 1. Midnight config ────────────────────────────────────────────────────────
-const midnightCfg = await get<any>("/api/midnight/config");
+const midnightCfg = await get<any>("/v1/midnight/config");
 setNetworkId(midnightCfg.networkId as any);
 
 const networkUrls = {
@@ -40,13 +40,13 @@ let blob = process.env.OFFER_BLOB ?? "";
 let offerId: number | undefined;
 
 if (!blob) {
-  const { offers } = await get<any>("/api/zswaps?limit=1");
+  const { offers } = await get<any>("/v1/offers?limit=1");
   if (offers.length === 0) {
     console.error("No open offers. Submit one first with 09-submit-offer.ts.");
     process.exit(1);
   }
   // The list is blob-free — fetch the blob by content hash.
-  const detail = await get<any>(`/api/zswaps/${offers[0].offer_hash}`);
+  const detail = await get<any>(`/v1/offers/${offers[0].offer_hash}`);
   blob    = detail.blob;
   offerId = offers[0].id;
   console.log(`Using offer ${offers[0].offer_hash}  celestia=#${offers[0].celestia_height}`);
@@ -82,7 +82,7 @@ console.log(`\n✅  Settlement submitted: ${txHash}…`);
 console.log("\nWaiting for offer to be archived (nullifier consumed)…");
 for (let i = 0; i < 36; i++) {
   await sleep(5_000);
-  const { status } = await post<any>("/api/zswap/status", { blob });
+  const { status } = await post<any>("/v1/offers/status", { offer: blob });
   console.log(`  status: ${status}`);
   if (status === "consumed") {
     console.log("✅  Offer consumed (all inputs spent in one tx) — settlement confirmed.");

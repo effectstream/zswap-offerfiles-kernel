@@ -23,7 +23,7 @@ const midnightCfg = await get<{
   indexerWsUri: string;
   proofServerUri: string;
   networkId: string;
-}>("/api/midnight/config");
+}>("/v1/midnight/config");
 
 setNetworkId(midnightCfg.networkId as any);
 

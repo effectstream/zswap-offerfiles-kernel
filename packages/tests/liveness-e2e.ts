@@ -15,10 +15,10 @@ const API = "http://127.0.0.1:9999";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function submit(blob: string): Promise<{ status: number; body: any }> {
-  const r = await fetch(`${API}/api/zswap/submit`, {
+  const r = await fetch(`${API}/v1/offers`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ blob }),
+    body: JSON.stringify({ offer: blob }),
   });
   let body: any;
   try { body = await r.json(); } catch { body = await r.text(); }

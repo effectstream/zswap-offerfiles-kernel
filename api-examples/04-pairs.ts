@@ -5,8 +5,8 @@ import { get, print, header } from "./config.ts";
 
 header("Trading Pairs");
 
-const pairs = await get<any[]>("/api/pairs");
-print("GET /api/pairs", pairs);
+const pairs = await get<any[]>("/v1/pairs");
+print("GET /v1/pairs", pairs);
 
 if (pairs.length === 0) {
   console.log("\nNo pairs yet — open offers will create pairs automatically.");

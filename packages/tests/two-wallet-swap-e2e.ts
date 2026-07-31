@@ -7,7 +7,7 @@
 //   3. genesis shielded-transfers ZToken to a fresh MAKER wallet
 //   4. MAKER creates an UNBALANCED swap offer  +X / -Z  (give Z, want X),
 //      payFees:false → maker needs no dust
-//   5. /api/zswap/submit  (crypto + liveness + root-known) → batcher → Celestia
+//   5. /v1/offers  (crypto + liveness + root-known) → batcher → Celestia
 //   6. celestia-zswap ingestion indexes the offer (offer_file)
 //   7. genesis (the TAKER — holds X + dust) balances + settles on Midnight
 //   8. nullifier consumed → spent_nullifiers + offer ARCHIVED; MAKER now holds X
@@ -76,10 +76,10 @@ async function waitFor(name: string, fn: () => Promise<boolean>, tries = 36, ms 
 }
 
 async function submitOffer(blob: string): Promise<{ status: number; body: any }> {
-  const r = await fetch(`${API}/api/zswap/submit`, {
+  const r = await fetch(`${API}/v1/offers`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ blob }),
+    body: JSON.stringify({ offer: blob }),
   });
   let body: any;
   try {

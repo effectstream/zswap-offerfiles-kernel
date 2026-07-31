@@ -2,7 +2,7 @@
 // Infra is already up when this runs (Phase A + migrations + startup mint).
 //
 // Flow: mint A/B via offer-files helpers → create A↔B offer
-//   → /api/zswap/submit → wait for Celestia indexing
+//   → /v1/offers → wait for Celestia indexing
 //   → balance + settle on Midnight → nullifier consumed → offer ARCHIVED.
 //
 // Does NOT call mintTestTokens() — that races the orchestrator's

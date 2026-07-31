@@ -12,7 +12,7 @@ export function OverviewPanel() {
         Proof server: <code>{PROOF_SERVER_URL}</code>.
       </p>
       <div className="flow">
-        <div className="box"><strong>1. Upload</strong>POST /api/zswap/submit</div>
+        <div className="box"><strong>1. Upload</strong>POST /v1/offers</div>
         <div className="arrow">→</div>
         <div className="box"><strong>2. Index</strong>Celestia → offer_file</div>
         <div className="arrow">→</div>

@@ -106,7 +106,7 @@ async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig
   }) as typeof fetch
 
   const zkConfigProvider = new FetchZkConfigProvider<OfferFilesCircuits>(API_BASE, safeFetch.bind(window))
-  // VITE_PROOF_SERVER_URL wins over whatever /api/midnight/config reports.
+  // VITE_PROOF_SERVER_URL wins over whatever /v1/midnight/config reports.
   const proofServerUri = PROOF_SERVER_URL || config.proofServerUri
 
   return {

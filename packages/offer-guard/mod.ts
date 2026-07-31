@@ -19,6 +19,7 @@
 // generators), so state-machine.ts inlines the SAME ladder in generator form
 // over these primitives — if you change the order here, change it there.
 import { createHash } from "node:crypto";
+
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import {
   getBlankRefState,
@@ -27,6 +28,31 @@ import {
   type OfferValidation,
   type UnshieldedSpendRef,
 } from "@zswap-da/validator";
+
+/**
+ * The MIP-0006 shared Celestia namespace. One namespace = one liquidity pool:
+ * every compliant UI, indexer, and bot reads the same offer stream, so an
+ * offer made in one dApp is takeable in any other. Per-dApp namespaces would
+ * re-silo liquidity, defeating the standard's purpose — deployments MUST NOT
+ * override this except for isolated dev/e2e runs.
+ *
+ * Celestia namespaces are 29 bytes: a version byte plus a 28-byte id. For
+ * version-0 (user) namespaces the first 18 id bytes MUST be zero, leaving 10
+ * freely chosen bytes — ours is ASCII `mn-swap-v1`. Config carries just that
+ * 10-byte suffix; the sync layer right-aligns it into the 28-byte id, which
+ * yields exactly the MIP's `0x00` + 18 zero bytes + suffix layout.
+ */
+export const MIP6_NAMESPACE_ID_SUFFIX_HEX = "6d6e2d737761702d7631"; // "mn-swap-v1"
+
+/** The full 29-byte namespace (version 0x00 ‖ 18×0x00 ‖ suffix). */
+export function mip6NamespaceBytes(): Uint8Array {
+  const suffix = MIP6_NAMESPACE_ID_SUFFIX_HEX;
+  const bytes = new Uint8Array(29);
+  for (let i = 0; i < 10; i++) {
+    bytes[19 + i] = parseInt(suffix.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
 
 /**
  * Content-addressed offer identity (the MIP-0006 `offerId`): hex sha256 over

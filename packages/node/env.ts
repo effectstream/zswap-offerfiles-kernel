@@ -5,6 +5,7 @@ import {
   resolveOfferTtlSeconds,
   resolveRootWindowSeconds,
 } from "./network-windows.ts";
+import { MIP6_NAMESPACE_ID_SUFFIX_HEX } from "@zswap-da/offer-guard";
 
 // Instance name of the Celestia blob primitive. This is the value the
 // framework writes to effectstream.primitive_accounting.primitive_name, and
@@ -16,7 +17,10 @@ import {
 export const CELESTIA_PRIMITIVE_NAME = "ZswapBlob";
 
 export const CELESTIA_RPC_URL = getEnv("CELESTIA_RPC_URL") ?? "http://127.0.0.1:26658";
-export const CELESTIA_NAMESPACE = getEnv("CELESTIA_NAMESPACE") ?? "000000000000deadbeef";
+// MIP-0006 shared namespace by default — see MIP6_NAMESPACE_ID_SUFFIX_HEX in
+// @zswap-da/offer-guard for why overriding re-silos liquidity (dev/e2e only).
+export const CELESTIA_NAMESPACE =
+  getEnv("CELESTIA_NAMESPACE") ?? MIP6_NAMESPACE_ID_SUFFIX_HEX;
 export const CELESTIA_FEE = parseInt(getEnv("CELESTIA_FEE") ?? "2000");
 export const CELESTIA_GAS_LIMIT = parseInt(getEnv("CELESTIA_GAS_LIMIT") ?? "100000");
 export const CELESTIA_AUTH_TOKEN = getEnv("CELESTIA_AUTH_TOKEN") ?? "";

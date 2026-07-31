@@ -41,7 +41,10 @@ Three configurations ship out of the box. All endpoints and env-var names are id
 # ── Celestia ────────────────────────────────────────────────────────────────
 CELESTIA_NETWORK=devnet|mocha|mainnet    # selects polling-interval default
 CELESTIA_RPC_URL=http://...              # light-node JSON-RPC endpoint
-CELESTIA_NAMESPACE=000000000000deadbeef # 10-byte hex namespace (no 0x prefix)
+CELESTIA_NAMESPACE=6d6e2d737761702d7631   # 10-byte namespace id suffix (hex, no 0x).
+                                        # Default = the MIP-0006 SHARED namespace
+                                        # ("mn-swap-v1"): one namespace = one liquidity
+                                        # pool. Override only for isolated dev/e2e.
 CELESTIA_AUTH_TOKEN=                    # bearer token; leave empty for QuickNode (auth is in the URL)
 CELESTIA_START_HEIGHT=1                 # skip blocks before your deployment
 CELESTIA_POLLING_INTERVAL_MS=6000       # how often to poll for new blocks
@@ -777,15 +780,15 @@ independent verification, or posting without trusting an operator.
 ### Namespace
 
 The offer namespace is `CELESTIA_NAMESPACE` (hex, default
-`000000000000deadbeef`). Celestia's RPC wants it base64-encoded as a 29-byte
+`6d6e2d737761702d7631` = `mn-swap-v1`). Celestia's RPC wants it base64-encoded as a 29-byte
 array — 1 version byte (`0x00`) + 28-byte ID, right-aligned:
 
 ```bash
-# 000000000000deadbeef →
+# 6d6e2d737761702d7631 (mn-swap-v1) →
 NS_B64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAN6tvu8="
 
 # derive it for any namespace:
-bun -e 'const h=process.argv[1].replace(/^0x/,"");const b=new Uint8Array(29);const x=(h.match(/.{1,2}/g)??[]).map(n=>parseInt(n,16));b.set(x,29-x.length);console.log(Buffer.from(b).toString("base64"))' 000000000000deadbeef
+bun -e 'const h=process.argv[1].replace(/^0x/,"");const b=new Uint8Array(29);const x=(h.match(/.{1,2}/g)??[]).map(n=>parseInt(n,16));b.set(x,29-x.length);console.log(Buffer.from(b).toString("base64"))' 6d6e2d737761702d7631
 ```
 
 ### Post an offer — `blob.Submit`

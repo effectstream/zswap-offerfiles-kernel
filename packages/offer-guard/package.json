@@ -1,0 +1,16 @@
+{
+  "name": "@zswap-da/offer-guard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./mod.ts"
+  },
+  "dependencies": {
+    "@effectstream/mip-zswap-offer": "0.2.0",
+    "@zswap-da/validator": "workspace:*"
+  },
+  "devDependencies": {
+    "@scure/base": "^2.0.0"
+  }
+}

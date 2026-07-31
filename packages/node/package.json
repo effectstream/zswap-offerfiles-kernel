@@ -37,7 +37,8 @@
     "effection": "^3.5.0",
     "@effectstream/mip-zswap-offer": "0.2.0",
     "@fastify/rate-limit": "^10.0.0",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "@zswap-da/offer-guard": "workspace:*"
   },
   "devDependencies": {
     "fastify": "^5.0.0",

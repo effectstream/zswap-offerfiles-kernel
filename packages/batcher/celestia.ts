@@ -4,6 +4,7 @@ import {
   type DefaultBatcherInput,
 } from "@effectstream/batcher-sdk";
 import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { DedupStore, offerHashFromBlob } from "@zswap-da/offer-guard";
 import type { BatcherConfig } from "./config.ts";
 
 // DoS guard on the decoded offer size; mirrors the node's OFFER_MAX_BYTES. The
@@ -20,8 +21,16 @@ type ValidationResult = { valid: boolean; error?: string };
 // the blob is queued or submitted, so a rejected offer never costs a fee. This
 // is the authoritative pre-fee gate — it also covers producers that hit the
 // batcher's `/send-input` directly, bypassing `/api/zswap/submit`.
-class ZswapCelestiaAdapter extends CelestiaAdapter {
+export class ZswapCelestiaAdapter extends CelestiaAdapter {
   private readonly networkId: string;
+  // Published-hash dedup: the batcher's own store (it has no DB). Consulted
+  // FIRST in validateInput — a replay must never cost a proof verification,
+  // let alone a fee — and written ONLY on successful publish (marking at
+  // validation time would block a legitimate retry after a failed submit).
+  // In-memory: empties on restart, in which case one duplicate fee can slip
+  // through; the node-side STM dedup is permanent, so the network never
+  // indexes the duplicate. See DedupStore in @zswap-da/offer-guard.
+  private readonly published = new DedupStore();
 
   constructor(config: CelestiaAdapterConfig, networkId: string) {
     super(config);
@@ -32,6 +41,22 @@ class ZswapCelestiaAdapter extends CelestiaAdapter {
     // Base adapter checks: non-empty string input + max blob size.
     const base = super.validateInput(input);
     if (!base.valid) return base;
+
+    // Dedup before any expensive work. Hashing needs only a bech32m decode
+    // (cheap, O(n)); if the blob does not even decode, fall through — full
+    // validation below rejects it with a precise code.
+    try {
+      const hash = offerHashFromBlob(input.input);
+      if (this.published.has(hash)) {
+        return {
+          valid: false,
+          error:
+            `DUPLICATE_OFFER: this batcher already published ${hash} — not paying twice for the same bytes`,
+        };
+      }
+    } catch {
+      /* undecodable — let validateZswapOffer produce the real error */
+    }
 
     // Structure + cryptographic proofs (steps 1–5): rejects malformed, forged,
     // and non-swap offers — the bulk of fee-wasting "bad" blobs. This is
@@ -69,6 +94,18 @@ class ZswapCelestiaAdapter extends CelestiaAdapter {
     if (!sponsorship.valid) return sponsorship;
 
     return { valid: true };
+  }
+
+  override async submitBatch(data: any, fee: string | bigint): Promise<any> {
+    const txhash = await super.submitBatch(data, fee);
+    // Record AFTER the publish succeeded — this is the moment the fee is
+    // irrevocably spent, so it is the moment a repeat becomes "paying twice".
+    try {
+      this.published.add(offerHashFromBlob(data.rawData));
+    } catch {
+      /* non-offer payload — nothing to record */
+    }
+    return txhash;
   }
 
   // Stub seam for the Celestia fee-sponsorship policy. A real implementation

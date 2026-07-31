@@ -16,6 +16,11 @@
     "@effectstream/midnight-contracts": "0.101.1",
     "@effectstream/utils": "0.101.1",
     "@zswap-da/validator": "workspace:*",
-    "effection": "^3.5.0"
+    "effection": "^3.5.0",
+    "@zswap-da/offer-guard": "workspace:*"
+  },
+  "devDependencies": {
+    "@scure/base": "^2.0.0",
+    "@effectstream/mip-zswap-offer": "0.2.0"
   }
 }

@@ -60,8 +60,13 @@
         "@effectstream/batcher-sdk": "0.101.1",
         "@effectstream/midnight-contracts": "0.101.1",
         "@effectstream/utils": "0.101.1",
+        "@zswap-da/offer-guard": "workspace:*",
         "@zswap-da/validator": "workspace:*",
         "effection": "^3.5.0",
+      },
+      "devDependencies": {
+        "@effectstream/mip-zswap-offer": "0.2.0",
+        "@scure/base": "^2.0.0",
       },
     },
     "packages/contracts-celestia": {
@@ -147,6 +152,7 @@
         "@sinclair/typebox": "^0.34.30",
         "@zswap-da/contract-offer-files": "workspace:*",
         "@zswap-da/database": "workspace:*",
+        "@zswap-da/offer-guard": "workspace:*",
         "@zswap-da/validator": "workspace:*",
         "effection": "^3.5.0",
         "rxjs": "^7.8.2",
@@ -154,6 +160,17 @@
       "devDependencies": {
         "fastify": "^5.0.0",
         "pg": "^8.16.3",
+      },
+    },
+    "packages/offer-guard": {
+      "name": "@zswap-da/offer-guard",
+      "version": "0.1.0",
+      "dependencies": {
+        "@effectstream/mip-zswap-offer": "0.2.0",
+        "@zswap-da/validator": "workspace:*",
+      },
+      "devDependencies": {
+        "@scure/base": "^2.0.0",
       },
     },
     "packages/tests": {
@@ -1087,6 +1104,8 @@
     "@zswap-da/docs-playground": ["@zswap-da/docs-playground@workspace:docs"],
 
     "@zswap-da/node": ["@zswap-da/node@workspace:packages/node"],
+
+    "@zswap-da/offer-guard": ["@zswap-da/offer-guard@workspace:packages/offer-guard"],
 
     "@zswap-da/tests": ["@zswap-da/tests@workspace:packages/tests"],
 

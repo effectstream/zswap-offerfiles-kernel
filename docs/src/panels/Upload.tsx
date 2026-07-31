@@ -110,7 +110,7 @@ export function UploadPanel({
         setSubmitMsg(`Waiting for indexer… (${i + 1}/20)`)
         await new Promise((res) => setTimeout(res, 3000))
         const s = await dbg.call(api.zswapStatus(b))
-        if (['open', 'completed', 'expired'].includes(s.parsed?.status ?? '')) {
+        if (['live', 'consumed', 'cancelled', 'expired'].includes(s.parsed?.status ?? '')) {
           setSubmitMsg(`Indexed status: ${s.parsed!.status}`)
           break
         }

@@ -41,7 +41,7 @@ export function ReadPanel() {
           }>Send</button>
         </div>
         <p className="lead" style={{ marginBottom: 0 }}>
-          List rows carry <code>offer_hash</code> instead of the ~24 KB blob —
+          List rows carry <code>offerId</code> instead of the ~24 KB blob —
           fetch a single offer (with blob) below.
         </p>
       </div>
@@ -49,7 +49,7 @@ export function ReadPanel() {
         <h3><span className="method get">GET</span><span className="path">/v1/offers/:hash</span></h3>
         <div className="actions">
           <button className="btn primary" type="button" onClick={() => {
-            const h = prompt('offer_hash (64 hex chars):')?.trim().toLowerCase()
+            const h = prompt('offerId (64 hex chars):')?.trim().toLowerCase()
             if (!h) return
             dbg.call(api.zswapByHash(h))
           }}>Fetch offer by hash</button>

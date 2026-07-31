@@ -5,7 +5,7 @@ Shared, pure ZSwap offer validation. One deterministic routine,
 
 - **Ingestion** — the `celestia-zswap` state-machine handler, so the indexer
   never serves an invalid offer.
-- **Pre-submission** — `/api/zswap/submit` and the batcher's Celestia adapter
+- **Pre-submission** — `POST /v1/offers` and the batcher's Celestia adapter
   `validateInput` hook, so we never pay a Celestia fee for an offer that can't
   settle.
 

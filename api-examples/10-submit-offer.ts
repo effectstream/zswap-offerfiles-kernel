@@ -142,7 +142,7 @@ for (let i = 0; i < 30; i++) {
     break;
   }
   if (status === "consumed" || status === "cancelled" || status === "expired") {
-    console.error(`Offer ended with status "${status}" before it could be seen as open.`);
+    console.error(`Offer ended with status "${status}" before it could be seen live.`);
     break;
   }
 }
@@ -150,7 +150,7 @@ for (let i = 0; i < 30; i++) {
 await wallet.stop().catch(() => {});
 
 if (!landed) {
-  console.error("\n✗  Offer did not reach 'open' status within the polling window.");
+  console.error("\n✗  Offer did not reach 'live' status within the polling window.");
   console.error("   Check node sync and Celestia indexer lag, then retry.");
   process.exit(1);
 }

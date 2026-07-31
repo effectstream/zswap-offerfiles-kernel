@@ -34,7 +34,7 @@ export function StatusPanel({ blob, setBlob }: { blob: string; setBlob: (v: stri
         </p>
         <div className="actions">
           <button className="btn" type="button" onClick={() => {
-            const h = prompt('offer_hash (64 hex chars):')?.trim().toLowerCase()
+            const h = prompt('offerId (64 hex chars):')?.trim().toLowerCase()
             if (!h) return
             dbg.call(api.zswapStatusByHash(h))
           }}>Lookup by hash</button>

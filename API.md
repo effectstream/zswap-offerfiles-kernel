@@ -205,9 +205,9 @@ Returns the current live offer book — offers published to Celestia, validated,
 | `token` | hex string | — | Filter to offers that include this token color (64 hex chars, no `0x`). Matches both giving and wanting sides. |
 | `direction` | `GIVING` \| `WANTING` | any | Filter by side. Only meaningful when `token` is also set. |
 | `limit` | integer | 100 | Max results (capped at 100). |
-| `after_hash` | hex string | — | Keyset cursor: the previous page's `next_cursor`. Malformed or unknown values answer `400 INVALID_CURSOR` (never a silent first page). There is **no `offset`** — cursors cost O(1) regardless of depth and are immune to concurrent inserts/archives shifting the page window. |
+| `after_hash` | hex string | — | Keyset cursor: the previous page's `nextCursor`. Malformed or unknown values answer `400 INVALID_CURSOR` (never a silent first page). There is **no `offset`** — cursors cost O(1) regardless of depth and are immune to concurrent inserts/archives shifting the page window. |
 
-**Response** — `{ "offers": [...], "next_cursor": "<hash>" | null }`, newest first. Pass `next_cursor` back as `after_hash` to fetch the next page; `null` means exhausted (a full final page returns a cursor whose follow-up fetch yields `{ "offers": [], "next_cursor": null }`). The list is **blob-free**: a single offer blob is 16–25 KB of bech32m, so a 100-row page carrying blobs would be megabytes. Each row instead carries `offer_hash`; fetch the blob per offer via `GET /v1/offers/:hash`.
+**Response** — `{ "offers": [...], "nextCursor": "<hash>" | null }`, newest first. Pass `nextCursor` back as `after_hash` to fetch the next page; `null` means exhausted (a full final page returns a cursor whose follow-up fetch yields `{ "offers": [], "nextCursor": null }`). The list is **blob-free**: a single offer blob is 16–25 KB of bech32m, so a 100-row page carrying blobs would be megabytes. Each row instead carries `offerId`; fetch the string per offer via `GET /v1/offers/:offerId`.
 
 ```json
 {
@@ -237,9 +237,9 @@ Each row is a MIP-0006 `OffchainOfferPayload`. **`offerBech32` is omitted in lis
 
 | Field | Description |
 |---|---|
-| `offer_hash` | **Content hash** — hex sha256 of the raw MIP-0005 transaction bytes (the bech32m-decoded blob). Identical on every node that indexes the same offer; use it, not `id`, for lookups. Set at ingestion for every indexed offer. |
+| `offerId` | **Content hash** — hex sha256 of the raw MIP-0005 transaction bytes (the canonical serialized `Transaction`; the bech32m string is an encoding of these bytes). Identical on every node that indexes the same offer. |
 | `id` | Local row id. **Deployment-specific bookkeeping** — two nodes indexing the same namespace assign different ids. Never use it for cross-system references. |
-| `blob_chars` | Length of the bech32m blob served by `GET /v1/offers/:hash` |
+| `blobChars` | Length of the bech32m string served by `GET /v1/offers/:offerId` |
 | `gives` | Tokens the maker is offering. Each leg carries `kind` (`SHIELDED`/`UNSHIELDED`, MIP-0006 `TokenLeg.type`) — the same color on different value layers is two distinct legs, never netted |
 | `wants` | Tokens the maker is requesting (same leg shape) |
 | `ttl_seconds` | Offer lifetime in seconds from `metadata_created_at`, as a **string** |
@@ -255,7 +255,7 @@ curl "http://host:9999/v1/offers?token=00000000000000000000000000000000000000000
 
 #### `GET /v1/offers/:hash`
 
-One offer — **including its `swapoffer1…` blob** — addressed by content hash (the hex sha256 of the raw offer bytes, as served in list rows and submit responses). Resolves archived offers too, so a consumed/expired offer still returns with its final status.
+One offer — **including its `swapoffer1…` string** (`offerBech32`; the MIP requires it in single-offer responses) — addressed by content hash (the hex sha256 of the raw offer bytes, as served in list rows and submit responses). Resolves archived offers too, so a consumed/expired offer still returns with its final status.
 
 ```bash
 curl "http://host:9999/v1/offers/9f2c4a...e1"
@@ -265,27 +265,30 @@ curl "http://host:9999/v1/offers/9f2c4a...e1"
 
 ```json
 {
-  "offer_hash": "9f2c4a…e1",
-  "status": "live",
-  "blob": "swapoffer1...",
-  "celestia_height": "12231800",
-  "created_at": "2026-06-01T12:00:05.123Z",
-  "metadata_created_at": "2026-06-01T12:00:00.000Z",
-  "metadata_expires_at": null,
-  "ttl_seconds": "3600",
-  "gives": [ { "token": "00…00", "amount": "1000000", "kind": "UNSHIELDED" } ],
-  "wants": [ { "token": "70ce…69", "amount": "500000", "kind": "SHIELDED" } ]
+  "version": 1,
+  "offerId": "9f2c4a…e1",
+  "offerBech32": "swapoffer1...",
+  "celestiaHeight": "12231800",
+  "ttlSeconds": "3600",
+  "computed": {
+    "gives": [ { "token": "00…00", "amount": "1000000", "type": "UNSHIELDED" } ],
+    "wants": [ { "token": "70ce…69", "amount": "500000", "type": "SHIELDED" } ],
+    "expiresAt": "2026-06-01T13:00:00.000Z",
+    "inputNullifiers": ["7c1d9b…"],
+    "firstSeenAt": "2026-06-01T12:00:00.000Z",
+    "status": "live"
+  }
 }
 ```
 
-`status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
+`computed.status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND", "offerId": "…" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
 
 #### `GET /v1/offers/:hash/status`
 
 Lightweight status probe by content hash:
 
 ```json
-{ "offer_hash": "9f2c4a…e1", "status": "live" }
+{ "offerId": "9f2c4a…e1", "status": "live" }
 ```
 
 `status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"`.
@@ -298,7 +301,7 @@ Lightweight status probe by content hash:
 
 Status lookup by blob, for reconciling a "My Trades" list on startup when only the blobs are held client-side. POST body — a real blob is 16–25 KB, beyond any practical query-string limit.
 
-**Body:** `{ "offer": "swapoffer1..." }`, or batched: `{ "blobs": ["swapoffer1...", ...] }` (max 50).
+**Body:** `{ "offer": "swapoffer1..." }`, or batched: `{ "offers": ["swapoffer1...", ...] }` (max 50).
 
 ```bash
 curl -X POST http://host:9999/v1/offers/status \
@@ -309,14 +312,12 @@ curl -X POST http://host:9999/v1/offers/status \
 **Response**
 
 ```json
-{ "blob": "swapoffer1...", "offer_hash": "9f2c4a…e1", "status": "live" }
+{ "offerId": "9f2c4a…e1", "status": "live" }
 ```
 
-Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"` (see *Fill vs cancel* above).
+Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"` (see *Fill vs cancel* above). A blob that does not decode answers `{ "status": "not_found" }` with no `offerId`.
 
 Lookups resolve via the offer's content hash (an indexed probe). A blob that does not decode as a `swapoffer1…` string answers `"not_found"` **without touching the database** — undecodable blobs can never have been indexed, and this keeps junk submissions from costing more than a hash attempt.
-
-> `GET /v1/offers/status?blob=…` still exists for backward compatibility, but real offer blobs exceed proxy URI limits (nginx answers **414**) — use the POST variant or `GET /v1/offers/:hash/status`.
 
 ---
 
@@ -427,10 +428,10 @@ curl -X POST http://host:9999/v1/offers \
 **Success `200`**
 
 ```json
-{ "success": true, "offer_hash": "9f2c4a…e1", "blob": "swapoffer1...", "result": { ... } }
+{ "success": true, "offerId": "9f2c4a…e1", "result": { ... } }
 ```
 
-`offer_hash` is the offer's content hash — track it with `GET /v1/offers/:hash` once indexed.
+`offerId` is the offer's content hash — track it with `GET /v1/offers/:offerId` once indexed. Ignore `result` (internal batcher receipt; shape not stable).
 
 **Error `400`**
 
@@ -689,7 +690,7 @@ Shielded and unshielded NIGHT share the same color (`0x0000…0000`) and differ 
 
 Offer blobs follow **MIP-0005** (HRP `swapoffer`). The encoding bundles a proven Midnight `Transaction` plus the cryptographic proofs required for settlement. Use `OfferFiles.encode` / `OfferFiles.decode` from `@effectstream/mip-zswap-offer/mip5` (also re-exported by `@zswap-da/validator`) rather than constructing the binary format by hand.
 
-P2P swap semantics (gives/wants derivation, two-sided rule, on-chain/off-chain payload types) live in `@effectstream/mip-zswap-offer/mip6` (**MIP-0006**). Full DA/API alignment (raw `OnchainOfferPayload` on Celestia, `OffchainOfferPayload` responses) is deferred — Celestia still carries the bech32 string in this template.
+P2P swap semantics (gives/wants derivation, two-sided rule, off-chain payload shape) live in `@effectstream/mip-zswap-offer/mip6` (**MIP-0006**). DA/API alignment is **complete**: Celestia blobs carry the **raw transaction bytes** (no envelope — the on-chain payload type was removed from the spec), and API responses are `OffchainOfferPayload`s.
 
 The decoded offer contains:
 
@@ -750,11 +751,11 @@ curl -s -X POST http://host:3334/send-input \
     "confirmationLevel": "wait-receipt"
   }' | jq .
 
-# Confirm the offer landed in the indexer (list is blob-free; note the offer_hash)
+# Confirm the offer landed in the indexer (list is blob-free; note the offerId)
 curl -s "http://host:9999/v1/offers?limit=5" | jq '.offers[0]'
 
 # Fetch the full offer (with blob) by its content hash
-curl -s "http://host:9999/v1/offers/$(curl -s 'http://host:9999/v1/offers?limit=1' | jq -r '.offers[0].offer_hash')" | jq .
+curl -s "http://host:9999/v1/offers/$(curl -s 'http://host:9999/v1/offers?limit=1' | jq -r '.offers[0].offerId')" | jq .
 
 # Stream lifecycle events while waiting for settlement
 curl -N http://host:9999/v1/offers/stream

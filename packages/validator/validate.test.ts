@@ -13,6 +13,7 @@ import {
   buildStrictness,
   getBlankRefState,
   validateZswapOffer,
+  validateZswapOfferBytes,
   verifyOfferCrypto,
 } from "./mod.ts";
 
@@ -278,5 +279,33 @@ describe.skipIf(!hasFixture)("validateZswapOffer — crypto + liveness (real fix
     expect(a.inputRoots).toEqual(b.inputRoots);
     expect(a.gives).toEqual(b.gives);
     expect(a.wants).toEqual(b.wants);
+  });
+});
+
+describe("validateZswapOfferBytes — the raw-bytes ingest path (#5)", () => {
+  test("junk bytes → BAD_DESERIALIZE, same as the string path on the same bytes", () => {
+    const bytes = new Uint8Array(64).fill(7);
+    const viaBytes = validateZswapOfferBytes(bytes, {
+      refState: NO_REF,
+      tblock: TBLOCK,
+      maxBytes: 10_000,
+    });
+    const viaString = validateZswapOffer(
+      bech32m.encode(OFFER_HRP, bech32m.toWords(bytes), false),
+      { refState: NO_REF, tblock: TBLOCK, maxBytes: 10_000 },
+    );
+    expect(viaBytes.ok).toBe(false);
+    expect(viaBytes.code).toBe("BAD_DESERIALIZE");
+    expect(viaBytes.code).toBe(viaString.code); // the two entries agree
+  });
+
+  test("oversized raw bytes → TOO_LARGE (no bech32m step to bound first)", () => {
+    const r = validateZswapOfferBytes(new Uint8Array(200), {
+      refState: NO_REF,
+      tblock: TBLOCK,
+      maxBytes: 8,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe("TOO_LARGE");
   });
 });

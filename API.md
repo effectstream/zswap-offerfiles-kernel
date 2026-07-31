@@ -94,7 +94,7 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults
 Celestia DA                    Midnight
      │                               │
      │  every blob in namespace      │  every block: nullifiers,
-     │  → decoded as swapoffer1…    │  unshielded UTXOs, Merkle roots
+     │  → raw MIP-0005 tx bytes      │  unshielded UTXOs, Merkle roots
      ▼                               ▼
          ┌─────────────────────────────┐
          │   ZSwap-DA indexer (node)   │

@@ -5,6 +5,7 @@ import {
 } from "@effectstream/batcher-sdk";
 import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
 import { DedupStore, offerHashFromBlob } from "@zswap-da/offer-guard";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import type { BatcherConfig } from "./config.ts";
 
 // DoS guard on the decoded offer size; mirrors the node's OFFER_MAX_BYTES. The
@@ -94,6 +95,27 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
     if (!sponsorship.valid) return sponsorship;
 
     return { valid: true };
+  }
+
+  // Publish the RAW MIP-0005 transaction bytes to Celestia, not the bech32m
+  // string (MIP-0006): bech32m is a display encoding and wastes ~1.6× the
+  // blob for no benefit. The base adapter base64s `input` as UTF-8, which
+  // cannot carry binary — so we decode the bech32m input to bytes here and
+  // hand the base adapter a payload it will base64 verbatim. `rawData` stays
+  // the bech32m string for logging / the dedup record.
+  override buildBatchData(inputs: any[], options?: any): any {
+    const built = super.buildBatchData(inputs, options);
+    if (!built) return built;
+    try {
+      const rawBytes = OfferFiles.decode(built.rawData);
+      // Base64 of the raw bytes becomes blob.data (Celestia stores these
+      // bytes; the read side recovers them via atob → latin1 → Uint8Array).
+      built.data.blob.data = Buffer.from(rawBytes).toString("base64");
+    } catch {
+      // Non-decodable input never reaches here (validateInput rejected it),
+      // but fail safe: leave the base adapter's payload untouched.
+    }
+    return built;
   }
 
   override async submitBatch(data: any, fee: string | bigint): Promise<any> {

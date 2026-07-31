@@ -7,8 +7,8 @@ import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
-import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
-import { offerHashFromBlob } from "./offer-hash.ts";
+import { getBlankRefState, validateZswapOfferBytes, verifyOfferCrypto } from "@zswap-da/validator";
+import { latin1ToBytes, offerBytesToBech32, offerHashFromBytes } from "@zswap-da/offer-guard";
 import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 
 import {
@@ -288,7 +288,13 @@ stm.addStateTransition("midnight-zswap-root", function* (data) {
 
 stm.addStateTransition("celestia-zswap", function* (data) {
   const { payload } = data.parsedInput;
+  // MIP-0006: the DA blob is the RAW MIP-0005 transaction bytes, not the
+  // bech32m string. The framework fetcher sets suppliedValue = atob(blob.data),
+  // a latin1 string whose char codes are those bytes; latin1ToBytes recovers
+  // them. `raw` (the latin1 string) is still the accounting-table key used by
+  // rejectOffer's scrub, so keep it as-is for that match.
   const raw = payload.suppliedValue;
+  const rawBytes = latin1ToBytes(raw);
 
   // Anyone can post any bytes to the public Celestia namespace for the price
   // of a blob fee, so this transition is the real gate — /api/zswap/submit and
@@ -340,7 +346,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     });
   };
 
-  const result = validateZswapOffer(raw, {
+  const result = validateZswapOfferBytes(rawBytes, {
     refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(data.blockTimestamp),
     maxBytes: OFFER_MAX_BYTES,
@@ -369,7 +375,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   // offer re-published — same maker retrying, or a relay replaying the blob —
   // resolves to the same hash on every node regardless of local ids. Checks
   // history too: a consumed/expired offer must not be resurrected by replay.
-  const offerHash = offerHashFromBlob(raw);
+  const offerHash = offerHashFromBytes(rawBytes);
   const existing = yield* World.resolve(getOfferStatusByHash, {
     offer_hash: offerHash,
   });
@@ -474,7 +480,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     // ── Insert offer ──
     const offerFileRes = yield* World.resolve(insertOfferFileWithHash, {
       celestia_height: data.blockHeight,
-      transaction_hex: raw,
+      transaction_hex: offerBytesToBech32(rawBytes), // bech32m for storage/API
       offer_hash: offerHash,
       metadata_created_at: new Date(data.blockTimestamp).toISOString(),
       metadata_expires_at: expiresAt,

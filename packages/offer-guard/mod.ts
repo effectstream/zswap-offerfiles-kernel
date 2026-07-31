@@ -68,6 +68,43 @@ export function offerHashFromBlob(blob: string): string {
   return createHash("sha256").update(OfferFiles.decode(blob)).digest("hex");
 }
 
+/**
+ * Content hash from RAW offer bytes — the on-chain (DA) form. Equal to
+ * offerHashFromBlob(encode(bytes)) since the hash is over the bytes either
+ * way; used by the STM, which ingests raw bytes off Celestia.
+ */
+export function offerHashFromBytes(rawTx: Uint8Array): string {
+  return createHash("sha256").update(rawTx).digest("hex");
+}
+
+/**
+ * Encode raw offer bytes to the MIP-0005 bech32m string (for storage/display
+ * and the indexer API). Thin re-export of the codec so the STM has one import.
+ */
+export function offerBytesToBech32(rawTx: Uint8Array): string {
+  return OfferFiles.encode(rawTx);
+}
+
+/**
+ * The Celestia read transport, made explicit and testable. The framework
+ * fetcher sets `suppliedValue = atob(blob.data)` — a latin1 string whose
+ * char codes ARE the raw bytes (0–255). This recovers the Uint8Array. The
+ * inverse (bytesToLatin1) mirrors what btoa consumes, so round-trip tests can
+ * replicate the exact wire path without a live Celestia node.
+ */
+export function latin1ToBytes(suppliedValue: string): Uint8Array {
+  const out = new Uint8Array(suppliedValue.length);
+  for (let i = 0; i < suppliedValue.length; i++) {
+    out[i] = suppliedValue.charCodeAt(i) & 0xff;
+  }
+  return out;
+}
+export function bytesToLatin1(rawTx: Uint8Array): string {
+  let s = "";
+  for (const b of rawTx) s += String.fromCharCode(b);
+  return s;
+}
+
 /** Async liveness/dedup checks a caller can plug in (all optional). */
 export interface LivenessChecks {
   /** Already indexed/archived/published? Return the known status if so. */

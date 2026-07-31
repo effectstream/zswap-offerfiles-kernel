@@ -17,3 +17,4 @@ docker/
 .dockerignore
 mnemonic-to-seed.ts
 packages/contracts-midnight/contract-offer-files.undeployed.json
+PLAN.md

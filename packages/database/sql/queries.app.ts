@@ -126,6 +126,85 @@ export const getLastOffer = {
     ),
 };
 
+// ── 24 h pair stats (full window, no row cap) ──────────────────────────────
+//
+// Computed in SQL over EVERY fill in the window. The old path derived stats
+// from the display-history query and inherited its LIMIT 120, so any pair
+// with >120 fills in 24 h reported understated volume, a truncated high/low
+// window, and a change24 baselined on the 120th-newest trade mislabelled as
+// "24 h ago". The display list keeps its cap; stats must not.
+//
+// One round trip, four scalar-subquery groups over a shared fills CTE:
+//   last_price       — newest fill ever (not window-bound: a quiet pair still
+//                      has a last traded price)
+//   ref_before_24h   — newest fill at or older than the 24 h cutoff: the
+//                      correct change24 baseline
+//   oldest_in_24h    — fallback baseline when the pair's whole history is
+//                      inside the window (change-since-inception)
+//   window aggregates — high / low / volumes / fill count over ALL 24 h fills
+//
+// Zero-amount legs are excluded up front (price would be 0 or ∞) — same
+// filter the old JS path applied per row.
+export interface IGetPairStats24hParams {
+  base: string;
+  quote: string;
+}
+export interface IGetPairStats24hResult {
+  last_price: string | null;
+  ref_before_24h: string | null;
+  oldest_in_24h: string | null;
+  fills_24h: number;
+  high_24h: string | null;
+  low_24h: string | null;
+  volume_base_24h: string | null;
+  volume_quote_24h: string | null;
+}
+export const getPairStats24h = {
+  run: (params: IGetPairStats24hParams, dbConn: any) =>
+    runQ<IGetPairStats24hParams, IGetPairStats24hResult>(
+      `WITH fills AS (
+         SELECT h.archived_at,
+                CASE WHEN g.token_color = :base!
+                     THEN w.amount::numeric / g.amount::numeric
+                     ELSE g.amount::numeric / w.amount::numeric END AS price,
+                CASE WHEN g.token_color = :base!
+                     THEN g.amount::numeric ELSE w.amount::numeric END AS base_amt,
+                CASE WHEN g.token_color = :base!
+                     THEN w.amount::numeric ELSE g.amount::numeric END AS quote_amt
+         FROM offer_file_history h
+         JOIN offer_file_tokens_history g
+           ON g.offer_file_id = h.id AND g.direction = 'GIVING'
+         JOIN offer_file_tokens_history w
+           ON w.offer_file_id = h.id AND w.direction = 'WANTING'
+         WHERE h.archive_reason = 'CONSUMED'
+           AND g.amount::numeric > 0
+           AND w.amount::numeric > 0
+           AND ((g.token_color = :base! AND w.token_color = :quote!)
+             OR (g.token_color = :quote! AND w.token_color = :base!))
+       )
+       SELECT
+         (SELECT price FROM fills ORDER BY archived_at DESC LIMIT 1)::text AS last_price,
+         (SELECT price FROM fills
+           WHERE archived_at <= NOW() - INTERVAL '24 hours'
+           ORDER BY archived_at DESC LIMIT 1)::text AS ref_before_24h,
+         (SELECT price FROM fills
+           WHERE archived_at > NOW() - INTERVAL '24 hours'
+           ORDER BY archived_at ASC LIMIT 1)::text AS oldest_in_24h,
+         (SELECT COUNT(*)::int FROM fills
+           WHERE archived_at > NOW() - INTERVAL '24 hours') AS fills_24h,
+         (SELECT MAX(price) FROM fills
+           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS high_24h,
+         (SELECT MIN(price) FROM fills
+           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS low_24h,
+         (SELECT SUM(base_amt) FROM fills
+           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS volume_base_24h,
+         (SELECT SUM(quote_amt) FROM fills
+           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS volume_quote_24h`,
+      params,
+      dbConn,
+    ),
+};
+
 // ── Trade history ──────────────────────────────────────────────────────────
 
 export interface IGetTradeHistoryParams {

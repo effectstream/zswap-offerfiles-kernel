@@ -888,6 +888,46 @@ export const getRecentRejections = {
     ),
 };
 
+// Root upsert that pins first_seen_ms on the FIRST insert and never moves it
+// (COALESCE keeps the existing value on conflict) while still advancing
+// last_seen_ms for the prune. Supersedes the generated UpsertKnownRoot at the
+// STM call site.
+export interface IUpsertKnownRootWithFirstSeenParams {
+  root: string;
+  height: NumberOrString;
+  seen_ms: NumberOrString;
+}
+export type IUpsertKnownRootWithFirstSeenResult = void;
+export const upsertKnownRootWithFirstSeen = {
+  run: (params: IUpsertKnownRootWithFirstSeenParams, dbConn: any) =>
+    runQ<IUpsertKnownRootWithFirstSeenParams, IUpsertKnownRootWithFirstSeenResult>(
+      `INSERT INTO known_roots (root, height, last_seen_ms, first_seen_ms)
+       VALUES (:root!, :height!, :seen_ms!, :seen_ms!)
+       ON CONFLICT (root) DO UPDATE
+         SET height = EXCLUDED.height,
+             last_seen_ms = EXCLUDED.last_seen_ms,
+             first_seen_ms = COALESCE(known_roots.first_seen_ms, EXCLUDED.first_seen_ms)`,
+      params,
+      dbConn,
+    ),
+};
+
+// Earliest first_seen_ms among a set of shielded input roots — the basis for
+// shielded expiry. Called at ingestion with the offer's just-validated
+// inputRoots (all already present in known_roots). NULL for an unshielded-
+// only offer (empty root list).
+export interface IGetEarliestRootFirstSeenParams { roots: string[] }
+export interface IGetEarliestRootFirstSeenResult { first_seen_ms: NumberOrString | null }
+export const getEarliestRootFirstSeen = {
+  run: (params: IGetEarliestRootFirstSeenParams, dbConn: any) =>
+    runQ<IGetEarliestRootFirstSeenParams, IGetEarliestRootFirstSeenResult>(
+      `SELECT MIN(first_seen_ms) AS first_seen_ms
+       FROM known_roots WHERE root = ANY(:roots!)`,
+      params,
+      dbConn,
+    ),
+};
+
 // NOTE: status-by-blob lookups go through offerHashFromBlob() + the
 // getOfferStatusByHash index probe — never a literal transaction_hex
 // comparison. A TEXT-equality query here would seq-scan both offer tables

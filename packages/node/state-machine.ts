@@ -9,6 +9,7 @@ import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
 import { offerHashFromBlob } from "./offer-hash.ts";
+import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 
 import {
   insertOfferFileWithHash,
@@ -28,7 +29,8 @@ import {
   insertCreatedUnshielded,
   deleteCreatedUnshielded,
   isUnshieldedCreated,
-  upsertKnownRoot,
+  upsertKnownRootWithFirstSeen,
+  getEarliestRootFirstSeen,
   isKnownRoot,
   pruneKnownRoots,
 } from "@zswap-da/database";
@@ -271,10 +273,10 @@ stm.addStateTransition("midnight-zswap-root", function* (data) {
     return;
   }
   try {
-    yield* World.resolve(upsertKnownRoot, {
+    yield* World.resolve(upsertKnownRootWithFirstSeen, {
       root,
       height: data.blockHeight,
-      last_seen_ms: data.blockTimestamp,
+      seen_ms: data.blockTimestamp,
     });
     yield* World.resolve(pruneKnownRoots, {
       cutoff_ms: data.blockTimestamp - ROOT_WINDOW_SECONDS * 1000,
@@ -442,6 +444,32 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     return;
   }
 
+  // ── Derive expires_at (MIP-0006) ──
+  // Deterministic, computed once at ingestion:
+  //   shielded (has input roots) → earliest root first_seen + ROOT_WINDOW.
+  //     A shielded offer is fillable only while its proof root stays in the
+  //     ledger's recency window; that window opened when the chain first saw
+  //     the root, so this is the true on-chain expiry.
+  //   otherwise → the earliest intent TTL if the offer carries one, else our
+  //     indexer TTL (block time + OFFER_TTL_SECONDS). An unshielded UTXO has
+  //     no root window; the intent TTL is the only ledger bound, and absent
+  //     that we fall back to the operator TTL.
+  let expiresAt: string | null = null;
+  const inputRoots = result.inputRoots ?? [];
+  if (inputRoots.length > 0) {
+    const fs = yield* World.resolve(getEarliestRootFirstSeen, { roots: inputRoots });
+    const firstSeenMs = fs[0]?.first_seen_ms;
+    if (firstSeenMs != null) {
+      expiresAt = new Date(Number(firstSeenMs) + ROOT_WINDOW_SECONDS * 1000).toISOString();
+    }
+  }
+  if (expiresAt == null) {
+    const intentTtl = P2pAtomicSwaps.earliestIntentTtl(result.tx!);
+    expiresAt = intentTtl
+      ? new Date(intentTtl).toISOString()
+      : new Date(data.blockTimestamp + OFFER_TTL_SECONDS * 1000).toISOString();
+  }
+
   try {
     // ── Insert offer ──
     const offerFileRes = yield* World.resolve(insertOfferFileWithHash, {
@@ -449,7 +477,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
       transaction_hex: raw,
       offer_hash: offerHash,
       metadata_created_at: new Date(data.blockTimestamp).toISOString(),
-      metadata_expires_at: null,
+      metadata_expires_at: expiresAt,
       ttl_seconds: OFFER_TTL_SECONDS,
     });
 

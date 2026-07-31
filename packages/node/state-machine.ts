@@ -450,10 +450,6 @@ stm.addStateTransition("celestia-zswap", function* (data) {
       offer_hash: offerHash,
       metadata_created_at: new Date(data.blockTimestamp).toISOString(),
       metadata_expires_at: null,
-      metadata_maker_note: null,
-      auth_signer_public_key: null,
-      auth_signature: null,
-      auth_scheme: null,
       ttl_seconds: OFFER_TTL_SECONDS,
     });
 

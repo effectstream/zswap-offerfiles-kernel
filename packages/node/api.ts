@@ -232,7 +232,6 @@ export const apiRouter: StartConfigApiRouter = async function (
       created_at: offer.created_at,
       metadata_created_at: offer.metadata_created_at,
       metadata_expires_at: offer.metadata_expires_at,
-      metadata_maker_note: offer.metadata_maker_note,
       ttl_seconds: offer.ttl_seconds,
       gives,
       wants,

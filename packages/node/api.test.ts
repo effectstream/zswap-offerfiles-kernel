@@ -114,6 +114,14 @@ describe("GET /api/zswaps — keyset pagination over HTTP", () => {
     expect(p2.body.next_cursor === null || p2.body.offers.length < 2).toBe(true);
   });
 
+  test("detail response carries no auth_* or maker-note fields (spec removals)", async () => {
+    const { status, body } = await getJson(`/api/zswaps/${hashOf(1)}`);
+    expect(status).toBe(200);
+    const keys = Object.keys(body);
+    expect(keys.some((k) => k.startsWith("auth_"))).toBe(false);
+    expect(keys).not.toContain("metadata_maker_note");
+  });
+
   test("malformed cursor → 400 INVALID_CURSOR", async () => {
     const { status, body } = await getJson("/api/zswaps?after_hash=nonsense");
     expect(status).toBe(400);

@@ -42,10 +42,6 @@ async function insertOffer(hash: string, blob: string): Promise<number> {
       offer_hash: hash,
       metadata_created_at: new Date().toISOString(),
       metadata_expires_at: null,
-      metadata_maker_note: null,
-      auth_signer_public_key: null,
-      auth_signature: null,
-      auth_scheme: null,
       ttl_seconds: 3600,
     },
     client,
@@ -161,6 +157,18 @@ test("archiveOfferByNullifierWithHash carries offer_hash into history", async ()
   expect(detail[0].status).toBe("consumed");
   const legs = await getOfferTokensAny.run({ offer_file_id: id, live: false }, client);
   expect(legs.length).toBe(2);
+});
+
+test("spec-removed columns are gone from the schema (auth block, maker note)", async () => {
+  // MIP-0006 removed wrapper auth (unsound, privacy-harming) and maker
+  // messages (phishing surface; no ledger field for an authenticated one).
+  // Negative assertion so the columns cannot quietly return.
+  const r = await client.query(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_name IN ('offer_file', 'offer_file_history')
+       AND (column_name LIKE 'auth_%' OR column_name = 'metadata_maker_note')`,
+  );
+  expect(r.rows).toEqual([]);
 });
 
 test("unique index rejects a second open offer with the same hash", async () => {

@@ -215,7 +215,6 @@ Returns the current live offer book — offers published to Celestia, validated,
     "blob_chars": 24781,
     "metadata_created_at": "2026-06-01T12:00:00.000Z",
     "metadata_expires_at": null,
-    "metadata_maker_note": null,
     "ttl_seconds": "3600",
     "created_at": "2026-06-01T12:00:05.123Z",
     "gives": [
@@ -237,7 +236,6 @@ Returns the current live offer book — offers published to Celestia, validated,
 | `gives` | Tokens the maker is offering. Each leg carries `kind` (`SHIELDED`/`UNSHIELDED`, MIP-0006 `TokenLeg.type`) — the same color on different value layers is two distinct legs, never netted |
 | `wants` | Tokens the maker is requesting (same leg shape) |
 | `ttl_seconds` | Offer lifetime in seconds from `metadata_created_at`, as a **string** |
-| `metadata_maker_note` | Optional free-text note from the maker (`null` when none) |
 
 All string/number fields are returned as-is from the DB; numeric-looking values (`celestia_height`, `ttl_seconds`, token `amount`) are **strings** to preserve full precision.
 
@@ -267,7 +265,6 @@ curl "http://host:9999/api/zswaps/9f2c4a...e1"
   "created_at": "2026-06-01T12:00:05.123Z",
   "metadata_created_at": "2026-06-01T12:00:00.000Z",
   "metadata_expires_at": null,
-  "metadata_maker_note": null,
   "ttl_seconds": "3600",
   "gives": [ { "token": "00…00", "amount": "1000000", "kind": "UNSHIELDED" } ],
   "wants": [ { "token": "70ce…69", "amount": "500000", "kind": "SHIELDED" } ]

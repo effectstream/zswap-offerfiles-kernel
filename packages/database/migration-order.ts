@@ -9,6 +9,7 @@ import offerRejectionsSql from "./migrations/006-offer-rejections.sql" with { ty
 import cursorPaginationSql from "./migrations/007-cursor-pagination.sql" with { type: "text" };
 import nullifierTxHashSql from "./migrations/008-nullifier-tx-hash.sql" with { type: "text" };
 import legKindSql from "./migrations/009-leg-kind.sql" with { type: "text" };
+import dropAuthNoteSql from "./migrations/010-drop-auth-and-note.sql" with { type: "text" };
 import localMigrationSql from "./migrations/local-migration.sql" with { type: "text" };
 export const migrationTable: DBMigrations[] = [
   {
@@ -50,6 +51,10 @@ export const migrationTable: DBMigrations[] = [
   {
     name: "009-leg-kind.sql",
     sql: legKindSql,
+  },
+  {
+    name: "010-drop-auth-and-note.sql",
+    sql: dropAuthNoteSql,
   },
   {
     name: "local-migration.sql",

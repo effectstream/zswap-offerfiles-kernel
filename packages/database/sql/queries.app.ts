@@ -413,10 +413,6 @@ export interface IInsertOfferFileWithHashParams {
   offer_hash: string;
   metadata_created_at: DateOrString | null;
   metadata_expires_at: DateOrString | null;
-  metadata_maker_note: string | null;
-  auth_signer_public_key: string | null;
-  auth_signature: string | null;
-  auth_scheme: string | null;
   ttl_seconds: NumberOrString | null;
 }
 export interface IInsertOfferFileWithHashResult { id: number }
@@ -429,10 +425,6 @@ export const insertOfferFileWithHash = {
            offer_hash,
            metadata_created_at,
            metadata_expires_at,
-           metadata_maker_note,
-           auth_signer_public_key,
-           auth_signature,
-           auth_scheme,
            ttl_seconds
        ) VALUES (
            :celestia_height!,
@@ -440,10 +432,6 @@ export const insertOfferFileWithHash = {
            :offer_hash!,
            :metadata_created_at!,
            :metadata_expires_at!,
-           :metadata_maker_note!,
-           :auth_signer_public_key!,
-           :auth_signature!,
-           :auth_scheme!,
            COALESCE(:ttl_seconds!, 3600)
        ) RETURNING id`,
       params,
@@ -561,7 +549,6 @@ export interface IGetOfferByHashResult {
   offer_hash: string;
   metadata_created_at: DateOrString | null;
   metadata_expires_at: DateOrString | null;
-  metadata_maker_note: string | null;
   ttl_seconds: NumberOrString | null;
   created_at: DateOrString | null;
   status: string;
@@ -571,14 +558,14 @@ export const getOfferByHash = {
   run: (params: IGetOfferByHashParams, dbConn: any) =>
     runQ<IGetOfferByHashParams, IGetOfferByHashResult>(
       `SELECT id, celestia_height, transaction_hex, offer_hash,
-              metadata_created_at, metadata_expires_at, metadata_maker_note,
+              metadata_created_at, metadata_expires_at,
               ttl_seconds, created_at,
               'open' AS status, NULL::text AS archive_reason
        FROM offer_file
        WHERE offer_hash = :offer_hash!
        UNION ALL
        SELECT id, celestia_height, transaction_hex, offer_hash,
-              metadata_created_at, metadata_expires_at, metadata_maker_note,
+              metadata_created_at, metadata_expires_at,
               ttl_seconds, created_at,
               (${archivedStatusCase("offer_file_history.id")}) AS status,
               archive_reason
@@ -659,7 +646,6 @@ export interface IGetOpenOffersPageResult {
   blob_chars: number;
   metadata_created_at: DateOrString | null;
   metadata_expires_at: DateOrString | null;
-  metadata_maker_note: string | null;
   ttl_seconds: NumberOrString | null;
   created_at: DateOrString | null;
 }
@@ -668,7 +654,7 @@ export const getOpenOffersPage = {
     runQ<IGetOpenOffersPageParams, IGetOpenOffersPageResult>(
       `SELECT o.id, o.celestia_height, o.offer_hash,
               LENGTH(o.transaction_hex)::int AS blob_chars,
-              o.metadata_created_at, o.metadata_expires_at, o.metadata_maker_note,
+              o.metadata_created_at, o.metadata_expires_at,
               o.ttl_seconds, o.created_at
        FROM offer_file o
        WHERE
@@ -720,10 +706,6 @@ const HISTORY_COLUMNS = `
         offer_hash,
         metadata_created_at,
         metadata_expires_at,
-        metadata_maker_note,
-        auth_signer_public_key,
-        auth_signature,
-        auth_scheme,
         created_at,
         ttl_seconds`;
 

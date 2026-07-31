@@ -28,29 +28,31 @@ export async function submitOffer(blob: string): Promise<SubmitResult> {
   return { status: r.status, body };
 }
 
+export interface ApiTokenLeg { token: string; amount: string; type: string }
 export interface ApiZswap {
-  id: number;
-  celestia_height: string;
-  offer_hash: string | null;
-  blob_chars: number;
-  gives: { token: string; amount: string }[];
-  wants: { token: string; amount: string }[];
+  version: 1;
+  offerId: string | null;
+  offerBech32?: string;
+  blobChars?: number;
+  celestiaHeight?: string;
+  computed: {
+    gives: ApiTokenLeg[];
+    wants: ApiTokenLeg[];
+    expiresAt?: string | null;
+    inputNullifiers: string[];
+    firstSeenAt?: string | null;
+    status: string;
+  };
 }
 
-export interface ApiZswapDetail {
-  offer_hash: string;
-  status: string;
-  blob: string;
-  gives: { token: string; amount: string }[];
-  wants: { token: string; amount: string }[];
-}
+export type ApiZswapDetail = ApiZswap & { offerBech32: string };
 
 export interface ApiZswapsPage {
   offers: ApiZswap[];
-  next_cursor: string | null;
+  nextCursor: string | null;
 }
 
-/** One page; pass after_hash (= previous next_cursor) to continue. */
+/** One page; pass after_hash (= previous nextCursor) to continue. */
 export async function getZswapsPage(
   params: { token?: string; limit?: number; after_hash?: string } = {},
 ): Promise<ApiZswapsPage> {

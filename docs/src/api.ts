@@ -21,28 +21,33 @@ export type KnownToken = {
   kind: string
 }
 
-export type Offer = {
-  id: number
-  celestia_height?: string
-  /** Content hash (sha256 of the raw offer bytes) — the cross-node offer id. */
-  offer_hash: string | null
-  /** bech32m length of the blob; fetch the blob itself via zswapByHash(). */
-  blob_chars?: number
-  gives?: { token: string; amount: string }[]
-  wants?: { token: string; amount: string }[]
-}
+/** MIP-0006 TokenLeg. */
+export type TokenLeg = { token: string; amount: string; type: 'SHIELDED' | 'UNSHIELDED' }
 
-export type OfferDetail = {
-  offer_hash: string
+export type OfferComputed = {
+  gives: TokenLeg[]
+  wants: TokenLeg[]
+  expiresAt?: string | null
+  inputNullifiers: string[]
+  firstSeenAt?: string | null
   status: 'live' | 'consumed' | 'cancelled' | 'expired'
-  /** MIP-0005 bech32m string of the offer. */
-  blob: string
-  celestia_height?: string
-  gives?: { token: string; amount: string }[]
-  wants?: { token: string; amount: string }[]
 }
 
-export type OffersPage = { offers: Offer[]; next_cursor: string | null }
+/** MIP-0006 OffchainOfferPayload. In LIST responses `offerBech32` is omitted
+ *  (16–25 KB per offer); fetch it per offer via zswapByHash(). */
+export type Offer = {
+  version: 1
+  offerId: string | null
+  offerBech32?: string
+  blobChars?: number
+  celestiaHeight?: string
+  computed: OfferComputed
+}
+
+/** Single-offer response — the MIP requires `offerBech32` here. */
+export type OfferDetail = Offer & { offerBech32: string }
+
+export type OffersPage = { offers: Offer[]; nextCursor: string | null }
 
 export type SyncStatus = { status: string; [k: string]: unknown }
 
@@ -75,10 +80,10 @@ export const api = {
   zswapByHash: (hash: string) =>
     req<OfferDetail>('GET', `${API_BASE}/v1/offers/${hash}`),
   zswapStatusByHash: (hash: string) =>
-    req<{ offer_hash: string; status: string }>('GET', `${API_BASE}/v1/offers/${hash}/status`),
+    req<{ offerId: string; status: string }>('GET', `${API_BASE}/v1/offers/${hash}/status`),
   /** POST: a real blob is 16–25 KB — far beyond what a query string survives. */
   zswapStatus: (blob: string) =>
-    req<{ offer: string; offer_hash?: string; status: string }>('POST', `${API_BASE}/v1/offers/status`, { offer: blob }),
+    req<{ offerId?: string; status: string }>('POST', `${API_BASE}/v1/offers/status`, { offer: blob }),
   submitOffer: (blob: string) => req('POST', `${API_BASE}/v1/offers`, { offer: blob }),
   knownTokens: () => req<KnownToken[]>('GET', `${API_BASE}/v1/known-tokens`),
   registerToken: (color: string, name: string, kind: string) =>

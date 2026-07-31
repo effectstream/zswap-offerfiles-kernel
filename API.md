@@ -209,24 +209,28 @@ Returns the current live offer book — offers published to Celestia, validated,
 ```json
 {
   "offers": [{
-    "id": 42,
-    "celestia_height": "12231800",
-    "offer_hash": "9f2c4a…64 hex chars…e1",
-    "blob_chars": 24781,
-    "metadata_created_at": "2026-06-01T12:00:00.000Z",
-    "metadata_expires_at": null,
-    "ttl_seconds": "3600",
-    "created_at": "2026-06-01T12:00:05.123Z",
-    "gives": [
-      { "token": "0000000000000000000000000000000000000000000000000000000000000000", "amount": "1000000", "kind": "UNSHIELDED" }
-    ],
-    "wants": [
-      { "token": "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569", "amount": "500000", "kind": "SHIELDED" }
-    ]
+    "version": 1,
+    "offerId": "9f2c4a…64 hex chars…e1",
+    "blobChars": 24781,
+    "celestiaHeight": "12231800",
+    "computed": {
+      "gives": [
+        { "token": "0000…0000", "amount": "1000000", "type": "UNSHIELDED" }
+      ],
+      "wants": [
+        { "token": "70ce…b569", "amount": "500000", "type": "SHIELDED" }
+      ],
+      "expiresAt": "2026-06-01T13:00:00.000Z",
+      "inputNullifiers": ["7c1d9b…"],
+      "firstSeenAt": "2026-06-01T12:00:00.000Z",
+      "status": "live"
+    }
   }],
-  "next_cursor": null
+  "nextCursor": null
 }
 ```
+
+Each row is a MIP-0006 `OffchainOfferPayload`. **`offerBech32` is omitted in list responses** — the spec's presence rule is "at least one of `offerId`/`offerBech32`", and a real offer's string is 16–25 KB, so a 100-row page carrying strings would be megabytes. Fetch the string per offer via `GET /v1/offers/:offerId`, which always includes it. `blobChars` sizes that fetch.
 
 | Field | Description |
 |---|---|

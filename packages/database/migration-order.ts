@@ -11,6 +11,7 @@ import nullifierTxHashSql from "./migrations/008-nullifier-tx-hash.sql" with { t
 import legKindSql from "./migrations/009-leg-kind.sql" with { type: "text" };
 import dropAuthNoteSql from "./migrations/010-drop-auth-and-note.sql" with { type: "text" };
 import rootFirstSeenSql from "./migrations/011-root-first-seen.sql" with { type: "text" };
+import firstSeenAtSql from "./migrations/012-first-seen-at.sql" with { type: "text" };
 import localMigrationSql from "./migrations/local-migration.sql" with { type: "text" };
 export const migrationTable: DBMigrations[] = [
   {
@@ -60,6 +61,10 @@ export const migrationTable: DBMigrations[] = [
   {
     name: "011-root-first-seen.sql",
     sql: rootFirstSeenSql,
+  },
+  {
+    name: "012-first-seen-at.sql",
+    sql: firstSeenAtSql,
   },
   {
     name: "local-migration.sql",

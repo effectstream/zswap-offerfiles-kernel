@@ -46,12 +46,12 @@ if (!blob) {
     process.exit(1);
   }
   // The list is blob-free — fetch the blob by content hash.
-  const detail = await get<any>(`/v1/offers/${offers[0].offer_hash}`);
-  blob    = detail.blob;
+  const detail = await get<any>(`/v1/offers/${offers[0].offerId}`);
+  blob    = detail.offerBech32;
   offerId = offers[0].id;
-  console.log(`Using offer ${offers[0].offer_hash}  celestia=#${offers[0].celestia_height}`);
-  console.log(`  gives: ${JSON.stringify(offers[0].gives)}`);
-  console.log(`  wants: ${JSON.stringify(offers[0].wants)}\n`);
+  console.log(`Using offer ${offers[0].offerId}  celestia=#${offers[0].celestiaHeight}`);
+  console.log(`  gives: ${JSON.stringify(offers[0].computed.gives)}`);
+  console.log(`  wants: ${JSON.stringify(offers[0].computed.wants)}\n`);
 } else {
   console.log(`Using OFFER_BLOB (${blob.slice(0, 32)}…)\n`);
 }

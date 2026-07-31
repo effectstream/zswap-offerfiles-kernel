@@ -122,13 +122,13 @@ try {
   console.log(`${TAG} reading available zswaps back from GET /v1/offers…`);
   const myColors = new Set([T0, T1]);
   const apiOffers = (await getZswaps({ limit: 100 })).filter((o) =>
-    o.gives.some((g) => myColors.has(g.token)) || o.wants.some((w) => myColors.has(w.token))
+    o.computed.gives.some((g) => myColors.has(g.token)) || o.computed.wants.some((w) => myColors.has(w.token))
   );
   check("API returned my 2 offers", apiOffers.length === 2, `got ${apiOffers.length}`);
 
   // Sanity: the API's derived gives/wants reflect the real swap directions.
-  const giveColors = new Set(apiOffers.flatMap((o) => o.gives.map((g) => g.token)));
-  const wantColors = new Set(apiOffers.flatMap((o) => o.wants.map((w) => w.token)));
+  const giveColors = new Set(apiOffers.flatMap((o) => o.computed.gives.map((g) => g.token)));
+  const wantColors = new Set(apiOffers.flatMap((o) => o.computed.wants.map((w) => w.token)));
   check("API gives/wants reflect T0↔T1 swap", giveColors.has(T0) && giveColors.has(T1) && wantColors.has(T0) && wantColors.has(T1),
     `gives=${[...giveColors].map((c) => c.slice(0, 6))} wants=${[...wantColors].map((c) => c.slice(0, 6))}`);
 
@@ -137,8 +137,8 @@ try {
   console.log(`${TAG} reconstructing offers from GET /v1/offers/:hash…`);
   let reconstructed;
   try {
-    const details = await Promise.all(apiOffers.map((o) => getZswapByHash(o.offer_hash!)));
-    reconstructed = details.map((d) => reconstructOffer(d.blob));
+    const details = await Promise.all(apiOffers.map((o) => getZswapByHash(o.offerId!)));
+    reconstructed = details.map((d) => reconstructOffer(d.offerBech32));
     check("reconstructed both offers from API blob", reconstructed.length === 2);
   } catch (e) {
     check("reconstructed both offers from API blob", false, String(e).slice(0, 140));

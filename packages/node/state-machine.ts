@@ -461,11 +461,16 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   //     no root window; the intent TTL is the only ledger bound, and absent
   //     that we fall back to the operator TTL.
   let expiresAt: string | null = null;
+  // firstSeenAt (MIP-0006): shielded → the moment the offer became provable
+  // on this chain (earliest proof-root first-seen); otherwise the Celestia
+  // block time. Deterministic on replay — never wall-clock.
+  let firstSeenAt = new Date(data.blockTimestamp).toISOString();
   const inputRoots = result.inputRoots ?? [];
   if (inputRoots.length > 0) {
     const fs = yield* World.resolve(getEarliestRootFirstSeen, { roots: inputRoots });
     const firstSeenMs = fs[0]?.first_seen_ms;
     if (firstSeenMs != null) {
+      firstSeenAt = new Date(Number(firstSeenMs)).toISOString();
       expiresAt = new Date(Number(firstSeenMs) + ROOT_WINDOW_SECONDS * 1000).toISOString();
     }
   }
@@ -484,6 +489,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
       offer_hash: offerHash,
       metadata_created_at: new Date(data.blockTimestamp).toISOString(),
       metadata_expires_at: expiresAt,
+      first_seen_at: firstSeenAt,
       ttl_seconds: OFFER_TTL_SECONDS,
     });
 

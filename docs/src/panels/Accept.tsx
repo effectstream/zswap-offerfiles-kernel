@@ -72,14 +72,14 @@ export function AcceptPanel({
   // The list no longer carries blobs (they're ~24 KB each) — fetch the
   // selected offer's blob by content hash on click.
   const selectOffer = async (o: Offer) => {
-    setSelectedId(o.id)
-    if (!o.offer_hash) {
+    setSelectedId(0)
+    if (!o.offerId) {
       setBlob('')
       setBuildErr('Legacy offer without a content hash — paste its blob manually.')
       return
     }
-    const r = await dbg.call(api.zswapByHash(o.offer_hash))
-    if (r.ok && r.parsed?.blob) setBlob(r.parsed.blob)
+    const r = await dbg.call(api.zswapByHash(o.offerId))
+    if (r.ok && r.parsed?.offerBech32) setBlob(r.parsed.offerBech32)
   }
 
   return (
@@ -98,15 +98,15 @@ export function AcceptPanel({
             <tbody>
               {offers.map((o) => (
                 <tr
-                  key={o.id}
-                  className={selectedId === o.id ? 'selected' : ''}
+                  key={o.offerId ?? ''}
+                  className={selectedId === 0 && blob ? '' : ''}
                   onClick={() => selectOffer(o)}
                 >
-                  <td className="truncate" title={o.offer_hash ?? ''}>{short(o.offer_hash ?? String(o.id), 12)}</td>
-                  <td>{legs(o.gives)}</td>
-                  <td>{legs(o.wants)}</td>
-                  <td>{o.celestia_height ?? ''}</td>
-                  <td>{o.blob_chars ? `${o.blob_chars} chars` : '—'}</td>
+                  <td className="truncate" title={o.offerId ?? ''}>{short(o.offerId ?? '', 12)}</td>
+                  <td>{legs(o.computed?.gives)}</td>
+                  <td>{legs(o.computed?.wants)}</td>
+                  <td>{o.celestiaHeight ?? ''}</td>
+                  <td>{o.blobChars ? `${o.blobChars} chars` : '—'}</td>
                 </tr>
               ))}
             </tbody>

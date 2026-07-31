@@ -15,6 +15,7 @@ import {
   upsertPairStatsByOfferId,
   getOpenOffersPage,
   getOfferTokensForOffers,
+  getOfferNullifiersForOffers,
   getOfferByHash,
   getOfferStatusByHash,
   getOfferTokensAny,
@@ -35,7 +36,9 @@ import { offerHashFromBlob } from "./offer-hash.ts";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
 
-type OfferLegDto = { token: string; amount: string; kind: string };
+// MIP-0006 TokenLeg: { token, amount, type } — camelCase, `type` is the
+// value layer. Our DB column is `kind`; the wire name is the MIP's.
+type TokenLegDto = { token: string; amount: string; type: string };
 
 export const apiRouter: StartConfigApiRouter = async function (
   server: any,
@@ -160,34 +163,61 @@ export const apiRouter: StartConfigApiRouter = async function (
       },
       dbConn,
     );
-    if (offers.length === 0) return { offers: [], next_cursor: null };
+    if (offers.length === 0) return { offers: [], nextCursor: null };
 
     // One batched legs query for the whole page instead of one per offer.
     const legs = await getOfferTokensForOffers.run(
       { offer_file_ids: offers.map((o) => o.id) },
       dbConn,
     );
-    const byOffer = new Map<number, { gives: OfferLegDto[]; wants: OfferLegDto[] }>();
+    const byOffer = new Map<number, { gives: TokenLegDto[]; wants: TokenLegDto[] }>();
     for (const leg of legs) {
       let entry = byOffer.get(leg.offer_file_id);
       if (!entry) {
         entry = { gives: [], wants: [] };
         byOffer.set(leg.offer_file_id, entry);
       }
-      const dto = { token: leg.token_color, amount: leg.amount, kind: leg.kind };
+      const dto = { token: leg.token_color, amount: leg.amount, type: leg.kind };
       if (leg.direction === "GIVING") entry.gives.push(dto);
       else entry.wants.push(dto);
     }
 
+    // MIP-0006 OffchainOfferPayload per row, with `offerBech32` OMITTED:
+    // the spec's presence rule is "at least one of offerId/offerBech32", and
+    // lists SHOULD serve the id — a real offer's string is 16–25 KB, so a
+    // 100-row page carrying strings is megabytes of redundant payload when
+    // each offer is individually retrievable by id. Fetch the string via
+    // GET /v1/offers/:offerId.
+    const nullifiers = await getOfferNullifiersForOffers.run(
+      { offer_file_ids: offers.map((o) => o.id), live: true },
+      dbConn,
+    );
+    const nullifiersByOffer = new Map<number, string[]>();
+    for (const row of nullifiers) {
+      const list = nullifiersByOffer.get(row.offer_file_id) ?? [];
+      list.push(row.nullifier);
+      nullifiersByOffer.set(row.offer_file_id, list);
+    }
+
     return {
       offers: offers.map((offer) => ({
-        ...offer,
-        gives: byOffer.get(offer.id)?.gives ?? [],
-        wants: byOffer.get(offer.id)?.wants ?? [],
+        version: 1 as const,
+        offerId: offer.offer_hash,
+        // offerBech32 omitted — see above; blobChars sizes the fetch.
+        blobChars: offer.blob_chars,
+        celestiaHeight: offer.celestia_height,
+        computed: {
+          gives: byOffer.get(offer.id)?.gives ?? [],
+          wants: byOffer.get(offer.id)?.wants ?? [],
+          expiresAt: offer.metadata_expires_at,
+          inputNullifiers: nullifiersByOffer.get(offer.id) ?? [],
+          firstSeenAt: offer.first_seen_at,
+          status: "live" as const,
+        },
       })),
       // A full page may be the last one; the follow-up fetch then returns
-      // { offers: [], next_cursor: null } and the caller stops.
-      next_cursor:
+      // { offers: [], nextCursor: null } and the caller stops.
+      nextCursor:
         offers.length === limit ? offers[offers.length - 1].offer_hash : null,
     };
   });
@@ -209,7 +239,7 @@ export const apiRouter: StartConfigApiRouter = async function (
     }
     const rows = await getOfferByHash.run({ offer_hash: hash }, dbConn);
     if (rows.length === 0) {
-      return reply.code(404).send({ error: "NOT_FOUND", offer_hash: hash });
+      return reply.code(404).send({ error: "NOT_FOUND", offerId: hash });
     }
     const offer = rows[0];
     const live = offer.status === "live";
@@ -217,24 +247,32 @@ export const apiRouter: StartConfigApiRouter = async function (
       { offer_file_id: offer.id, live },
       dbConn,
     );
-    const gives: OfferLegDto[] = [];
-    const wants: OfferLegDto[] = [];
+    const gives: TokenLegDto[] = [];
+    const wants: TokenLegDto[] = [];
     for (const leg of legs) {
-      const dto = { token: leg.token_color, amount: leg.amount, kind: leg.kind };
+      const dto = { token: leg.token_color, amount: leg.amount, type: leg.kind };
       if (leg.direction === "GIVING") gives.push(dto);
       else wants.push(dto);
     }
+    // Single-offer response: the MIP requires offerBech32 here.
+    const offerNullifiers = await getOfferNullifiersForOffers.run(
+      { offer_file_ids: [offer.id], live },
+      dbConn,
+    );
     return {
-      offer_hash: offer.offer_hash,
-      status: offer.status,
-      blob: offer.transaction_hex,
-      celestia_height: offer.celestia_height,
-      created_at: offer.created_at,
-      metadata_created_at: offer.metadata_created_at,
-      metadata_expires_at: offer.metadata_expires_at,
-      ttl_seconds: offer.ttl_seconds,
-      gives,
-      wants,
+      version: 1 as const,
+      offerId: offer.offer_hash,
+      offerBech32: offer.transaction_hex,
+      celestiaHeight: offer.celestia_height,
+      ttlSeconds: offer.ttl_seconds,
+      computed: {
+        gives,
+        wants,
+        expiresAt: offer.metadata_expires_at,
+        inputNullifiers: offerNullifiers.map((n) => n.nullifier),
+        firstSeenAt: offer.first_seen_at,
+        status: offer.status,
+      },
     };
   });
 
@@ -248,7 +286,7 @@ export const apiRouter: StartConfigApiRouter = async function (
       });
     }
     const rows = await getOfferStatusByHash.run({ offer_hash: hash }, dbConn);
-    return { offer_hash: hash, status: rows[0]?.status ?? "not_found" };
+    return { offerId: hash, status: rows[0]?.status ?? "not_found" };
   });
 
   server.get("/v1/known-tokens", async () => {
@@ -434,11 +472,11 @@ export const apiRouter: StartConfigApiRouter = async function (
     try {
       hash = offerHashFromBlob(blob);
     } catch {
-      return { offer: blob, status: "not_found" };
+      return { status: "not_found" };
     }
     const rows = await getOfferStatusByHash.run({ offer_hash: hash }, dbConn);
-    if (rows.length === 0) return { offer: blob, offer_hash: hash, status: "not_found" };
-    return { offer: blob, offer_hash: hash, status: rows[0].status };
+    if (rows.length === 0) return { offerId: hash, status: "not_found" };
+    return { offerId: hash, status: rows[0].status };
   };
 
   // POST /v1/offers/status — status by bech32m string: body { offer } or
@@ -523,7 +561,7 @@ export const apiRouter: StartConfigApiRouter = async function (
         return reply.code(409).send({
           error: "DUPLICATE_OFFER",
           reason: `offer already indexed with status '${existing[0].status}'`,
-          offer_hash: offerHash,
+          offerId: offerHash,
           status: existing[0].status,
         });
       }
@@ -596,7 +634,7 @@ export const apiRouter: StartConfigApiRouter = async function (
       const result = await submitBlobViaBatcher(blob);
       // offer_hash is how the maker tracks this offer from now on:
       // GET /v1/offers/:hash once indexed.
-      return { success: true, offer_hash: offerHash, offer: blob, result };
+      return { success: true, offerId: offerHash, result };
     },
   );
 

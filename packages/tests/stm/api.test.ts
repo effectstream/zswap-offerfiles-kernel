@@ -141,13 +141,13 @@ export async function apiTest(db: Client): Promise<void> {
     const myColors = new Set([T0, T1]);
     const apiOffers = (await getZswaps({ limit: 100 })).filter(
       (o) =>
-        o.gives.some((g) => myColors.has(g.token)) ||
-        o.wants.some((w) => myColors.has(w.token)),
+        o.computed.gives.some((g) => myColors.has(g.token)) ||
+        o.computed.wants.some((w) => myColors.has(w.token)),
     );
     await assert("API returned my 2 offers", async () => apiOffers.length === 2);
 
-    const giveColors = new Set(apiOffers.flatMap((o) => o.gives.map((g) => g.token)));
-    const wantColors = new Set(apiOffers.flatMap((o) => o.wants.map((w) => w.token)));
+    const giveColors = new Set(apiOffers.flatMap((o) => o.computed.gives.map((g) => g.token)));
+    const wantColors = new Set(apiOffers.flatMap((o) => o.computed.wants.map((w) => w.token)));
     await assert(
       "API gives/wants reflect T0↔T1 swap",
       async () =>
@@ -160,7 +160,7 @@ export async function apiTest(db: Client): Promise<void> {
     // Every listed offer must carry its content hash (the list is blob-free).
     await assert(
       "API list rows carry offer_hash",
-      async () => apiOffers.every((o) => /^[0-9a-f]{64}$/.test(o.offer_hash ?? "")),
+      async () => apiOffers.every((o) => /^[0-9a-f]{64}$/.test(o.offerId ?? "")),
     );
 
     // Reconstruct each offer tx from the per-offer blob endpoint
@@ -169,9 +169,9 @@ export async function apiTest(db: Client): Promise<void> {
     let reconstructed: ReturnType<typeof reconstructOffer>[];
     try {
       const details = await Promise.all(
-        apiOffers.map((o) => getZswapByHash(o.offer_hash!)),
+        apiOffers.map((o) => getZswapByHash(o.offerId!)),
       );
-      reconstructed = details.map((d) => reconstructOffer(d.blob));
+      reconstructed = details.map((d) => reconstructOffer(d.offerBech32));
       await assert(
         "reconstructed both offers from API blob",
         async () => reconstructed.length === 2,

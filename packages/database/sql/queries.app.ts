@@ -413,6 +413,7 @@ export interface IInsertOfferFileWithHashParams {
   offer_hash: string;
   metadata_created_at: DateOrString | null;
   metadata_expires_at: DateOrString | null;
+  first_seen_at: DateOrString | null;
   ttl_seconds: NumberOrString | null;
 }
 export interface IInsertOfferFileWithHashResult { id: number }
@@ -425,6 +426,7 @@ export const insertOfferFileWithHash = {
            offer_hash,
            metadata_created_at,
            metadata_expires_at,
+           first_seen_at,
            ttl_seconds
        ) VALUES (
            :celestia_height!,
@@ -432,6 +434,7 @@ export const insertOfferFileWithHash = {
            :offer_hash!,
            :metadata_created_at!,
            :metadata_expires_at!,
+           :first_seen_at!,
            COALESCE(:ttl_seconds!, 3600)
        ) RETURNING id`,
       params,
@@ -549,6 +552,7 @@ export interface IGetOfferByHashResult {
   offer_hash: string;
   metadata_created_at: DateOrString | null;
   metadata_expires_at: DateOrString | null;
+  first_seen_at: DateOrString | null;
   ttl_seconds: NumberOrString | null;
   created_at: DateOrString | null;
   status: string;
@@ -558,14 +562,14 @@ export const getOfferByHash = {
   run: (params: IGetOfferByHashParams, dbConn: any) =>
     runQ<IGetOfferByHashParams, IGetOfferByHashResult>(
       `SELECT id, celestia_height, transaction_hex, offer_hash,
-              metadata_created_at, metadata_expires_at,
+              metadata_created_at, metadata_expires_at, first_seen_at,
               ttl_seconds, created_at,
               'live' AS status, NULL::text AS archive_reason
        FROM offer_file
        WHERE offer_hash = :offer_hash!
        UNION ALL
        SELECT id, celestia_height, transaction_hex, offer_hash,
-              metadata_created_at, metadata_expires_at,
+              metadata_created_at, metadata_expires_at, first_seen_at,
               ttl_seconds, created_at,
               (${archivedStatusCase("offer_file_history.id")}) AS status,
               archive_reason
@@ -593,6 +597,23 @@ export const getOfferTokensAny = {
        UNION ALL
        SELECT token_color, amount, direction, kind FROM offer_file_tokens_history
        WHERE NOT :live! AND offer_file_id = :offer_file_id!`,
+      params,
+      dbConn,
+    ),
+};
+
+// Batched nullifiers for a page of offers — computed.inputNullifiers in the
+// MIP-0006 payload (the keys an indexer watches to mark an offer consumed).
+export interface IGetOfferNullifiersForOffersParams { offer_file_ids: number[]; live: boolean }
+export interface IGetOfferNullifiersForOffersResult { offer_file_id: number; nullifier: string }
+export const getOfferNullifiersForOffers = {
+  run: (params: IGetOfferNullifiersForOffersParams, dbConn: any) =>
+    runQ<IGetOfferNullifiersForOffersParams, IGetOfferNullifiersForOffersResult>(
+      `SELECT offer_file_id, nullifier FROM offer_file_nullifiers
+       WHERE :live! AND offer_file_id = ANY(:offer_file_ids!)
+       UNION ALL
+       SELECT offer_file_id, nullifier FROM offer_file_nullifiers_history
+       WHERE NOT :live! AND offer_file_id = ANY(:offer_file_ids!)`,
       params,
       dbConn,
     ),
@@ -646,6 +667,7 @@ export interface IGetOpenOffersPageResult {
   blob_chars: number;
   metadata_created_at: DateOrString | null;
   metadata_expires_at: DateOrString | null;
+  first_seen_at: DateOrString | null;
   ttl_seconds: NumberOrString | null;
   created_at: DateOrString | null;
 }
@@ -654,7 +676,7 @@ export const getOpenOffersPage = {
     runQ<IGetOpenOffersPageParams, IGetOpenOffersPageResult>(
       `SELECT o.id, o.celestia_height, o.offer_hash,
               LENGTH(o.transaction_hex)::int AS blob_chars,
-              o.metadata_created_at, o.metadata_expires_at,
+              o.metadata_created_at, o.metadata_expires_at, o.first_seen_at,
               o.ttl_seconds, o.created_at
        FROM offer_file o
        WHERE
@@ -706,6 +728,7 @@ const HISTORY_COLUMNS = `
         offer_hash,
         metadata_created_at,
         metadata_expires_at,
+        first_seen_at,
         created_at,
         ttl_seconds`;
 

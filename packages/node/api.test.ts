@@ -73,13 +73,13 @@ describe("GET /v1/offers — keyset pagination over HTTP", () => {
       const { status, body } = await getJson(url);
       expect(status).toBe(200);
       expect(Array.isArray(body.offers)).toBe(true);
-      seen.push(...body.offers.map((o: any) => o.offer_hash));
-      if (!body.next_cursor) {
+      seen.push(...body.offers.map((o: any) => o.offerId));
+      if (!body.nextCursor) {
         expect(body.offers.length).toBeLessThan(3);
         break;
       }
-      expect(body.next_cursor).toBe(body.offers[body.offers.length - 1].offer_hash);
-      url = `/v1/offers?limit=3&after_hash=${body.next_cursor}`;
+      expect(body.nextCursor).toBe(body.offers[body.offers.length - 1].offerId);
+      url = `/v1/offers?limit=3&after_hash=${body.nextCursor}`;
     }
     expect(seen.length).toBe(7);
     expect(new Set(seen).size).toBe(7);
@@ -88,18 +88,34 @@ describe("GET /v1/offers — keyset pagination over HTTP", () => {
   test("offset is gone: the parameter is ignored, not honored", async () => {
     const a = await getJson("/v1/offers?limit=2");
     const b = await getJson("/v1/offers?limit=2&offset=4");
-    expect(b.body.offers.map((o: any) => o.offer_hash)).toEqual(
-      a.body.offers.map((o: any) => o.offer_hash),
+    expect(b.body.offers.map((o: any) => o.offerId)).toEqual(
+      a.body.offers.map((o: any) => o.offerId),
     );
   });
 
-  test("rows carry layer-tagged legs and no blob", async () => {
+  test("list rows are MIP-0006 payloads: offerId + computed, offerBech32 OMITTED", async () => {
     const { body } = await getJson("/v1/offers?limit=1");
     const offer = body.offers[0];
-    expect(offer.gives.length).toBe(1);
-    expect(offer.gives[0].kind).toBe("SHIELDED"); // MIP-0006 TokenLeg.type
-    expect(offer.transaction_hex).toBeUndefined();
-    expect(offer.blob_chars).toBeGreaterThan(0);
+    expect(offer.version).toBe(1);
+    expect(offer.offerId).toMatch(/^[0-9a-f]{64}$/);
+    // The presence rule: at least one of offerId/offerBech32. Lists serve the
+    // id — a 100-row page of 16–25 KB strings would be megabytes.
+    expect(offer.offerBech32).toBeUndefined();
+    expect(offer.computed.gives.length).toBe(1);
+    expect(offer.computed.gives[0].type).toBe("SHIELDED"); // MIP TokenLeg.type
+    expect(Array.isArray(offer.computed.inputNullifiers)).toBe(true);
+    expect(offer.computed.status).toBe("live");
+    expect(offer.blobChars).toBeGreaterThan(0);
+  });
+
+  test("detail response DOES carry offerBech32 (spec: MUST for single offer)", async () => {
+    const { status, body } = await getJson(`/v1/offers/${hashOf(1)}`);
+    expect(status).toBe(200);
+    expect(body.version).toBe(1);
+    expect(body.offerId).toBe(hashOf(1));
+    expect(typeof body.offerBech32).toBe("string");
+    expect(body.computed.status).toBe("live");
+    expect(Array.isArray(body.computed.inputNullifiers)).toBe(true);
   });
 
   test("token filter composes with the cursor", async () => {
@@ -107,19 +123,21 @@ describe("GET /v1/offers — keyset pagination over HTTP", () => {
     const p1 = await getJson(`/v1/offers?limit=2&token=${color}`);
     expect(p1.body.offers.length).toBe(2);
     const p2 = await getJson(
-      `/v1/offers?limit=2&token=${color}&after_hash=${p1.body.next_cursor}`,
+      `/v1/offers?limit=2&token=${color}&after_hash=${p1.body.nextCursor}`,
     );
-    const ids = [...p1.body.offers, ...p2.body.offers].map((o: any) => o.offer_hash);
+    const ids = [...p1.body.offers, ...p2.body.offers].map((o: any) => o.offerId);
     expect(new Set(ids).size).toBe(3); // ids 2,4,6
-    expect(p2.body.next_cursor === null || p2.body.offers.length < 2).toBe(true);
+    expect(p2.body.nextCursor === null || p2.body.offers.length < 2).toBe(true);
   });
 
-  test("detail response carries no auth_* or maker-note fields (spec removals)", async () => {
-    const { status, body } = await getJson(`/v1/offers/${hashOf(1)}`);
-    expect(status).toBe(200);
+  test("no auth_* / maker-note / snake_case leakage in responses (spec removals + camelCase)", async () => {
+    const { body } = await getJson(`/v1/offers/${hashOf(1)}`);
     const keys = Object.keys(body);
     expect(keys.some((k) => k.startsWith("auth_"))).toBe(false);
     expect(keys).not.toContain("metadata_maker_note");
+    // MIP payloads are camelCase (A2) — no snake_case survivors.
+    expect(keys.some((k) => k.includes("_"))).toBe(false);
+    expect(Object.keys(body.computed).some((k) => k.includes("_"))).toBe(false);
   });
 
   test("old /api/* paths are gone (404) — proves a move, not a copy", async () => {

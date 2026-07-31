@@ -41,6 +41,8 @@ export type OfferDetail = {
   wants?: { token: string; amount: string }[]
 }
 
+export type OffersPage = { offers: Offer[]; next_cursor: string | null }
+
 export type SyncStatus = { status: string; [k: string]: unknown }
 
 /** Phantom-typed request: T is the expected response body. */
@@ -65,8 +67,9 @@ export const api = {
   // ── Node (:9999) ──────────────────────────────────────────────────────────
   health: () => req<{ status: string }>('GET', `${API_BASE}/health`),
   sync: () => req<SyncStatus>('GET', `${API_BASE}/api/health/sync`),
-  zswaps: (q: { token?: string; direction?: string; limit?: number } = {}) =>
-    req<Offer[]>('GET', `${API_BASE}/api/zswaps?${qs(q)}`),
+  /** Keyset pagination: pass the previous page's next_cursor as after_hash. */
+  zswaps: (q: { token?: string; direction?: string; limit?: number; after_hash?: string } = {}) =>
+    req<OffersPage>('GET', `${API_BASE}/api/zswaps?${qs(q)}`),
   /** Full offer (including its blob) by content hash. */
   zswapByHash: (hash: string) =>
     req<OfferDetail>('GET', `${API_BASE}/api/zswaps/${hash}`),

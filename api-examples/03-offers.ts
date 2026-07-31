@@ -10,8 +10,8 @@ const params = new URLSearchParams({ limit: "10" });
 if (process.env.TOKEN)     params.set("token",     process.env.TOKEN);
 if (process.env.DIRECTION) params.set("direction", process.env.DIRECTION);
 
-const offers = await get<any[]>(`/api/zswaps?${params}`);
-print(`GET /api/zswaps?${params}`, offers);
+const { offers, next_cursor } = await get<any>(`/api/zswaps?${params}`);
+print(`GET /api/zswaps?${params}`, { offers, next_cursor });
 
 if (offers.length === 0) {
   console.log("\nNo open offers found.");

@@ -40,7 +40,7 @@ let blob = process.env.OFFER_BLOB ?? "";
 let offerId: number | undefined;
 
 if (!blob) {
-  const offers = await get<any[]>("/api/zswaps?limit=1");
+  const { offers } = await get<any>("/api/zswaps?limit=1");
   if (offers.length === 0) {
     console.error("No open offers. Submit one first with 09-submit-offer.ts.");
     process.exit(1);

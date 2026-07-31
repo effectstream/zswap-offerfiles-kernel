@@ -18,9 +18,10 @@ import {
   getOfferByHash,
   getOfferStatusByHash,
   getOfferTokensAny,
+  resolveOfferCursor,
 } from "@zswap-da/database";
 
-import { ENABLE_TOKEN_REGISTRY, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, midnightContract } from "./env.ts";
+import { isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, midnightContract } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
@@ -95,21 +96,24 @@ export const apiRouter: StartConfigApiRouter = async function (
   eventBus.on("app_event", onAppEvent);
 
   // GET /api/zswaps — list open offers, newest first, with optional filtering
-  // & pagination. Deliberately does NOT include the offer blob: a single blob
-  // is ~16–25 KB of bech32m, so a 100-row page would be megabytes. Each row
-  // carries `offer_hash` — fetch the blob via GET /api/zswaps/:hash.
-  server.get("/api/zswaps", async (request: any) => {
+  // & keyset pagination. Deliberately does NOT include the offer blob: a
+  // single blob is ~16–25 KB of bech32m, so a 100-row page would be
+  // megabytes. Each row carries `offer_hash` — fetch the blob via
+  // GET /api/zswaps/:hash.
+  //
+  // Pagination is cursor-based (`after_hash` = the previous page's
+  // `next_cursor`); OFFSET is gone. Offsets cost O(offset) per page and shift
+  // whenever an offer is indexed or archived mid-pagination, silently
+  // skipping or repeating rows; the cursor seeks in the (created_at, id)
+  // index and is immune to both. Response: { offers, next_cursor } —
+  // next_cursor is null once exhausted.
+  server.get("/api/zswaps", async (request: any, reply: any) => {
     const query = request?.query ?? {};
 
     const rawLimit = Number.parseInt((query as any).limit ?? "", 10);
-    const rawOffset = Number.parseInt((query as any).offset ?? "", 10);
-
     let limit = Number.isFinite(rawLimit) ? rawLimit : 100;
     if (limit <= 0) limit = 100;
     if (limit > 100) limit = 100;
-
-    let offset = Number.isFinite(rawOffset) ? rawOffset : 0;
-    if (offset < 0) offset = 0;
 
     const token = (query as any).token as string | undefined;
     const directionRaw = ((query as any).direction as string | undefined)
@@ -119,16 +123,44 @@ export const apiRouter: StartConfigApiRouter = async function (
         ? directionRaw
         : undefined;
 
+    // Resolve the opaque cursor to its keyset anchor. Anything that does not
+    // resolve is a caller error — a fabricated cursor would otherwise
+    // silently return page one and the caller would loop forever.
+    let afterCreatedAt: unknown = null;
+    let afterId: number | null = null;
+    const afterHash = String((query as any).after_hash ?? "").toLowerCase();
+    if (afterHash) {
+      if (!/^[0-9a-f]{64}$/.test(afterHash)) {
+        return reply.code(400).send({
+          error: "INVALID_CURSOR",
+          reason: "after_hash must be 64 hex chars (a next_cursor value)",
+        });
+      }
+      const anchor = await resolveOfferCursor.run(
+        { offer_hash: afterHash },
+        dbConn,
+      );
+      if (anchor.length === 0) {
+        return reply.code(400).send({
+          error: "INVALID_CURSOR",
+          reason: "unknown cursor — restart pagination from the first page",
+        });
+      }
+      afterCreatedAt = anchor[0].created_at;
+      afterId = anchor[0].id;
+    }
+
     const offers = await getOpenOffersPage.run(
       {
         token: token ?? "",
         direction: direction ?? "ANY",
         limit,
-        offset,
+        after_created_at: afterCreatedAt as any,
+        after_id: afterId,
       },
       dbConn,
     );
-    if (offers.length === 0) return [];
+    if (offers.length === 0) return { offers: [], next_cursor: null };
 
     // One batched legs query for the whole page instead of one per offer.
     const legs = await getOfferTokensForOffers.run(
@@ -147,11 +179,17 @@ export const apiRouter: StartConfigApiRouter = async function (
       else entry.wants.push(dto);
     }
 
-    return offers.map((offer) => ({
-      ...offer,
-      gives: byOffer.get(offer.id)?.gives ?? [],
-      wants: byOffer.get(offer.id)?.wants ?? [],
-    }));
+    return {
+      offers: offers.map((offer) => ({
+        ...offer,
+        gives: byOffer.get(offer.id)?.gives ?? [],
+        wants: byOffer.get(offer.id)?.wants ?? [],
+      })),
+      // A full page may be the last one; the follow-up fetch then returns
+      // { offers: [], next_cursor: null } and the caller stops.
+      next_cursor:
+        offers.length === limit ? offers[offers.length - 1].offer_hash : null,
+    };
   });
 
   // GET /api/zswaps/:hash — one offer, including its blob, by content hash
@@ -307,7 +345,7 @@ export const apiRouter: StartConfigApiRouter = async function (
       },
     },
     async (request: any, reply: any) => {
-      if (!ENABLE_TOKEN_REGISTRY) {
+      if (!isTokenRegistryEnabled()) {
         return reply.code(404).send({
           error: "NOT_ENABLED",
           reason:

@@ -66,7 +66,7 @@ export function AcceptPanel({
 
   const loadBook = async () => {
     const r = await dbg.call(api.zswaps({ limit: 50 }))
-    if (r.ok && Array.isArray(r.parsed)) setOffers(r.parsed)
+    if (r.ok && Array.isArray(r.parsed?.offers)) setOffers(r.parsed.offers)
   }
 
   // The list no longer carries blobs (they're ~24 KB each) — fetch the

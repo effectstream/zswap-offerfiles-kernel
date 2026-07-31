@@ -448,14 +448,23 @@ export const getOfferTokensForOffers = {
 // List page without the ~24 KB blob; blob_chars lets UIs size downloads.
 // EXISTS instead of JOIN + DISTINCT: the join duplicated each offer per leg
 // and forced a 9-column dedup before the sort; EXISTS lets the planner walk
-// idx_offer_file_created_at and stop at LIMIT (measured 12× faster at 5k
+// the (created_at, id) index and stop at LIMIT (measured 12× faster at 5k
 // offers, and the gap widens with book size). When :token is '' the OR
 // short-circuits — no probe at all on the unfiltered path.
+//
+// Pagination is KEYSET, not OFFSET: the caller resolves an `after_hash`
+// cursor to the anchor row's (created_at, id) via resolveOfferCursor and
+// passes both here (or nulls for the first page). The row-value comparison
+// seeks straight to the anchor position in idx_offer_file_created_at_id —
+// no O(offset) discard, and concurrent inserts/archives cannot shift the
+// page window. `id` tie-breaks offers sharing a created_at; it stays
+// server-side (the public cursor is the offer_hash).
 export interface IGetOpenOffersPageParams {
   token: string;
   direction: string;
   limit: number;
-  offset: number;
+  after_created_at: DateOrString | null;
+  after_id: number | null;
 }
 export interface IGetOpenOffersPageResult {
   id: number;
@@ -482,9 +491,31 @@ export const getOpenOffersPage = {
            WHERE oft.offer_file_id = o.id
              AND oft.token_color = :token!
              AND (:direction! = 'ANY' OR oft.direction = :direction!)))
-       ORDER BY o.created_at DESC
-       LIMIT :limit!
-       OFFSET :offset!`,
+         AND (:after_id!::int IS NULL
+              OR (o.created_at, o.id) < (:after_created_at!::timestamptz, :after_id!::int))
+       ORDER BY o.created_at DESC, o.id DESC
+       LIMIT :limit!`,
+      params,
+      dbConn,
+    ),
+};
+
+// Resolve an `after_hash` cursor to its keyset anchor. Checks history too:
+// if the anchor offer was consumed/expired mid-pagination its row moved
+// tables, but (created_at, id) is copied on archive, so the cursor stays
+// valid and the reader continues exactly where they left off.
+export interface IResolveOfferCursorParams { offer_hash: string }
+export interface IResolveOfferCursorResult {
+  id: number;
+  created_at: DateOrString | null;
+}
+export const resolveOfferCursor = {
+  run: (params: IResolveOfferCursorParams, dbConn: any) =>
+    runQ<IResolveOfferCursorParams, IResolveOfferCursorResult>(
+      `SELECT id, created_at FROM offer_file WHERE offer_hash = :offer_hash!
+       UNION ALL
+       SELECT id, created_at FROM offer_file_history WHERE offer_hash = :offer_hash!
+       LIMIT 1`,
       params,
       dbConn,
     ),

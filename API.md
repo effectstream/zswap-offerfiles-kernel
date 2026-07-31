@@ -27,7 +27,7 @@ Three configurations ship out of the box. All endpoints and env-var names are id
 | `CELESTIA_POLLING_INTERVAL_MS` | `6000` | `3000` | `30000` |
 | `CELESTIA_START_HEIGHT` | `1` | `10620000` ¹ | set to your deployment block |
 | `MIDNIGHT_START_BLOCK` | `1` | `1` | set to your deployment block |
-| `OFFER_TTL_SECONDS` | `2592000` (30 d) | `3600` ² | `3600` ² |
+| `OFFER_TTL_SECONDS` | default = root window (1 h) | default = root window (1 h) ² | default = root window (1 h) ² |
 | Node API port | `9999` | `9999` | `9999` |
 | Batcher port | `3334` | `3334` | `3334` |
 | Config file | `config.dev.ts` | `config.preview.ts` | `config.mainnet.ts` |
@@ -62,13 +62,17 @@ NTP_STEP_SIZE=1000
 # ── Node ──────────────────────────────────────────────────────────────────────
 EFFECTSTREAM_API_PORT=9999
 BATCHER_SUBMIT_URL=http://127.0.0.1:3334
-OFFER_TTL_SECONDS=2592000               # offer lifetime (seconds)
+OFFER_TTL_SECONDS=                      # offer lifetime; DEFAULTS to ROOT_WINDOW_SECONDS
+                                        # (shielded fillability tracks the root window)
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /api/known-tokens; names are UNVERIFIED — dev/e2e only
-ROOT_WINDOW_SECONDS=1209600             # known-roots retention window; SET THIS to the
-                                        # deployed chain's root-recency window (~3600 on
-                                        # current networks). Too wide ⇒ the book lists
-                                        # offers whose roots the chain already dropped.
+ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
+                                        # 3600 (1 h) on all currently deployed networks;
+                                        # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
+                                        # placeholder, network not publicly available yet).
+                                        # Must mirror the chain's root-recency window: too
+                                        # wide ⇒ phantom unfillable offers on the book;
+                                        # too narrow ⇒ valid offers rejected ROOT_UNKNOWN.
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -195,13 +199,13 @@ Returns the current live offer book — offers published to Celestia, validated,
 | `token` | hex string | — | Filter to offers that include this token color (64 hex chars, no `0x`). Matches both giving and wanting sides. |
 | `direction` | `GIVING` \| `WANTING` | any | Filter by side. Only meaningful when `token` is also set. |
 | `limit` | integer | 100 | Max results (capped at 100). |
-| `offset` | integer | 0 | Pagination offset. |
+| `after_hash` | hex string | — | Keyset cursor: the previous page's `next_cursor`. Malformed or unknown values answer `400 INVALID_CURSOR` (never a silent first page). There is **no `offset`** — cursors cost O(1) regardless of depth and are immune to concurrent inserts/archives shifting the page window. |
 
-**Response** — array of offer objects, newest first. The list is **blob-free**: a single offer blob is 16–25 KB of bech32m, so a 100-row page carrying blobs would be megabytes. Each row instead carries `offer_hash`; fetch the blob per offer via `GET /api/zswaps/:hash`.
+**Response** — `{ "offers": [...], "next_cursor": "<hash>" | null }`, newest first. Pass `next_cursor` back as `after_hash` to fetch the next page; `null` means exhausted (a full final page returns a cursor whose follow-up fetch yields `{ "offers": [], "next_cursor": null }`). The list is **blob-free**: a single offer blob is 16–25 KB of bech32m, so a 100-row page carrying blobs would be megabytes. Each row instead carries `offer_hash`; fetch the blob per offer via `GET /api/zswaps/:hash`.
 
 ```json
-[
-  {
+{
+  "offers": [{
     "id": 42,
     "celestia_height": "12231800",
     "offer_hash": "9f2c4a…64 hex chars…e1",
@@ -217,8 +221,9 @@ Returns the current live offer book — offers published to Celestia, validated,
     "wants": [
       { "token": "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569", "amount": "500000" }
     ]
-  }
-]
+  }],
+  "next_cursor": null
+}
 ```
 
 | Field | Description |
@@ -737,10 +742,10 @@ curl -s -X POST http://host:3334/send-input \
   }' | jq .
 
 # Confirm the offer landed in the indexer (list is blob-free; note the offer_hash)
-curl -s "http://host:9999/api/zswaps?limit=5" | jq '.[0]'
+curl -s "http://host:9999/api/zswaps?limit=5" | jq '.offers[0]'
 
 # Fetch the full offer (with blob) by its content hash
-curl -s "http://host:9999/api/zswaps/$(curl -s 'http://host:9999/api/zswaps?limit=1' | jq -r '.[0].offer_hash')" | jq .
+curl -s "http://host:9999/api/zswaps/$(curl -s 'http://host:9999/api/zswaps?limit=1' | jq -r '.offers[0].offer_hash')" | jq .
 
 # Stream lifecycle events while waiting for settlement
 curl -N http://host:9999/api/events

@@ -34,7 +34,7 @@ export type Offer = {
 
 export type OfferDetail = {
   offer_hash: string
-  status: 'open' | 'completed' | 'expired'
+  status: 'open' | 'consumed' | 'cancelled' | 'expired'
   blob: string
   celestia_height?: string
   gives?: { token: string; amount: string }[]

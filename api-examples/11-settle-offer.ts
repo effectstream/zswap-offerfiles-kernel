@@ -84,11 +84,11 @@ for (let i = 0; i < 36; i++) {
   await sleep(5_000);
   const { status } = await post<any>("/api/zswap/status", { blob });
   console.log(`  status: ${status}`);
-  if (status === "completed") {
-    console.log("✅  Offer archived as CONSUMED — settlement confirmed.");
+  if (status === "consumed") {
+    console.log("✅  Offer consumed (all inputs spent in one tx) — settlement confirmed.");
     break;
   }
-  if (status === "expired" || status === "not_found") {
+  if (status === "cancelled" || status === "expired" || status === "not_found") {
     console.log(`Offer ended with status: ${status}`);
     break;
   }

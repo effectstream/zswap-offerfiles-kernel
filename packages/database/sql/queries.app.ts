@@ -177,6 +177,7 @@ export const getPairStats24h = {
          JOIN offer_file_tokens_history w
            ON w.offer_file_id = h.id AND w.direction = 'WANTING'
          WHERE h.archive_reason = 'CONSUMED'
+           AND NOT ${cancelledPredicate("h.id")}
            AND g.amount::numeric > 0
            AND w.amount::numeric > 0
            AND ((g.token_color = :base! AND w.token_color = :quote!)
@@ -206,6 +207,9 @@ export const getPairStats24h = {
 };
 
 // ── Trade history ──────────────────────────────────────────────────────────
+// Classified replacement for the generated GetTradeHistory: cancels must not
+// render as trades. LIMIT 120 is fine HERE (display list) — stats never use
+// this query (see getPairStats24h).
 
 export interface IGetTradeHistoryParams {
   base: string;
@@ -228,6 +232,7 @@ export const getTradeHistory = {
        JOIN offer_file_tokens_history g ON g.offer_file_id = h.id AND g.direction = 'GIVING'
        JOIN offer_file_tokens_history w ON w.offer_file_id = h.id AND w.direction = 'WANTING'
        WHERE h.archive_reason = 'CONSUMED'
+         AND NOT ${cancelledPredicate("h.id")}
          AND ((g.token_color = :base! AND w.token_color = :quote!)
            OR (g.token_color = :quote! AND w.token_color = :base!))
        ORDER BY h.archived_at DESC
@@ -330,6 +335,7 @@ export const upsertPairStatsByOfferId = {
        FROM offer_file_tokens_history g
        JOIN offer_file_tokens_history w ON w.offer_file_id = g.offer_file_id AND w.direction = 'WANTING'
        WHERE g.direction = 'GIVING' AND g.offer_file_id = :offer_id!
+         AND NOT ${cancelledPredicate("g.offer_file_id")}
        ON CONFLICT (pair_key) DO UPDATE SET
            trade_count    = pair_stats.trade_count + 1,
            last_price     = EXCLUDED.last_price,
@@ -423,6 +429,63 @@ export const insertOfferFileWithHash = {
     ),
 };
 
+// ── Fill vs cancel (read-time classification, phase 1) ─────────────────────
+//
+// Settlement is atomic: a fill consumes ALL of an offer's inputs in ONE
+// Midnight transaction. So an archived-CONSUMED offer is CANCELLED — with
+// certainty — when either
+//   (a) some of its nullifiers were never spent at all (the maker moved one
+//       coin elsewhere; the rest can now never settle), or
+//   (b) its nullifiers were spent across MORE THAN ONE transaction.
+// Everything else stays `consumed`. All-in-one-tx is a heuristic (a maker
+// consolidating the same coins in one personal tx looks identical) until
+// phase 2 adds output-commitment tracking; offers with no shielded inputs
+// (unshielded-only) have no nullifiers to group and classify as `consumed`.
+//
+// Read-time on purpose: the archive fires on the FIRST nullifier event of a
+// block, before its same-tx siblings are processed — but the whole block
+// commits in one DB transaction, so readers only ever see complete state.
+//
+// `idExpr` is the SQL expression for the archived offer's id in the caller's
+// scope (e.g. "offer_file_history.id" or "h.id").
+const cancelledPredicate = (idExpr: string) => `(
+  EXISTS (SELECT 1 FROM offer_file_nullifiers_history cnx
+          LEFT JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
+          WHERE cnx.offer_file_id = ${idExpr} AND cnn.nullifier IS NULL)
+  OR (SELECT COUNT(DISTINCT cnn.tx_hash)
+      FROM offer_file_nullifiers_history cnx
+      JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
+      WHERE cnx.offer_file_id = ${idExpr}) > 1
+)`;
+
+// Status of an archived row: expired (TTL) / cancelled / consumed.
+const archivedStatusCase = (tableIdExpr: string) => `
+  CASE WHEN archive_reason <> 'CONSUMED' THEN 'expired'
+       WHEN ${cancelledPredicate(tableIdExpr)} THEN 'cancelled'
+       ELSE 'consumed'
+  END`;
+
+// Nullifier insert that captures the spending transaction's hash. Supersedes
+// the generated UpsertNullifier (which predates the tx_hash column) at the
+// STM call site; ON CONFLICT keeps the FIRST-seen hash — a nullifier can only
+// be spent once, so a second event for it is a replay, not new information.
+export interface IInsertNullifierWithTxParams {
+  nullifier: string;
+  height: NumberOrString;
+  tx_hash: string | null;
+}
+export type IInsertNullifierWithTxResult = void;
+export const insertNullifierWithTx = {
+  run: (params: IInsertNullifierWithTxParams, dbConn: any) =>
+    runQ<IInsertNullifierWithTxParams, IInsertNullifierWithTxResult>(
+      `INSERT INTO nullifiers (nullifier, height, tx_hash)
+       VALUES (:nullifier!, :height!, :tx_hash!)
+       ON CONFLICT (nullifier) DO NOTHING`,
+      params,
+      dbConn,
+    ),
+};
+
 // Open + archived in one probe: dedup gate at ingestion/submit, and the
 // status half of GET /api/zswaps/:hash.
 export interface IGetOfferStatusByHashParams { offer_hash: string }
@@ -439,7 +502,7 @@ export const getOfferStatusByHash = {
        WHERE offer_hash = :offer_hash!
        UNION ALL
        SELECT id,
-           CASE archive_reason WHEN 'CONSUMED' THEN 'completed' ELSE 'expired' END AS status,
+           (${archivedStatusCase("offer_file_history.id")}) AS status,
            archive_reason
        FROM offer_file_history
        WHERE offer_hash = :offer_hash!`,
@@ -475,7 +538,7 @@ export const getOfferByHash = {
        SELECT id, celestia_height, transaction_hex, offer_hash,
               metadata_created_at, metadata_expires_at, metadata_maker_note,
               ttl_seconds, created_at,
-              CASE archive_reason WHEN 'CONSUMED' THEN 'completed' ELSE 'expired' END AS status,
+              (${archivedStatusCase("offer_file_history.id")}) AS status,
               archive_reason
        FROM offer_file_history
        WHERE offer_hash = :offer_hash!

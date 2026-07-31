@@ -22,6 +22,7 @@ const {
   getOfferTokensAny,
   getOpenOffersPage,
   getOfferTokensForOffers,
+  insertNullifierWithTx,
 } = await import("@zswap-da/database");
 
 const PORT = 54333;
@@ -132,6 +133,13 @@ test("archiveOfferByNullifierWithHash carries offer_hash into history", async ()
     { offer_file_id: id, nullifier: "null-b" },
     client,
   );
+  // Mirror the real transition order: the spend (with its tx hash) is
+  // recorded BEFORE the archive fires. Without it the classifier correctly
+  // reports `cancelled` (a partial/unrecorded spend can never be a fill).
+  await insertNullifierWithTx.run(
+    { nullifier: "null-b", height: 1, tx_hash: "settletx" },
+    client,
+  );
   const archived = await archiveOfferByNullifierWithHash.run(
     { nullifier: "null-b" },
     client,
@@ -146,11 +154,11 @@ test("archiveOfferByNullifierWithHash carries offer_hash into history", async ()
 
   const status = await getOfferStatusByHash.run({ offer_hash: HASH_B }, client);
   expect(status.length).toBe(1);
-  expect(status[0].status).toBe("completed");
+  expect(status[0].status).toBe("consumed");
 
   // Detail lookup still resolves after archiving, with history legs.
   const detail = await getOfferByHash.run({ offer_hash: HASH_B }, client);
-  expect(detail[0].status).toBe("completed");
+  expect(detail[0].status).toBe("consumed");
   const legs = await getOfferTokensAny.run({ offer_file_id: id, live: false }, client);
   expect(legs.length).toBe(2);
 });

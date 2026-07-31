@@ -7,6 +7,7 @@ import pairStatsSql from "./migrations/004-pair-stats.sql" with { type: "text" }
 import offerHashSql from "./migrations/005-offer-hash.sql" with { type: "text" };
 import offerRejectionsSql from "./migrations/006-offer-rejections.sql" with { type: "text" };
 import cursorPaginationSql from "./migrations/007-cursor-pagination.sql" with { type: "text" };
+import nullifierTxHashSql from "./migrations/008-nullifier-tx-hash.sql" with { type: "text" };
 import localMigrationSql from "./migrations/local-migration.sql" with { type: "text" };
 export const migrationTable: DBMigrations[] = [
   {
@@ -40,6 +41,10 @@ export const migrationTable: DBMigrations[] = [
   {
     name: "007-cursor-pagination.sql",
     sql: cursorPaginationSql,
+  },
+  {
+    name: "008-nullifier-tx-hash.sql",
+    sql: nullifierTxHashSql,
   },
   {
     name: "local-migration.sql",

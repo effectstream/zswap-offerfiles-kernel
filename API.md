@@ -271,7 +271,7 @@ curl "http://host:9999/api/zswaps/9f2c4a...e1"
 }
 ```
 
-`status` is `"open"` | `"completed"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
+`status` is `"open"` | `"consumed"` | `"cancelled"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
 
 #### `GET /api/zswaps/:hash/status`
 
@@ -281,7 +281,9 @@ Lightweight status probe by content hash:
 { "offer_hash": "9f2c4a…e1", "status": "open" }
 ```
 
-`status` is `"open"` | `"completed"` | `"expired"` | `"not_found"`.
+`status` is `"open"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"`.
+
+**Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's inputs in *one* Midnight transaction — so an archived offer whose nullifiers were spent across different transactions, or only partially spent, is reported `"cancelled"` with certainty: it can never have settled. `"consumed"` means all inputs left in a single transaction; for single-input offers (and unshielded-only offers, which have no nullifiers to group) this cannot be distinguished from the maker consolidating their own coins — output-commitment tracking (phase 2) tightens it to verified fills. Chart/trade data counts only `"consumed"` offers.
 
 ---
 
@@ -303,7 +305,7 @@ curl -X POST http://host:9999/api/zswap/status \
 { "blob": "swapoffer1...", "offer_hash": "9f2c4a…e1", "status": "open" }
 ```
 
-Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"open"` | `"completed"` | `"expired"` | `"not_found"`.
+Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"open"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"` (see *Fill vs cancel* above).
 
 Lookups resolve via the offer's content hash (an indexed probe). A blob that does not decode as a `swapoffer1…` string answers `"not_found"` **without touching the database** — undecodable blobs can never have been indexed, and this keeps junk submissions from costing more than a hash attempt.
 

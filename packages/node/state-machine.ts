@@ -21,7 +21,7 @@ import {
   archiveOfferByNullifierWithHash,
   archiveOfferByUnshieldedSpendWithHash,
   archiveOfferByIdTtlWithHash,
-  upsertNullifier,
+  insertNullifierWithTx,
   markNullifierMatched,
   findUnmatchedNullifier,
   isNullifierSpent,
@@ -39,12 +39,12 @@ import {
 // still *open* by watching the on-chain nullifiers (shielded) and
 // unshielded UTXO refs of its inputs. Two limits are intentional:
 //
-//   1. CONSUMED conflates *filled* and *canceled*. The indexer watches
-//      input consumption only; an offer's *output commitments* are not
-//      tracked, so a maker who spends the coin elsewhere is
-//      indistinguishable from a successful swap. If you need
-//      fill-vs-cancel attribution, extend the decoder to surface ZswapOutput
-//      commitments and classify on consumption.
+//   1. Fill vs cancel is classified at READ time from nullifier tx grouping
+//      (settlement is atomic → all inputs spent in one tx; split or partial
+//      spends are definitively cancels — see cancelledPredicate in the
+//      database package). All-in-one-tx remains a heuristic for single-input
+//      offers and maker self-consolidation; phase 2 (ZswapOutput commitment
+//      tracking in the sync engine) upgrades `consumed` to verified-fill.
 //
 //   2. Archival is destructive (rows are DELETEd into history). If a
 //      consuming Midnight/Celestia block is later reorged out, the offer
@@ -110,14 +110,21 @@ const stm = new Stm<typeof grammar, {}>(grammar);
 stm.addStateTransition("midnight-nullifier", function* (data) {
   const { payload } = data.parsedInput;
   const { nullifier } = payload;
+  // The spending transaction's hash — the fill-vs-cancel discriminator
+  // (settlement is atomic, so a fill puts ALL of an offer's nullifiers in
+  // ONE tx; see cancelledPredicate in the database package). The sync layer
+  // has always delivered it; it was previously discarded here.
+  const txHash = payload?.txHash ? bytesOrStringToHex(payload.txHash) : null;
 
   try {
-    // Upsert into the unified nullifiers table. offer_matched=false initially;
+    // Insert into the unified nullifiers table. offer_matched=false initially;
     // if the offer was already indexed (or is indexed later), it gets flipped
-    // to true via markNullifierMatched.
-    yield* World.resolve(upsertNullifier, {
+    // to true via markNullifierMatched. First-seen tx_hash wins on conflict —
+    // a nullifier spends once; a repeat event is a replay.
+    yield* World.resolve(insertNullifierWithTx, {
       nullifier,
       height: data.blockHeight,
+      tx_hash: txHash,
     });
 
     const archived = yield* World.resolve(archiveOfferByNullifierWithHash, {

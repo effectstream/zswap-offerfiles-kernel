@@ -141,7 +141,7 @@ for (let i = 0; i < 30; i++) {
     console.log("✅  Offer is live in the order book.");
     break;
   }
-  if (status === "completed" || status === "expired") {
+  if (status === "consumed" || status === "cancelled" || status === "expired") {
     console.error(`Offer ended with status "${status}" before it could be seen as open.`);
     break;
   }

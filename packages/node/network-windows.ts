@@ -1,9 +1,15 @@
 // Per-network protocol windows, pure and testable — env.ts wires these into
 // the exported constants.
 //
-// The root-recency window is a LEDGER parameter: the chain accepts shielded
-// proofs only against Merkle roots it has seen inside this window, and our
-// known_roots retention must mirror it exactly. Too wide and the book lists
+// The root-recency window governs `past_roots` in the zswap crate: the chain
+// accepts shielded proofs only against Merkle roots inside this window, and
+// our known_roots retention must mirror it exactly.
+//
+// It is NOT the on-chain `global_ttl` LedgerParameter, despite both being 1 h
+// today: `global_ttl` bounds intent TTLs and is governance-changeable
+// (OverwriteParameters), while the root window lives in the zswap crate —
+// hardcoded through node 1.x, parameterized from node 2.x. Moving one does
+// not move the other, so they are configured independently here. Too wide and the book lists
 // offers whose roots the chain already dropped (phantom, unfillable offers —
 // the same failure class the nullifier-retention fix closed); too narrow and
 // legitimate offers get rejected as ROOT_UNKNOWN.

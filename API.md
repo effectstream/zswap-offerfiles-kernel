@@ -73,9 +73,12 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults
                                         # 3600 (1 h) on all currently deployed networks;
                                         # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
                                         # placeholder, network not publicly available yet).
-                                        # Must mirror the chain's root-recency window: too
-                                        # wide ⇒ phantom unfillable offers on the book;
-                                        # too narrow ⇒ valid offers rejected ROOT_UNKNOWN.
+                                        # Must mirror the zswap crate's past_roots window
+                                        # (hardcoded through node 1.x, parameterized from
+                                        # 2.x) — NOT the on-chain global_ttl, which bounds
+                                        # intent TTLs and moves independently. Too wide ⇒
+                                        # phantom unfillable offers on the book; too narrow
+                                        # ⇒ valid offers rejected ROOT_UNKNOWN.
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -84,7 +87,7 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults
 |---|---|---|
 | `nullifiers` | **Forever** | A shielded spend is permanent. Coin commitments stay in the Merkle tree after being spent, so a maker can always build a valid current-root proof for a long-spent coin — the nullifier is the only thing that catches it. There is intentionally no TTL. |
 | `created_unshielded` | **Live-set** | Create inserts, spend deletes; absence means "spent or never existed". Self-trimming, so no TTL is needed. |
-| `known_roots` | **TTL-limited** (`ROOT_WINDOW_SECONDS`) | Unlike a spend, a root's validity genuinely expires — the ledger only accepts proofs against roots inside its recency window, and we must mirror that. |
+| `known_roots` | **TTL-limited** (`ROOT_WINDOW_SECONDS`) | Unlike a spend, a root's validity genuinely expires. The ledger's `past_roots` is a *TimeFilterMap*: the current root is re-inserted every block and entries older than `tblock − window` are evicted — so a root stays valid while it keeps being current, and our prune mirrors that by aging on **last-seen**. Independent from the on-chain `global_ttl` (which bounds intent TTLs) despite both being 1 h. |
 
 ---
 

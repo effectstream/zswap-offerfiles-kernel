@@ -935,16 +935,37 @@ export const upsertKnownRootWithFirstSeen = {
     ),
 };
 
-// Earliest first_seen_ms among a set of shielded input roots — the basis for
-// shielded expiry. Called at ingestion with the offer's just-validated
-// inputRoots (all already present in known_roots). NULL for an unshielded-
-// only offer (empty root list).
+// Root timing for a set of shielded input roots. Called at ingestion with
+// the offer's just-validated inputRoots (all already in known_roots).
+// NULL for an unshielded-only offer (empty root list).
+//
+// TWO DIFFERENT MINIMA, for two different questions — do not conflate them:
+//
+//   first_seen_ms — when the chain FIRST held this tree state. An offer
+//     cannot predate its own proof root, so this is a deterministic lower
+//     bound on the offer's age → computed.firstSeenAt.
+//
+//   last_seen_ms  — when the root was LAST current. This is the expiry
+//     basis, because the ledger's `past_roots` is a TimeFilterMap that
+//     RE-INSERTS the current root every block and evicts entries older than
+//     `tblock − window` (zswap/src/ledger.rs). On a chain segment with no
+//     new coin commitments the same root keeps being refreshed, so the
+//     window runs from the last block whose tree state the offer proved
+//     against — NOT from when the root (or the offer) first appeared.
+//     Our pruneKnownRoots already mirrors this (`last_seen_ms < cutoff`).
+//
+// MIN across the offer's roots either way: the offer dies when the FIRST of
+// its roots leaves the window.
 export interface IGetEarliestRootFirstSeenParams { roots: string[] }
-export interface IGetEarliestRootFirstSeenResult { first_seen_ms: NumberOrString | null }
+export interface IGetEarliestRootFirstSeenResult {
+  first_seen_ms: NumberOrString | null;
+  last_seen_ms: NumberOrString | null;
+}
 export const getEarliestRootFirstSeen = {
   run: (params: IGetEarliestRootFirstSeenParams, dbConn: any) =>
     runQ<IGetEarliestRootFirstSeenParams, IGetEarliestRootFirstSeenResult>(
-      `SELECT MIN(first_seen_ms) AS first_seen_ms
+      `SELECT MIN(first_seen_ms) AS first_seen_ms,
+              MIN(last_seen_ms)  AS last_seen_ms
        FROM known_roots WHERE root = ANY(:roots!)`,
       params,
       dbConn,

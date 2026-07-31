@@ -451,15 +451,35 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   }
 
   // ── Derive expires_at (MIP-0006) ──
-  // Deterministic, computed once at ingestion:
-  //   shielded (has input roots) → earliest root first_seen + ROOT_WINDOW.
-  //     A shielded offer is fillable only while its proof root stays in the
-  //     ledger's recency window; that window opened when the chain first saw
-  //     the root, so this is the true on-chain expiry.
-  //   otherwise → the earliest intent TTL if the offer carries one, else our
-  //     indexer TTL (block time + OFFER_TTL_SECONDS). An unshielded UTXO has
-  //     no root window; the intent TTL is the only ledger bound, and absent
-  //     that we fall back to the operator TTL.
+  // Computed once at ingestion. The two paths have genuinely different
+  // ledger semantics:
+  //
+  // SHIELDED (offer has input roots) → earliest root last_seen + ROOT_WINDOW.
+  //   A Zswap offer carries NO ttl field: `ttl_check_weak` only iterates
+  //   intents, so a pure Zswap partial tx passes well-formedness forever.
+  //   It dies at APPLY time, when `apply_input` rejects an input whose
+  //   merkle root is no longer in `past_roots` (UnknownMerkleRoot) — or
+  //   sooner if a nullifier lands first. `past_roots` is a TimeFilterMap
+  //   that re-inserts the CURRENT root every block and evicts entries older
+  //   than `tblock − window`, so the clock runs from the last block whose
+  //   tree state the offer proved against, not from offer creation.
+  //   NOTE: this value is therefore a conservative FLOOR — on a quiet chain
+  //   segment the same root keeps refreshing and the real expiry extends.
+  //   Serving the exact current value would mean persisting each offer's
+  //   roots and recomputing at read time; the floor never over-promises
+  //   fillability, and our own TTL cleanup archives at OFFER_TTL anyway.
+  //
+  // UNSHIELDED → the earliest intent TTL. Not a fallback: `UnshieldedOffer`
+  //   exists only inside `Intent`, and `Intent.ttl` is non-optional, so an
+  //   unshielded offer structurally ALWAYS has a TTL (bounded by the
+  //   on-chain `global_ttl`, 1 h by default, so the inclusion window is
+  //   [ttl − global_ttl, ttl]). The indexer-TTL branch below is defensive
+  //   only — it should be unreachable for a well-formed offer.
+  //
+  // The two windows are INDEPENDENT despite both defaulting to 1 h: the
+  // root window is fixed in the zswap crate (parameterized from node 2.x),
+  // while `global_ttl` is an on-chain LedgerParameters field changeable by
+  // governance. Moving one does not move the other.
   let expiresAt: string | null = null;
   // firstSeenAt (MIP-0006): shielded → the moment the offer became provable
   // on this chain (earliest proof-root first-seen); otherwise the Celestia
@@ -469,9 +489,14 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   if (inputRoots.length > 0) {
     const fs = yield* World.resolve(getEarliestRootFirstSeen, { roots: inputRoots });
     const firstSeenMs = fs[0]?.first_seen_ms;
+    const lastSeenMs = fs[0]?.last_seen_ms;
+    // firstSeenAt: the offer cannot predate its own proof root.
     if (firstSeenMs != null) {
       firstSeenAt = new Date(Number(firstSeenMs)).toISOString();
-      expiresAt = new Date(Number(firstSeenMs) + ROOT_WINDOW_SECONDS * 1000).toISOString();
+    }
+    // expiresAt: from LAST-seen — the refresh semantics above.
+    if (lastSeenMs != null) {
+      expiresAt = new Date(Number(lastSeenMs) + ROOT_WINDOW_SECONDS * 1000).toISOString();
     }
   }
   if (expiresAt == null) {

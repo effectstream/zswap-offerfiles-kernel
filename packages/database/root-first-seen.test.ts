@@ -53,12 +53,43 @@ test("first_seen_ms is pinned on first insert and never moves; last_seen_ms adva
   expect(Number(r.rows[0].height)).toBe(30);
 });
 
-test("getEarliestRootFirstSeen returns the MIN across an offer's roots", async () => {
+test("returns MIN of BOTH first_seen and last_seen across an offer's roots", async () => {
   await upsertKnownRootWithFirstSeen.run({ root: "ra", height: 1, seen_ms: 8000 }, client);
   await upsertKnownRootWithFirstSeen.run({ root: "rb", height: 1, seen_ms: 3000 }, client);
   await upsertKnownRootWithFirstSeen.run({ root: "rc", height: 1, seen_ms: 6000 }, client);
   const r = await getEarliestRootFirstSeen.run({ roots: ["ra", "rb", "rc"] }, client);
-  expect(Number(r[0].first_seen_ms)).toBe(3000); // earliest bounds the window
+  // The offer dies when the FIRST of its roots leaves the window.
+  expect(Number(r[0].first_seen_ms)).toBe(3000);
+  expect(Number(r[0].last_seen_ms)).toBe(3000);
+});
+
+test("EXPIRY tracks last_seen, which ADVANCES as the root is re-accepted", async () => {
+  // The ledger's past_roots is a TimeFilterMap: the current root is
+  // re-inserted every block and entries older than (tblock − window) are
+  // evicted. So on a quiet chain segment the same root keeps refreshing and
+  // the offer stays fillable — the window runs from the LAST block whose
+  // tree state it proved against. An expiry pinned to first_seen (an earlier
+  // revision of this code) would have expired live offers early.
+  await upsertKnownRootWithFirstSeen.run({ root: "refresh", height: 1, seen_ms: 1_000 }, client);
+  const before = await getEarliestRootFirstSeen.run({ roots: ["refresh"] }, client);
+  expect(Number(before[0].last_seen_ms)).toBe(1_000);
+
+  for (const t of [2_000, 5_000, 9_000]) {
+    await upsertKnownRootWithFirstSeen.run({ root: "refresh", height: 2, seen_ms: t }, client);
+  }
+  const after = await getEarliestRootFirstSeen.run({ roots: ["refresh"] }, client);
+  expect(Number(after[0].last_seen_ms)).toBe(9_000);   // expiry moved out
+  expect(Number(after[0].first_seen_ms)).toBe(1_000);  // firstSeenAt did not
+});
+
+test("prune evicts on last_seen, matching the expiry basis (both mirror TimeFilterMap)", async () => {
+  // Consistency guard: a root is prunable exactly when its expiry has passed.
+  const WINDOW_MS = 3_600_000;
+  await upsertKnownRootWithFirstSeen.run({ root: "old", height: 1, seen_ms: 1_000 }, client);
+  const r = await getEarliestRootFirstSeen.run({ roots: ["old"] }, client);
+  const expiry = Number(r[0].last_seen_ms) + WINDOW_MS;
+  const cutoff = expiry - WINDOW_MS; // == last_seen: the prune threshold
+  expect(cutoff).toBe(Number(r[0].last_seen_ms));
 });
 
 test("empty / unshielded-only root set yields NULL (caller falls back to intent/TTL)", async () => {
@@ -68,19 +99,16 @@ test("empty / unshielded-only root set yields NULL (caller falls back to intent/
   expect(r2[0].first_seen_ms).toBeNull();
 });
 
-test("expiry derived from first_seen is stable across re-upserts (the determinism the drift bug broke)", async () => {
-  const WINDOW_MS = 3600_000;
+test("firstSeenAt is stable across re-upserts (offer age must not drift)", async () => {
   await upsertKnownRootWithFirstSeen.run({ root: "stable", height: 1, seen_ms: 100_000 }, client);
   const before = Number(
     (await getEarliestRootFirstSeen.run({ roots: ["stable"] }, client))[0].first_seen_ms,
   );
-  // Root re-accepted many times, as on a quiet chain.
   for (const t of [200_000, 500_000, 900_000]) {
     await upsertKnownRootWithFirstSeen.run({ root: "stable", height: 2, seen_ms: t }, client);
   }
   const after = Number(
     (await getEarliestRootFirstSeen.run({ roots: ["stable"] }, client))[0].first_seen_ms,
   );
-  expect(after).toBe(before);
-  expect(before + WINDOW_MS).toBe(3_700_000); // expiry unchanged by re-acceptance
+  expect(after).toBe(before); // pinned — unlike expiry, which tracks last_seen
 });

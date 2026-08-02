@@ -6,6 +6,7 @@ import {
 import {
   PrimitiveTypeCelestiaGeneric,
   PrimitiveTypeMidnightGeneric,
+  PrimitiveTypeMidnightNullifierAndCommitment,
   PrimitiveTypeMidnightUnshieldedSpend,
   PrimitiveTypeMidnightUnshieldedCreate,
   PrimitiveTypeMidnightZswapRoot,
@@ -150,11 +151,7 @@ export const config = new ConfigBuilder()
         (syncProtocols) => (syncProtocols as any).parallelMidnight,
         () => ({
           name: "Midnight-ZswapEvents",
-          // TODO(effectstream#838): switch the literal to
-        // PrimitiveTypeMidnightNullifierAndCommitment once the updated
-        // @effectstream/sm ships on npm. The literal is the wire-stable type
-        // string; the old constant/primitive no longer exists upstream.
-        type: "Midnight:NullifierAndCommitment" as any,
+          type: PrimitiveTypeMidnightNullifierAndCommitment,
           startBlockHeight: MIDNIGHT_START_BLOCK,
           stateMachinePrefix: "midnight-zswap-event",
         // Both kinds ride the SAME indexer response field the fetcher already

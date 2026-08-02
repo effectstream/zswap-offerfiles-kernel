@@ -21,6 +21,6 @@
   },
   "devDependencies": {
     "@scure/base": "^2.0.0",
-    "@effectstream/mip-zswap-offer": "0.2.0"
+    "@effectstream/mip-zswap-offer": "0.3.0"
   }
 }

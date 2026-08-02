@@ -12,6 +12,6 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "@scure/base": "^2.0.0",
-    "@effectstream/mip-zswap-offer": "0.2.0"
+    "@effectstream/mip-zswap-offer": "0.3.0"
   }
 }

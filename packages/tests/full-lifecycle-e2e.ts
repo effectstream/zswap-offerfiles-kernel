@@ -3,7 +3,7 @@
 //   → make a minted A↔B offer → /v1/offers (validators + liveness)
 //   → batcher → Celestia → celestia-zswap ingestion (re-validated) → indexed
 //   → taker balances + settles on Midnight → nullifier consumed
-//   → midnight-nullifier primitive → spent_nullifiers + offer ARCHIVED.
+//   → midnight-zswap-event primitive → nullifiers + offer ARCHIVED.
 // Proves all four liveness primitives live: known_roots (ZswapRoot),
 // created_unshielded (UnshieldedCreate — via the unshielded mint),
 // spent_nullifiers (Nullifier), and — stretch, environment-permitting —

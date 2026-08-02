@@ -461,6 +461,27 @@ export const insertOfferFileWithHash = {
 //
 // `idExpr` is the SQL expression for the archived offer's id in the caller's
 // scope (e.g. "offer_file_history.id" or "h.id").
+// Read-time fill-vs-cancel classification of an archived (CONSUMED) offer.
+// Three branches, each individually certain:
+//
+//   1. PARTIAL SPEND — some offer nullifier never landed on-chain while
+//      others did. Settlement is atomic, so this can never have been a fill.
+//   2. SPLIT SPEND — the nullifiers span more than one distinct tx. Same
+//      atomicity argument.
+//   3. MISSING FILL MARKERS — all nullifiers landed in ONE tx, but that tx
+//      did not create the offer's own output commitments. The offer tx fixes
+//      the maker's output commitments and merging preserves outputs
+//      verbatim, so every genuine settlement creates ALL of them; their
+//      absence proves the inputs were spent by a non-settlement tx. This is
+//      what upgrades the old all-in-one-tx HEURISTIC to a proof — including
+//      the single-input case it could never classify. (A tx that recreates
+//      the exact commitments is a maker self-fill: the offer's terms
+//      executed, so `consumed` is the right answer there.)
+//
+// Branch 3 is vacuous for offers with no stored commitments (rows indexed
+// before migration 013, or offers whose wants are unshielded-only): those
+// keep the branch-1/2 heuristic. NULL tx_hash on any spend row also falls
+// back — never classify on absent evidence.
 const cancelledPredicate = (idExpr: string) => `(
   EXISTS (SELECT 1 FROM offer_file_nullifiers_history cnx
           LEFT JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
@@ -469,6 +490,25 @@ const cancelledPredicate = (idExpr: string) => `(
       FROM offer_file_nullifiers_history cnx
       JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
       WHERE cnx.offer_file_id = ${idExpr}) > 1
+  OR (
+    (SELECT COUNT(DISTINCT cnn.tx_hash)
+     FROM offer_file_nullifiers_history cnx
+     JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
+     WHERE cnx.offer_file_id = ${idExpr} AND cnn.tx_hash IS NOT NULL) = 1
+    AND NOT EXISTS (SELECT 1 FROM offer_file_nullifiers_history cnx
+                    JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
+                    WHERE cnx.offer_file_id = ${idExpr} AND cnn.tx_hash IS NULL)
+    AND EXISTS (
+      SELECT 1 FROM offer_file_commitments_history oc
+      WHERE oc.offer_file_id = ${idExpr}
+        AND NOT EXISTS (
+          SELECT 1 FROM commitments cm
+          WHERE cm.commitment = oc.commitment
+            AND cm.tx_hash = (SELECT MIN(cnn2.tx_hash)
+                              FROM offer_file_nullifiers_history cnx2
+                              JOIN nullifiers cnn2 ON cnn2.nullifier = cnx2.nullifier
+                              WHERE cnx2.offer_file_id = ${idExpr})))
+  )
 )`;
 
 // Status of an archived row: expired (TTL) / cancelled / consumed.
@@ -597,6 +637,45 @@ export const getOfferTokensAny = {
        UNION ALL
        SELECT token_color, amount, direction, kind FROM offer_file_tokens_history
        WHERE NOT :live! AND offer_file_id = :offer_file_id!`,
+      params,
+      dbConn,
+    ),
+};
+
+// Chain-side commitment record from the Midnight:NullifierAndCommitment
+// primitive (kind: "commitment" events). Commitments are globally unique for
+// the life of the chain, so ON CONFLICT DO NOTHING makes replays idempotent;
+// first-seen wins, matching insertNullifierWithTx.
+export interface IInsertCommitmentParams {
+  commitment: string;
+  tx_hash: string | null;
+  mt_index: string | null;
+  height: number;
+}
+export const insertCommitment = {
+  run: (params: IInsertCommitmentParams, dbConn: any) =>
+    runQ<IInsertCommitmentParams, never>(
+      `INSERT INTO commitments (commitment, tx_hash, mt_index, height)
+       VALUES (:commitment!, :tx_hash!, :mt_index!, :height!)
+       ON CONFLICT (commitment) DO NOTHING`,
+      params,
+      dbConn,
+    ),
+};
+
+// The offer's own shielded output commitments, captured at ingestion from the
+// published blob. These are the fill markers: a settling tx must create all
+// of them (merging preserves outputs verbatim).
+export interface IInsertOfferFileCommitmentParams {
+  offer_file_id: number;
+  commitment: string;
+}
+export const insertOfferFileCommitment = {
+  run: (params: IInsertOfferFileCommitmentParams, dbConn: any) =>
+    runQ<IInsertOfferFileCommitmentParams, never>(
+      `INSERT INTO offer_file_commitments (offer_file_id, commitment)
+       VALUES (:offer_file_id!, :commitment!)
+       ON CONFLICT DO NOTHING`,
       params,
       dbConn,
     ),
@@ -762,6 +841,12 @@ archived_unshielded_spends AS (
     INSERT INTO offer_file_unshielded_spends_history (offer_file_id, owner, intent_hash, output_no)
     SELECT offer_file_id, owner, intent_hash, output_no
     FROM offer_file_unshielded_spends
+    WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
+),
+archived_commitments AS (
+    INSERT INTO offer_file_commitments_history (offer_file_id, commitment)
+    SELECT offer_file_id, commitment
+    FROM offer_file_commitments
     WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
 )
 DELETE FROM offer_file

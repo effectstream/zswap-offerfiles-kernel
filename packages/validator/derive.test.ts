@@ -4,6 +4,7 @@ import {
   bytesOrStringToHex,
   collectNullifiers,
   collectUnshieldedSpends,
+  collectOutputCommitments,
   deriveLegs,
   UnknownTokenTagError,
 } from "./derive.ts";
@@ -161,5 +162,32 @@ describe("deriveLegs", () => {
     const { gives, wants } = deriveLegs(tx);
     expect(gives[0]!.token).toBe("aabb");
     expect(wants[0]!.token).toBe("ccdd");
+  });
+});
+
+describe("collectOutputCommitments (fill markers)", () => {
+  const C1 = "1a".repeat(32);
+  const C2 = "2b".repeat(32);
+  const C3 = "3c".repeat(32);
+
+  test("guaranteed + fallible outputs, normalized to lowercase hex", () => {
+    const tx = mockTx({
+      guaranteed: { outputs: [{ commitment: C1.toUpperCase() }, { commitment: C2 }] },
+      fallible: new Map([[1, { outputs: [{ commitment: C3 }] }]]),
+    });
+    expect(collectOutputCommitments(tx)).toEqual([C1, C2, C3]);
+  });
+
+  test("no shielded outputs → no markers (classification falls back to heuristic)", () => {
+    expect(collectOutputCommitments(mockTx({}))).toEqual([]);
+    expect(collectOutputCommitments(mockTx({ guaranteed: { outputs: [] } }))).toEqual([]);
+  });
+
+  test("byte-array commitments hex-encode like collectNullifiers inputs", () => {
+    const bytes = Uint8Array.from({ length: 32 }, (_, i) => i);
+    const tx = mockTx({ guaranteed: { outputs: [{ commitment: bytes }] } });
+    expect(collectOutputCommitments(tx)).toEqual([
+      Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join(""),
+    ]);
   });
 });

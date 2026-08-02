@@ -293,7 +293,7 @@ Lightweight status probe by content hash:
 
 `status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"`.
 
-**Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's inputs in *one* Midnight transaction — so an archived offer whose nullifiers were spent across different transactions, or only partially spent, is reported `"cancelled"` with certainty: it can never have settled. `"consumed"` means all inputs left in a single transaction; for single-input offers (and unshielded-only offers, which have no nullifiers to group) this cannot be distinguished from the maker consolidating their own coins — output-commitment tracking (phase 2) tightens it to verified fills. Chart/trade data counts only `"consumed"` offers.
+**Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's inputs in *one* Midnight transaction — so an archived offer whose nullifiers were spent across different transactions, or only partially spent, is reported `"cancelled"` with certainty: it can never have settled. `"consumed"` means all inputs left in a single transaction — and for offers with stored **fill markers** (the offer's own output commitments, plaintext in the published blob and captured at ingestion) the classification is exact in both directions: a genuine settlement must create those commitments on-chain (merging preserves outputs verbatim), so their absence from the spending tx proves a cancel, single-input offers included. Marker-less offers (unshielded-only wants, rows indexed before the commitments migration) keep the one-tx heuristic. Chain-side commitments come from the `Midnight:NullifierAndCommitment` primitive at zero extra indexer cost. Chart/trade data counts only `"consumed"` offers.
 
 ---
 

@@ -12,6 +12,7 @@ export {
   bytesOrStringToHex,
   collectNullifiers,
   collectUnshieldedSpends,
+  collectOutputCommitments,
   deriveLegs,
   UnknownTokenTagError,
 } from "./derive.ts";

@@ -1,3 +1,4 @@
+import { collectOutputCommitments } from "./derive.ts";
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -144,6 +145,14 @@ describe.skipIf(!hasFixture)("validateZswapOffer — crypto + liveness (real fix
     refState: getBlankRefState(NETWORK_ID),
     tblock: TBLOCK,
     maxBytes: 1_000_000,
+  });
+
+  test("fixture exposes its fill markers (output commitments) in plaintext", () => {
+    const r = validateZswapOffer(blob, opts());
+    if (!r.ok) throw new Error(r.reason);
+    const markers = collectOutputCommitments(r.tx!);
+    expect(markers.length).toBeGreaterThan(0);
+    for (const c of markers) expect(c).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test("a valid open offer passes with a BLANK refState (the #1 risk)", () => {

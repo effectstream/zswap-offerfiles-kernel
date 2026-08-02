@@ -114,7 +114,7 @@ export const isTokenRegistryEnabled = (): boolean =>
 
 // NOTE: there is deliberately no nullifier TTL. Shielded spends are permanent,
 // so the nullifier set must be complete for `isNullifierSpent` to be a sound
-// double-spend gate — see the note in the midnight-nullifier transition.
+// double-spend gate — see the note in the midnight-zswap-event transition.
 // Unshielded liveness needs no TTL either: created_unshielded is a live-set
 // (create inserts, spend deletes), so it is self-trimming. Only known_roots is
 // TTL-limited, because root validity genuinely expires — ROOT_WINDOW_SECONDS.

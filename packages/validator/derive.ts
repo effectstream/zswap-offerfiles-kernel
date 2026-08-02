@@ -86,6 +86,35 @@ export function collectUnshieldedSpends(
 }
 
 /**
+ * The offer's shielded output commitments — plaintext fields of the
+ * serialized outputs (commitments are the public leaves of the zswap Merkle
+ * tree; only coin contents are private). These are the offer's FILL MARKERS:
+ * transaction merging preserves outputs verbatim, so a settling tx creates
+ * exactly these commitments on-chain, while a cancel creates none of them.
+ * Guaranteed + per-segment fallible outputs; transients excluded (created
+ * and spent inside the offer tx itself — they mark nothing).
+ */
+export function collectOutputCommitments(tx: UnprovenTransaction): string[] {
+  const commitments: string[] = [];
+  const offers = [
+    (tx as any).guaranteedOffer ?? (tx as any).guaranteedCoins,
+    ...(() => {
+      const fallible = (tx as any).fallibleOffer ?? (tx as any).fallibleCoins;
+      if (!fallible) return [];
+      if (typeof fallible.values === "function") return [...fallible.values()];
+      return [fallible];
+    })(),
+  ].filter(Boolean);
+  for (const offer of offers) {
+    for (const out of offer.outputs ?? []) {
+      const c = (out as any).commitment;
+      if (c != null) commitments.push(bytesOrStringToHex(c).toLowerCase());
+    }
+  }
+  return commitments;
+}
+
+/**
  * Layer-tagged gives/wants, verbatim from MIP-0006 `deriveTokenLegs`.
  *
  * The codec already nets per (color, layer) and keeps layers separate — the

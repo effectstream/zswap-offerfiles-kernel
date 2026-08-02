@@ -7,7 +7,7 @@ import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
-import { getBlankRefState, validateZswapOfferBytes, verifyOfferCrypto } from "@zswap-da/validator";
+import { getBlankRefState, validateZswapOfferBytes, verifyOfferCrypto, collectOutputCommitments } from "@zswap-da/validator";
 import { latin1ToBytes, offerBytesToBech32, offerHashFromBytes } from "@zswap-da/offer-guard";
 import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 
@@ -17,6 +17,8 @@ import {
   deleteRejectedAccountingRow,
   recordOfferRejection,
   insertOfferFileNullifier,
+  insertCommitment,
+  insertOfferFileCommitment,
   insertOfferFileUnshieldedSpend,
   insertOfferFileTokenWithKind,
   archiveOfferByNullifierWithHash,
@@ -41,12 +43,14 @@ import {
 // still *open* by watching the on-chain nullifiers (shielded) and
 // unshielded UTXO refs of its inputs. Two limits are intentional:
 //
-//   1. Fill vs cancel is classified at READ time from nullifier tx grouping
-//      (settlement is atomic → all inputs spent in one tx; split or partial
-//      spends are definitively cancels — see cancelledPredicate in the
-//      database package). All-in-one-tx remains a heuristic for single-input
-//      offers and maker self-consolidation; phase 2 (ZswapOutput commitment
-//      tracking in the sync engine) upgrades `consumed` to verified-fill.
+//   1. Fill vs cancel is classified at READ time (cancelledPredicate in the
+//      database package). Split/partial nullifier spends are definitive
+//      cancels (settlement is atomic); and for offers with stored fill
+//      markers (their output commitments, captured at ingestion) the
+//      converse is exact too: the single spending tx must have created
+//      those commitments, else it was a cancel — single-input included.
+//      Only marker-less offers (pre-migration rows, unshielded-only wants)
+//      keep the all-in-one-tx heuristic.
 //
 //   2. Archival is destructive (rows are DELETEd into history). If a
 //      consuming Midnight/Celestia block is later reorged out, the offer
@@ -109,13 +113,37 @@ function unshieldedOwnerToCanonicalHex(value: unknown): string {
 
 const stm = new Stm<typeof grammar, {}>(grammar);
 
-stm.addStateTransition("midnight-nullifier", function* (data) {
+// Midnight:NullifierAndCommitment (effectstream#838) — one input per zswap
+// ledger event, discriminated on payload.kind:
+//   "nullifier"  → a shielded coin was SPENT  (ZswapInput)
+//   "commitment" → a shielded coin was CREATED (ZswapOutput)
+// Both kinds carry the ledger txHash. Together they are the exact
+// fill-vs-cancel evidence: a fill's single settlement tx spends ALL of an
+// offer's nullifiers AND creates the offer's output commitments; see
+// cancelledPredicate in the database package.
+stm.addStateTransition("midnight-zswap-event", function* (data) {
   const { payload } = data.parsedInput;
+
+  if (payload?.kind === "commitment") {
+    // Coin created. Record it permanently (mirrors the nullifiers table —
+    // globally unique, first-seen tx wins, replays are no-ops). No offer
+    // matching happens here: commitments are consulted read-time by the
+    // classification predicate, keyed on the spending tx's hash.
+    try {
+      yield* World.resolve(insertCommitment, {
+        commitment: bytesOrStringToHex(payload.commitment),
+        tx_hash: payload?.txHash ? bytesOrStringToHex(payload.txHash) : null,
+        mt_index: payload?.mtIndex != null ? String(payload.mtIndex) : null,
+        height: data.blockHeight,
+      });
+    } catch (e) {
+      console.error("[MIDNIGHT] Failed to record commitment", payload?.commitment, e);
+    }
+    return;
+  }
+
   const { nullifier } = payload;
-  // The spending transaction's hash — the fill-vs-cancel discriminator
-  // (settlement is atomic, so a fill puts ALL of an offer's nullifiers in
-  // ONE tx; see cancelledPredicate in the database package). The sync layer
-  // has always delivered it; it was previously discarded here.
+  // The spending transaction's hash — the fill-vs-cancel discriminator.
   const txHash = payload?.txHash ? bytesOrStringToHex(payload.txHash) : null;
 
   try {
@@ -536,6 +564,16 @@ stm.addStateTransition("celestia-zswap", function* (data) {
       yield* World.resolve(insertOfferFileUnshieldedSpend, {
         offer_file_id: offerFileId,
         ...s,
+      });
+    }
+    // Fill markers: the offer's own shielded output commitments, plaintext in
+    // the published blob. A settling tx must create ALL of them (merging
+    // preserves outputs verbatim) — cancelledPredicate uses their presence in
+    // the spending tx to classify fill vs cancel exactly.
+    for (const commitment of collectOutputCommitments(result.tx!)) {
+      yield* World.resolve(insertOfferFileCommitment, {
+        offer_file_id: offerFileId,
+        commitment,
       });
     }
 

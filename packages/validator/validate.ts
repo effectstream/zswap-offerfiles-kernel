@@ -6,6 +6,7 @@ import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 import {
   collectNullifiers,
   collectUnshieldedSpends,
+  collectOutputCommitments,
   deriveLegs,
   UnknownTokenTagError,
 } from "./derive.ts";

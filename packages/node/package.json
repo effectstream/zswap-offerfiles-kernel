@@ -25,7 +25,7 @@
     "@zswap-da/validator": "workspace:*",
     "@zswap-da/contract-offer-files": "workspace:*",
     "@midnight-ntwrk/compact-js": "2.5.0",
-    "@midnight-ntwrk/ledger-v8": "8.0.3",
+    "@midnight-ntwrk/ledger-v8": "8.1.0",
     "@midnight-ntwrk/midnight-js-contracts": "4.0.4",
     "@midnight-ntwrk/midnight-js-network-id": "4.0.4",
     "@midnight-ntwrk/onchain-runtime-v3": "3.0.0",

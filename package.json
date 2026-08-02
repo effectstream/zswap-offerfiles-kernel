@@ -35,5 +35,8 @@
   },
   "devDependencies": {
     "@types/bun": "^1.3.13"
+  },
+  "overrides": {
+    "@midnight-ntwrk/ledger-v8": "8.1.0"
   }
 }

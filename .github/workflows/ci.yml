@@ -45,6 +45,15 @@ jobs:
           bun-version: latest
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      # The Compact compiler's output (src/managed/) is gitignored and the
+      # compiler isn't on the runner. The playground only needs the module to
+      # RESOLVE — stub it as `any` so tsc checks everything else. Local runs
+      # with real artifacts are unaffected (this dir only exists here in CI).
+      - name: Stub Compact-generated contract artifacts
+        run: |
+          mkdir -p packages/contracts-midnight/contract-offer-files/src/managed/contract
+          printf 'export declare const Contract: any;\nexport type Contract = any;\nexport declare const ledger: any;\nexport declare const pureCircuits: any;\n' \
+            > packages/contracts-midnight/contract-offer-files/src/managed/contract/index.d.ts
       - name: tsc -b
         working-directory: docs
         run: bunx tsc -b

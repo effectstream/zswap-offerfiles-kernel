@@ -22,8 +22,8 @@ lowercase-hex SHA-256 of the offer's **raw transaction bytes** (not of the
 offer, so it is safe to use in URLs, dedup keys, and React keys.
 If you have a blob and need its id client-side:
 `sha256(bech32m-decode(blob))` — or `OfferFiles.offerId(bytes)` from
-`@effectstream/mip-zswap-offer` **v0.3.0** (not yet on npm; until it publishes,
-hash the decoded bytes yourself or use `POST /v1/offers/status`).
+`@effectstream/mip-zswap-offer` **v0.3.0** (on npm). The same package's
+`OffchainOfferPayload` type matches these response shapes exactly.
 
 ### 1.2 The list is blob-free; the payload is MIP-0006 shaped
 

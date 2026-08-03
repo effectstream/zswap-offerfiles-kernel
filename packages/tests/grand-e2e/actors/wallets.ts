@@ -239,47 +239,77 @@ export async function drainBatcherQueue(label: string, timeoutMs = 60 * 60_000):
   throw new Error(`drainBatcherQueue(${label}) timed out after ${timeoutMs / 60000} min`);
 }
 
-/** Genesis → many recipients in ONE shielded tx (genesis pays fees). */
-async function transferShieldedMany(
+/** One genesis transfer tx (genesis pays fees). Reverts on any failure so a
+ *  retry can reselect the coins. */
+async function genesisTransferOnce(
   genesis: WalletResult,
+  shielded: boolean,
   color: string,
   outputs: { receiverAddress: unknown; amount: bigint }[],
 ): Promise<void> {
   const recipe = await genesis.wallet.transferTransaction(
     [
       {
-        type: "shielded",
+        type: shielded ? "shielded" : "unshielded",
         outputs: outputs.map((o) => ({ type: color, amount: o.amount, receiverAddress: o.receiverAddress })),
       } as any,
     ],
     shieldedKeys(genesis),
     { ttl: new Date(Date.now() + TX_TTL_MS), payFees: true },
   );
-  const finalized = await genesis.wallet.finalizeRecipe(recipe);
-  await genesis.wallet.submitTransaction(finalized);
+  try {
+    const maybeSigned = shielded
+      ? recipe
+      : await (genesis.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
+          genesis.unshieldedKeystore.signData(p),
+        );
+    const finalized = await withProveSlot(() => genesis.wallet.finalizeRecipe(maybeSigned));
+    try {
+      await genesis.wallet.submitTransaction(finalized);
+    } catch (e) {
+      await (genesis.wallet as any).revert(finalized).catch(() => {});
+      throw e;
+    }
+  } catch (e) {
+    await (genesis.wallet as any).revert(recipe).catch(() => {});
+    throw e;
+  }
 }
 
-/** Genesis → many recipients in ONE unshielded tx. */
-async function transferUnshieldedMany(
+/**
+ * Genesis → many recipients, chunked ≤12 outputs per tx. Bigger fan-out txs
+ * are rejected by the node (Invalid Transaction: Custom error: 170 observed
+ * at 26 outputs; 12 is repeatedly fine). Chunks after the first spend the
+ * previous chunk's change, which only exists once that tx confirms and the
+ * wallet syncs — the retry loop self-synchronizes on that (InsufficientFunds
+ * simply means "change not visible yet").
+ */
+async function genesisFanOut(
   genesis: WalletResult,
+  shielded: boolean,
   color: string,
   outputs: { receiverAddress: unknown; amount: bigint }[],
 ): Promise<void> {
-  const recipe = await genesis.wallet.transferTransaction(
-    [
-      {
-        type: "unshielded",
-        outputs: outputs.map((o) => ({ type: color, amount: o.amount, receiverAddress: o.receiverAddress })),
-      } as any,
-    ],
-    shieldedKeys(genesis),
-    { ttl: new Date(Date.now() + TX_TTL_MS), payFees: true },
-  );
-  const signed = await (genesis.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-    genesis.unshieldedKeystore.signData(p),
-  );
-  const finalized = await genesis.wallet.finalizeRecipe(signed);
-  await genesis.wallet.submitTransaction(finalized);
+  const FAN_CHUNK = 12;
+  for (let i = 0; i < outputs.length; i += FAN_CHUNK) {
+    const chunk = outputs.slice(i, i + FAN_CHUNK);
+    let lastErr: unknown;
+    let done = false;
+    for (let attempt = 0; attempt < 20 && !done; attempt++) {
+      try {
+        await genesisTransferOnce(genesis, shielded, color, chunk);
+        done = true;
+      } catch (e) {
+        lastErr = e;
+        console.warn(
+          `${TAG} genesis fan-out chunk ${i / FAN_CHUNK + 1}/${Math.ceil(outputs.length / FAN_CHUNK)} retry ${attempt + 1}: ` +
+            `${e instanceof Error ? e.message : e}`,
+        );
+        await sleep(15_000);
+      }
+    }
+    if (!done) throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  }
 }
 
 // ── Setup: build, mint, fund, split ─────────────────────────────────────────
@@ -387,11 +417,11 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   cancelDoubles.forEach((c, i) =>
     outsByKey[cancelGiveToken("double", i)].push({ receiverAddress: c.shieldedAddr, amount: CANCEL_COIN * 2n }),
   );
-  await transferShieldedMany(genesis, ledger.colors.TA!, outsByKey.TA);
-  await transferShieldedMany(genesis, ledger.colors.TB!, outsByKey.TB);
+  await genesisFanOut(genesis, true, ledger.colors.TA!, outsByKey.TA);
+  await genesisFanOut(genesis, true, ledger.colors.TB!, outsByKey.TB);
   console.log(`${TAG} funding fan-out (unshielded)…`);
-  await transferUnshieldedMany(genesis, ledger.colors.UA!, outsByKey.UA);
-  await transferUnshieldedMany(genesis, ledger.colors.UB!, outsByKey.UB);
+  await genesisFanOut(genesis, false, ledger.colors.UA!, outsByKey.UA);
+  await genesisFanOut(genesis, false, ledger.colors.UB!, outsByKey.UB);
 
   // Wait for funds to land, then self-split into per-offer coins. Wallets
   // prove in parallel; the batcher (ONE worker) queues everything no-wait and
@@ -705,7 +735,7 @@ export async function runCancelCycle(
 export function makeRefill(genesisPw: PoolWallet, target: PoolWallet, giveToken: TokenKey): () => Promise<void> {
   return () =>
     genesisPw.run(async () => {
-      await transferShieldedMany(genesisPw.wr, ledger.colors[giveToken]!, [
+      await genesisFanOut(genesisPw.wr, true, ledger.colors[giveToken]!, [
         { receiverAddress: target.shieldedAddr, amount: CANCEL_COIN },
       ]);
       // Wait until the coin lands so the next cycle can select it.

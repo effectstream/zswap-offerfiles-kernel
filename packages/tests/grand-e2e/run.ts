@@ -97,6 +97,34 @@ function writeScorecard(determinism: DeterminismOutcome | null): void {
   }
   lines.push(``);
 
+  lines.push(`## 🔴 CRITICAL — unauthenticated remote node crash (found by this suite, NOT patched)`);
+  lines.push(``);
+  lines.push(
+    `**One 0x00 byte in any namespace blob kills every ZSwap-DA indexer.** The framework stores each ` +
+      `fetched blob body in \`effectstream.primitive_accounting.payload\` (JSON, where NUL survives as ` +
+      `\`\\u0000\`); the STM's rejected-blob scrub (\`deleteRejectedAccountingRow\`) then matches that body ` +
+      `back as a **text** parameter, which Postgres cannot represent: ` +
+      `\`invalid byte sequence for encoding "UTF8": 0x00\`. The runtime swallows STF errors to telemetry ` +
+      `(HANDOFF gotcha #2), so nothing is logged — and the next statement in the same block transaction ` +
+      `fails \`25P02 current transaction is aborted\`, exiting the sync process (code 1) and taking the ` +
+      `orchestrator down with it.`,
+  );
+  lines.push(``);
+  lines.push(
+    `Severity: the namespace is permissionless **by design**, so this is an unauthenticated remote crash ` +
+      `of the whole network's indexers for the price of one blob fee. Binary junk contains 0x00 by ` +
+      `default, so it is the ordinary outcome of spam, not a sophisticated attack — and it fires on the ` +
+      `exact path built to survive hostile input.`,
+  );
+  lines.push(``);
+  lines.push(
+    `No parameter-level fix exists (no text/jsonb parameter can carry NUL); the repair is structural — ` +
+      `store bodies as \`bytea\`, or scrub by row id. Reproduced standalone in seconds with PGlite, no ` +
+      `stack required. Per the handoff this is reported, not worked around: the suite's own garbage ` +
+      `fixtures are NUL-free so the remaining checks can run, and \`GRAND_NUL_CRASH_REPRO=1\` publishes ` +
+      `one NUL-bearing blob to reproduce the crash on demand.`,
+  );
+  lines.push(``);
   lines.push(`## Documented gaps asserted as current behavior`);
   lines.push(``);
   lines.push(

@@ -11,10 +11,10 @@ import { ledger } from "../ledger.ts";
 import type { P1Artifacts } from "./p1-happy.ts";
 import {
   apiFixtures,
+  celestiaGarbageKinds,
   cryptoTamperBlob,
   publishCelestiaGarbage,
   STRUCTURAL_CODES,
-  type CelestiaGarbageKind,
 } from "../actors/adversary.ts";
 import { submitOffer2 } from "../lib/api2.ts";
 import { offerRowByHash, rejectionRows, tableCount } from "../lib/db2.ts";
@@ -92,12 +92,7 @@ export async function p4Adversarial(db: Client, art: P1Artifacts): Promise<void>
   // ── 4.7 direct-Celestia garbage ──────────────────────────────────────────
   const rejectionsBefore = await rejectionRows(db);
   const before = new Map(rejectionsBefore.map((r) => [`${r.celestia_height}|${r.code}`, r.count]));
-  const kinds: CelestiaGarbageKind[] = [
-    "random-bytes",
-    "truncated-tx",
-    "bech32-string-as-utf8",
-    "replayed-real-blob", // consumed offer's raw bytes → dedup rejection
-  ];
+  const kinds = celestiaGarbageKinds();
   const heights: number[] = [];
   for (const [i, kind] of kinds.entries()) {
     const src = kind === "replayed-real-blob" ? art.consumedBlob : art.liveBlob;

@@ -41,9 +41,9 @@ import {
 } from "../actors/wallets.ts";
 import {
   bech32GarbageBlob,
+  celestiaGarbageKinds,
   cryptoTamperBlob,
   publishCelestiaGarbage,
-  type CelestiaGarbageKind,
 } from "../actors/adversary.ts";
 import type { P1Artifacts } from "./p1-happy.ts";
 import { chaosBatcher, chaosIndexer, chaosSync } from "./p6-chaos.ts";
@@ -247,7 +247,7 @@ async function apiInvalidStorm(db: Client, art: P1Artifacts): Promise<{ okCodes:
 }
 
 async function celestiaGarbageStorm(art: P1Artifacts): Promise<number> {
-  const kinds: CelestiaGarbageKind[] = ["random-bytes", "truncated-tx", "bech32-string-as-utf8", "replayed-real-blob"];
+  const kinds = celestiaGarbageKinds();
   let published = 0;
   for (let i = 0; i < STORM_CELESTIA_GARBAGE_COUNT; i++) {
     const kind = kinds[i % kinds.length]!;

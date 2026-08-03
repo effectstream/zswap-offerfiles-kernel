@@ -106,15 +106,20 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
   override buildBatchData(inputs: any[], options?: any): any {
     const built = super.buildBatchData(inputs, options);
     if (!built) return built;
-    try {
-      const rawBytes = OfferFiles.decode(built.rawData);
-      // Base64 of the raw bytes becomes blob.data (Celestia stores these
-      // bytes; the read side recovers them via atob → latin1 → Uint8Array).
-      built.data.blob.data = Buffer.from(rawBytes).toString("base64");
-    } catch {
-      // Non-decodable input never reaches here (validateInput rejected it),
-      // but fail safe: leave the base adapter's payload untouched.
-    }
+    // rawData moved from the result's top level (batcher-sdk 0.101.x) into
+    // `data` (0.103.0). Read both so an SDK bump cannot silently strand it —
+    // and if NEITHER is present or the decode fails, THROW instead of
+    // shipping the base adapter's UTF-8 payload: validateInput already
+    // guaranteed a decodable offer, so failure here is a wiring bug, and
+    // "fail safe" here would mean paying a Celestia fee to publish a blob
+    // every reader rejects. (That exact silent fallback put bech32m STRINGS
+    // on the namespace when 0.103.0 moved the field — live-debugged
+    // 2026-08-03; the STM rejected every one with BAD_DESERIALIZE.)
+    const raw = built.data?.rawData ?? built.rawData;
+    const rawBytes = OfferFiles.decode(raw);
+    // Base64 of the raw bytes becomes blob.data (Celestia stores these
+    // bytes; the read side recovers them via atob → latin1 → Uint8Array).
+    built.data.blob.data = Buffer.from(rawBytes).toString("base64");
     return built;
   }
 
@@ -123,7 +128,7 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
     // Record AFTER the publish succeeded — this is the moment the fee is
     // irrevocably spent, so it is the moment a repeat becomes "paying twice".
     try {
-      this.published.add(offerHashFromBlob(data.rawData));
+      this.published.add(offerHashFromBlob(data.rawData ?? data.data?.rawData));
     } catch {
       /* non-offer payload — nothing to record */
     }

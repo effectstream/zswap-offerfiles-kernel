@@ -187,6 +187,7 @@
         "@noble/hashes": "^1.8.0",
         "@scure/base": "^2.0.0",
         "@zswap-da/contract-offer-files": "workspace:*",
+        "@zswap-da/offer-guard": "workspace:*",
         "@zswap-da/validator": "workspace:*",
         "effection": "^3.5.0",
         "pg": "^8.14.0",

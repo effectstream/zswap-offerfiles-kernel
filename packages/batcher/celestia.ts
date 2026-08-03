@@ -107,13 +107,26 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
     const built = super.buildBatchData(inputs, options);
     if (!built) return built;
     try {
-      const rawBytes = OfferFiles.decode(built.rawData);
+      // batcher-sdk 0.103.0 returns { selectedInputs, data: { blob, rawData,
+      // inputKey } } — rawData lives under .data. (Reading it at the 0.101.x
+      // location returned undefined, the decode threw, and the silent catch
+      // below shipped the base adapter's UTF-8 bech32m payload — every
+      // API-submitted offer then died BAD_DESERIALIZE at STM ingestion.
+      // Found by the grand e2e suite, 2026-08-03.)
+      const rawBytes = OfferFiles.decode(built.data.rawData);
       // Base64 of the raw bytes becomes blob.data (Celestia stores these
       // bytes; the read side recovers them via atob → latin1 → Uint8Array).
       built.data.blob.data = Buffer.from(rawBytes).toString("base64");
-    } catch {
-      // Non-decodable input never reaches here (validateInput rejected it),
-      // but fail safe: leave the base adapter's payload untouched.
+    } catch (e) {
+      // Non-decodable input never reaches here (validateInput rejected it) —
+      // anything landing in this catch is a bug in THIS override, and
+      // publishing the untouched UTF-8 payload would silently break the DA
+      // wire format for every consumer. Scream, don't swallow.
+      console.error(
+        "[Celestia] buildBatchData raw-bytes conversion FAILED — publishing would emit the wrong wire format:",
+        e,
+      );
+      throw e;
     }
     return built;
   }

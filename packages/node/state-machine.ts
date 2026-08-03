@@ -359,7 +359,9 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     yield* World.resolve(deleteRejectedAccountingRow, {
       primitive_name: CELESTIA_PRIMITIVE_NAME,
       block_height: data.blockHeight,
-      supplied_value: raw,
+      // The body's JSON encoding, not the body: raw bytes contain 0x00,
+      // which has no text representation. See deleteRejectedAccountingRow.
+      supplied_json: JSON.stringify(raw),
     });
     yield* World.resolve(recordOfferRejection, {
       celestia_height: data.blockHeight,

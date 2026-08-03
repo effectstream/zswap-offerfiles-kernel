@@ -101,7 +101,7 @@ afterAll(async () => {
 test("rejecting a blob removes its stored body entirely", async () => {
   await insertBlob(100, BIG_BLOB, "commit-a", 0);
   await deleteRejectedAccountingRow.run(
-    { primitive_name: PRIMITIVE, block_height: 100, supplied_value: BIG_BLOB },
+    { primitive_name: PRIMITIVE, block_height: 100, supplied_json: JSON.stringify(BIG_BLOB) },
     client,
   );
   expect(await suppliedValues(100)).toEqual([]);
@@ -111,7 +111,7 @@ test("delete only touches the matching blob, leaving accepted offers intact", as
   await insertBlob(300, BIG_BLOB, "commit-d", 0);
   await insertBlob(300, OTHER_BLOB, "commit-e", 1);
   await deleteRejectedAccountingRow.run(
-    { primitive_name: PRIMITIVE, block_height: 300, supplied_value: BIG_BLOB },
+    { primitive_name: PRIMITIVE, block_height: 300, supplied_json: JSON.stringify(BIG_BLOB) },
     client,
   );
   expect(await suppliedValues(300)).toEqual([OTHER_BLOB]);
@@ -121,7 +121,7 @@ test("delete is scoped to its block — the same blob at another height survives
   await insertBlob(400, BIG_BLOB, "commit-f", 0);
   await insertBlob(401, BIG_BLOB, "commit-g", 0);
   await deleteRejectedAccountingRow.run(
-    { primitive_name: PRIMITIVE, block_height: 400, supplied_value: BIG_BLOB },
+    { primitive_name: PRIMITIVE, block_height: 400, supplied_json: JSON.stringify(BIG_BLOB) },
     client,
   );
   expect(await suppliedValues(400)).toEqual([]);
@@ -130,7 +130,7 @@ test("delete is scoped to its block — the same blob at another height survives
 
 test("delete is idempotent (replay re-fetches, re-rejects, re-deletes)", async () => {
   await deleteRejectedAccountingRow.run(
-    { primitive_name: PRIMITIVE, block_height: 100, supplied_value: BIG_BLOB },
+    { primitive_name: PRIMITIVE, block_height: 100, supplied_json: JSON.stringify(BIG_BLOB) },
     client,
   );
   expect(await suppliedValues(100)).toEqual([]);
@@ -145,11 +145,50 @@ test("many rejected blobs in one block all delete (no unique-index interference)
   expect((await suppliedValues(500)).length).toBe(10);
   for (let i = 0; i < 10; i++) {
     await deleteRejectedAccountingRow.run(
-      { primitive_name: PRIMITIVE, block_height: 500, supplied_value: `${BIG_BLOB}${i}` },
+      { primitive_name: PRIMITIVE, block_height: 500, supplied_json: JSON.stringify(`${BIG_BLOB}${i}`) },
       client,
     );
   }
   expect(await suppliedValues(500)).toEqual([]);
+});
+
+test("a blob body containing 0x00 deletes instead of killing the node", async () => {
+  // REGRESSION (found by packages/tests/grand-e2e): the scrub used to match
+  // the blob body as text. Every real Midnight transaction contains 0x00,
+  // which Postgres cannot represent as text, so the statement aborted the
+  // block transaction and the sync process exited on the next statement
+  // (25P02). Ordinary rejections of genuine transactions were fatal, not just
+  // adversarial junk.
+  const NUL = String.fromCharCode(0);
+  const REAL_TX_LIKE = `midnight:transaction[v9]${NUL}${String.fromCharCode(0xff)}${NUL}body`;
+  const rowsAt = async (height: number): Promise<number> => {
+    // NOT via ->>: extracting ANY field of a document holding a NUL anywhere
+    // raises "unsupported Unicode escape sequence", so a poisoned row is
+    // countable but never readable field-wise.
+    const r = await client.query(
+      `SELECT count(*)::int AS n FROM effectstream.primitive_accounting
+       WHERE effectstream_block_height = $1`,
+      [height],
+    );
+    return Number(r.rows[0].n);
+  };
+
+  await insertBlob(600, REAL_TX_LIKE, "commit-nul", 0);
+  await insertBlob(600, OTHER_BLOB, "commit-clean", 1);
+  expect(await rowsAt(600)).toBe(2);
+
+  await deleteRejectedAccountingRow.run(
+    { primitive_name: PRIMITIVE, block_height: 600, supplied_json: JSON.stringify(REAL_TX_LIKE) },
+    client,
+  );
+
+  // Poisoned row gone, NUL-free neighbour untouched — the old predicate could
+  // do neither, because reading the stored row was itself a failing half.
+  expect(await rowsAt(600)).toBe(1);
+  expect(await suppliedValues(600)).toEqual([OTHER_BLOB]);
+  // Connection still usable: the guarded failure mode is an aborted
+  // transaction, not a wrong result.
+  await client.query(`SELECT 1`);
 });
 
 test("delete seeks on BOTH leading index columns (primitive_name, height)", async () => {
@@ -160,7 +199,7 @@ test("delete seeks on BOTH leading index columns (primitive_name, height)", asyn
   const r = await client.query(
     `EXPLAIN DELETE FROM effectstream.primitive_accounting
      WHERE primitive_name = '${PRIMITIVE}' AND effectstream_block_height = 999
-       AND payload->'payload'->>'suppliedValue' = 'x'`,
+       AND position('x' in payload::text) > 0`,
   );
   const plan = r.rows.map((row: any) => row["QUERY PLAN"]).join("\n");
   expect(plan).toContain("primitive_accounting_unique_payload_per_block");

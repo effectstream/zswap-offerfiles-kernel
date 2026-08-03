@@ -844,17 +844,38 @@ export const archiveOfferByIdTtlWithHash = prepared<IArchiveOfferByIdTtlWithHash
 // the cost, and it grows with total node activity rather than with blob
 // volume. With primitive_name it is a two-column prefix seek down to the
 // handful of blobs at that height, and only then the body comparison.
+// Matched on the body's JSON ENCODING as a substring of payload::text, never
+// on the body itself. A blob body is arbitrary bytes and every real Midnight
+// transaction contains 0x00, which Postgres cannot represent as text: reading
+// the stored value raises "unsupported Unicode escape sequence", and binding
+// the raw body as a parameter raises "invalid byte sequence for encoding
+// UTF8: 0x00". Either aborts the block transaction, and because the runtime
+// routes state-transition errors to telemetry only, that surfaced as an
+// unexplained sync exit (25P02 on the next statement) which took the whole
+// orchestrator down. It fired on ORDINARY rejections of genuine transactions
+// (the live crash was a NOT_A_SWAP), and since reading the stored row is one
+// of the failing halves, a single such blob broke the scrub for every blob at
+// that height. Found by packages/tests/grand-e2e.
+//
+// JSON spells the byte as six literal ASCII characters, so payload::text is
+// ASCII-escaped, the parameter is ASCII, and nothing is ever unescaped.
+// Substring rather than a whole-document/md5 match on purpose: the framework
+// owns that document's shape, and an md5 of a re-serialized document passed
+// every unit test then silently matched NOTHING live — removing the crash
+// while quietly disabling the scrub this DELETE exists for. A needle taken
+// from the body alone cannot drift with key order or added fields. The two
+// leading index columns still seek to the blobs at that height.
 export interface IDeleteRejectedAccountingRowParams {
   primitive_name: string;
   block_height: number;
-  supplied_value: string;
+  supplied_json: string;
 }
 export type IDeleteRejectedAccountingRowResult = void;
 export const deleteRejectedAccountingRow = prepared<IDeleteRejectedAccountingRowParams, IDeleteRejectedAccountingRowResult>(
       `DELETE FROM effectstream.primitive_accounting
        WHERE primitive_name = :primitive_name!
          AND effectstream_block_height = :block_height!
-         AND payload->'payload'->>'suppliedValue' = :supplied_value!`,
+         AND position(:supplied_json! in payload::text) > 0`,
 );
 
 // Aggregated rejection counter — what survives a discarded blob. Bounded by

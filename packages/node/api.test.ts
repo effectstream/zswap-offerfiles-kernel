@@ -229,7 +229,7 @@ describe("GET /v1/quote — unknown-token demo fallback", () => {
     const suggested = Number(body.suggested_to_amount);
     expect(suggested).toBeGreaterThan(900000);
     expect(suggested).toBeLessThanOrEqual(1000000);
-    const persisted = await dbConn.query(
+    const persisted = await client.query(
       "SELECT 1 FROM token_prices WHERE token_color = ANY($1)",
       [[u1, u2]],
     );

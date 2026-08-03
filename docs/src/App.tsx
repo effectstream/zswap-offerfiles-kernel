@@ -38,7 +38,7 @@ const NAV: { group: string; items: { id: PanelId; label: string; hint: string }[
     items: [
       { id: 'upload', label: 'Upload offer', hint: 'POST /api/zswap/submit' },
       { id: 'accept', label: 'Accept / settle', hint: 'Book + batcher' },
-      { id: 'status', label: 'Offer status', hint: 'GET /api/zswap/status' },
+      { id: 'status', label: 'Offer status', hint: 'POST /api/zswap/status' },
       { id: 'events', label: 'Live events', hint: 'SSE /api/events' },
     ],
   },

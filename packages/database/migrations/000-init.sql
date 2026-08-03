@@ -146,17 +146,30 @@ CREATE TABLE offer_file_unshielded_spends_history (
 );
 
 -- Unified nullifier table (replaces seen_nullifiers + spent_nullifiers).
--- offer_matched=true:  matched to an indexed offer — permanent record used
---   by the validator to reject double-spend attempts.
--- offer_matched=false: early-arrival race buffer (Midnight event arrived
---   before the Celestia offer was indexed). Pruned by the midnight-nullifier
---   STF after SEEN_NULLIFIER_TTL_SECONDS (default 30 days).
+-- Every shielded nullifier observed on Midnight, kept FOREVER — this set is
+-- the double-spend record `isNullifierSpent` consults before indexing an
+-- offer, and a spend never becomes un-spent, so completeness is the whole
+-- point. Do NOT add a TTL: coin commitments stay in the Merkle tree after
+-- being spent, so a maker can always build a valid, current-root proof for a
+-- long-spent coin; the nullifier is the only thing that catches it.
+--
+-- offer_matched=true:  matched to one of our indexed offers.
+-- offer_matched=false: not (yet) ours — either the early-arrival race
+--   (Midnight event before the Celestia offer) or, far more often, unrelated
+--   Midnight-wide activity. Both are load-bearing for the spent-check.
+--
+-- Retention across the three sets, for contrast:
+--   nullifiers         — shielded spends, permanent (here).
+--   created_unshielded — unshielded live-set, self-trimming (spend deletes).
+--   known_roots        — TTL-limited, because root validity really does expire.
 CREATE TABLE nullifiers (
     nullifier     TEXT        PRIMARY KEY,
     height        BIGINT      NOT NULL,
     recorded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     offer_matched BOOLEAN     NOT NULL DEFAULT FALSE
 );
-CREATE INDEX idx_nullifiers_unmatched ON nullifiers (recorded_at)
-    WHERE offer_matched = false;
+-- No secondary index: `isNullifierSpent` and `findUnmatchedNullifier` are both
+-- primary-key lookups. The old partial index on (recorded_at) existed solely
+-- to serve the removed TTL prune, and cost a write on every nullifier insert —
+-- the highest-volume insert path in the system.
 

@@ -40,6 +40,20 @@ export function ReadPanel() {
             dbg.call(api.zswaps({ limit: 20, token: token || undefined, direction: dir || undefined }))
           }>Send</button>
         </div>
+        <p className="lead" style={{ marginBottom: 0 }}>
+          List rows carry <code>offer_hash</code> instead of the ~24 KB blob —
+          fetch a single offer (with blob) below.
+        </p>
+      </div>
+      <div className="card">
+        <h3><span className="method get">GET</span><span className="path">/api/zswaps/:hash</span></h3>
+        <div className="actions">
+          <button className="btn primary" type="button" onClick={() => {
+            const h = prompt('offer_hash (64 hex chars):')?.trim().toLowerCase()
+            if (!h) return
+            dbg.call(api.zswapByHash(h))
+          }}>Fetch offer by hash</button>
+        </div>
       </div>
       <div className="card">
         <h3><span className="method get">GET</span><span className="path">/api/known-tokens · /api/pairs</span></h3>

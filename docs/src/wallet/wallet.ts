@@ -102,11 +102,16 @@ export async function connectLocal(seed?: string): Promise<Connected> {
   const { MidnightLocalConnector } = await import('@effectstream/wallets/midnight-local')
   const cfg = await run(api.midnightConfig()).catch(() => null)
   const host = typeof location !== 'undefined' ? location.hostname : '127.0.0.1'
+  // Match the page's scheme: on an https page the browser hard-blocks
+  // http/ws (mixed content), so the localhost fallbacks must upgrade too.
+  const secure = typeof location !== 'undefined' && location.protocol === 'https:'
+  const httpScheme = secure ? 'https' : 'http'
+  const wsScheme = secure ? 'wss' : 'ws'
   const networkUrls = {
-    indexer: cfg?.indexerUri ?? `http://${host}:8088/api/v3/graphql`,
-    indexerWS: cfg?.indexerWsUri ?? `ws://${host}:8088/api/v3/graphql/ws`,
-    node: (cfg as any)?.nodeUri ?? `http://${host}:9944`,
-    proofServer: PROOF_SERVER_URL || cfg?.proofServerUri || `http://${host}:6300`,
+    indexer: cfg?.indexerUri ?? `${httpScheme}://${host}:8088/api/v3/graphql`,
+    indexerWS: cfg?.indexerWsUri ?? `${wsScheme}://${host}:8088/api/v3/graphql/ws`,
+    node: (cfg as any)?.nodeUri ?? `${httpScheme}://${host}:9944`,
+    proofServer: PROOF_SERVER_URL || cfg?.proofServerUri || `${httpScheme}://${host}:6300`,
   }
   const provider = await MidnightLocalConnector.instance().connectFromSeed({
     seed,

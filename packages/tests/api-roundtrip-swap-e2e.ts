@@ -20,7 +20,7 @@ import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/m
 import { joinOfferFiles, mintShielded } from "./lib/offer-files.ts";
 import { buildWallet, shieldedKeys, transferShielded, waitForShielded, waitForSync } from "./lib/wallet.ts";
 import { describeImbalances, mergeFinalized, nonDustImbalances, settleViaBatcher } from "./lib/batcher.ts";
-import { getZswaps, reconstructOffer, submitOffer } from "./lib/api.ts";
+import { getZswaps, getZswapByHash, reconstructOffer, submitOffer } from "./lib/api.ts";
 
 globalThis.WebSocket = WebSocket;
 setNetworkId(net.id as any);
@@ -132,11 +132,13 @@ try {
   check("API gives/wants reflect T0↔T1 swap", giveColors.has(T0) && giveColors.has(T1) && wantColors.has(T0) && wantColors.has(T1),
     `gives=${[...giveColors].map((c) => c.slice(0, 6))} wants=${[...wantColors].map((c) => c.slice(0, 6))}`);
 
-  // Reconstruct each offer tx FROM the API blob (the Celestia round-trip data)
-  console.log(`${TAG} reconstructing offers from API transaction_hex…`);
+  // Reconstruct each offer tx FROM the API blob (the Celestia round-trip data).
+  // The list is blob-free; each blob is fetched by content hash.
+  console.log(`${TAG} reconstructing offers from GET /api/zswaps/:hash…`);
   let reconstructed;
   try {
-    reconstructed = apiOffers.map((o) => reconstructOffer(o.transaction_hex));
+    const details = await Promise.all(apiOffers.map((o) => getZswapByHash(o.offer_hash!)));
+    reconstructed = details.map((d) => reconstructOffer(d.blob));
     check("reconstructed both offers from API blob", reconstructed.length === 2);
   } catch (e) {
     check("reconstructed both offers from API blob", false, String(e).slice(0, 140));

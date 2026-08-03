@@ -24,10 +24,24 @@ export type KnownToken = {
 export type Offer = {
   id: number
   celestia_height?: string
-  transaction_hex: string
+  /** Content hash (sha256 of the raw offer bytes) — the cross-node offer id. */
+  offer_hash: string | null
+  /** bech32m length of the blob; fetch the blob itself via zswapByHash(). */
+  blob_chars?: number
   gives?: { token: string; amount: string }[]
   wants?: { token: string; amount: string }[]
 }
+
+export type OfferDetail = {
+  offer_hash: string
+  status: 'open' | 'completed' | 'expired'
+  blob: string
+  celestia_height?: string
+  gives?: { token: string; amount: string }[]
+  wants?: { token: string; amount: string }[]
+}
+
+export type OffersPage = { offers: Offer[]; next_cursor: string | null }
 
 export type SyncStatus = { status: string; [k: string]: unknown }
 
@@ -53,10 +67,17 @@ export const api = {
   // ── Node (:9999) ──────────────────────────────────────────────────────────
   health: () => req<{ status: string }>('GET', `${API_BASE}/health`),
   sync: () => req<SyncStatus>('GET', `${API_BASE}/api/health/sync`),
-  zswaps: (q: { token?: string; direction?: string; limit?: number } = {}) =>
-    req<Offer[]>('GET', `${API_BASE}/api/zswaps?${qs(q)}`),
+  /** Keyset pagination: pass the previous page's next_cursor as after_hash. */
+  zswaps: (q: { token?: string; direction?: string; limit?: number; after_hash?: string } = {}) =>
+    req<OffersPage>('GET', `${API_BASE}/api/zswaps?${qs(q)}`),
+  /** Full offer (including its blob) by content hash. */
+  zswapByHash: (hash: string) =>
+    req<OfferDetail>('GET', `${API_BASE}/api/zswaps/${hash}`),
+  zswapStatusByHash: (hash: string) =>
+    req<{ offer_hash: string; status: string }>('GET', `${API_BASE}/api/zswaps/${hash}/status`),
+  /** POST: a real blob is 16–25 KB — far beyond what a query string survives. */
   zswapStatus: (blob: string) =>
-    req<{ blob: string; status: string }>('GET', `${API_BASE}/api/zswap/status?blob=${encodeURIComponent(blob)}`),
+    req<{ blob: string; offer_hash?: string; status: string }>('POST', `${API_BASE}/api/zswap/status`, { blob }),
   submitOffer: (blob: string) => req('POST', `${API_BASE}/api/zswap/submit`, { blob }),
   knownTokens: () => req<KnownToken[]>('GET', `${API_BASE}/api/known-tokens`),
   registerToken: (color: string, name: string, kind: string) =>

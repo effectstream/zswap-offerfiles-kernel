@@ -804,29 +804,6 @@ const isNullifierSpentIR: any = {"usedParamSet":{"nullifier":true},"params":[{"n
 export const isNullifierSpent = new PreparedQuery<IIsNullifierSpentParams,IIsNullifierSpentResult>(isNullifierSpentIR);
 
 
-/** 'PruneStaleNullifiers' parameters type */
-export interface IPruneStaleNullifiersParams {
-  cutoff_at: Date;
-}
-
-/** 'PruneStaleNullifiers' return type */
-export type IPruneStaleNullifiersResult = void;
-
-/** 'PruneStaleNullifiers' query type */
-export interface IPruneStaleNullifiersQuery {
-  params: IPruneStaleNullifiersParams;
-  result: IPruneStaleNullifiersResult;
-}
-
-const pruneStaleNullifiersIR: any = {"usedParamSet":{"cutoff_at":true},"params":[{"name":"cutoff_at","required":true,"transform":{"type":"scalar"},"locs":[{"a":69,"b":79}]}],"statement":"DELETE FROM nullifiers WHERE offer_matched = false AND recorded_at < :cutoff_at!"};
-
-/**
- * Query generated from SQL:
- * ```
- * DELETE FROM nullifiers WHERE offer_matched = false AND recorded_at < :cutoff_at!
- * ```
- */
-export const pruneStaleNullifiers = new PreparedQuery<IPruneStaleNullifiersParams,IPruneStaleNullifiersResult>(pruneStaleNullifiersIR);
 
 
 /** 'InsertCreatedUnshielded' parameters type */

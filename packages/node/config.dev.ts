@@ -18,6 +18,7 @@ import { getConnection } from "@effectstream/db";
 import {
   CELESTIA_FETCH_CONCURRENCY,
   CELESTIA_NAMESPACE,
+  CELESTIA_PRIMITIVE_NAME,
   CELESTIA_POLLING_INTERVAL_MS,
   CELESTIA_RPC_URL,
   CELESTIA_STEP_SIZE,
@@ -111,7 +112,7 @@ export const config = new ConfigBuilder()
     return builder.addPrimitive(
       (syncProtocols) => (syncProtocols as any).parallelCelestia,
       () => ({
-        name: "ZswapBlob",
+        name: CELESTIA_PRIMITIVE_NAME,
         type: PrimitiveTypeCelestiaGeneric,
         startBlockHeight: 1,
         namespace: CELESTIA_NAMESPACE,

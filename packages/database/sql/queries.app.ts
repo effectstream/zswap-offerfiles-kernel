@@ -295,27 +295,434 @@ export const getPairs = {
     ),
 };
 
-// ── ZSwap status (My Trades reconciliation) ────────────────────────────────
+// ── Offer hash (content-addressed lookups, MIP-0006 offerId) ───────────────
+// offer_hash = hex sha256 of the raw MIP-0005 transaction bytes. These
+// supersede the generated InsertOfferFile / GetOfferFiles for call sites that
+// carry the hash; fold them into queries.sql on the next pgtyped regeneration.
 
-export interface IGetZswapStatusByBlobParams { blob: string }
-export interface IGetZswapStatusByBlobResult {
+export interface IInsertOfferFileWithHashParams {
+  celestia_height: NumberOrString;
   transaction_hex: string;
-  status: string;
-  archive_reason: string | null;
+  offer_hash: string;
+  metadata_created_at: DateOrString | null;
+  metadata_expires_at: DateOrString | null;
+  metadata_maker_note: string | null;
+  auth_signer_public_key: string | null;
+  auth_signature: string | null;
+  auth_scheme: string | null;
+  ttl_seconds: NumberOrString | null;
 }
-export const getZswapStatusByBlob = {
-  run: (params: IGetZswapStatusByBlobParams, dbConn: any) =>
-    runQ<IGetZswapStatusByBlobParams, IGetZswapStatusByBlobResult>(
-      `SELECT transaction_hex, 'open' AS status, NULL::text AS archive_reason
-       FROM offer_file
-       WHERE transaction_hex = :blob!
-       UNION ALL
-       SELECT transaction_hex,
-           CASE archive_reason WHEN 'CONSUMED' THEN 'completed' ELSE 'expired' END AS status,
-           archive_reason
-       FROM offer_file_history
-       WHERE transaction_hex = :blob!`,
+export interface IInsertOfferFileWithHashResult { id: number }
+export const insertOfferFileWithHash = {
+  run: (params: IInsertOfferFileWithHashParams, dbConn: any) =>
+    runQ<IInsertOfferFileWithHashParams, IInsertOfferFileWithHashResult>(
+      `INSERT INTO offer_file (
+           celestia_height,
+           transaction_hex,
+           offer_hash,
+           metadata_created_at,
+           metadata_expires_at,
+           metadata_maker_note,
+           auth_signer_public_key,
+           auth_signature,
+           auth_scheme,
+           ttl_seconds
+       ) VALUES (
+           :celestia_height!,
+           :transaction_hex!,
+           :offer_hash!,
+           :metadata_created_at!,
+           :metadata_expires_at!,
+           :metadata_maker_note!,
+           :auth_signer_public_key!,
+           :auth_signature!,
+           :auth_scheme!,
+           COALESCE(:ttl_seconds!, 3600)
+       ) RETURNING id`,
       params,
       dbConn,
     ),
 };
+
+// Open + archived in one probe: dedup gate at ingestion/submit, and the
+// status half of GET /api/zswaps/:hash.
+export interface IGetOfferStatusByHashParams { offer_hash: string }
+export interface IGetOfferStatusByHashResult {
+  id: number;
+  status: string;
+  archive_reason: string | null;
+}
+export const getOfferStatusByHash = {
+  run: (params: IGetOfferStatusByHashParams, dbConn: any) =>
+    runQ<IGetOfferStatusByHashParams, IGetOfferStatusByHashResult>(
+      `SELECT id, 'open' AS status, NULL::text AS archive_reason
+       FROM offer_file
+       WHERE offer_hash = :offer_hash!
+       UNION ALL
+       SELECT id,
+           CASE archive_reason WHEN 'CONSUMED' THEN 'completed' ELSE 'expired' END AS status,
+           archive_reason
+       FROM offer_file_history
+       WHERE offer_hash = :offer_hash!`,
+      params,
+      dbConn,
+    ),
+};
+
+export interface IGetOfferByHashParams { offer_hash: string }
+export interface IGetOfferByHashResult {
+  id: number;
+  celestia_height: NumberOrString;
+  transaction_hex: string;
+  offer_hash: string;
+  metadata_created_at: DateOrString | null;
+  metadata_expires_at: DateOrString | null;
+  metadata_maker_note: string | null;
+  ttl_seconds: NumberOrString | null;
+  created_at: DateOrString | null;
+  status: string;
+  archive_reason: string | null;
+}
+export const getOfferByHash = {
+  run: (params: IGetOfferByHashParams, dbConn: any) =>
+    runQ<IGetOfferByHashParams, IGetOfferByHashResult>(
+      `SELECT id, celestia_height, transaction_hex, offer_hash,
+              metadata_created_at, metadata_expires_at, metadata_maker_note,
+              ttl_seconds, created_at,
+              'open' AS status, NULL::text AS archive_reason
+       FROM offer_file
+       WHERE offer_hash = :offer_hash!
+       UNION ALL
+       SELECT id, celestia_height, transaction_hex, offer_hash,
+              metadata_created_at, metadata_expires_at, metadata_maker_note,
+              ttl_seconds, created_at,
+              CASE archive_reason WHEN 'CONSUMED' THEN 'completed' ELSE 'expired' END AS status,
+              archive_reason
+       FROM offer_file_history
+       WHERE offer_hash = :offer_hash!
+       LIMIT 1`,
+      params,
+      dbConn,
+    ),
+};
+
+// Legs for one archived-or-open offer; `live` picks the table.
+export interface IGetOfferTokensAnyParams { offer_file_id: number; live: boolean }
+export interface IGetOfferTokensAnyResult {
+  token_color: string;
+  amount: string;
+  direction: string;
+}
+export const getOfferTokensAny = {
+  run: (params: IGetOfferTokensAnyParams, dbConn: any) =>
+    runQ<IGetOfferTokensAnyParams, IGetOfferTokensAnyResult>(
+      `SELECT token_color, amount, direction FROM offer_file_tokens
+       WHERE :live! AND offer_file_id = :offer_file_id!
+       UNION ALL
+       SELECT token_color, amount, direction FROM offer_file_tokens_history
+       WHERE NOT :live! AND offer_file_id = :offer_file_id!`,
+      params,
+      dbConn,
+    ),
+};
+
+// Batched legs for a page of open offers (kills the per-offer N+1 in the list).
+export interface IGetOfferTokensForOffersParams { offer_file_ids: number[] }
+export interface IGetOfferTokensForOffersResult {
+  offer_file_id: number;
+  token_color: string;
+  amount: string;
+  direction: string;
+}
+export const getOfferTokensForOffers = {
+  run: (params: IGetOfferTokensForOffersParams, dbConn: any) =>
+    runQ<IGetOfferTokensForOffersParams, IGetOfferTokensForOffersResult>(
+      `SELECT offer_file_id, token_color, amount, direction
+       FROM offer_file_tokens
+       WHERE offer_file_id = ANY(:offer_file_ids!)`,
+      params,
+      dbConn,
+    ),
+};
+
+// List page without the ~24 KB blob; blob_chars lets UIs size downloads.
+// EXISTS instead of JOIN + DISTINCT: the join duplicated each offer per leg
+// and forced a 9-column dedup before the sort; EXISTS lets the planner walk
+// the (created_at, id) index and stop at LIMIT (measured 12× faster at 5k
+// offers, and the gap widens with book size). When :token is '' the OR
+// short-circuits — no probe at all on the unfiltered path.
+//
+// Pagination is KEYSET, not OFFSET: the caller resolves an `after_hash`
+// cursor to the anchor row's (created_at, id) via resolveOfferCursor and
+// passes both here (or nulls for the first page). The row-value comparison
+// seeks straight to the anchor position in idx_offer_file_created_at_id —
+// no O(offset) discard, and concurrent inserts/archives cannot shift the
+// page window. `id` tie-breaks offers sharing a created_at; it stays
+// server-side (the public cursor is the offer_hash).
+export interface IGetOpenOffersPageParams {
+  token: string;
+  direction: string;
+  limit: number;
+  after_created_at: DateOrString | null;
+  after_id: number | null;
+}
+export interface IGetOpenOffersPageResult {
+  id: number;
+  celestia_height: NumberOrString;
+  offer_hash: string | null;
+  blob_chars: number;
+  metadata_created_at: DateOrString | null;
+  metadata_expires_at: DateOrString | null;
+  metadata_maker_note: string | null;
+  ttl_seconds: NumberOrString | null;
+  created_at: DateOrString | null;
+}
+export const getOpenOffersPage = {
+  run: (params: IGetOpenOffersPageParams, dbConn: any) =>
+    runQ<IGetOpenOffersPageParams, IGetOpenOffersPageResult>(
+      `SELECT o.id, o.celestia_height, o.offer_hash,
+              LENGTH(o.transaction_hex)::int AS blob_chars,
+              o.metadata_created_at, o.metadata_expires_at, o.metadata_maker_note,
+              o.ttl_seconds, o.created_at
+       FROM offer_file o
+       WHERE
+         (:token! = '' OR EXISTS (
+           SELECT 1 FROM offer_file_tokens oft
+           WHERE oft.offer_file_id = o.id
+             AND oft.token_color = :token!
+             AND (:direction! = 'ANY' OR oft.direction = :direction!)))
+         AND (:after_id!::int IS NULL
+              OR (o.created_at, o.id) < (:after_created_at!::timestamptz, :after_id!::int))
+       ORDER BY o.created_at DESC, o.id DESC
+       LIMIT :limit!`,
+      params,
+      dbConn,
+    ),
+};
+
+// Resolve an `after_hash` cursor to its keyset anchor. Checks history too:
+// if the anchor offer was consumed/expired mid-pagination its row moved
+// tables, but (created_at, id) is copied on archive, so the cursor stays
+// valid and the reader continues exactly where they left off.
+export interface IResolveOfferCursorParams { offer_hash: string }
+export interface IResolveOfferCursorResult {
+  id: number;
+  created_at: DateOrString | null;
+}
+export const resolveOfferCursor = {
+  run: (params: IResolveOfferCursorParams, dbConn: any) =>
+    runQ<IResolveOfferCursorParams, IResolveOfferCursorResult>(
+      `SELECT id, created_at FROM offer_file WHERE offer_hash = :offer_hash!
+       UNION ALL
+       SELECT id, created_at FROM offer_file_history WHERE offer_hash = :offer_hash!
+       LIMIT 1`,
+      params,
+      dbConn,
+    ),
+};
+
+// Hash-aware archive queries. These supersede the generated
+// ArchiveOfferBy* queries: the history insert names offer_hash explicitly,
+// because a BEFORE INSERT trigger reading the live row proved unreliable
+// inside the archiving wCTE (sub-statement snapshot ordering — see
+// migrations/005-offer-hash.sql). The three variants differ only in how
+// offers are matched and the archive_reason recorded.
+const HISTORY_COLUMNS = `
+        id,
+        celestia_height,
+        transaction_hex,
+        offer_hash,
+        metadata_created_at,
+        metadata_expires_at,
+        metadata_maker_note,
+        auth_signer_public_key,
+        auth_signature,
+        auth_scheme,
+        created_at,
+        ttl_seconds`;
+
+const archiveOfferSql = (matched: string, reason: "CONSUMED" | "TTL") => `
+WITH matched AS (
+${matched}
+),
+archived_offer AS (
+    INSERT INTO offer_file_history (${HISTORY_COLUMNS},
+        archive_reason
+    )
+    SELECT${HISTORY_COLUMNS},
+        '${reason}'
+    FROM offer_file
+    WHERE id IN (SELECT offer_file_id FROM matched)
+    RETURNING id
+),
+archived_tokens AS (
+    INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction)
+    SELECT offer_file_id, token_color, amount, direction
+    FROM offer_file_tokens
+    WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
+),
+archived_nullifiers AS (
+    INSERT INTO offer_file_nullifiers_history (offer_file_id, nullifier)
+    SELECT offer_file_id, nullifier
+    FROM offer_file_nullifiers
+    WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
+),
+archived_unshielded_spends AS (
+    INSERT INTO offer_file_unshielded_spends_history (offer_file_id, owner, intent_hash, output_no)
+    SELECT offer_file_id, owner, intent_hash, output_no
+    FROM offer_file_unshielded_spends
+    WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
+)
+DELETE FROM offer_file
+WHERE id IN (SELECT offer_file_id FROM matched)
+RETURNING id`;
+
+export interface IArchiveOfferResult { id: number }
+
+export interface IArchiveOfferByNullifierWithHashParams { nullifier: string }
+export const archiveOfferByNullifierWithHash = {
+  run: (params: IArchiveOfferByNullifierWithHashParams, dbConn: any) =>
+    runQ<IArchiveOfferByNullifierWithHashParams, IArchiveOfferResult>(
+      archiveOfferSql(
+        `    SELECT DISTINCT offer_file_id
+    FROM offer_file_nullifiers
+    WHERE nullifier = :nullifier!`,
+        "CONSUMED",
+      ),
+      params,
+      dbConn,
+    ),
+};
+
+export interface IArchiveOfferByUnshieldedSpendWithHashParams {
+  owner: string;
+  intent_hash: string;
+  output_no: number;
+}
+export const archiveOfferByUnshieldedSpendWithHash = {
+  run: (params: IArchiveOfferByUnshieldedSpendWithHashParams, dbConn: any) =>
+    runQ<IArchiveOfferByUnshieldedSpendWithHashParams, IArchiveOfferResult>(
+      archiveOfferSql(
+        `    SELECT DISTINCT offer_file_id
+    FROM offer_file_unshielded_spends
+    WHERE owner = :owner!
+      AND intent_hash = :intent_hash!
+      AND output_no = :output_no!`,
+        "CONSUMED",
+      ),
+      params,
+      dbConn,
+    ),
+};
+
+export interface IArchiveOfferByIdTtlWithHashParams { offer_file_id: number }
+export const archiveOfferByIdTtlWithHash = {
+  run: (params: IArchiveOfferByIdTtlWithHashParams, dbConn: any) =>
+    runQ<IArchiveOfferByIdTtlWithHashParams, IArchiveOfferResult>(
+      archiveOfferSql(
+        `    SELECT id AS offer_file_id
+    FROM offer_file
+    WHERE id = :offer_file_id!
+    LIMIT 1`,
+        "TTL",
+      ),
+      params,
+      dbConn,
+    ),
+};
+
+// ── Rejected-blob cleanup (framework table) ────────────────────────────────
+//
+// The framework persists EVERY blob it fetches from the namespace into
+// effectstream.primitive_accounting, permanently — the STM's own scheduled
+// input is deleted after processing, but this accounting row is not. Since
+// the Celestia namespace is permissionless, that is unbounded,
+// attacker-controlled storage: anyone can park megabytes in our DB for the
+// price of a blob fee, and every byte is copied again into the generated
+// md5(payload) column.
+//
+// So when the STM rejects an offer, it DELETEs the row in the same block
+// transaction that created it. Blanking the body in place was the other
+// option; deleting wins because the row's only remaining value would have
+// been "a blob was seen here" — which offer_rejections records in bounded,
+// aggregated form, along with the reject reason the accounting row never
+// carried. Deleting also sidesteps the table's UNIQUE index on
+// (primitive_name, height, md5(payload)), which any in-place rewrite has to
+// avoid colliding with.
+//
+// Safe to delete: the insert is ON CONFLICT DO NOTHING, no foreign key
+// references the table, and nothing in the framework's production path reads
+// it back (only its own reproduction tests do). Deterministic: a replay
+// re-fetches, re-rejects, and re-deletes identically.
+//
+// The table's only usable index is
+// (primitive_name, effectstream_block_height, payload_hash), so BOTH leading
+// columns must be constrained: filtering on height alone still "uses" the
+// index but walks all of it, across every primitive's rows — measured 137×
+// the cost, and it grows with total node activity rather than with blob
+// volume. With primitive_name it is a two-column prefix seek down to the
+// handful of blobs at that height, and only then the body comparison.
+export interface IDeleteRejectedAccountingRowParams {
+  primitive_name: string;
+  block_height: number;
+  supplied_value: string;
+}
+export type IDeleteRejectedAccountingRowResult = void;
+export const deleteRejectedAccountingRow = {
+  run: (params: IDeleteRejectedAccountingRowParams, dbConn: any) =>
+    runQ<IDeleteRejectedAccountingRowParams, IDeleteRejectedAccountingRowResult>(
+      `DELETE FROM effectstream.primitive_accounting
+       WHERE primitive_name = :primitive_name!
+         AND effectstream_block_height = :block_height!
+         AND payload->'payload'->>'suppliedValue' = :supplied_value!`,
+      params,
+      dbConn,
+    ),
+};
+
+// Aggregated rejection counter — what survives a discarded blob. Bounded by
+// (heights with a rejection) × (distinct codes), never by blob count, so it
+// cannot itself be inflated by spam. See migrations/006-offer-rejections.sql.
+export interface IRecordOfferRejectionParams {
+  celestia_height: NumberOrString;
+  code: string;
+}
+export type IRecordOfferRejectionResult = void;
+export const recordOfferRejection = {
+  run: (params: IRecordOfferRejectionParams, dbConn: any) =>
+    runQ<IRecordOfferRejectionParams, IRecordOfferRejectionResult>(
+      `INSERT INTO offer_rejections (celestia_height, code, count)
+       VALUES (:celestia_height!, :code!, 1)
+       ON CONFLICT (celestia_height, code)
+       DO UPDATE SET count = offer_rejections.count + 1`,
+      params,
+      dbConn,
+    ),
+};
+
+// Recent rejection activity, newest height first — the ops view of "is
+// something spamming the namespace, and with what?".
+export interface IGetRecentRejectionsParams { limit: number }
+export interface IGetRecentRejectionsResult {
+  celestia_height: NumberOrString;
+  code: string;
+  count: number;
+}
+export const getRecentRejections = {
+  run: (params: IGetRecentRejectionsParams, dbConn: any) =>
+    runQ<IGetRecentRejectionsParams, IGetRecentRejectionsResult>(
+      `SELECT celestia_height, code, count
+       FROM offer_rejections
+       ORDER BY celestia_height DESC, code
+       LIMIT :limit!`,
+      params,
+      dbConn,
+    ),
+};
+
+// NOTE: status-by-blob lookups go through offerHashFromBlob() + the
+// getOfferStatusByHash index probe — never a literal transaction_hex
+// comparison. A TEXT-equality query here would seq-scan both offer tables
+// against ~24 KB strings and hand attackers a cheap DoS (POST junk blobs →
+// full scans); btree can't index the column anyway (rows exceed the ~2.7 KB
+// entry limit). Undecodable blobs must be answered without touching the DB.

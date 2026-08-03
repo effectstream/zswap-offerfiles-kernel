@@ -20,6 +20,7 @@ import {
   CELESTIA_AUTH_TOKEN,
   CELESTIA_FETCH_CONCURRENCY,
   CELESTIA_NAMESPACE,
+  CELESTIA_PRIMITIVE_NAME,
   CELESTIA_NETWORK,
   CELESTIA_POLLING_INTERVAL_MS,
   CELESTIA_RPC_URL,
@@ -169,7 +170,7 @@ export const config = new ConfigBuilder()
     return builder.addPrimitive(
       (syncProtocols) => (syncProtocols as any).parallelCelestia,
       () => ({
-        name: "ZswapBlob",
+        name: CELESTIA_PRIMITIVE_NAME,
         type: PrimitiveTypeCelestiaGeneric,
         startBlockHeight: celestiaStartHeight,
         namespace: CELESTIA_NAMESPACE,

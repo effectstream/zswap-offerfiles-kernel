@@ -70,6 +70,23 @@ export interface ValidateOpts {
   // Max decoded transaction size in bytes.
   maxBytes: number;
 
+  // When to run `wellFormed` (proof + signature verification) — by far the
+  // most expensive step in the pipeline.
+  //
+  //   "verify" (default) — run it inline, at the end of this function. Right
+  //     for callers with no cheaper discriminator available, notably the
+  //     batcher's pre-fee gate: it must know the offer is genuine before
+  //     spending a Celestia fee, and it has no DB to consult.
+  //
+  //   "defer" — skip it here and return `ok` with everything derived. The
+  //     caller MUST then run `verifyOfferCrypto(result.tx, opts)` before
+  //     acting on the offer. Right for callers that hold indexed rejection
+  //     criteria (dedup, liveness): running those microsecond probes first
+  //     means a replayed or stale blob never costs a proof verification.
+  //     Reordering can only change WHICH rejection fires, never turn a
+  //     rejection into an acceptance — crypto still gates every insert.
+  crypto?: "verify" | "defer";
+
   // Optional SYNCHRONOUS liveness checks. Provide these only when a sync check
   // is available (unit tests with in-memory sets; callers that pre-fetched).
   // Async callers (the STM via World.resolve, submit via pg, the batcher via

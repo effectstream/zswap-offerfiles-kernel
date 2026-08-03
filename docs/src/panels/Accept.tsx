@@ -66,7 +66,20 @@ export function AcceptPanel({
 
   const loadBook = async () => {
     const r = await dbg.call(api.zswaps({ limit: 50 }))
-    if (r.ok && Array.isArray(r.parsed)) setOffers(r.parsed)
+    if (r.ok && Array.isArray(r.parsed?.offers)) setOffers(r.parsed.offers)
+  }
+
+  // The list no longer carries blobs (they're ~24 KB each) — fetch the
+  // selected offer's blob by content hash on click.
+  const selectOffer = async (o: Offer) => {
+    setSelectedId(o.id)
+    if (!o.offer_hash) {
+      setBlob('')
+      setBuildErr('Legacy offer without a content hash — paste its blob manually.')
+      return
+    }
+    const r = await dbg.call(api.zswapByHash(o.offer_hash))
+    if (r.ok && r.parsed?.blob) setBlob(r.parsed.blob)
   }
 
   return (
@@ -81,19 +94,19 @@ export function AcceptPanel({
         </div>
         {offers.length === 0 ? <p className="lead" style={{ margin: 0 }}>No offers loaded yet.</p> : (
           <table className="offers">
-            <thead><tr><th>id</th><th>gives</th><th>wants</th><th>height</th><th>blob</th></tr></thead>
+            <thead><tr><th>hash</th><th>gives</th><th>wants</th><th>height</th><th>blob</th></tr></thead>
             <tbody>
               {offers.map((o) => (
                 <tr
                   key={o.id}
                   className={selectedId === o.id ? 'selected' : ''}
-                  onClick={() => { setSelectedId(o.id); setBlob(o.transaction_hex) }}
+                  onClick={() => selectOffer(o)}
                 >
-                  <td>{o.id}</td>
+                  <td className="truncate" title={o.offer_hash ?? ''}>{short(o.offer_hash ?? String(o.id), 12)}</td>
                   <td>{legs(o.gives)}</td>
                   <td>{legs(o.wants)}</td>
                   <td>{o.celestia_height ?? ''}</td>
-                  <td className="truncate" title={o.transaction_hex}>{short(o.transaction_hex)}</td>
+                  <td>{o.blob_chars ? `${o.blob_chars} chars` : '—'}</td>
                 </tr>
               ))}
             </tbody>

@@ -16,7 +16,6 @@ const {
   isNullifierSpent,
   markNullifierMatched,
   findUnmatchedNullifier,
-  pruneStaleNullifiers,
 } = await import("@zswap-da/database");
 
 const PORT = 54329;
@@ -64,16 +63,19 @@ test("findUnmatchedNullifier: returns row when offer_matched=false, empty after 
   expect((await isNullifierSpent.run({ nullifier: "early" }, client)).length).toBe(1);
 });
 
-test("pruneStaleNullifiers: removes unmatched rows older than cutoff, keeps matched rows", async () => {
+test("nullifiers are retained regardless of age or match state (no TTL)", async () => {
+  // Guards the invariant that replaced the old TTL prune: a spend is
+  // permanent, so `isNullifierSpent` must still see it however old the row is
+  // and whether or not it ever matched one of our offers. Deleting unmatched
+  // rows used to let a long-spent coin back a freshly published offer.
   await client.query(`
     INSERT INTO nullifiers (nullifier, height, recorded_at, offer_matched)
     VALUES
-      ('stale_unmatched', 1, NOW() - INTERVAL '31 days', false),
-      ('fresh_unmatched', 2, NOW(),                      false),
-      ('stale_matched',   3, NOW() - INTERVAL '31 days', true)
+      ('ancient_unmatched', 1, NOW() - INTERVAL '400 days', false),
+      ('fresh_unmatched',   2, NOW(),                       false),
+      ('ancient_matched',   3, NOW() - INTERVAL '400 days', true)
   `);
-  await pruneStaleNullifiers.run({ cutoff_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }, client);
-  expect((await isNullifierSpent.run({ nullifier: "stale_unmatched" }, client)).length).toBe(0);
-  expect((await isNullifierSpent.run({ nullifier: "fresh_unmatched" }, client)).length).toBe(1);
-  expect((await isNullifierSpent.run({ nullifier: "stale_matched" }, client)).length).toBe(1);
+  for (const n of ["ancient_unmatched", "fresh_unmatched", "ancient_matched"]) {
+    expect((await isNullifierSpent.run({ nullifier: n }, client)).length).toBe(1);
+  }
 });

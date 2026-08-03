@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 
 export type AppEvent =
-  | { type: "offer_indexed"; offerId: number; celestiaHeight: number | string; gives: unknown[]; wants: unknown[] }
+  | { type: "offer_indexed"; offerId: number; offerHash: string; celestiaHeight: number | string; gives: unknown[]; wants: unknown[] }
   | {
       type: "offer_consumed";
       offerId: number;
@@ -9,11 +9,12 @@ export type AppEvent =
       unshieldedSpend?: { owner: string; intentHash: string; outputNo: number };
     }
   | { type: "offer_expired"; offerId: number }
-  | { type: "token_minted"; name: string; color: string }
+  | { type: "token_minted"; name: string; color: string; kind?: string }
   | {
       type: "offer_rejected";
       code?: string;
       reason?: string;
+      offerHash?: string;
       celestiaHeight: number | string;
     };
 

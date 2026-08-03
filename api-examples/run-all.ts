@@ -13,7 +13,7 @@
 //   GIVE_TOKEN  WANT_TOKEN  GIVE_AMOUNT  WANT_AMOUNT  TTL_MINUTES  MINT_AMOUNT
 
 import { readFileSync } from "node:fs";
-import { config, header, get } from "./config.ts";
+import { config, header, get, post } from "./config.ts";
 
 const WALLET_OPS = process.env.WALLET_OPS === "1";
 // Gap between wallet/chain operations — Midnight batcher queues serially.
@@ -111,9 +111,7 @@ try {
   process.exit(1);
 }
 
-const { status: offerStatus } = await get<any>(
-  `/api/zswap/status?blob=${encodeURIComponent(offerBlob)}`,
-);
+const { status: offerStatus } = await post<any>("/api/zswap/status", { blob: offerBlob });
 console.log(`   /api/zswap/status → "${offerStatus}"`);
 if (offerStatus !== "open") {
   console.error(`✗  Offer is not open (status: "${offerStatus}"). Aborting settlement.`);

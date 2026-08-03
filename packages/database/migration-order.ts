@@ -4,6 +4,9 @@ import spentSetsSql from "./migrations/001-spent-sets.sql" with { type: "text" }
 import livenessSetsSql from "./migrations/002-liveness-sets.sql" with { type: "text" };
 import tokenPricesSql from "./migrations/003-token-prices.sql" with { type: "text" };
 import pairStatsSql from "./migrations/004-pair-stats.sql" with { type: "text" };
+import offerHashSql from "./migrations/005-offer-hash.sql" with { type: "text" };
+import offerRejectionsSql from "./migrations/006-offer-rejections.sql" with { type: "text" };
+import cursorPaginationSql from "./migrations/007-cursor-pagination.sql" with { type: "text" };
 import localMigrationSql from "./migrations/local-migration.sql" with { type: "text" };
 export const migrationTable: DBMigrations[] = [
   {
@@ -25,6 +28,18 @@ export const migrationTable: DBMigrations[] = [
   {
     name: "004-pair-stats.sql",
     sql: pairStatsSql,
+  },
+  {
+    name: "005-offer-hash.sql",
+    sql: offerHashSql,
+  },
+  {
+    name: "006-offer-rejections.sql",
+    sql: offerRejectionsSql,
+  },
+  {
+    name: "007-cursor-pagination.sql",
+    sql: cursorPaginationSql,
   },
   {
     name: "local-migration.sql",

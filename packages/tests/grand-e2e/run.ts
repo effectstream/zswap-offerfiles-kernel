@@ -100,27 +100,34 @@ function writeScorecard(determinism: DeterminismOutcome | null): void {
   lines.push(`## 🔴 CRITICAL — unauthenticated remote node crash (found by this suite, NOT patched)`);
   lines.push(``);
   lines.push(
-    `**One 0x00 byte in any namespace blob kills every ZSwap-DA indexer.** The framework stores each ` +
-      `fetched blob body in \`effectstream.primitive_accounting.payload\` (JSON, where NUL survives as ` +
-      `\`\\u0000\`); the STM's rejected-blob scrub (\`deleteRejectedAccountingRow\`) then matches that body ` +
-      `back as a **text** parameter, which Postgres cannot represent: ` +
-      `\`invalid byte sequence for encoding "UTF8": 0x00\`. The runtime swallows STF errors to telemetry ` +
-      `(HANDOFF gotcha #2), so nothing is logged — and the next statement in the same block transaction ` +
-      `fails \`25P02 current transaction is aborted\`, exiting the sync process (code 1) and taking the ` +
-      `orchestrator down with it.`,
+    `**One 0x00 byte in any namespace blob kills every ZSwap-DA indexer.** Nothing ever *writes* a NUL ` +
+      `into a text column — JSON escaping makes the write legal. It bites where the blob body is used as ` +
+      `a **lookup key**: the STM's scrub (\`deleteRejectedAccountingRow\`) asks Postgres to extract the ` +
+      `stored body back to text with \`->>\` and compare it to the raw latin1 string as a parameter. Both ` +
+      `halves are illegal — the extraction raises \`unsupported Unicode escape sequence\` and the ` +
+      `parameter raises \`invalid byte sequence for encoding "UTF8": 0x00\`. STF errors go to telemetry ` +
+      `only (HANDOFF gotcha #2), so nothing is logged; the next statement in the same block transaction ` +
+      `dies \`25P02 current transaction is aborted\`, exiting the sync process (code 1) and taking the ` +
+      `orchestrator with it.`,
   );
   lines.push(``);
   lines.push(
-    `Severity: the namespace is permissionless **by design**, so this is an unauthenticated remote crash ` +
-      `of the whole network's indexers for the price of one blob fee. Binary junk contains 0x00 by ` +
-      `default, so it is the ordinary outcome of spam, not a sophisticated attack — and it fires on the ` +
-      `exact path built to survive hostile input.`,
+    `Blast radius exceeds the poison blob: the failing half is the extraction of the **stored** row, so ` +
+      `the scrub dies for every blob sharing that Celestia height, legitimate offers included. And since ` +
+      `the namespace is permissionless **by design**, this is an unauthenticated remote crash of the ` +
+      `whole network's indexers for one blob fee — binary junk contains 0x00 by default, so it is the ` +
+      `ordinary outcome of spam, not a sophisticated attack, on the exact path built to survive hostile ` +
+      `input.`,
   );
   lines.push(``);
   lines.push(
-    `No parameter-level fix exists (no text/jsonb parameter can carry NUL); the repair is structural — ` +
-      `store bodies as \`bytea\`, or scrub by row id. Reproduced standalone in seconds with PGlite, no ` +
-      `stack required. Per the handoff this is reported, not worked around: the suite's own garbage ` +
+    `**No migration required.** Never extract the body to text: matching the whole document ` +
+      `(\`payload::text = :param\`) or the existing generated column (\`payload_hash = md5(:param)\`) both ` +
+      `delete the row correctly, because the JSON text carries the escape as literal characters, leaving ` +
+      `the parameter clean ASCII. The \`payload_hash\` form is additionally an index probe on ` +
+      `(primitive_name, effectstream_block_height, payload_hash) rather than today's body comparison. ` +
+      `Reproduced standalone in seconds via \`bun run packages/tests/grand-e2e/nul-crash-repro.ts\` ` +
+      `(PGlite, no stack). Per the handoff this is reported, not worked around: the suite's garbage ` +
       `fixtures are NUL-free so the remaining checks can run, and \`GRAND_NUL_CRASH_REPRO=1\` publishes ` +
       `one NUL-bearing blob to reproduce the crash on demand.`,
   );

@@ -180,6 +180,24 @@ RETURNING id`;
 
 // ── Sync health — effectstream framework schema ────────────────────────────
 
+// The NTP protocol's REAL anchor, snapshotted by the framework at startup.
+// The env defaults (NTP_START_TIME = Preview genesis, BLOCK_TIME_MS = 10 min)
+// describe deployed networks; the dev orchestrator anchors NTP at launch
+// time with 1 s blocks, so a tip computed from env reads ~130 days behind
+// on a machine that is actually AT tip. Health must use this snapshot and
+// fall back to env only when it is absent.
+export interface IGetNtpConfigSnapshotResult {
+  start_time: NumberOrString | null;
+  block_time_ms: NumberOrString | null;
+}
+export const getNtpConfigSnapshot = prepared<void, IGetNtpConfigSnapshotResult>(
+  `SELECT (immutable_config->>'startTime')::bigint  AS start_time,
+          (immutable_config->>'blockTimeMS')::bigint AS block_time_ms
+   FROM effectstream.sync_protocol_config_snapshot
+   WHERE network_type = 'ntp'
+   LIMIT 1`,
+);
+
 export interface IGetNtpCurrentBlockResult {
   current: NumberOrString | null;
 }

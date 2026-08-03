@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { bech32m } from "@scure/base";
-import { OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
+import { OFFER_HRP, OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { offerHashFromBlob } from "@zswap-da/offer-guard";
 
 import { ZswapCelestiaAdapter } from "./celestia.ts";
@@ -141,5 +141,40 @@ describe("node/batcher parity on shared fixtures", () => {
     const batcherVerdict = adapter().validateInput(inputFor(blob) as any);
     expect(batcherVerdict.valid).toBe(false);
     expect(batcherVerdict.error).toContain(code);
+  });
+});
+
+describe("buildBatchData — raw bytes on the wire, regardless of SDK payload shape", () => {
+  test("blob.data is base64 of the DECODED bytes when built via the REAL base adapter", () => {
+    // Regression for the 0.103.0 shape drift: the SDK moved rawData from the
+    // result's top level into `data`; the override read the old location,
+    // its fail-safe catch swallowed the TypeError, and full bech32m STRINGS
+    // shipped to Celestia (every one rejected BAD_DESERIALIZE at the STM).
+    // Building through the real super.buildBatchData pins the CURRENT shape,
+    // so the next drift fails HERE instead of live.
+    const a = adapter();
+    const blob = craftBlob(3);
+    const built = (a as any).buildBatchData([inputFor(blob)]);
+    expect(built).toBeTruthy();
+    const wire = Buffer.from(built.data.blob.data, "base64");
+    const expected = Buffer.from(OfferFiles.decode(blob));
+    expect(wire.equals(expected)).toBe(true); // bytes, not the string
+    expect(wire.toString("latin1").startsWith("swapoffer1")).toBe(false);
+  });
+
+  test("a wiring bug now THROWS instead of silently shipping the string", () => {
+    const a = adapter();
+    const base = Object.getPrototypeOf(Object.getPrototypeOf(a));
+    const spy = base.buildBatchData;
+    // Simulate a future SDK moving rawData somewhere new entirely.
+    base.buildBatchData = () => ({
+      selectedInputs: [],
+      data: { blob: { namespace: "n", data: "utf8-of-string", share_version: 0 } },
+    });
+    try {
+      expect(() => (a as any).buildBatchData([inputFor(craftBlob(4))])).toThrow();
+    } finally {
+      base.buildBatchData = spy;
+    }
   });
 });

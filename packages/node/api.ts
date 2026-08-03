@@ -319,21 +319,34 @@ export const apiRouter: StartConfigApiRouter = async function (
         reason: "from_token and to_token must be 64-hex token colors",
       });
     }
-    // Only quote registered tokens: quoting arbitrary colors would fabricate a
-    // market rate — and persist a fallback price row — for tokens that don't exist.
+    // DEMO FALLBACK — unknown tokens quote at $1 (so two unknowns are 1:1).
+    // This endpoint used to 404 UNKNOWN_TOKEN for unregistered colors, on the
+    // principle that quoting arbitrary colors fabricates a market rate. That
+    // principle stands, but there is no token-tracking story yet and the 404
+    // walls off the demo, so unknowns get a neutral price INSTEAD of an
+    // error: loudly logged, never persisted to token_prices (a later
+    // registration starts from the real fallback, not a squatted $1 row).
+    // TODO(token-registry): remove once tokens are chain-derived — the
+    // Midnight:TokenMint primitive can maintain a verified color→contract
+    // registry; see PLAN "TokenMint" note.
+    const unknownTokens: string[] = [];
     for (const color of [fromToken, toToken]) {
       const known = await getTokenByColor.run({ token_color: color }, dbConn);
-      if (known.length === 0) {
-        return reply
-          .code(404)
-          .send({ error: "UNKNOWN_TOKEN", token: color });
-      }
+      if (known.length === 0) unknownTokens.push(color);
+    }
+    if (unknownTokens.length > 0) {
+      console.error(
+        `[QUOTE] ⚠️  UNKNOWN_TOKEN — serving 1:1 demo fallback (price=$1, not persisted). ` +
+          `No token-tracking solution yet; fix before any real pricing. Tokens: ${unknownTokens.join(", ")}`,
+      );
     }
     const digits = (v: unknown) => String(v ?? "").replace(/[^0-9]/g, "");
     const fromAmount = BigInt(digits((q as any).from_amount) || "0");
     const toRaw = digits((q as any).to_amount);
     const toAmount = toRaw.length ? BigInt(toRaw) : undefined;
-    const [pf, pt] = await Promise.all([resolvePrice(fromToken), resolvePrice(toToken)]);
+    const priceFor = (color: string) =>
+      unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
+    const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
     return quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount);
   });
 

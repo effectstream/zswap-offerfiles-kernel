@@ -209,3 +209,35 @@ describe("POST /v1/known-tokens — registry gate (item #20)", () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe("GET /v1/quote — unknown-token demo fallback", () => {
+  test("unregistered colors quote 1:1 at $1 instead of erroring", async () => {
+    // DEMO FALLBACK (see api.ts): there is no token-tracking story yet, so
+    // unknown colors must not wall off the demo with UNKNOWN_TOKEN. Two
+    // unknowns ⇒ equal $1 prices ⇒ 1:1. Loudly logged server-side; the $1
+    // price must NOT be persisted (a later registration starts clean).
+    const u1 = "7".repeat(64);
+    const u2 = "8".repeat(64);
+    const { status, body } = await getJson(
+      `/v1/quote?from_token=${u1}&to_token=${u2}&from_amount=1000000`,
+    );
+    expect(status).toBe(200);
+    expect(body.market_rate).toBe(1); // the 1:1 claim — equal $1 prices
+    expect(body.from_usd).toBe(1000000); // fallback price is exactly $1
+    // The standard market spread applies to fallback quotes like any other;
+    // assert spread-agnostically rather than pinning its current value.
+    const suggested = Number(body.suggested_to_amount);
+    expect(suggested).toBeGreaterThan(900000);
+    expect(suggested).toBeLessThanOrEqual(1000000);
+    const persisted = await client.query(
+      "SELECT 1 FROM token_prices WHERE token_color = ANY($1)",
+      [[u1, u2]],
+    );
+    expect(persisted.rows.length).toBe(0);
+  });
+
+  test("malformed colors still answer 400", async () => {
+    const { status } = await getJson("/v1/quote?from_token=zzz&to_token=abc&from_amount=1");
+    expect(status).toBe(400);
+  });
+});

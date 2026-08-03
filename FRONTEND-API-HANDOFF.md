@@ -214,7 +214,7 @@ their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
 - `GET /v1/pairs` → `[{ "pair_key": "…", "base_color": "…", "quote_color": "…", "trade_count": 3, "last_price": "2.0", "last_traded_at": "…", "open_count": 1 }]`
 - `GET /v1/quote?from_token=…&to_token=…&from_amount=…[&to_amount=…]` →
   `{ "from_token", "to_token", "from_amount", "market_rate", "suggested_to_amount", "to_amount", "implied_rate", "discount", "sponsored", "from_usd", "to_usd" }`.
-  404 `UNKNOWN_TOKEN` for unregistered colors (registered = present in known-tokens).
+  Unregistered colors do NOT error: they quote at a $1 demo fallback (two unknowns ⇒ 1:1). Don't render fallback quotes as real market prices — check the token against `/v1/known-tokens` if the UI needs to distinguish.
 - `GET /v1/chart/stats?base=…&quote=…` → `{ "base", "quote", "last", "change24", "high", "low", "volume_base", "volume_quote" }` (numbers; `change24` in %).
 - `GET /v1/chart/history?base=…&quote=…` → newest-first `[{ "price": n, "amt": n, "up": bool, "at": ms }]`. Derived **only from genuine fills** (consumed, not cancelled) — expect it to be sparser than the old data if the old one counted cancels.
 - `GET /v1/midnight/config` → `{ "contractAddress", "indexerUri", "indexerWsUri", "proofServerUri", "networkId" }` (already camelCase).

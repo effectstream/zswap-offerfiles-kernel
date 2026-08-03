@@ -458,7 +458,7 @@ Validation consults the node's local state only — no live RPC calls are made. 
 
 Price quote for a token swap, backed by the `token_prices` table. On first request the deterministic fallback price is written; subsequent calls are consistent. Operators can override rows directly in the DB.
 
-Both tokens must be registered in `known_tokens` — unknown colors answer `404 { "error": "UNKNOWN_TOKEN" }` rather than fabricating a rate, and malformed colors answer `400`.
+Unregistered colors quote at a **$1 demo fallback** (two unknown tokens ⇒ 1:1) instead of erroring — loudly logged server-side, never persisted to `token_prices`. This is a stopgap until token identity is chain-derived (TokenMint registry); do not treat fallback quotes as market data. Malformed colors answer `400`.
 
 **Query parameters:** `from_token`, `to_token` (64-hex, no `0x`), `from_amount` (base units), optional `to_amount`.
 

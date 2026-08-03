@@ -6,7 +6,7 @@ import {
 import {
   PrimitiveTypeCelestiaGeneric,
   PrimitiveTypeMidnightGeneric,
-  PrimitiveTypeMidnightNullifier,
+  PrimitiveTypeMidnightNullifierAndCommitment,
   PrimitiveTypeMidnightUnshieldedSpend,
   PrimitiveTypeMidnightUnshieldedCreate,
   PrimitiveTypeMidnightZswapRoot,
@@ -190,10 +190,15 @@ export const config = new ConfigBuilder()
     ).addPrimitive(
       (syncProtocols) => (syncProtocols as any).parallelMidnight,
       () => ({
-        name: "Midnight-Nullifier",
-        type: PrimitiveTypeMidnightNullifier,
+        name: "Midnight-ZswapEvents",
+        type: PrimitiveTypeMidnightNullifierAndCommitment,
         startBlockHeight: MIDNIGHT_START_BLOCK,
-        stateMachinePrefix: "midnight-nullifier",
+        stateMachinePrefix: "midnight-zswap-event",
+        // Both kinds ride the SAME indexer response field the fetcher already
+        // requests (zswapLedgerEvents) — capturing commitments adds zero
+        // indexer queries. They are the fill markers for exact fill-vs-cancel
+        // classification (see cancelledPredicate in the database package).
+        capture: "both",
         networkId: midnightNetworkConfig.id,
       }),
     ).addPrimitive(

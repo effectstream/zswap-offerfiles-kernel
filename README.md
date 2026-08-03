@@ -123,7 +123,7 @@ node/indexer/proof-server, Celestia, sync `:9999`, batcher `:3334`) via
 Phase B cases (`packages/tests/stm/`):
 
 1. **zswap-flow** — shielded A↔B, wallet settle → `offer_file` → history `CONSUMED`, `nullifiers`↑, `known_roots` advanced
-2. **api** — two opposing makers via `/api/zswap/submit`, merge + batcher settle, balances; negatives `BAD_ENCODING` / `NULLIFIER_SPENT` never index
+2. **api** — two opposing makers via `POST /v1/offers`, merge + batcher settle, balances; negatives `BAD_ENCODING` / `NULLIFIER_SPENT` never index
 3. **multi-token** — multi-give `{T0,T1}` ↔ multi-want `T2`, batcher settle
 4. **unshielded-only** — unshielded↔unshielded; spend shrinks `created_unshielded` (no `spent_*` table)
 5. **root-unknown** — well-formed offer rejected with `ROOT_UNKNOWN`; `offer_file` unchanged
@@ -140,7 +140,7 @@ live in `packages/tests/lib/`.
 bun packages/tests/ring-swap-e2e.ts 2        # A↔B swap (2-cycle), batcher-settled
 bun packages/tests/ring-swap-e2e.ts 3        # ring a→b→c→a (merge N proven offers)
 bun packages/tests/multi-token-swap-e2e.ts   # multi-give {T0,T1} ↔ multi-want {T0,T1}
-bun packages/tests/api-roundtrip-swap-e2e.ts # push → read /api/zswaps → reconstruct → settle
+bun packages/tests/api-roundtrip-swap-e2e.ts # push → read /v1/offers → reconstruct → settle
                                              #   + negatives: corrupted (BAD_ENCODING) and
                                              #     consumed (NULLIFIER_SPENT) never reach Celestia
 bun packages/tests/root-unknown-negative-e2e.ts  # well-formed offer rejected by past_roots gate
@@ -225,10 +225,10 @@ batcher endpoints, and direct Celestia access.
 
 There are **two ways** to post and read offers:
 
-- **Via this backend (recommended for apps):** `POST /api/zswap/submit` validates
+- **Via this backend (recommended for apps):** `POST /v1/offers` validates
   an offer (structure + ZK proofs + liveness) *before* any Celestia fee, then
-  forwards it; `GET /api/zswaps` returns validated, indexed, liveness-checked
-  offers. See API.md.
+  forwards it; `GET /v1/offers` returns validated, indexed, liveness-checked
+  offers as MIP-0006 `OffchainOfferPayload`s. See API.md.
 - **Directly on Celestia:** post with `blob.Submit` / read with `blob.GetAll`
   against the same Celestia node — the backend is a convenience layer, not a
   gatekeeper. Use for archival/mirroring or independent verification. See
@@ -236,18 +236,18 @@ There are **two ways** to post and read offers:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/api/zswaps?limit&offset&token&direction` | Active swap offers + their gives/wants. Blob-free: rows carry `offer_hash` (sha256 of the raw offer bytes — stable across nodes, unlike local row ids). |
-| `GET` | `/api/zswaps/:hash` | One offer **including its `swapoffer1…` blob**, by content hash. Resolves archived offers with their final status. |
-| `GET` | `/api/zswaps/:hash/status` | Lightweight status probe by content hash. |
-| `POST` | `/api/zswap/status` | Status by blob (`{blob}` or `{blobs: […]}`) — POST body because real blobs are 16–25 KB. |
-| `GET` | `/api/known-tokens` | Token color → name registry. |
-| `POST` | `/api/known-tokens` | Register a token name/color/kind. |
-| `GET` | `/api/midnight/config` | Public Midnight config the browser contract client needs. |
-| `POST` | `/api/zswap/submit` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, `409` on duplicate, else forward to the batcher → Celestia. Returns the offer's `offer_hash`. |
-| `GET` | `/api/events` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
+| `GET` | `/v1/offers?limit&token&direction&after_hash` | Open offers as MIP-0006 payloads (`offerId` + `computed.*`). Blob-free and cursor-paginated: `offerId` is the sha256 of the raw offer bytes — stable across nodes. |
+| `GET` | `/v1/offers/:offerId` | One offer **including its `swapoffer1…` string** (`offerBech32`), by content hash. Resolves archived offers with their final status. |
+| `GET` | `/v1/offers/:offerId/status` | Lightweight status probe by content hash. |
+| `POST` | `/v1/offers/status` | Status by blob (`{offer}` or `{offers: […]}`, max 50) — POST body because real blobs are 16–25 KB. |
+| `GET` | `/v1/known-tokens` | Token color → name registry. |
+| `POST` | `/v1/known-tokens` | Register a token name/color/kind (dev/e2e only; off in production). |
+| `GET` | `/v1/midnight/config` | Public Midnight config the browser contract client needs. |
+| `POST` | `/v1/offers` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, `409` on duplicate, else forward to the batcher → Celestia. Returns the offer's `offerId`. |
+| `GET` | `/v1/offers/stream` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
 
-Beyond the above, the node also serves `GET /health`, `GET /api/health/sync`,
-`GET /api/pairs`, `GET /api/quote`, and
+Beyond the above, the node also serves `GET /health`, `GET /v1/health/sync`,
+`GET /v1/pairs`, `GET /v1/quote`, and
 `GET /api/chart/{stats,history}` — all detailed in [API.md](API.md).
 
 ## Celestia data retention (read before relying on history)

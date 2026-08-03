@@ -15,6 +15,7 @@ import {
   upsertPairStatsByOfferId,
   getOpenOffersPage,
   getOfferTokensForOffers,
+  getOfferNullifiersForOffers,
   getOfferByHash,
   getOfferStatusByHash,
   getOfferTokensAny,
@@ -35,7 +36,9 @@ import { offerHashFromBlob } from "./offer-hash.ts";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
 
-type OfferLegDto = { token: string; amount: string };
+// MIP-0006 TokenLeg: { token, amount, type } — camelCase, `type` is the
+// value layer. Our DB column is `kind`; the wire name is the MIP's.
+type TokenLegDto = { token: string; amount: string; type: string };
 
 export const apiRouter: StartConfigApiRouter = async function (
   server: any,
@@ -95,11 +98,11 @@ export const apiRouter: StartConfigApiRouter = async function (
   };
   eventBus.on("app_event", onAppEvent);
 
-  // GET /api/zswaps — list open offers, newest first, with optional filtering
+  // GET /v1/offers — list open offers, newest first, with optional filtering
   // & keyset pagination. Deliberately does NOT include the offer blob: a
   // single blob is ~16–25 KB of bech32m, so a 100-row page would be
   // megabytes. Each row carries `offer_hash` — fetch the blob via
-  // GET /api/zswaps/:hash.
+  // GET /v1/offers/:hash.
   //
   // Pagination is cursor-based (`after_hash` = the previous page's
   // `next_cursor`); OFFSET is gone. Offsets cost O(offset) per page and shift
@@ -107,7 +110,7 @@ export const apiRouter: StartConfigApiRouter = async function (
   // skipping or repeating rows; the cursor seeks in the (created_at, id)
   // index and is immune to both. Response: { offers, next_cursor } —
   // next_cursor is null once exhausted.
-  server.get("/api/zswaps", async (request: any, reply: any) => {
+  server.get("/v1/offers", async (request: any, reply: any) => {
     const query = request?.query ?? {};
 
     const rawLimit = Number.parseInt((query as any).limit ?? "", 10);
@@ -160,46 +163,73 @@ export const apiRouter: StartConfigApiRouter = async function (
       },
       dbConn,
     );
-    if (offers.length === 0) return { offers: [], next_cursor: null };
+    if (offers.length === 0) return { offers: [], nextCursor: null };
 
     // One batched legs query for the whole page instead of one per offer.
     const legs = await getOfferTokensForOffers.run(
       { offer_file_ids: offers.map((o) => o.id) },
       dbConn,
     );
-    const byOffer = new Map<number, { gives: OfferLegDto[]; wants: OfferLegDto[] }>();
+    const byOffer = new Map<number, { gives: TokenLegDto[]; wants: TokenLegDto[] }>();
     for (const leg of legs) {
       let entry = byOffer.get(leg.offer_file_id);
       if (!entry) {
         entry = { gives: [], wants: [] };
         byOffer.set(leg.offer_file_id, entry);
       }
-      const dto = { token: leg.token_color, amount: leg.amount };
+      const dto = { token: leg.token_color, amount: leg.amount, type: leg.kind };
       if (leg.direction === "GIVING") entry.gives.push(dto);
       else entry.wants.push(dto);
     }
 
+    // MIP-0006 OffchainOfferPayload per row, with `offerBech32` OMITTED:
+    // the spec's presence rule is "at least one of offerId/offerBech32", and
+    // lists SHOULD serve the id — a real offer's string is 16–25 KB, so a
+    // 100-row page carrying strings is megabytes of redundant payload when
+    // each offer is individually retrievable by id. Fetch the string via
+    // GET /v1/offers/:offerId.
+    const nullifiers = await getOfferNullifiersForOffers.run(
+      { offer_file_ids: offers.map((o) => o.id), live: true },
+      dbConn,
+    );
+    const nullifiersByOffer = new Map<number, string[]>();
+    for (const row of nullifiers) {
+      const list = nullifiersByOffer.get(row.offer_file_id) ?? [];
+      list.push(row.nullifier);
+      nullifiersByOffer.set(row.offer_file_id, list);
+    }
+
     return {
       offers: offers.map((offer) => ({
-        ...offer,
-        gives: byOffer.get(offer.id)?.gives ?? [],
-        wants: byOffer.get(offer.id)?.wants ?? [],
+        version: 1 as const,
+        offerId: offer.offer_hash,
+        // offerBech32 omitted — see above; blobChars sizes the fetch.
+        blobChars: offer.blob_chars,
+        celestiaHeight: offer.celestia_height,
+        computed: {
+          gives: byOffer.get(offer.id)?.gives ?? [],
+          wants: byOffer.get(offer.id)?.wants ?? [],
+          expiresAt: offer.metadata_expires_at,
+          inputNullifiers: nullifiersByOffer.get(offer.id) ?? [],
+          firstSeenAt: offer.first_seen_at,
+          status: "live" as const,
+        },
       })),
       // A full page may be the last one; the follow-up fetch then returns
-      // { offers: [], next_cursor: null } and the caller stops.
-      next_cursor:
+      // { offers: [], nextCursor: null } and the caller stops.
+      nextCursor:
         offers.length === limit ? offers[offers.length - 1].offer_hash : null,
     };
   });
 
-  // GET /api/zswaps/:hash — one offer, including its blob, by content hash
+  // GET /v1/offers/:hash — one offer, including its blob, by content hash
   // (hex sha256 of the raw MIP-0005 transaction bytes; the MIP-0006 offerId).
   // The hash — not the SERIAL id — is the lookup key because ids are local
   // bookkeeping: two nodes indexing the same namespace assign different ids
   // depending on ingestion order, filters, and restarts, while the content
   // hash is identical everywhere. Looks through open offers first, then
   // history, so a consumed/expired offer still resolves with its status.
-  server.get("/api/zswaps/:hash", async (request: any, reply: any) => {
+  server.get("/v1/offers/:hash", async (request: any, reply: any) => {
     const hash = String(request.params?.hash ?? "").toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(hash)) {
       return reply.code(400).send({
@@ -209,38 +239,45 @@ export const apiRouter: StartConfigApiRouter = async function (
     }
     const rows = await getOfferByHash.run({ offer_hash: hash }, dbConn);
     if (rows.length === 0) {
-      return reply.code(404).send({ error: "NOT_FOUND", offer_hash: hash });
+      return reply.code(404).send({ error: "NOT_FOUND", offerId: hash });
     }
     const offer = rows[0];
-    const live = offer.status === "open";
+    const live = offer.status === "live";
     const legs = await getOfferTokensAny.run(
       { offer_file_id: offer.id, live },
       dbConn,
     );
-    const gives: OfferLegDto[] = [];
-    const wants: OfferLegDto[] = [];
+    const gives: TokenLegDto[] = [];
+    const wants: TokenLegDto[] = [];
     for (const leg of legs) {
-      const dto = { token: leg.token_color, amount: leg.amount };
+      const dto = { token: leg.token_color, amount: leg.amount, type: leg.kind };
       if (leg.direction === "GIVING") gives.push(dto);
       else wants.push(dto);
     }
+    // Single-offer response: the MIP requires offerBech32 here.
+    const offerNullifiers = await getOfferNullifiersForOffers.run(
+      { offer_file_ids: [offer.id], live },
+      dbConn,
+    );
     return {
-      offer_hash: offer.offer_hash,
-      status: offer.status,
-      blob: offer.transaction_hex,
-      celestia_height: offer.celestia_height,
-      created_at: offer.created_at,
-      metadata_created_at: offer.metadata_created_at,
-      metadata_expires_at: offer.metadata_expires_at,
-      metadata_maker_note: offer.metadata_maker_note,
-      ttl_seconds: offer.ttl_seconds,
-      gives,
-      wants,
+      version: 1 as const,
+      offerId: offer.offer_hash,
+      offerBech32: offer.transaction_hex,
+      celestiaHeight: offer.celestia_height,
+      ttlSeconds: offer.ttl_seconds,
+      computed: {
+        gives,
+        wants,
+        expiresAt: offer.metadata_expires_at,
+        inputNullifiers: offerNullifiers.map((n) => n.nullifier),
+        firstSeenAt: offer.first_seen_at,
+        status: offer.status,
+      },
     };
   });
 
-  // GET /api/zswaps/:hash/status — lightweight status probe by content hash.
-  server.get("/api/zswaps/:hash/status", async (request: any, reply: any) => {
+  // GET /v1/offers/:hash/status — lightweight status probe by content hash.
+  server.get("/v1/offers/:hash/status", async (request: any, reply: any) => {
     const hash = String(request.params?.hash ?? "").toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(hash)) {
       return reply.code(400).send({
@@ -249,15 +286,15 @@ export const apiRouter: StartConfigApiRouter = async function (
       });
     }
     const rows = await getOfferStatusByHash.run({ offer_hash: hash }, dbConn);
-    return { offer_hash: hash, status: rows[0]?.status ?? "not_found" };
+    return { offerId: hash, status: rows[0]?.status ?? "not_found" };
   });
 
-  server.get("/api/known-tokens", async () => {
+  server.get("/v1/known-tokens", async () => {
     const result = await getKnownTokens.run(undefined, dbConn);
     return result;
   });
 
-  // GET /api/quote — price quote for from→to backed by the token_prices DB table.
+  // GET /v1/quote — price quote for from→to backed by the token_prices DB table.
   // On first request for a token the deterministic fallback price is inserted so
   // subsequent calls are consistent and operators can override rows manually.
   // Params: from_token, to_token (hex colors), from_amount (base units),
@@ -272,7 +309,7 @@ export const apiRouter: StartConfigApiRouter = async function (
 
   const TOKEN_COLOR_RE = /^[0-9a-f]{64}$/;
 
-  server.get("/api/quote", async (request: any, reply: any) => {
+  server.get("/v1/quote", async (request: any, reply: any) => {
     const q = request?.query ?? {};
     const fromToken = String((q as any).from_token ?? "").toLowerCase();
     const toToken = String((q as any).to_token ?? "").toLowerCase();
@@ -282,25 +319,38 @@ export const apiRouter: StartConfigApiRouter = async function (
         reason: "from_token and to_token must be 64-hex token colors",
       });
     }
-    // Only quote registered tokens: quoting arbitrary colors would fabricate a
-    // market rate — and persist a fallback price row — for tokens that don't exist.
+    // DEMO FALLBACK — unknown tokens quote at $1 (so two unknowns are 1:1).
+    // This endpoint used to 404 UNKNOWN_TOKEN for unregistered colors, on the
+    // principle that quoting arbitrary colors fabricates a market rate. That
+    // principle stands, but there is no token-tracking story yet and the 404
+    // walls off the demo, so unknowns get a neutral price INSTEAD of an
+    // error: loudly logged, never persisted to token_prices (a later
+    // registration starts from the real fallback, not a squatted $1 row).
+    // TODO(token-registry): remove once tokens are chain-derived — the
+    // Midnight:TokenMint primitive can maintain a verified color→contract
+    // registry; see PLAN "TokenMint" note.
+    const unknownTokens: string[] = [];
     for (const color of [fromToken, toToken]) {
       const known = await getTokenByColor.run({ token_color: color }, dbConn);
-      if (known.length === 0) {
-        return reply
-          .code(404)
-          .send({ error: "UNKNOWN_TOKEN", token: color });
-      }
+      if (known.length === 0) unknownTokens.push(color);
+    }
+    if (unknownTokens.length > 0) {
+      console.error(
+        `[QUOTE] ⚠️  UNKNOWN_TOKEN — serving 1:1 demo fallback (price=$1, not persisted). ` +
+          `No token-tracking solution yet; fix before any real pricing. Tokens: ${unknownTokens.join(", ")}`,
+      );
     }
     const digits = (v: unknown) => String(v ?? "").replace(/[^0-9]/g, "");
     const fromAmount = BigInt(digits((q as any).from_amount) || "0");
     const toRaw = digits((q as any).to_amount);
     const toAmount = toRaw.length ? BigInt(toRaw) : undefined;
-    const [pf, pt] = await Promise.all([resolvePrice(fromToken), resolvePrice(toToken)]);
+    const priceFor = (color: string) =>
+      unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
+    const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
     return quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount);
   });
 
-  // GET /api/chart/{stats,history} — REAL per-pair market data derived from the
+  // GET /v1/chart/{stats,history} — REAL per-pair market data derived from the
   // indexer DB: history = consumed offers (offer_file_history), stats = last/24h/
   // high/low/volume from those fills (mid of open offers as fallback).
   // Params: base, quote (hex colors).
@@ -315,22 +365,22 @@ export const apiRouter: StartConfigApiRouter = async function (
     error: "VALIDATION",
     reason: "base and quote are required",
   };
-  server.get("/api/chart/stats", async (request: any, reply: any) => {
+  server.get("/v1/chart/stats", async (request: any, reply: any) => {
     const pair = readPair(request);
     if (!pair) return reply.code(400).send(PAIR_REQUIRED);
     return realStats(dbConn, pair.base, pair.quote);
   });
-  server.get("/api/chart/history", async (request: any, reply: any) => {
+  server.get("/v1/chart/history", async (request: any, reply: any) => {
     const pair = readPair(request);
     if (!pair) return reply.code(400).send(PAIR_REQUIRED);
     return realHistory(dbConn, pair.base, pair.quote);
   });
 
-  // POST /api/known-tokens — register a token name/color pair. The browser-wallet
+  // POST /v1/known-tokens — register a token name/color pair. The browser-wallet
   // mint path submits the contract call client-side and still needs the backend
   // DB to know the token name for indexing/display.
   server.post(
-    "/api/known-tokens",
+    "/v1/known-tokens",
     {
       schema: {
         body: {
@@ -381,10 +431,10 @@ export const apiRouter: StartConfigApiRouter = async function (
     },
   );
 
-  // GET /api/midnight/config — expose the public Midnight config the browser
+  // GET /v1/midnight/config — expose the public Midnight config the browser
   // contract client needs (contract address, indexer, proof server). Never
   // include secrets.
-  server.get("/api/midnight/config", async () => {
+  server.get("/v1/midnight/config", async () => {
     const contractAddress =
       midnightContract?.contractAddress ?? process.env.MIDNIGHT_CONTRACT_ADDRESS;
     if (!contractAddress) {
@@ -399,24 +449,31 @@ export const apiRouter: StartConfigApiRouter = async function (
     };
   });
 
-  // GET /api/health/sync — per-protocol sync state (current block, tip, lag).
+  // GET /v1/health/sync — per-protocol sync state (current block, tip, lag).
   // Uses effectstream.effectstream_blocks for NTP and
   // effectstream.sync_protocol_pagination for parallel chains.
   // Chain tips are fetched from the Midnight indexer / Celestia RPC and cached 60 s.
   // Exempt from the 60/min API budget — UIs poll this as a liveness probe.
-  server.get("/api/health/sync", { config: { rateLimit: false } }, async () => {
+  server.get("/v1/health/sync", { config: { rateLimit: false } }, async () => {
     return getSyncStatus(dbConn);
   });
 
-  // GET /api/pairs — all known trading pairs from pair_stats (historical) merged
+  // GET /v1/health — MIP-0006 indexer liveness. Lightweight {status,synced}
+  // derived from the sync state; /v1/health/sync is the detailed extension.
+  server.get("/v1/health", { config: { rateLimit: false } }, async () => {
+    const sync = await getSyncStatus(dbConn).catch(() => null as any);
+    return { status: sync?.status ?? "error", synced: sync?.status === "ok" };
+  });
+
+  // GET /v1/pairs — all known trading pairs from pair_stats (historical) merged
   // with live open-offer counts. Fast: pair_stats is a write-side projection
   // updated on each CONSUMED archive; the live subquery hits a small indexed table.
-  server.get("/api/pairs", async () => {
+  server.get("/v1/pairs", async () => {
     return getPairs.run(undefined, dbConn);
   });
 
   // Status lookup for My Trades startup reconciliation. Returns
-  // { blob, status } with status 'open' | 'completed' | 'expired' | 'not_found'.
+  // { offer, status } with status 'live' | 'consumed' | 'cancelled' | 'expired' | 'not_found'.
   //
   // Always via the content hash — an indexed probe. Undecodable blobs are
   // answered WITHOUT touching the DB: they can never have been indexed
@@ -428,74 +485,66 @@ export const apiRouter: StartConfigApiRouter = async function (
     try {
       hash = offerHashFromBlob(blob);
     } catch {
-      return { blob, status: "not_found" };
+      return { status: "not_found" };
     }
     const rows = await getOfferStatusByHash.run({ offer_hash: hash }, dbConn);
-    if (rows.length === 0) return { blob, offer_hash: hash, status: "not_found" };
-    return { blob, offer_hash: hash, status: rows[0].status };
+    if (rows.length === 0) return { offerId: hash, status: "not_found" };
+    return { offerId: hash, status: rows[0].status };
   };
 
-  // POST /api/zswap/status — body { blob } or { blobs: [...] }. POST because a
-  // real offer blob is 16–25 KB: far beyond what proxies accept in a query
-  // string (the GET variant 414s at nginx for any real offer).
+  // POST /v1/offers/status — status by bech32m string: body { offer } or
+  // { offers: [...] }. POST because a real offer is 16–25 KB, far beyond what
+  // proxies accept in a query string. Prefer GET /v1/offers/:hash/status when
+  // the content hash is known.
   server.post(
-    "/api/zswap/status",
+    "/v1/offers/status",
     {
       schema: {
         body: {
           type: "object",
           properties: {
-            blob: { type: "string" },
-            blobs: { type: "array", items: { type: "string" }, maxItems: 50 },
+            offer: { type: "string" },
+            offers: { type: "array", items: { type: "string" }, maxItems: 50 },
           },
         },
       },
     },
     async (request: any, reply: any) => {
-      const { blob, blobs } = request.body ?? {};
-      if (typeof blob === "string" && blob.trim()) {
-        return statusForBlob(blob.trim());
+      const { offer, offers } = request.body ?? {};
+      if (typeof offer === "string" && offer.trim()) {
+        return statusForBlob(offer.trim());
       }
-      if (Array.isArray(blobs) && blobs.length > 0) {
+      if (Array.isArray(offers) && offers.length > 0) {
         const statuses = [];
-        for (const b of blobs) statuses.push(await statusForBlob(String(b).trim()));
+        for (const b of offers) statuses.push(await statusForBlob(String(b).trim()));
         return { statuses };
       }
       return reply
         .code(400)
-        .send({ error: "VALIDATION", reason: "provide blob or blobs[]" });
+        .send({ error: "VALIDATION", reason: "provide offer or offers[]" });
     },
   );
 
-  // GET /api/zswap/status?blob=<bech32m> — kept for short-blob callers and
-  // backward compatibility. Real offers must use the POST variant or
-  // GET /api/zswaps/:hash/status.
-  server.get("/api/zswap/status", async (request: any, reply: any) => {
-    const blob = String((request.query as any)?.blob ?? "").trim();
-    if (!blob) return reply.code(400).send({ error: "blob query param required" });
-    return statusForBlob(blob);
-  });
-
-  // POST /api/zswap/submit — fully validate a `swapoffer1…` blob, then forward
+  // POST /v1/offers — fully validate a `swapoffer1…` blob, then forward
   // it to Celestia DA via the batcher. We validate here so the frontend gets
   // fast, specific feedback; the batcher's validateInput hook re-validates as
   // the authoritative pre-fee gate. The frontend produces the blob via
   // OfferFiles.encode().
   server.post(
-    "/api/zswap/submit",
+    "/v1/offers",
     {
       schema: {
         body: {
           type: "object",
-          required: ["blob"],
+          required: ["offer"],
           properties: {
-            blob: { type: "string" },
+            offer: { type: "string" }, // MIP-0005 bech32m swapoffer1… string
           },
         },
       },
     },
     async (request: any, reply: any) => {
-      const { blob } = request.body;
+      const { offer: blob } = request.body;
 
       // Structure only — proof verification is deferred to the end of this
       // handler, after the indexed dedup/liveness probes, so a replayed or
@@ -525,7 +574,7 @@ export const apiRouter: StartConfigApiRouter = async function (
         return reply.code(409).send({
           error: "DUPLICATE_OFFER",
           reason: `offer already indexed with status '${existing[0].status}'`,
-          offer_hash: offerHash,
+          offerId: offerHash,
           status: existing[0].status,
         });
       }
@@ -597,13 +646,13 @@ export const apiRouter: StartConfigApiRouter = async function (
 
       const result = await submitBlobViaBatcher(blob);
       // offer_hash is how the maker tracks this offer from now on:
-      // GET /api/zswaps/:hash once indexed.
-      return { success: true, offer_hash: offerHash, blob, result };
+      // GET /v1/offers/:hash once indexed.
+      return { success: true, offerId: offerHash, result };
     },
   );
 
-  // GET /api/events — Server-Sent Events stream for real-time offer lifecycle updates
-  server.get("/api/events", async (request: any, reply: any) => {
+  // GET /v1/offers/stream — Server-Sent Events stream for real-time offer lifecycle updates
+  server.get("/v1/offers/stream", async (request: any, reply: any) => {
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",

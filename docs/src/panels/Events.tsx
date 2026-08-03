@@ -9,7 +9,7 @@ export function EventsPanel() {
     <div className="panel">
       <h2>Live events</h2>
       <div className="card">
-        <h3><span className="method get">GET</span><span className="path">/api/events</span></h3>
+        <h3><span className="method get">GET</span><span className="path">/v1/offers/stream</span></h3>
         <div className="actions">
           <button className="btn primary" type="button" onClick={() => {
             sse.current?.close()

@@ -1,7 +1,7 @@
 // API ROUND-TRIP swap e2e — the faithful end-to-end path:
 //
-//   makers PUSH offers via /api/zswap/submit → batcher → Celestia → indexed
-//   SOLVER READS the offers back from GET /api/zswaps and reconstructs each
+//   makers PUSH offers via /v1/offers → batcher → Celestia → indexed
+//   SOLVER READS the offers back from GET /v1/offers and reconstructs each
 //   tx from the served blob (transaction_hex), then merges + settles via the
 //   batcher. This validates the Celestia fetch + validate + index + serve
 //   primitives, not an in-memory shortcut.
@@ -112,33 +112,33 @@ try {
 
   // ── PUSH both offers via the API → Celestia → indexed ──
   const offersBefore = await count("offer_file");
-  console.log(`${TAG} pushing 2 offers via /api/zswap/submit…`);
+  console.log(`${TAG} pushing 2 offers via /v1/offers…`);
   await submitIndexed(blob0, "P0 offer (give T0 / want T1)");
   await submitIndexed(blob1, "P1 offer (give T1 / want T0)");
   const indexedOk = await waitFor("offers indexed", async () => (await count("offer_file")) >= offersBefore + 2, 24);
   check("2 offers indexed (reached Celestia + STM)", indexedOk);
 
   // ── READ the offers back from the API and reconstruct them ──
-  console.log(`${TAG} reading available zswaps back from GET /api/zswaps…`);
+  console.log(`${TAG} reading available zswaps back from GET /v1/offers…`);
   const myColors = new Set([T0, T1]);
   const apiOffers = (await getZswaps({ limit: 100 })).filter((o) =>
-    o.gives.some((g) => myColors.has(g.token)) || o.wants.some((w) => myColors.has(w.token))
+    o.computed.gives.some((g) => myColors.has(g.token)) || o.computed.wants.some((w) => myColors.has(w.token))
   );
   check("API returned my 2 offers", apiOffers.length === 2, `got ${apiOffers.length}`);
 
   // Sanity: the API's derived gives/wants reflect the real swap directions.
-  const giveColors = new Set(apiOffers.flatMap((o) => o.gives.map((g) => g.token)));
-  const wantColors = new Set(apiOffers.flatMap((o) => o.wants.map((w) => w.token)));
+  const giveColors = new Set(apiOffers.flatMap((o) => o.computed.gives.map((g) => g.token)));
+  const wantColors = new Set(apiOffers.flatMap((o) => o.computed.wants.map((w) => w.token)));
   check("API gives/wants reflect T0↔T1 swap", giveColors.has(T0) && giveColors.has(T1) && wantColors.has(T0) && wantColors.has(T1),
     `gives=${[...giveColors].map((c) => c.slice(0, 6))} wants=${[...wantColors].map((c) => c.slice(0, 6))}`);
 
   // Reconstruct each offer tx FROM the API blob (the Celestia round-trip data).
   // The list is blob-free; each blob is fetched by content hash.
-  console.log(`${TAG} reconstructing offers from GET /api/zswaps/:hash…`);
+  console.log(`${TAG} reconstructing offers from GET /v1/offers/:hash…`);
   let reconstructed;
   try {
-    const details = await Promise.all(apiOffers.map((o) => getZswapByHash(o.offer_hash!)));
-    reconstructed = details.map((d) => reconstructOffer(d.blob));
+    const details = await Promise.all(apiOffers.map((o) => getZswapByHash(o.offerId!)));
+    reconstructed = details.map((d) => reconstructOffer(d.offerBech32));
     check("reconstructed both offers from API blob", reconstructed.length === 2);
   } catch (e) {
     check("reconstructed both offers from API blob", false, String(e).slice(0, 140));

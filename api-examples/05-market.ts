@@ -20,8 +20,8 @@ header("Market Data");
 // Quote
 const quoteParams = new URLSearchParams({ from_token: FROM, to_token: TO, from_amount: AMOUNT });
 try {
-  const quote = await get(`/api/quote?${quoteParams}`);
-  print(`GET /api/quote  (${AMOUNT} of ${FROM.slice(0,8)}… → ${TO.slice(0,8)}…)`, quote);
+  const quote = await get(`/v1/quote?${quoteParams}`);
+  print(`GET /v1/quote  (${AMOUNT} of ${FROM.slice(0,8)}… → ${TO.slice(0,8)}…)`, quote);
 } catch (e: any) {
   console.log("Quote unavailable:", e.message);
 }
@@ -29,16 +29,16 @@ try {
 // 24h stats
 const pairParams = new URLSearchParams({ base: BASE, quote: QUOTE });
 try {
-  const stats = await get(`/api/chart/stats?${pairParams}`);
-  print("GET /api/chart/stats", stats);
+  const stats = await get(`/v1/chart/stats?${pairParams}`);
+  print("GET /v1/chart/stats", stats);
 } catch (e: any) {
   console.log("Stats unavailable:", e.message);
 }
 
 // Trade history
 try {
-  const history = await get<any[]>(`/api/chart/history?${pairParams}`);
-  print(`GET /api/chart/history (${(history as any[]).length} fills)`, history.slice(0, 5));
+  const history = await get<any[]>(`/v1/chart/history?${pairParams}`);
+  print(`GET /v1/chart/history (${(history as any[]).length} fills)`, history.slice(0, 5));
   if (history.length > 5) console.log(`  … and ${history.length - 5} more`);
 } catch (e: any) {
   console.log("History unavailable:", e.message);

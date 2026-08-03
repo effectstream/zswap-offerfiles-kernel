@@ -111,9 +111,9 @@ try {
   process.exit(1);
 }
 
-const { status: offerStatus } = await post<any>("/api/zswap/status", { blob: offerBlob });
-console.log(`   /api/zswap/status → "${offerStatus}"`);
-if (offerStatus !== "open") {
+const { status: offerStatus } = await post<any>("/v1/offers/status", { offer: offerBlob });
+console.log(`   /v1/offers/status → "${offerStatus}"`);
+if (offerStatus !== "live") {
   console.error(`✗  Offer is not open (status: "${offerStatus}"). Aborting settlement.`);
   process.exit(1);
 }

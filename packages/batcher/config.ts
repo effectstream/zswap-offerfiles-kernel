@@ -1,4 +1,5 @@
 import path from "node:path";
+import { MIP6_NAMESPACE_ID_SUFFIX_HEX } from "@zswap-da/offer-guard";
 import { fileURLToPath } from "node:url";
 
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
@@ -70,7 +71,7 @@ export function loadBatcherConfig(): BatcherConfig {
     },
     celestia: {
       rpcUrl: ENV.getString("CELESTIA_RPC_URL", "http://127.0.0.1:26658"),
-      namespace: ENV.getString("CELESTIA_NAMESPACE", "000000000000deadbeef"),
+      namespace: ENV.getString("CELESTIA_NAMESPACE", MIP6_NAMESPACE_ID_SUFFIX_HEX),
       authToken: ENV.getString("CELESTIA_AUTH_TOKEN", "") || undefined,
       network,
       fee: ENV.getNumber("CELESTIA_FEE", 2000),

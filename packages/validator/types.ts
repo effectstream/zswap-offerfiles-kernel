@@ -34,10 +34,13 @@ export interface UnshieldedSpendRef {
 
 // A give/want leg derived from the transaction's per-segment imbalances.
 // `token` is the lowercase token color (RawTokenType hex); `amount` is a
-// non-negative decimal string (the absolute imbalance for that direction).
+// non-negative decimal string (the absolute imbalance for that direction);
+// `kind` is the value layer (MIP-0006 TokenLeg.type) — the same color on
+// different layers is two distinct legs, never netted.
 export interface OfferLeg {
   token: string;
   amount: string;
+  kind: "SHIELDED" | "UNSHIELDED";
 }
 
 export interface OfferValidation {

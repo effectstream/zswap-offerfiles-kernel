@@ -36,10 +36,10 @@ const NAV: { group: string; items: { id: PanelId; label: string; hint: string }[
   {
     group: 'Offers',
     items: [
-      { id: 'upload', label: 'Upload offer', hint: 'POST /api/zswap/submit' },
+      { id: 'upload', label: 'Upload offer', hint: 'POST /v1/offers' },
       { id: 'accept', label: 'Accept / settle', hint: 'Book + batcher' },
-      { id: 'status', label: 'Offer status', hint: 'POST /api/zswap/status' },
-      { id: 'events', label: 'Live events', hint: 'SSE /api/events' },
+      { id: 'status', label: 'Offer status', hint: 'POST /v1/offers/status' },
+      { id: 'events', label: 'Live events', hint: 'SSE /v1/offers/stream' },
     ],
   },
   {
@@ -63,7 +63,7 @@ function AppInner() {
   const call = dbg.call
 
   // Mount-only probe — do NOT depend on `dbg` (its value changes every request
-  // and would re-fire this into a /api/health/sync storm → RATE_LIMITED).
+  // and would re-fire this into a /v1/health/sync storm → RATE_LIMITED).
   useEffect(() => {
     let cancelled = false
     run(api.sync())

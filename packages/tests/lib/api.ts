@@ -1,5 +1,5 @@
 // Node HTTP API helpers: submit offers and read them back. Reading offers back
-// from GET /api/zswaps (and reconstructing the tx from the blob the API serves)
+// from GET /v1/offers (and reconstructing the tx from the blob the API serves)
 // is the faithful path — it exercises the Celestia fetch + validate + index +
 // serve primitives, not an in-memory shortcut.
 
@@ -14,10 +14,10 @@ export interface SubmitResult {
 }
 
 export async function submitOffer(blob: string): Promise<SubmitResult> {
-  const r = await fetch(`${API}/api/zswap/submit`, {
+  const r = await fetch(`${API}/v1/offers`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ blob }),
+    body: JSON.stringify({ offer: blob }),
   });
   let body: any;
   try {
@@ -28,29 +28,31 @@ export async function submitOffer(blob: string): Promise<SubmitResult> {
   return { status: r.status, body };
 }
 
+export interface ApiTokenLeg { token: string; amount: string; type: string }
 export interface ApiZswap {
-  id: number;
-  celestia_height: string;
-  offer_hash: string | null;
-  blob_chars: number;
-  gives: { token: string; amount: string }[];
-  wants: { token: string; amount: string }[];
+  version: 1;
+  offerId: string | null;
+  offerBech32?: string;
+  blobChars?: number;
+  celestiaHeight?: string;
+  computed: {
+    gives: ApiTokenLeg[];
+    wants: ApiTokenLeg[];
+    expiresAt?: string | null;
+    inputNullifiers: string[];
+    firstSeenAt?: string | null;
+    status: string;
+  };
 }
 
-export interface ApiZswapDetail {
-  offer_hash: string;
-  status: string;
-  blob: string;
-  gives: { token: string; amount: string }[];
-  wants: { token: string; amount: string }[];
-}
+export type ApiZswapDetail = ApiZswap & { offerBech32: string };
 
 export interface ApiZswapsPage {
   offers: ApiZswap[];
-  next_cursor: string | null;
+  nextCursor: string | null;
 }
 
-/** One page; pass after_hash (= previous next_cursor) to continue. */
+/** One page; pass after_hash (= previous nextCursor) to continue. */
 export async function getZswapsPage(
   params: { token?: string; limit?: number; after_hash?: string } = {},
 ): Promise<ApiZswapsPage> {
@@ -58,7 +60,7 @@ export async function getZswapsPage(
   if (params.token) q.set("token", params.token);
   if (params.after_hash) q.set("after_hash", params.after_hash);
   q.set("limit", String(params.limit ?? 100));
-  const r = await fetch(`${API}/api/zswaps?${q.toString()}`);
+  const r = await fetch(`${API}/v1/offers?${q.toString()}`);
   return (await r.json()) as ApiZswapsPage;
 }
 
@@ -69,8 +71,8 @@ export async function getZswaps(params: { token?: string; limit?: number } = {})
 
 /** The list is blob-free; the blob is served per-offer by content hash. */
 export async function getZswapByHash(hash: string): Promise<ApiZswapDetail> {
-  const r = await fetch(`${API}/api/zswaps/${hash}`);
-  if (!r.ok) throw new Error(`GET /api/zswaps/${hash} -> ${r.status}`);
+  const r = await fetch(`${API}/v1/offers/${hash}`);
+  if (!r.ok) throw new Error(`GET /v1/offers/${hash} -> ${r.status}`);
   return (await r.json()) as ApiZswapDetail;
 }
 

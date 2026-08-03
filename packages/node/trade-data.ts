@@ -7,7 +7,7 @@
 // Prices are quoted as quote-per-base. An offer GIVING base / WANTING quote is a
 // SELL of base (ask); GIVING quote / WANTING base is a BUY of base (bid).
 
-import { getTradeHistory, getOpenLegs } from "@zswap-da/database";
+import { getTradeHistory, getOpenLegs, getPairStats24h } from "@zswap-da/database";
 
 export interface HistoryRow { price: number; amt: number; up: boolean; at: string }
 export interface Stats {
@@ -59,25 +59,40 @@ async function currentMid(dbConn: any, base: string, quote: string): Promise<num
 }
 
 export async function realStats(dbConn: any, base: string, quote: string): Promise<Stats> {
-  const hist = await realHistory(dbConn, base, quote);
-  if (hist.length === 0) {
+  // Stats come from getPairStats24h — a SQL aggregate over EVERY fill in the
+  // 24 h window. They must never be derived from realHistory: that query is
+  // display-capped at 120 rows, and inheriting the cap silently understated
+  // volume, truncated high/low, and baselined change24 on the 120th-newest
+  // trade for any pair with >120 fills a day.
+  const rows = await getPairStats24h.run({ base, quote }, dbConn);
+  const s = rows[0];
+  const last = s?.last_price != null ? Number(s.last_price) : null;
+
+  if (last == null) {
+    // No fills ever — quote the mid of the open book, if any.
     const mid = await currentMid(dbConn, base, quote);
     return { base, quote, last: mid, change24: 0, high: mid, low: mid, volume_base: 0, volume_quote: 0 };
   }
-  const now = Date.now();
-  const dayAgo = now - 86_400_000;
-  const last = hist[0].price;
-  const olderThanDay = hist.find((h) => Date.parse(h.at) < dayAgo);
-  const ref = olderThanDay ? olderThanDay.price : hist[hist.length - 1].price;
+
+  // change24 baseline: the newest fill at/older than the cutoff; for a pair
+  // whose entire history is inside the window, the oldest in-window fill
+  // (change since inception). Equal to `last` when the window is empty → 0%.
+  const ref = s.ref_before_24h != null
+    ? Number(s.ref_before_24h)
+    : s.oldest_in_24h != null
+      ? Number(s.oldest_in_24h)
+      : last;
   const change24 = ref > 0 ? ((last - ref) / ref) * 100 : 0;
-  const win = hist.filter((h) => Date.parse(h.at) >= dayAgo);
-  const window = win.length ? win : hist;
-  const prices = window.map((h) => h.price);
+
+  // Window empty (no trades in 24 h): volumes are genuinely 0 and high/low
+  // collapse to the last price — NOT to aggregates over stale history, which
+  // is what the old fallback reported as "24 h" numbers.
+  const hasWindow = s.fills_24h > 0;
   return {
     base, quote, last, change24,
-    high: Math.max(...prices),
-    low: Math.min(...prices),
-    volume_base: window.reduce((s, h) => s + h.amt, 0),
-    volume_quote: window.reduce((s, h) => s + h.amt * h.price, 0),
+    high: hasWindow ? Number(s.high_24h) : last,
+    low: hasWindow ? Number(s.low_24h) : last,
+    volume_base: hasWindow ? Number(s.volume_base_24h) : 0,
+    volume_quote: hasWindow ? Number(s.volume_quote_24h) : 0,
   };
 }

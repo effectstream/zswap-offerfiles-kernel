@@ -4,9 +4,9 @@
 //
 //   • Historic trades → offer_file_history (archive_reason='CONSUMED'): a
 //     coherent price random-walk over the last ~48h per pair. These back
-//     /api/chart/history and /api/chart/stats.
+//     /v1/chart/history and /v1/chart/stats.
 //   • Live order book → offer_file (+ offer_file_tokens): asks above / bids
-//     below each pair's mid. These back /api/zswaps → the on-screen order book.
+//     below each pair's mid. These back /v1/offers → the on-screen order book.
 //
 // All inserts are DIRECT SQL against the dev PGlite (127.0.0.1:5432). They are
 // DISPLAY-real: they render and price exactly like real offers, but the seeded
@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 // Seed rows carry a placeholder blob, not a decodable swapoffer1… string, so
 // the real offerHashFromBlob() cannot apply. Hash the placeholder itself:
 // still unique + stable, which keeps the hash-addressed endpoints
-// (GET /api/zswaps/:hash) working against seeded data in the UI.
+// (GET /v1/offers/:hash) working against seeded data in the UI.
 const seedHash = (blob: string) => createHash("sha256").update(blob).digest("hex");
 
 const SEED_BASE = 9_000_000; // all seeded rows live at/above this id
@@ -105,8 +105,8 @@ async function seedHistory(p: (typeof PAIRS)[number]) {
       [id, 1000 + id, `seed-hist-${id}`, seedHash(`seed-hist-${id}`), at],
     );
     await q(
-      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction) VALUES
-       ($1,$2,$3,'GIVING'), ($1,$4,$5,'WANTING')`,
+      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind) VALUES
+       ($1,$2,$3,'GIVING','SHIELDED'), ($1,$4,$5,'WANTING','SHIELDED')`,
       [id, give[0], String(give[1]), want[0], String(want[1])],
     );
     fills++;
@@ -126,8 +126,8 @@ async function seedBook(p: (typeof PAIRS)[number], mid: number) {
       [id, 2000 + id, `seed-book-${id}`, seedHash(`seed-book-${id}`), nowIso],
     );
     await q(
-      `INSERT INTO offer_file_tokens (offer_file_id, token_color, amount, direction) VALUES
-       ($1,$2,$3,'GIVING'), ($1,$4,$5,'WANTING')`,
+      `INSERT INTO offer_file_tokens (offer_file_id, token_color, amount, direction, kind) VALUES
+       ($1,$2,$3,'GIVING','SHIELDED'), ($1,$4,$5,'WANTING','SHIELDED')`,
       [id, give[0], String(give[1]), want[0], String(want[1])],
     );
     n++;

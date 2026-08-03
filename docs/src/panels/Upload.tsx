@@ -94,7 +94,7 @@ export function UploadPanel({
               diag
                 ? `diagnostics: offerRoot=${String(diag.offerRoot).slice(0, 18)}… knownRoots=${diag.knownRootsTotal}@h${diag.knownRootsLatestHeight} midnightTip=${diag.midnightTip} networkId=${diag.nodeNetworkId}`
                 : '',
-              'This is NOT fixed by waiting — rebuild the offer with Lace on the same network as /api/midnight/config (undeployed → local indexer :8088).',
+              'This is NOT fixed by waiting — rebuild the offer with Lace on the same network as /v1/midnight/config (undeployed → local indexer :8088).',
             ].filter(Boolean).join('\n\n'),
           )
         } else {
@@ -110,7 +110,7 @@ export function UploadPanel({
         setSubmitMsg(`Waiting for indexer… (${i + 1}/20)`)
         await new Promise((res) => setTimeout(res, 3000))
         const s = await dbg.call(api.zswapStatus(b))
-        if (['open', 'completed', 'expired'].includes(s.parsed?.status ?? '')) {
+        if (['live', 'consumed', 'cancelled', 'expired'].includes(s.parsed?.status ?? '')) {
           setSubmitMsg(`Indexed status: ${s.parsed!.status}`)
           break
         }
@@ -266,7 +266,7 @@ export function UploadPanel({
       </div>
 
       <div className="card">
-        <h3><span className="method post">POST</span><span className="path">/api/zswap/submit</span></h3>
+        <h3><span className="method post">POST</span><span className="path">/v1/offers</span></h3>
         <div className="field">
           <label>blob</label>
           <textarea value={blob} onChange={(e) => setBlob(e.target.value)} placeholder="swapoffer1..." spellCheck={false} />
@@ -294,7 +294,7 @@ export function UploadPanel({
         <div className="callout warn">
           <code>ROOT_UNKNOWN</code> means Lace&apos;s <code>makeIntent</code> proved against a merkle root
           this node has never synced. Check the Wallet tab — Lace indexer must equal{' '}
-          <code>/api/midnight/config</code> (usually <code>http://127.0.0.1:8088/api/v3/graphql</code>).
+          <code>/v1/midnight/config</code> (usually <code>http://127.0.0.1:8088/api/v3/graphql</code>).
           <code>networkId=undeployed</code> alone is not enough. Remint + rebuild after fixing Lace.
         </div>
       </div>

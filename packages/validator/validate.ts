@@ -6,6 +6,7 @@ import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 import {
   collectNullifiers,
   collectUnshieldedSpends,
+  collectOutputCommitments,
   deriveLegs,
   UnknownTokenTagError,
 } from "./derive.ts";
@@ -122,6 +123,24 @@ export function validateZswapOffer(
     };
   }
 
+  // Everything from here — size, deserialize, structure, crypto — is a pure
+  // function of the RAW BYTES. The DA layer publishes those bytes directly
+  // (MIP-0006), so the STM ingests via validateZswapOfferBytes; only the
+  // string-carrying callers (submit route, batcher pre-fee gate) come through
+  // the bech32m entry above.
+  return validateZswapOfferBytes(rawTx, opts);
+}
+
+/**
+ * Validate an offer from its RAW canonical `Transaction` bytes — the on-chain
+ * MIP-0006 form. Identical ladder to `validateZswapOffer` minus the bech32m
+ * encoding step (there is no string to decode). Steps: size · deserialize ·
+ * structural · root extraction · liveness · dedup · crypto (last).
+ */
+export function validateZswapOfferBytes(
+  rawTx: Uint8Array,
+  opts: ValidateOpts,
+): OfferValidation {
   // ── 2. Size ──
   if (rawTx.length > opts.maxBytes) {
     return {

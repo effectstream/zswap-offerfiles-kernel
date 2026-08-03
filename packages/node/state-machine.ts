@@ -7,8 +7,9 @@ import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
-import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
-import { offerHashFromBlob } from "./offer-hash.ts";
+import { getBlankRefState, validateZswapOfferBytes, verifyOfferCrypto, collectOutputCommitments } from "@zswap-da/validator";
+import { latin1ToBytes, offerBytesToBech32, offerHashFromBytes } from "@zswap-da/offer-guard";
+import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 
 import {
   insertOfferFileWithHash,
@@ -16,19 +17,22 @@ import {
   deleteRejectedAccountingRow,
   recordOfferRejection,
   insertOfferFileNullifier,
+  insertCommitment,
+  insertOfferFileCommitment,
   insertOfferFileUnshieldedSpend,
-  insertOfferFileToken,
+  insertOfferFileTokenWithKind,
   archiveOfferByNullifierWithHash,
   archiveOfferByUnshieldedSpendWithHash,
   archiveOfferByIdTtlWithHash,
-  upsertNullifier,
+  insertNullifierWithTx,
   markNullifierMatched,
   findUnmatchedNullifier,
   isNullifierSpent,
   insertCreatedUnshielded,
   deleteCreatedUnshielded,
   isUnshieldedCreated,
-  upsertKnownRoot,
+  upsertKnownRootWithFirstSeen,
+  getEarliestRootFirstSeen,
   isKnownRoot,
   pruneKnownRoots,
 } from "@zswap-da/database";
@@ -39,12 +43,14 @@ import {
 // still *open* by watching the on-chain nullifiers (shielded) and
 // unshielded UTXO refs of its inputs. Two limits are intentional:
 //
-//   1. CONSUMED conflates *filled* and *canceled*. The indexer watches
-//      input consumption only; an offer's *output commitments* are not
-//      tracked, so a maker who spends the coin elsewhere is
-//      indistinguishable from a successful swap. If you need
-//      fill-vs-cancel attribution, extend the decoder to surface ZswapOutput
-//      commitments and classify on consumption.
+//   1. Fill vs cancel is classified at READ time (cancelledPredicate in the
+//      database package). Split/partial nullifier spends are definitive
+//      cancels (settlement is atomic); and for offers with stored fill
+//      markers (their output commitments, captured at ingestion) the
+//      converse is exact too: the single spending tx must have created
+//      those commitments, else it was a cancel — single-input included.
+//      Only marker-less offers (pre-migration rows, unshielded-only wants)
+//      keep the all-in-one-tx heuristic.
 //
 //   2. Archival is destructive (rows are DELETEd into history). If a
 //      consuming Midnight/Celestia block is later reorged out, the offer
@@ -107,17 +113,48 @@ function unshieldedOwnerToCanonicalHex(value: unknown): string {
 
 const stm = new Stm<typeof grammar, {}>(grammar);
 
-stm.addStateTransition("midnight-nullifier", function* (data) {
+// Midnight:NullifierAndCommitment (effectstream#838) — one input per zswap
+// ledger event, discriminated on payload.kind:
+//   "nullifier"  → a shielded coin was SPENT  (ZswapInput)
+//   "commitment" → a shielded coin was CREATED (ZswapOutput)
+// Both kinds carry the ledger txHash. Together they are the exact
+// fill-vs-cancel evidence: a fill's single settlement tx spends ALL of an
+// offer's nullifiers AND creates the offer's output commitments; see
+// cancelledPredicate in the database package.
+stm.addStateTransition("midnight-zswap-event", function* (data) {
   const { payload } = data.parsedInput;
+
+  if (payload?.kind === "commitment") {
+    // Coin created. Record it permanently (mirrors the nullifiers table —
+    // globally unique, first-seen tx wins, replays are no-ops). No offer
+    // matching happens here: commitments are consulted read-time by the
+    // classification predicate, keyed on the spending tx's hash.
+    try {
+      yield* World.resolve(insertCommitment, {
+        commitment: bytesOrStringToHex(payload.commitment),
+        tx_hash: payload?.txHash ? bytesOrStringToHex(payload.txHash) : null,
+        mt_index: payload?.mtIndex != null ? String(payload.mtIndex) : null,
+        height: data.blockHeight,
+      });
+    } catch (e) {
+      console.error("[MIDNIGHT] Failed to record commitment", payload?.commitment, e);
+    }
+    return;
+  }
+
   const { nullifier } = payload;
+  // The spending transaction's hash — the fill-vs-cancel discriminator.
+  const txHash = payload?.txHash ? bytesOrStringToHex(payload.txHash) : null;
 
   try {
-    // Upsert into the unified nullifiers table. offer_matched=false initially;
+    // Insert into the unified nullifiers table. offer_matched=false initially;
     // if the offer was already indexed (or is indexed later), it gets flipped
-    // to true via markNullifierMatched.
-    yield* World.resolve(upsertNullifier, {
+    // to true via markNullifierMatched. First-seen tx_hash wins on conflict —
+    // a nullifier spends once; a repeat event is a replay.
+    yield* World.resolve(insertNullifierWithTx, {
       nullifier,
       height: data.blockHeight,
+      tx_hash: txHash,
     });
 
     const archived = yield* World.resolve(archiveOfferByNullifierWithHash, {
@@ -264,10 +301,10 @@ stm.addStateTransition("midnight-zswap-root", function* (data) {
     return;
   }
   try {
-    yield* World.resolve(upsertKnownRoot, {
+    yield* World.resolve(upsertKnownRootWithFirstSeen, {
       root,
       height: data.blockHeight,
-      last_seen_ms: data.blockTimestamp,
+      seen_ms: data.blockTimestamp,
     });
     yield* World.resolve(pruneKnownRoots, {
       cutoff_ms: data.blockTimestamp - ROOT_WINDOW_SECONDS * 1000,
@@ -279,7 +316,13 @@ stm.addStateTransition("midnight-zswap-root", function* (data) {
 
 stm.addStateTransition("celestia-zswap", function* (data) {
   const { payload } = data.parsedInput;
+  // MIP-0006: the DA blob is the RAW MIP-0005 transaction bytes, not the
+  // bech32m string. The framework fetcher sets suppliedValue = atob(blob.data),
+  // a latin1 string whose char codes are those bytes; latin1ToBytes recovers
+  // them. `raw` (the latin1 string) is still the accounting-table key used by
+  // rejectOffer's scrub, so keep it as-is for that match.
   const raw = payload.suppliedValue;
+  const rawBytes = latin1ToBytes(raw);
 
   // Anyone can post any bytes to the public Celestia namespace for the price
   // of a blob fee, so this transition is the real gate — /api/zswap/submit and
@@ -331,7 +374,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     });
   };
 
-  const result = validateZswapOffer(raw, {
+  const result = validateZswapOfferBytes(rawBytes, {
     refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(data.blockTimestamp),
     maxBytes: OFFER_MAX_BYTES,
@@ -360,7 +403,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   // offer re-published — same maker retrying, or a relay replaying the blob —
   // resolves to the same hash on every node regardless of local ids. Checks
   // history too: a consumed/expired offer must not be resurrected by replay.
-  const offerHash = offerHashFromBlob(raw);
+  const offerHash = offerHashFromBytes(rawBytes);
   const existing = yield* World.resolve(getOfferStatusByHash, {
     offer_hash: offerHash,
   });
@@ -435,18 +478,71 @@ stm.addStateTransition("celestia-zswap", function* (data) {
     return;
   }
 
+  // ── Derive expires_at (MIP-0006) ──
+  // Computed once at ingestion. The two paths have genuinely different
+  // ledger semantics:
+  //
+  // SHIELDED (offer has input roots) → earliest root last_seen + ROOT_WINDOW.
+  //   A Zswap offer carries NO ttl field: `ttl_check_weak` only iterates
+  //   intents, so a pure Zswap partial tx passes well-formedness forever.
+  //   It dies at APPLY time, when `apply_input` rejects an input whose
+  //   merkle root is no longer in `past_roots` (UnknownMerkleRoot) — or
+  //   sooner if a nullifier lands first. `past_roots` is a TimeFilterMap
+  //   that re-inserts the CURRENT root every block and evicts entries older
+  //   than `tblock − window`, so the clock runs from the last block whose
+  //   tree state the offer proved against, not from offer creation.
+  //   NOTE: this value is therefore a conservative FLOOR — on a quiet chain
+  //   segment the same root keeps refreshing and the real expiry extends.
+  //   Serving the exact current value would mean persisting each offer's
+  //   roots and recomputing at read time; the floor never over-promises
+  //   fillability, and our own TTL cleanup archives at OFFER_TTL anyway.
+  //
+  // UNSHIELDED → the earliest intent TTL. Not a fallback: `UnshieldedOffer`
+  //   exists only inside `Intent`, and `Intent.ttl` is non-optional, so an
+  //   unshielded offer structurally ALWAYS has a TTL (bounded by the
+  //   on-chain `global_ttl`, 1 h by default, so the inclusion window is
+  //   [ttl − global_ttl, ttl]). The indexer-TTL branch below is defensive
+  //   only — it should be unreachable for a well-formed offer.
+  //
+  // The two windows are INDEPENDENT despite both defaulting to 1 h: the
+  // root window is fixed in the zswap crate (parameterized from node 2.x),
+  // while `global_ttl` is an on-chain LedgerParameters field changeable by
+  // governance. Moving one does not move the other.
+  let expiresAt: string | null = null;
+  // firstSeenAt (MIP-0006): shielded → the moment the offer became provable
+  // on this chain (earliest proof-root first-seen); otherwise the Celestia
+  // block time. Deterministic on replay — never wall-clock.
+  let firstSeenAt = new Date(data.blockTimestamp).toISOString();
+  const inputRoots = result.inputRoots ?? [];
+  if (inputRoots.length > 0) {
+    const fs = yield* World.resolve(getEarliestRootFirstSeen, { roots: inputRoots });
+    const firstSeenMs = fs[0]?.first_seen_ms;
+    const lastSeenMs = fs[0]?.last_seen_ms;
+    // firstSeenAt: the offer cannot predate its own proof root.
+    if (firstSeenMs != null) {
+      firstSeenAt = new Date(Number(firstSeenMs)).toISOString();
+    }
+    // expiresAt: from LAST-seen — the refresh semantics above.
+    if (lastSeenMs != null) {
+      expiresAt = new Date(Number(lastSeenMs) + ROOT_WINDOW_SECONDS * 1000).toISOString();
+    }
+  }
+  if (expiresAt == null) {
+    const intentTtl = P2pAtomicSwaps.earliestIntentTtl(result.tx!);
+    expiresAt = intentTtl
+      ? new Date(intentTtl).toISOString()
+      : new Date(data.blockTimestamp + OFFER_TTL_SECONDS * 1000).toISOString();
+  }
+
   try {
     // ── Insert offer ──
     const offerFileRes = yield* World.resolve(insertOfferFileWithHash, {
       celestia_height: data.blockHeight,
-      transaction_hex: raw,
+      transaction_hex: offerBytesToBech32(rawBytes), // bech32m for storage/API
       offer_hash: offerHash,
       metadata_created_at: new Date(data.blockTimestamp).toISOString(),
-      metadata_expires_at: null,
-      metadata_maker_note: null,
-      auth_signer_public_key: null,
-      auth_signature: null,
-      auth_scheme: null,
+      metadata_expires_at: expiresAt,
+      first_seen_at: firstSeenAt,
       ttl_seconds: OFFER_TTL_SECONDS,
     });
 
@@ -470,25 +566,37 @@ stm.addStateTransition("celestia-zswap", function* (data) {
         ...s,
       });
     }
+    // Fill markers: the offer's own shielded output commitments, plaintext in
+    // the published blob. A settling tx must create ALL of them (merging
+    // preserves outputs verbatim) — cancelledPredicate uses their presence in
+    // the spending tx to classify fill vs cancel exactly.
+    for (const commitment of collectOutputCommitments(result.tx!)) {
+      yield* World.resolve(insertOfferFileCommitment, {
+        offer_file_id: offerFileId,
+        commitment,
+      });
+    }
 
     // ── Insert derived gives/wants ──
     // Must come before the early-arrival reconciliation below: the archive
     // queries copy these into offer_file_tokens_history in one statement,
     // so they have to exist when the archive runs.
     for (const g of gives) {
-      yield* World.resolve(insertOfferFileToken, {
+      yield* World.resolve(insertOfferFileTokenWithKind, {
         offer_file_id: offerFileId,
         token_color: g.token,
         amount: g.amount,
         direction: "GIVING",
+        kind: g.kind,
       });
     }
     for (const w of wants) {
-      yield* World.resolve(insertOfferFileToken, {
+      yield* World.resolve(insertOfferFileTokenWithKind, {
         offer_file_id: offerFileId,
         token_color: w.token,
         amount: w.amount,
         direction: "WANTING",
+        kind: w.kind,
       });
     }
 

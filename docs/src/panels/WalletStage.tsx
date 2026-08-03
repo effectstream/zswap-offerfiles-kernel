@@ -144,7 +144,7 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
           <div className="card">
             <h3>Mintable tokens</h3>
             <p>
-              Preset shortcuts plus whatever <code>/api/known-tokens</code> already has for this
+              Preset shortcuts plus whatever <code>/v1/known-tokens</code> already has for this
               network. Each mint adds <code>+{String(MINT_AMOUNT)}</code>.
             </p>
             {wallet.mintable.map((t) => {

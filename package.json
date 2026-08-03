@@ -21,10 +21,10 @@
     "docs:preview": "bun run --filter @zswap-da/docs-playground preview"
   },
   "dependencies": {
-    "@effectstream/celestia": "0.101.1",
-    "@effectstream/midnight-contracts": "0.101.1",
-    "@effectstream/mip-zswap-offer": "0.2.0",
-    "@effectstream/orchestrator": "0.101.1",
+    "@effectstream/celestia": "0.103.0",
+    "@effectstream/midnight-contracts": "0.103.0",
+    "@effectstream/mip-zswap-offer": "0.3.0",
+    "@effectstream/orchestrator": "0.103.0",
     "@electric-sql/pglite": "^0.3.14",
     "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
     "@scure/bip39": "^2.2.0",
@@ -35,5 +35,8 @@
   },
   "devDependencies": {
     "@types/bun": "^1.3.13"
+  },
+  "overrides": {
+    "@midnight-ntwrk/ledger-v8": "8.1.0"
   }
 }

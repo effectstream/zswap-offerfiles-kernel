@@ -4,6 +4,7 @@ import {
   bytesOrStringToHex,
   collectNullifiers,
   collectUnshieldedSpends,
+  collectOutputCommitments,
   deriveLegs,
   UnknownTokenTagError,
 } from "./derive.ts";
@@ -106,8 +107,8 @@ describe("deriveLegs", () => {
       ]),
     });
     const { gives, wants } = deriveLegs(tx);
-    expect(gives).toEqual([{ token: "aabb", amount: "100" }]);
-    expect(wants).toEqual([{ token: "ccdd", amount: "50" }]);
+    expect(gives).toEqual([{ token: "aabb", amount: "100", kind: "UNSHIELDED" }]);
+    expect(wants).toEqual([{ token: "ccdd", amount: "50", kind: "SHIELDED" }]);
   });
 
   test("merges the same token across segments", () => {
@@ -119,8 +120,28 @@ describe("deriveLegs", () => {
       ]),
     });
     const { gives, wants } = deriveLegs(tx);
-    expect(gives).toEqual([{ token: "aa", amount: "100" }]);
-    expect(wants).toEqual([{ token: "bb", amount: "10" }]);
+    expect(gives).toEqual([{ token: "aa", amount: "100", kind: "UNSHIELDED" }]);
+    expect(wants).toEqual([{ token: "bb", amount: "10", kind: "SHIELDED" }]);
+  });
+
+  test("same color on BOTH layers stays two legs — never netted (MIP-0006)", () => {
+    // Pre-fix, deriveLegs re-merged by color and NETTED across layers: giving
+    // 100 unshielded X while wanting 40 shielded X collapsed to a single
+    // give of 60 X, misstating the offer's actual terms.
+    const tx = mockTx({
+      imbalances: new Map([
+        [
+          0,
+          new Map<any, bigint>([
+            [unshielded("aa"), 100n],
+            [shielded("aa"), -40n],
+          ]),
+        ],
+      ]),
+    });
+    const { gives, wants } = deriveLegs(tx);
+    expect(gives).toEqual([{ token: "aa", amount: "100", kind: "UNSHIELDED" }]);
+    expect(wants).toEqual([{ token: "aa", amount: "40", kind: "SHIELDED" }]);
   });
 
   test("throws UnknownTokenTagError on an unexpected tag", () => {
@@ -141,5 +162,32 @@ describe("deriveLegs", () => {
     const { gives, wants } = deriveLegs(tx);
     expect(gives[0]!.token).toBe("aabb");
     expect(wants[0]!.token).toBe("ccdd");
+  });
+});
+
+describe("collectOutputCommitments (fill markers)", () => {
+  const C1 = "1a".repeat(32);
+  const C2 = "2b".repeat(32);
+  const C3 = "3c".repeat(32);
+
+  test("guaranteed + fallible outputs, normalized to lowercase hex", () => {
+    const tx = mockTx({
+      guaranteed: { outputs: [{ commitment: C1.toUpperCase() }, { commitment: C2 }] },
+      fallible: new Map([[1, { outputs: [{ commitment: C3 }] }]]),
+    });
+    expect(collectOutputCommitments(tx)).toEqual([C1, C2, C3]);
+  });
+
+  test("no shielded outputs → no markers (classification falls back to heuristic)", () => {
+    expect(collectOutputCommitments(mockTx({}))).toEqual([]);
+    expect(collectOutputCommitments(mockTx({ guaranteed: { outputs: [] } }))).toEqual([]);
+  });
+
+  test("byte-array commitments hex-encode like collectNullifiers inputs", () => {
+    const bytes = Uint8Array.from({ length: 32 }, (_, i) => i);
+    const tx = mockTx({ guaranteed: { outputs: [{ commitment: bytes }] } });
+    expect(collectOutputCommitments(tx)).toEqual([
+      Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join(""),
+    ]);
   });
 });

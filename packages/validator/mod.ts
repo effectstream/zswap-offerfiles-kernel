@@ -6,12 +6,13 @@
 //
 // Encoding: MIP-0005 (@effectstream/mip-zswap-offer/mip5). Two-sided / derive:
 // MIP-0006 (@effectstream/mip-zswap-offer/mip6).
-export { validateZswapOffer, verifyOfferCrypto } from "./validate.ts";
+export { validateZswapOffer, validateZswapOfferBytes, verifyOfferCrypto } from "./validate.ts";
 export { getBlankRefState, buildStrictness } from "./refstate.ts";
 export {
   bytesOrStringToHex,
   collectNullifiers,
   collectUnshieldedSpends,
+  collectOutputCommitments,
   deriveLegs,
   UnknownTokenTagError,
 } from "./derive.ts";

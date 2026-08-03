@@ -1,9 +1,9 @@
 // FULL LIFECYCLE e2e against a RUNNING dev stack:
 //   mint test tokens (2 shielded + 1 unshielded via the offer-files contract)
-//   → make a minted A↔B offer → /api/zswap/submit (validators + liveness)
+//   → make a minted A↔B offer → /v1/offers (validators + liveness)
 //   → batcher → Celestia → celestia-zswap ingestion (re-validated) → indexed
 //   → taker balances + settles on Midnight → nullifier consumed
-//   → midnight-nullifier primitive → spent_nullifiers + offer ARCHIVED.
+//   → midnight-zswap-event primitive → nullifiers + offer ARCHIVED.
 // Proves all four liveness primitives live: known_roots (ZswapRoot),
 // created_unshielded (UnshieldedCreate — via the unshielded mint),
 // spent_nullifiers (Nullifier), and — stretch, environment-permitting —
@@ -42,8 +42,8 @@ async function waitFor(name: string, fn: () => Promise<boolean>, tries = 36, ms 
   return false;
 }
 async function submitOffer(blob: string): Promise<{ status: number; body: any }> {
-  const r = await fetch(`${API}/api/zswap/submit`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ blob }),
+  const r = await fetch(`${API}/v1/offers`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ offer: blob }),
   });
   let body: any; try { body = await r.json(); } catch { body = await r.text(); }
   return { status: r.status, body };

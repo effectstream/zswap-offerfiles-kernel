@@ -74,10 +74,10 @@ async function waitFor(name: string, fn: () => Promise<boolean>, tries = 36, ms 
 }
 
 async function submitOffer(blob: string): Promise<{ status: number; body: any }> {
-  const r = await fetch(`${API}/api/zswap/submit`, {
+  const r = await fetch(`${API}/v1/offers`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ blob }),
+    body: JSON.stringify({ offer: blob }),
   });
   let body: any;
   try {

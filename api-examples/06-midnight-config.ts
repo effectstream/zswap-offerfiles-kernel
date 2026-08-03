@@ -6,8 +6,8 @@ import { get, print, header } from "./config.ts";
 
 header("Midnight Config");
 
-const cfg = await get("/api/midnight/config");
-print("GET /api/midnight/config", cfg);
+const cfg = await get("/v1/midnight/config");
+print("GET /v1/midnight/config", cfg);
 
 const c = cfg as any;
 console.log("\nQuick-copy values:");

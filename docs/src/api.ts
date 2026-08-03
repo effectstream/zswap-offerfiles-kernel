@@ -21,27 +21,33 @@ export type KnownToken = {
   kind: string
 }
 
+/** MIP-0006 TokenLeg. */
+export type TokenLeg = { token: string; amount: string; type: 'SHIELDED' | 'UNSHIELDED' }
+
+export type OfferComputed = {
+  gives: TokenLeg[]
+  wants: TokenLeg[]
+  expiresAt?: string | null
+  inputNullifiers: string[]
+  firstSeenAt?: string | null
+  status: 'live' | 'consumed' | 'cancelled' | 'expired'
+}
+
+/** MIP-0006 OffchainOfferPayload. In LIST responses `offerBech32` is omitted
+ *  (16–25 KB per offer); fetch it per offer via zswapByHash(). */
 export type Offer = {
-  id: number
-  celestia_height?: string
-  /** Content hash (sha256 of the raw offer bytes) — the cross-node offer id. */
-  offer_hash: string | null
-  /** bech32m length of the blob; fetch the blob itself via zswapByHash(). */
-  blob_chars?: number
-  gives?: { token: string; amount: string }[]
-  wants?: { token: string; amount: string }[]
+  version: 1
+  offerId: string | null
+  offerBech32?: string
+  blobChars?: number
+  celestiaHeight?: string
+  computed: OfferComputed
 }
 
-export type OfferDetail = {
-  offer_hash: string
-  status: 'open' | 'completed' | 'expired'
-  blob: string
-  celestia_height?: string
-  gives?: { token: string; amount: string }[]
-  wants?: { token: string; amount: string }[]
-}
+/** Single-offer response — the MIP requires `offerBech32` here. */
+export type OfferDetail = Offer & { offerBech32: string }
 
-export type OffersPage = { offers: Offer[]; next_cursor: string | null }
+export type OffersPage = { offers: Offer[]; nextCursor: string | null }
 
 export type SyncStatus = { status: string; [k: string]: unknown }
 
@@ -66,32 +72,32 @@ const qs = (q: Record<string, string | number | undefined>) => {
 export const api = {
   // ── Node (:9999) ──────────────────────────────────────────────────────────
   health: () => req<{ status: string }>('GET', `${API_BASE}/health`),
-  sync: () => req<SyncStatus>('GET', `${API_BASE}/api/health/sync`),
+  sync: () => req<SyncStatus>('GET', `${API_BASE}/v1/health/sync`),
   /** Keyset pagination: pass the previous page's next_cursor as after_hash. */
   zswaps: (q: { token?: string; direction?: string; limit?: number; after_hash?: string } = {}) =>
-    req<OffersPage>('GET', `${API_BASE}/api/zswaps?${qs(q)}`),
+    req<OffersPage>('GET', `${API_BASE}/v1/offers?${qs(q)}`),
   /** Full offer (including its blob) by content hash. */
   zswapByHash: (hash: string) =>
-    req<OfferDetail>('GET', `${API_BASE}/api/zswaps/${hash}`),
+    req<OfferDetail>('GET', `${API_BASE}/v1/offers/${hash}`),
   zswapStatusByHash: (hash: string) =>
-    req<{ offer_hash: string; status: string }>('GET', `${API_BASE}/api/zswaps/${hash}/status`),
+    req<{ offerId: string; status: string }>('GET', `${API_BASE}/v1/offers/${hash}/status`),
   /** POST: a real blob is 16–25 KB — far beyond what a query string survives. */
   zswapStatus: (blob: string) =>
-    req<{ blob: string; offer_hash?: string; status: string }>('POST', `${API_BASE}/api/zswap/status`, { blob }),
-  submitOffer: (blob: string) => req('POST', `${API_BASE}/api/zswap/submit`, { blob }),
-  knownTokens: () => req<KnownToken[]>('GET', `${API_BASE}/api/known-tokens`),
+    req<{ offerId?: string; status: string }>('POST', `${API_BASE}/v1/offers/status`, { offer: blob }),
+  submitOffer: (blob: string) => req('POST', `${API_BASE}/v1/offers`, { offer: blob }),
+  knownTokens: () => req<KnownToken[]>('GET', `${API_BASE}/v1/known-tokens`),
   registerToken: (color: string, name: string, kind: string) =>
-    req('POST', `${API_BASE}/api/known-tokens`, { color, name, kind }),
-  pairs: () => req('GET', `${API_BASE}/api/pairs`),
+    req('POST', `${API_BASE}/v1/known-tokens`, { color, name, kind }),
+  pairs: () => req('GET', `${API_BASE}/v1/pairs`),
   quote: (from_token: string, to_token: string, from_amount: string) =>
-    req('GET', `${API_BASE}/api/quote?${qs({ from_token, to_token, from_amount })}`),
+    req('GET', `${API_BASE}/v1/quote?${qs({ from_token, to_token, from_amount })}`),
   chartStats: (base: string, quote: string) =>
-    req('GET', `${API_BASE}/api/chart/stats?${qs({ base, quote })}`),
+    req('GET', `${API_BASE}/v1/chart/stats?${qs({ base, quote })}`),
   chartHistory: (base: string, quote: string) =>
-    req('GET', `${API_BASE}/api/chart/history?${qs({ base, quote })}`),
-  midnightConfig: () => req<MidnightConfig>('GET', `${API_BASE}/api/midnight/config`),
+    req('GET', `${API_BASE}/v1/chart/history?${qs({ base, quote })}`),
+  midnightConfig: () => req<MidnightConfig>('GET', `${API_BASE}/v1/midnight/config`),
   /** SSE endpoint — connect with `new EventSource(...)`, not fetch. */
-  eventsUrl: () => `${API_BASE}/api/events`,
+  eventsUrl: () => `${API_BASE}/v1/offers/stream`,
 
   // ── Batcher (:3334) ───────────────────────────────────────────────────────
   batcherHealth: () => req('GET', `${BATCHER_URL}/health`),

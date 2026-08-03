@@ -10,6 +10,7 @@ import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight
 import { BLOCK_TIME_MS, CELESTIA_RPC_URL, NTP_START_TIME } from "./env.ts";
 import {
   getNtpCurrentBlock,
+  getNtpConfigSnapshot,
   getSyncProtocolPagination,
   getLatestEffectstreamBlock,
   getNullifierStats,
@@ -119,8 +120,9 @@ async function fetchSetStats(dbConn: any): Promise<SetStats> {
 }
 
 export async function getSyncStatus(dbConn: any) {
-  const [ntpRows, pageRows, blockRows, setStats, lastOfferRows, rejections, midnightTip, celestiaTip] = await Promise.all([
+  const [ntpRows, ntpCfgRows, pageRows, blockRows, setStats, lastOfferRows, rejections, midnightTip, celestiaTip] = await Promise.all([
     getNtpCurrentBlock.run(undefined, dbConn),
+    getNtpConfigSnapshot.run(undefined, dbConn),
     getSyncProtocolPagination.run(undefined, dbConn),
     getLatestEffectstreamBlock.run(undefined, dbConn),
     fetchSetStats(dbConn),
@@ -134,7 +136,13 @@ export async function getSyncStatus(dbConn: any) {
   const unshieldedRows = [setStats.unshielded].filter(Boolean);
 
   const ntpCurrent = Number(ntpRows[0]?.current ?? 0);
-  const ntpTip = Math.floor((Date.now() - NTP_START_TIME) / BLOCK_TIME_MS);
+  // Tip from the protocol's ACTUAL anchor (config snapshot), not env: the
+  // dev orchestrator anchors NTP at launch with 1 s blocks, and computing
+  // the tip from the Preview-genesis env defaults reported a machine at tip
+  // as ~130 days behind (perpetual "syncing" — which the frontend gates on).
+  const ntpStartMs = Number(ntpCfgRows[0]?.start_time ?? NTP_START_TIME);
+  const ntpBlockMs = Number(ntpCfgRows[0]?.block_time_ms ?? BLOCK_TIME_MS);
+  const ntpTip = Math.floor((Date.now() - ntpStartMs) / ntpBlockMs);
 
   const pages: Record<string, { merged: number; fetched: number }> = {};
   for (const row of pageRows) {
@@ -144,7 +152,7 @@ export async function getSyncStatus(dbConn: any) {
   const mn = pages["parallelMidnight"];
   const ce = pages["parallelCelestia"];
 
-  const lagSeconds = Math.max(0, (ntpTip - ntpCurrent) * BLOCK_TIME_MS / 1000);
+  const lagSeconds = Math.max(0, (ntpTip - ntpCurrent) * ntpBlockMs / 1000);
 
   const toHex = (v: unknown) =>
     v != null ? Buffer.from(v as Buffer).toString("hex") : null;
@@ -161,7 +169,7 @@ export async function getSyncStatus(dbConn: any) {
           timestamp: latestBlock.ms_timestamp,
           block_hash: toHex(latestBlock.effectstream_block_hash),
           main_chain_block_hash: toHex(latestBlock.main_chain_block_hash),
-          block_time: BLOCK_TIME_MS,
+          block_time: ntpBlockMs,
           lag: Math.max(0, ntpTip - ntpCurrent),
         }
       : null,

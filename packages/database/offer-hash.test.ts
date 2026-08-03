@@ -14,7 +14,7 @@ const pg = (await import("pg")).default;
 const {
   migrationTable,
   insertOfferFileWithHash,
-  insertOfferFileToken,
+  insertOfferFileTokenWithKind,
   insertOfferFileNullifier,
   archiveOfferByNullifierWithHash,
   getOfferByHash,
@@ -22,6 +22,7 @@ const {
   getOfferTokensAny,
   getOpenOffersPage,
   getOfferTokensForOffers,
+  insertNullifierWithTx,
 } = await import("@zswap-da/database");
 
 const PORT = 54333;
@@ -41,21 +42,17 @@ async function insertOffer(hash: string, blob: string): Promise<number> {
       offer_hash: hash,
       metadata_created_at: new Date().toISOString(),
       metadata_expires_at: null,
-      metadata_maker_note: null,
-      auth_signer_public_key: null,
-      auth_signature: null,
-      auth_scheme: null,
       ttl_seconds: 3600,
     },
     client,
   );
   const id = rows[0].id;
-  await insertOfferFileToken.run(
-    { offer_file_id: id, token_color: TOKEN_G, amount: "10", direction: "GIVING" },
+  await insertOfferFileTokenWithKind.run(
+    { offer_file_id: id, token_color: TOKEN_G, amount: "10", direction: "GIVING", kind: "SHIELDED" },
     client,
   );
-  await insertOfferFileToken.run(
-    { offer_file_id: id, token_color: TOKEN_W, amount: "5", direction: "WANTING" },
+  await insertOfferFileTokenWithKind.run(
+    { offer_file_id: id, token_color: TOKEN_W, amount: "5", direction: "WANTING", kind: "UNSHIELDED" },
     client,
   );
   return id;
@@ -85,7 +82,7 @@ test("insert + getOfferByHash returns the open offer with blob and legs", async 
   const id = await insertOffer(HASH_A, "swapoffer1testblob-a");
   const rows = await getOfferByHash.run({ offer_hash: HASH_A }, client);
   expect(rows.length).toBe(1);
-  expect(rows[0].status).toBe("open");
+  expect(rows[0].status).toBe("live");
   expect(rows[0].transaction_hex).toBe("swapoffer1testblob-a");
   const legs = await getOfferTokensAny.run({ offer_file_id: id, live: true }, client);
   expect(legs.length).toBe(2);
@@ -123,13 +120,20 @@ test("token/direction filters work on the page query", async () => {
 test("duplicate probe: getOfferStatusByHash sees the open offer", async () => {
   const rows = await getOfferStatusByHash.run({ offer_hash: HASH_A }, client);
   expect(rows.length).toBe(1);
-  expect(rows[0].status).toBe("open");
+  expect(rows[0].status).toBe("live");
 });
 
 test("archiveOfferByNullifierWithHash carries offer_hash into history", async () => {
   const id = await insertOffer(HASH_B, "swapoffer1testblob-b");
   await insertOfferFileNullifier.run(
     { offer_file_id: id, nullifier: "null-b" },
+    client,
+  );
+  // Mirror the real transition order: the spend (with its tx hash) is
+  // recorded BEFORE the archive fires. Without it the classifier correctly
+  // reports `cancelled` (a partial/unrecorded spend can never be a fill).
+  await insertNullifierWithTx.run(
+    { nullifier: "null-b", height: 1, tx_hash: "settletx" },
     client,
   );
   const archived = await archiveOfferByNullifierWithHash.run(
@@ -146,13 +150,25 @@ test("archiveOfferByNullifierWithHash carries offer_hash into history", async ()
 
   const status = await getOfferStatusByHash.run({ offer_hash: HASH_B }, client);
   expect(status.length).toBe(1);
-  expect(status[0].status).toBe("completed");
+  expect(status[0].status).toBe("consumed");
 
   // Detail lookup still resolves after archiving, with history legs.
   const detail = await getOfferByHash.run({ offer_hash: HASH_B }, client);
-  expect(detail[0].status).toBe("completed");
+  expect(detail[0].status).toBe("consumed");
   const legs = await getOfferTokensAny.run({ offer_file_id: id, live: false }, client);
   expect(legs.length).toBe(2);
+});
+
+test("spec-removed columns are gone from the schema (auth block, maker note)", async () => {
+  // MIP-0006 removed wrapper auth (unsound, privacy-harming) and maker
+  // messages (phishing surface; no ledger field for an authenticated one).
+  // Negative assertion so the columns cannot quietly return.
+  const r = await client.query(
+    `SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_name IN ('offer_file', 'offer_file_history')
+       AND (column_name LIKE 'auth_%' OR column_name = 'metadata_maker_note')`,
+  );
+  expect(r.rows).toEqual([]);
 });
 
 test("unique index rejects a second open offer with the same hash", async () => {

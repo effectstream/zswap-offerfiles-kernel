@@ -14,7 +14,7 @@ export function HealthPanel() {
         </div>
       </div>
       <div className="card">
-        <h3><span className="method get">GET</span><span className="path">/api/health/sync</span></h3>
+        <h3><span className="method get">GET</span><span className="path">/v1/health/sync</span></h3>
         <div className="actions">
           <button className="btn primary" type="button" onClick={() => dbg.call(api.sync())}>Send</button>
         </div>

@@ -164,6 +164,7 @@ async function publishBatch(
   actors: Actors,
   recs: OfferRecord[],
   onIndexed?: (rec: OfferRecord) => void,
+  gate?: () => Promise<void>,
 ): Promise<void> {
   const byMaker = new Map<string, OfferRecord[]>();
   for (const rec of recs) {
@@ -176,6 +177,7 @@ async function publishBatch(
     const pw = [...actors.makers, ...actors.cancelSingles, ...actors.cancelDoubles].find((m) => m.seed === seed)!;
     for (const rec of list) {
       try {
+        if (gate) await gate();
         const built = await buildOffer(pw, rec);
         storeBlob(built.hash, built.blob);
         indexWaits.push(
@@ -270,6 +272,13 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     "plan",
     `expired=${plan.expired.length} settled=${plan.settled.length} cancelled=${plan.cancels.length} live=${plan.live.length}`,
   );
+  note(
+    "FINDING (throughput ceiling, reported)",
+    "the dev batcher runs its midnight-balancer with ONE wallet and the SDK default maxSlotsPerWallet=1 " +
+      "(pool W1 in its logs) — every settlement/cancel/split serializes at ~25 s/tx (~2.4 tx/min). " +
+      "The suite gates offer builds on settle depth to keep offers inside their 600 s window; production " +
+      "load needs maxSlotsPerWallet>1 and/or multiple batcher wallet seeds.",
+  );
 
   const offersBeforeStorm = await tableCount(db, "offer_file");
   const historyBeforeStorm = await tableCount(db, "offer_file_history");
@@ -300,6 +309,14 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     let settleInFlight = 0;
     let settlePeak = 0;
     const settleDone: Promise<void>[] = [];
+    // Backpressure: the single-worker batcher settles ~2.4 tx/min. Unthrottled
+    // makers would out-publish it, and offers queued past ~8 min age out
+    // (600 s TTL sweep + root window) before their settle runs. Gate offer
+    // BUILDS on in-flight settle depth so index→settle stays inside the window.
+    const SETTLE_GATE = actors.takers.length * 2;
+    const settleGate = async () => {
+      while (settleInFlight >= SETTLE_GATE) await sleep(5000);
+    };
     const settleOne = (rec: OfferRecord): void => {
       const taker = actors.takers[rec.index % actors.takers.length]!;
       settleInFlight++;
@@ -307,6 +324,13 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
       settleDone.push(
         (async () => {
           try {
+            // Freshness guard: settling an offer that already aged past its
+            // TTL would corrupt its fate (archived TTL, then spent) — skip it
+            // as a casualty instead.
+            if (rec.indexedAt && Date.now() - rec.indexedAt > 7 * 60_000) {
+              ledger.markCasualty(rec, "settle queue aged past the TTL-safe window");
+              return;
+            }
             const { loadBlob } = await import("../actors/wallets.ts");
             await settleOffer(taker, rec, loadBlob(rec.offerHash!));
             const archived = await waitUntil(
@@ -330,7 +354,7 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
       );
     };
 
-    const settledJob = publishBatch(db, actors, plan.settled, settleOne);
+    const settledJob = publishBatch(db, actors, plan.settled, settleOne, settleGate);
 
     const cancelJob = (async () => {
       const bySpecialist = new Map<string, Plan["cancels"]>();

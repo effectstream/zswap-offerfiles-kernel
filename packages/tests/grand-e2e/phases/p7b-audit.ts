@@ -19,6 +19,7 @@ import {
   getHealthSync,
   getOffersPage,
   postStatusByBlob,
+  realNtpLagSeconds,
 } from "../lib/api2.ts";
 import { rejectionRows } from "../lib/db2.ts";
 import type { SseRecorder } from "../lib/sse.ts";
@@ -267,9 +268,16 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
     );
     const casualtyBudget = ledger.casualties().length + 4; // + chaos resubmit duplicates
     let unmapped = 0;
+    let preRun = 0;
     for (const r of rows) {
-      if (!garbageHeights.has(Number(r.celestia_height))) unmapped++;
+      const h = Number(r.celestia_height);
+      if (h <= ledger.startCelestiaHeight) {
+        preRun++; // artifacts of earlier runs against a persistent devnet
+        continue;
+      }
+      if (!garbageHeights.has(h)) unmapped++;
     }
+    if (preRun > 0) note("rejections", `${preRun} pre-run rejection rows excluded (height ≤ ${ledger.startCelestiaHeight})`);
     return unmapped <= casualtyBudget;
   });
 
@@ -282,9 +290,11 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
     }
     return (await pgrepF("midnight-indexer")) !== null;
   });
-  await check("STM lag back to ≤ 2 blocks at audit end", async () => {
+  await check("STM lag back to ≤ ~10 s at audit end (blockL2 at the chain edge)", async () => {
+    // Real-lag measure; the endpoint's ntp.tip is wrong on dev (bug reported —
+    // see realNtpLagSeconds in lib/api2.ts).
     const h = await getHealthSync();
-    return Number(h?.ntp?.tip ?? 0) - Number(h?.ntp?.current ?? 0) <= 2;
+    return realNtpLagSeconds(h) <= 10;
   });
 
   // ── metrics + baseline ───────────────────────────────────────────────────

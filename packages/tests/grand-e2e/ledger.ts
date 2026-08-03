@@ -70,6 +70,10 @@ class Ledger {
   /** rowId → offerHash learned from offer_indexed SSE events / DB. */
   readonly rowIdToHash = new Map<number, string>();
   suiteStartedAt = Date.now();
+  /** Celestia head at p0 — rejections at or below this height predate the
+   *  suite (earlier runs / other producers) and are excluded from the
+   *  rejection-attribution audit. */
+  startCelestiaHeight = 0;
 
   addOffer(rec: OfferRecord): OfferRecord {
     this.offers.push(rec);

@@ -107,6 +107,22 @@ export async function getHealthSync(port?: number): Promise<any | null> {
   }
 }
 
+/**
+ * Real STM lag in seconds, from the last merged block's timestamp — NOT from
+ * the endpoint's own ntp.tip/lag fields. KNOWN BUG (reported, not patched):
+ * sync-health.ts computes the NTP tip from the env-default NTP_START_TIME +
+ * BLOCK_TIME_MS (the preview/mainnet 10-min-block anchor), while config.dev.ts
+ * runs 1 s blocks anchored at launch — so on dev the endpoint reports a bogus
+ * tip and permanent "syncing". blockL2.timestamp is the merged block's chain
+ * time, which with 1 s blocks makes (now − timestamp) an honest lag measure on
+ * every config.
+ */
+export function realNtpLagSeconds(health: any): number {
+  const ts = Date.parse(health?.blockL2?.timestamp ?? "");
+  if (!Number.isFinite(ts)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, (Date.now() - ts) / 1000);
+}
+
 export async function getHealth(port?: number): Promise<boolean> {
   try {
     const base = port ? `http://127.0.0.1:${port}` : API;

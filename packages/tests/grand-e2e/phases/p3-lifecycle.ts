@@ -158,7 +158,9 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
           await (gapWallet.wr.wallet as any).revert(built.finalized);
         });
         // Maker walks away: spends the offer's UTXO input on itself.
-        await gapWallet.run(() => selfSplit(gapWallet, "UA", ledger.colors.UA!, [GAP_COIN]));
+        await gapWallet.run(() =>
+          selfSplit(gapWallet, false, [{ color: ledger.colors.UA!, amount: GAP_COIN }], true),
+        );
         rec.state = "resolved";
         rec.resolvedAt = Date.now();
         await check(

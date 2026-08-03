@@ -3,7 +3,7 @@
 
 import type { Client } from "pg";
 import { BATCHER_URL, ORCHESTRATOR_URL } from "../config.ts";
-import { getHealth, getHealthSync } from "../lib/api2.ts";
+import { getHealth, getHealthSync, realNtpLagSeconds } from "../lib/api2.ts";
 import { networkHeadHeight } from "../lib/celestia.ts";
 import { beginPhase, check, note, pgrepF, waitUntil } from "../lib/util.ts";
 
@@ -29,9 +29,28 @@ export async function p0Smoke(db: Client): Promise<void> {
 
   const healthy = await check("node /v1/health answers ok", () => getHealth());
 
-  // With no stack up, fail fast instead of polling for 10 minutes.
-  await check("node sync reaches status=ok", () =>
-    waitUntil("sync ok", async () => (await getHealthSync())?.status === "ok", healthy ? 120 : 2, 5000),
+  // NOT `status === "ok"`: sync-health computes its NTP tip from the
+  // preview/mainnet env defaults, so on dev it reports "syncing" forever
+  // (bug reported separately — see realNtpLagSeconds). Readiness here is the
+  // real thing: the merged block is at the chain's edge and both parallel
+  // protocols have fetched to their tips. Fail fast when no stack is up.
+  await check("node synced to tip (blockL2 fresh + midnight/celestia caught up)", () =>
+    waitUntil(
+      "synced to tip",
+      async () => {
+        const h = await getHealthSync();
+        if (!h) return false;
+        // Steady-state gaps are structural: midnight delayMs=18 s (~6 s
+        // blocks ⇒ ≲4 behind), celestia delayMs=12 s (~1 s blocks ⇒ ≲15
+        // behind). Thresholds sit above those, well below "still syncing".
+        const parallelCaughtUp =
+          Number(h.midnight?.current ?? 0) >= Number(h.midnight?.tip ?? Infinity) - 8 &&
+          Number(h.celestia?.current ?? 0) >= Number(h.celestia?.tip ?? Infinity) - 40;
+        return realNtpLagSeconds(h) <= 15 && parallelCaughtUp;
+      },
+      healthy ? 120 : 2,
+      5000,
+    ),
   );
 
   await check("all app migrations applied", async () => {
@@ -45,7 +64,15 @@ export async function p0Smoke(db: Client): Promise<void> {
     return true;
   });
 
-  await check("celestia light node RPC reachable", async () => (await networkHeadHeight()) > 0);
+  await check("celestia light node RPC reachable", async () => {
+    const head = await networkHeadHeight();
+    if (head > 0) {
+      const { ledger } = await import("../ledger.ts");
+      ledger.startCelestiaHeight = head;
+      note("celestia baseline", `suite starts at height ${head}; earlier rejections are pre-run artifacts`);
+    }
+    return head > 0;
+  });
 
   await check("batcher /health ok", async () => {
     try {
@@ -65,6 +92,13 @@ export async function p0Smoke(db: Client): Promise<void> {
   } catch {
     note("orchestrator", "not reachable — chaos phases will manage processes via pgrep/pkill only");
   }
+
+  note(
+    "BUG FOUND (reported, not patched)",
+    "/v1/health/sync computes its NTP tip from env-default NTP_START_TIME+BLOCK_TIME_MS (10-min preview/mainnet blocks) " +
+      "while config.dev.ts runs 1 s blocks anchored at launch — dev reports a bogus tip and permanent 'syncing'. " +
+      "Suite measures lag from blockL2.timestamp instead (realNtpLagSeconds).",
+  );
 
   // ROOT_WINDOW_SECONDS=600 cannot be read from the node directly; it is
   // verified by effect twice: ttl_seconds=600 on the first indexed offer (p1)

@@ -149,6 +149,13 @@ async function main(): Promise<void> {
     sse.start();
 
     beginPhase("setup");
+    note(
+      "BUG FOUND & FIXED (packages/batcher/celestia.ts)",
+      "batcher-sdk 0.103.0 moved buildBatchData's rawData under .data; the raw-bytes override read the " +
+        "0.101.x location, threw on undefined, and a silent catch published the UTF-8 bech32m string — " +
+        "every API-submitted offer was rejected BAD_DESERIALIZE at STM ingestion (end-to-end DA breakage " +
+        "on the PR #19 stack). Fixed + regression test in celestia.test.ts; the catch now throws loudly.",
+    );
     actors = await setupActors(TOTAL_OFFERS);
     note("setup", "actors funded and split into per-offer coins");
 

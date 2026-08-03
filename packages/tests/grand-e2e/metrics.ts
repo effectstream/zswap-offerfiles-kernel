@@ -5,7 +5,7 @@
 // baseline.json carries numbers, each metric is enforced at baseline × 1.2.
 
 import { readFileSync } from "node:fs";
-import { apiTimings, getHealthSync } from "./lib/api2.ts";
+import { apiTimings, getHealthSync, realNtpLagSeconds } from "./lib/api2.ts";
 import { pgrepF, rssKb, summarizeLatencies, writeOut } from "./lib/util.ts";
 
 export interface MetricsSnapshot {
@@ -44,9 +44,11 @@ export async function initMetrics(): Promise<void> {
 
 async function pollLag(): Promise<void> {
   const h = await getHealthSync();
-  if (!h?.ntp) return;
-  const lag = Number(h.ntp.tip ?? 0) - Number(h.ntp.current ?? 0);
-  if (Number.isFinite(lag)) stmLagSamples.push({ at: Date.now(), lagBlocks: lag });
+  if (!h) return;
+  // Real lag from blockL2.timestamp (1 s blocks ⇒ seconds ≈ blocks); the
+  // endpoint's own ntp.tip is wrong on dev — see realNtpLagSeconds.
+  const lag = realNtpLagSeconds(h);
+  if (Number.isFinite(lag)) stmLagSamples.push({ at: Date.now(), lagBlocks: Math.round(lag) });
 }
 
 export function recordBatcherQueueDepth(depth: number): void {

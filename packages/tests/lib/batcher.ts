@@ -71,10 +71,24 @@ export function describeImbalances(tx: FinalizedTransaction): string {
  *  target. The batcher adds dust (fees), proves its balancing half, and submits.
  *  With confirmationLevel "wait-receipt" the call blocks until the settle
  *  receipt (or timeout). */
+export interface SettleOpts {
+  /** Client-side fetch abort (ms). */
+  timeoutMs?: number;
+  /** Server-side receipt-confirmation timeout (ms; batcher default is 60 s). */
+  serverTimeoutMs?: number;
+  /** "no-wait" queues and returns immediately (bulk flows that verify by
+   *  effect); default "wait-receipt" blocks until the settle receipt. */
+  level?: "no-wait" | "wait-receipt" | "wait-effectstream-processed";
+}
+
 export async function settleViaBatcher(
   tx: FinalizedTransaction,
-  timeoutMs = 240_000,
+  optsOrTimeout: number | SettleOpts = 240_000,
 ): Promise<{ ok: boolean; status: number; body: any }> {
+  const opts: SettleOpts =
+    typeof optsOrTimeout === "number" ? { timeoutMs: optsOrTimeout } : optsOrTimeout;
+  const timeoutMs = opts.timeoutMs ?? 240_000;
+  const level = opts.level ?? "wait-receipt";
   // SAFETY: the batcher balances dust only. Handing it a tx with a non-dust
   // imbalance would settle an incomplete swap — consuming inputs without
   // delivering the wanted outputs (fund loss). Refuse.
@@ -95,7 +109,8 @@ export async function settleViaBatcher(
       timestamp: String(Date.now()),
       target: "midnight-balancer",
     },
-    confirmationLevel: "wait-receipt",
+    confirmationLevel: level,
+    ...(opts.serverTimeoutMs !== undefined ? { timeoutMs: opts.serverTimeoutMs } : {}),
   };
   const resp = await fetch(`${BALANCER_URL}/send-input`, {
     method: "POST",

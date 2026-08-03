@@ -96,6 +96,28 @@ describe("batcher dedup (published-hash store)", () => {
   });
 });
 
+describe("raw-bytes DA wire format (MIP-0006)", () => {
+  // Regression guard for the 0.101.1→0.103.0 SDK drift: buildBatchData's
+  // return moved rawData under .data, the override read the old location,
+  // OfferFiles.decode(undefined) threw, and a silent catch shipped the base
+  // adapter's UTF-8 bech32m payload — every API-submitted offer then died
+  // BAD_DESERIALIZE at STM ingestion. This drives the REAL base class, so a
+  // future shape change fails here instead of on the wire.
+  test("blob.data is base64 of the RAW offer bytes, not the bech32m string", async () => {
+    const { OfferFiles } = await import("@effectstream/mip-zswap-offer/mip5");
+    const a = adapter();
+    const blob = craftBlob(5);
+    const built = (a as any).buildBatchData([inputFor(blob)]);
+    expect(built).not.toBeNull();
+    const published = Uint8Array.from(Buffer.from(built.data.blob.data, "base64"));
+    const expected = OfferFiles.decode(blob);
+    expect(published.length).toBe(expected.length);
+    expect(Buffer.from(published).equals(Buffer.from(expected))).toBe(true);
+    // And explicitly NOT the UTF-8 string form the base adapter would emit.
+    expect(new TextDecoder().decode(published.slice(0, 10))).not.toContain("swapoffer");
+  });
+});
+
 describe("node/batcher parity on shared fixtures", () => {
   // Both gates must agree on what is even a candidate offer — drift here
   // means one side pays for blobs the other rejects. Codes come from the

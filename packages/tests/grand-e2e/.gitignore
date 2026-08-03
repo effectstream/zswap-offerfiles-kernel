@@ -1,0 +1,3 @@
+# Run artifacts: ledger, metrics, state dumps, blob store, scorecard.
+out/
+SCORECARD.md

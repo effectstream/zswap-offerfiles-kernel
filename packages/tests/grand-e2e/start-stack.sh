@@ -40,13 +40,13 @@ echo "orchestrator pid $!"
 for i in $(seq 300); do
   sleep 5
   if grep -qa "All processes launched. Orchestrator is running" "$LOG"; then
-    if grep -qa "Shutting down: Process" "$LOG"; then
+    if grep -qa "Shutting down: " "$LOG"; then
       echo "BOOTSTRAP FAILED: $(grep -a 'exited with code' "$LOG" | tail -1 | sed 's/\x1b\[[0-9;]*m//g')"
       exit 2
     fi
     curl -s --max-time 5 http://127.0.0.1:9999/v1/health | grep -q '"status":"ok"' && { echo "STACK READY"; exit 0; }
   fi
-  grep -qa "Shutting down: Process" "$LOG" && {
+  grep -qa "Shutting down: " "$LOG" && {
     echo "BOOTSTRAP FAILED: $(grep -a 'exited with code' "$LOG" | tail -1 | sed 's/\x1b\[[0-9;]*m//g')"
     exit 2
   }

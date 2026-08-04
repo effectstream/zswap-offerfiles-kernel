@@ -7,8 +7,10 @@
 // instead of being derived from this instance's own (empty) database. That
 // pins instance B's NTP block heights to instance A's, which is what makes
 // "sync B to A's blockL2 height, then diff the databases" a well-defined
-// comparison. DB target and API port are steered by the usual env vars
-// (DB_PORT, EFFECTSTREAM_API_PORT), which the phase sets to the fresh pglite.
+// comparison. DB target, API port and the embedded MQTT broker's four ports are
+// all steered by env vars the phase sets (DB_PORT, EFFECTSTREAM_API_PORT,
+// MQTT_*_PORT) — the MQTT ports matter because they default to fixed values
+// that instance A already holds.
 
 import "@midnight-ntwrk/onchain-runtime-v3";
 

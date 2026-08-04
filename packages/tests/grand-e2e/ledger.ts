@@ -101,17 +101,28 @@ class Ledger {
     console.warn(`[LEDGER] casualty offer#${rec.index} (${rec.fate}): ${reason}`);
   }
 
-  /** Settled offers grouped per (giveColor, wantColor) with summed amounts —
-   *  the chart-volume oracle. */
-  fillLedger(): Map<string, { count: number; give: bigint; want: bigint }> {
-    const m = new Map<string, { count: number; give: bigint; want: bigint }>();
+  /**
+   * Settled offers aggregated per UNORDERED pair, with volume attributed per
+   * COLOR — the shape `/v1/chart/*` actually reports.
+   *
+   * pair_stats keys on `base|quote` and counts every fill for that pair
+   * regardless of direction, so an A→B fill and a B→A fill land in the same
+   * row: A's volume is `give` from the first plus `want` from the second.
+   * Keying the oracle by direction instead made the API look like it had
+   * doubled every trade (api=6 vs ledger=3, and volumes that summed exactly to
+   * the two directions combined).
+   */
+  fillLedger(): Map<string, { count: number; byColor: Record<string, bigint> }> {
+    const m = new Map<string, { count: number; byColor: Record<string, bigint> }>();
     for (const o of this.offers) {
       if (o.fate !== "settled" || o.state !== "resolved") continue;
-      const key = `${this.colors[o.giveToken]}|${this.colors[o.wantToken]}`;
-      const cur = m.get(key) ?? { count: 0, give: 0n, want: 0n };
+      const give = this.colors[o.giveToken]!;
+      const want = this.colors[o.wantToken]!;
+      const key = [give, want].sort().join("|");
+      const cur = m.get(key) ?? { count: 0, byColor: {} };
       cur.count++;
-      cur.give += BigInt(o.giveAmount);
-      cur.want += BigInt(o.wantAmount);
+      cur.byColor[give] = (cur.byColor[give] ?? 0n) + BigInt(o.giveAmount);
+      cur.byColor[want] = (cur.byColor[want] ?? 0n) + BigInt(o.wantAmount);
       m.set(key, cur);
     }
     return m;

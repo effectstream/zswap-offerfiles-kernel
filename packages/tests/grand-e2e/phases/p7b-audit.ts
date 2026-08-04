@@ -178,28 +178,33 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
 
   // ── 4. known_roots inside the 10-minute window ───────────────────────────
   await check("known_roots: every row inside the ROOT_WINDOW at audit time", async () => {
+    // Compare against CHAIN time, not wall-clock. last_seen_ms is derived from
+    // Midnight block timestamps, and the dev L2 clock runs ~20 min behind real
+    // time, so a wall-clock comparison reports perfectly fresh roots as stale.
+    const h = await getHealthSync();
+    const chainNow = Date.parse(h?.blockL2?.timestamp ?? "") || Date.now();
     const r = await db.query(`SELECT min(last_seen_ms)::bigint AS lo, max(last_seen_ms)::bigint AS hi FROM known_roots`);
     const lo = Number(r.rows[0]?.lo ?? 0);
-    return lo >= Date.now() - (ROOT_WINDOW_SECONDS + 300) * 1000;
-  });
+    return lo >= chainNow - (ROOT_WINDOW_SECONDS + 300) * 1000;
+  }, "compared against blockL2 chain time");
 
   // ── 5. Charts vs the fill ledger ─────────────────────────────────────────
   for (const [pairKey, fills] of ledger.fillLedger()) {
     const [base, quote] = pairKey.split("|") as [string, string];
+    const short = `${base.slice(0, 6)}|${quote.slice(0, 6)}`;
     const hist = await getChartHistory(base, quote);
-    await check(`chart history rows == fills for ${base.slice(0, 6)}|${quote.slice(0, 6)}`, async () => {
+    await check(`chart history rows == fills for ${short}`, async () => {
       const rows = Array.isArray(hist.body) ? hist.body : [];
       return fills.count > 120 ? rows.length === 120 : rows.length === fills.count;
     }, `api=${Array.isArray(hist.body) ? hist.body.length : "?"} ledger=${fills.count}`);
 
     const stats = await getChartStats(base, quote);
-    await check(`chart volume == Σ fill ledger for ${base.slice(0, 6)}|${quote.slice(0, 6)}`, async () => {
+    await check(`chart volume == Σ fill ledger for ${short}`, async () => {
       const vb = Number(stats.body?.volume_base ?? -1);
       const vq = Number(stats.body?.volume_quote ?? -1);
-      const g = Number(fills.give);
-      const w = Number(fills.want);
-      return (vb === g && vq === w) || (vb === w && vq === g); // orientation-agnostic
-    }, `vb=${stats.body?.volume_base} vq=${stats.body?.volume_quote} give=${fills.give} want=${fills.want}`);
+      return vb === Number(fills.byColor[base] ?? 0n) && vq === Number(fills.byColor[quote] ?? 0n);
+    }, `vb=${stats.body?.volume_base} vq=${stats.body?.volume_quote} ` +
+       `expected base=${fills.byColor[base] ?? 0n} quote=${fills.byColor[quote] ?? 0n}`);
   }
 
   // ── 6. SSE ledger ────────────────────────────────────────────────────────

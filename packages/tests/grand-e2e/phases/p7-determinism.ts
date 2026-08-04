@@ -18,6 +18,7 @@ import {
   EXPIRY_SLACK_MS,
   NODE_B_API_PORT,
   NODE_B_DB_PORT,
+  NODE_B_MQTT_PORTS,
   NODE_B_SYNC_TIMEOUT_MS,
   OFFER_TTL_SECONDS,
   OUT_DIR,
@@ -119,6 +120,8 @@ export async function p7Determinism(db: Client): Promise<DeterminismOutcome> {
         PGLITE: "true",
         DB_PORT: String(NODE_B_DB_PORT),
         EFFECTSTREAM_API_PORT: String(NODE_B_API_PORT),
+        // B's own MQTT broker — see NODE_B_MQTT_PORTS.
+        ...NODE_B_MQTT_PORTS,
         GRAND_NTP_START_TIME: String(startTime),
         ROOT_WINDOW_SECONDS: String(ROOT_WINDOW_SECONDS),
         OFFER_TTL_SECONDS: String(OFFER_TTL_SECONDS),

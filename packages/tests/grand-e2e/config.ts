@@ -101,6 +101,20 @@ export const API_SOFT_LIMIT_PER_MIN = 45;
 // ── Determinism / audit ──────────────────────────────────────────────────────
 export const NODE_B_API_PORT = 9998;
 export const NODE_B_DB_PORT = 5433;
+/** Instance B runs a full runtime, which also starts an embedded MQTT broker on
+ *  four FIXED ports (8883/9883 engine, 8884/9884 batcher). Those are not
+ *  governed by EFFECTSTREAM_API_PORT, so without private values here B dies at
+ *  boot with `Failed to listen at 127.0.0.1` — instance A already owns 8883. */
+export const NODE_B_MQTT_PORTS = {
+  MQTT_ENGINE_BROKER_PORT: "8893",
+  MQTT_ENGINE_BROKER_WS_PORT: "9893",
+  MQTT_BATCHER_BROKER_PORT: "8894",
+  MQTT_BATCHER_BROKER_WS_PORT: "9894",
+  MQTT_ENGINE_BROKER_URL: "mqtt://127.0.0.1:8893",
+  MQTT_ENGINE_BROKER_WS_URL: "ws://127.0.0.1:9893",
+  MQTT_BATCHER_BROKER_URL: "mqtt://127.0.0.1:8894",
+  MQTT_BATCHER_BROKER_WS_URL: "ws://127.0.0.1:9894",
+} as const;
 export const NODE_B_SYNC_TIMEOUT_MS = 45 * 60_000;
 
 // Tables excluded from the state diff, with reasons (documented in the

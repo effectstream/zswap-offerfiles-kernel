@@ -16,7 +16,16 @@ LOG=packages/tests/grand-e2e/out/stack.log
 # the batcher inherits the orchestrator's environment; setting it later (or on
 # a /restart call) has no effect. See NIGHT-UTXO provisioning in fresh-run.sh:
 # slots = min(dust coins / cost, cap), so both halves are needed.
-export BATCHER_MAX_SLOTS_PER_WALLET="${BATCHER_MAX_SLOTS_PER_WALLET:-100}"
+#
+# 7, not 100: dust stops being the limit and the PROOF SERVER becomes it. Every
+# in-flight settlement drives a proof, and the suite's own builder is proving
+# concurrently (PROVE_SLOTS in actors/wallets.ts). Measured on a 16-core box:
+# cap=100 with 25 dust coins gave 25 slots and drove load average to 25-27,
+# which starved the celestia devnet — block production fell from ~6/min to
+# 1-3/min, celestia-node logged 11x "underlying subscription is stuck", and
+# offers began dying with "blob.Submit failed: The operation timed out" (13
+# casualties before the run was pulled). Raise only with cores to spare.
+export BATCHER_MAX_SLOTS_PER_WALLET="${BATCHER_MAX_SLOTS_PER_WALLET:-7}"
 
 # The suite asserts against these two windows (config.ts), and the node only
 # reads them at startup. Without them the node uses its per-network defaults

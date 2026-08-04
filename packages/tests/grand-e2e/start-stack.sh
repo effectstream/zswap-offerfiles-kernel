@@ -17,6 +17,14 @@ LOG=packages/tests/grand-e2e/out/stack.log
 # a /restart call) has no effect. See NIGHT-UTXO provisioning in fresh-run.sh:
 # slots = min(dust coins / cost, cap), so both halves are needed.
 export BATCHER_MAX_SLOTS_PER_WALLET="${BATCHER_MAX_SLOTS_PER_WALLET:-100}"
+
+# The suite asserts against these two windows (config.ts), and the node only
+# reads them at startup. Without them the node uses its per-network defaults
+# (3600s), and the run fails four checks that look unrelated: p1's
+# `ttl_seconds=600`, and three p4 root checks — see the ROOT_UNKNOWN note in
+# p4-adversarial.ts for why a wide window makes the "foreign" fixture pass.
+export ROOT_WINDOW_SECONDS="${ROOT_WINDOW_SECONDS:-600}"
+export OFFER_TTL_SECONDS="${OFFER_TTL_SECONDS:-600}"
 NODE_ENV=development nohup bunx orchestrator start > "$LOG" 2>&1 &
 echo "orchestrator pid $!"
 

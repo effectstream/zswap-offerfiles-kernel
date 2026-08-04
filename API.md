@@ -186,7 +186,7 @@ curl http://host:9999/v1/health/sync
 | `midnight.tip` | Live Midnight chain tip (cached 60 s; `null` if unreachable) |
 | `celestia.tip` | Live Celestia chain tip (cached 60 s; `null` if unreachable) |
 | `sets.*` | Sizes of the ingested liveness sets (cached 15 s) |
-| `recent_rejections` | Blobs discarded at ingestion, as `{celestia_height, code, count}` for the 20 most recent heights. Rejected blob bodies are deleted, so this is how namespace spam stays visible — see [Ingestion pipeline](#ingestion-pipeline-the-critical-path) |
+| `recent_rejections` | Blobs discarded at ingestion, as `{celestia_height, code, count}` for the 20 most recent heights. **`celestia_height` is the indexer's own L2 block height, not a Celestia height** (legacy column name). Rejected blob bodies are deleted, so this is how namespace spam stays visible — see [Ingestion pipeline](#ingestion-pipeline-the-critical-path) |
 
 On a fresh database the initial sync of 89 days of Midnight history takes approximately 4 hours.
 
@@ -215,7 +215,7 @@ Returns the current live offer book — offers published to Celestia, validated,
     "version": 1,
     "offerId": "9f2c4a…64 hex chars…e1",
     "blobChars": 24781,
-    "celestiaHeight": "12231800",
+    "blockHeight": "1281600",
     "computed": {
       "gives": [
         { "token": "0000…0000", "amount": "1000000", "type": "UNSHIELDED" }
@@ -244,7 +244,13 @@ Each row is a MIP-0006 `OffchainOfferPayload`. **`offerBech32` is omitted in lis
 | `wants` | Tokens the maker is requesting (same leg shape) |
 | `ttl_seconds` | Offer lifetime in seconds from `metadata_created_at`, as a **string** |
 
-All string/number fields are returned as-is from the DB; numeric-looking values (`celestia_height`, `ttl_seconds`, token `amount`) are **strings** to preserve full precision.
+All string/number fields are returned as-is from the DB; numeric-looking values (`blockHeight`, `ttl_seconds`, token `amount`) are **strings** to preserve full precision.
+
+> **`blockHeight` is the indexer's own (effectstream/L2) block height, not a Celestia height.**
+> The Celestia inclusion height is not available to the indexer — the DA primitive
+> forwards only the blob payload — so it cannot be served. To locate an offer's blob
+> on the DA layer, match `offerId` (the sha256 of the exact bytes published) while
+> scanning the namespace; do not use this field as a Celestia height.
 
 ```bash
 # All open offers giving NIGHT:
@@ -268,7 +274,7 @@ curl "http://host:9999/v1/offers/9f2c4a...e1"
   "version": 1,
   "offerId": "9f2c4a…e1",
   "offerBech32": "swapoffer1...",
-  "celestiaHeight": "12231800",
+  "blockHeight": "1281600",
   "ttlSeconds": "3600",
   "computed": {
     "gives": [ { "token": "00…00", "amount": "1000000", "type": "UNSHIELDED" } ],
@@ -564,13 +570,13 @@ curl -N http://host:9999/v1/offers/stream
 ```
 data: {"type":"connected","timestamp":1750800000000}
 
-data: {"type":"offer_indexed","offerId":42,"celestiaHeight":12231800,"gives":[...],"wants":[...],"timestamp":...}
+data: {"type":"offer_indexed","offerId":42,"blockHeight":1281600,"gives":[...],"wants":[...],"timestamp":...}
 
 data: {"type":"offer_consumed","offerId":42,"nullifier":"abc123...","timestamp":...}
 
 data: {"type":"offer_expired","offerId":42,"timestamp":...}
 
-data: {"type":"offer_rejected","code":"ROOT_UNKNOWN","reason":"...","celestiaHeight":...,"timestamp":...}
+data: {"type":"offer_rejected","code":"ROOT_UNKNOWN","reason":"...","blockHeight":...,"timestamp":...}
 
 data: {"type":"token_minted","name":"MYTOKEN","color":"...","kind":"shielded","timestamp":...}
 ```
@@ -839,6 +845,13 @@ offer appears at `GET /v1/offers` and streams as `offer_indexed` on
 the same blob.
 
 ### Read offers — `blob.GetAll`
+
+> **Finding a specific offer's blob.** The API's `blockHeight` is the indexer's
+> own L2 height, not a Celestia height, so it cannot be used here. Scan the
+> namespace over a height range and match `offerId` — the sha256 of the exact
+> bytes published — which is stable and verifiable without trusting any
+> operator.
+
 
 Fetch every namespace blob at a given height (params: `[height, [namespaceB64]]`):
 

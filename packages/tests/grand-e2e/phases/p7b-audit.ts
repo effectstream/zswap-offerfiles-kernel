@@ -261,24 +261,16 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
   });
 
   // ── 9. offer_rejections maps to our own adversarial actions ──────────────
-  await check("every offer_rejection maps to a deliberate garbage publish (± casualties)", async () => {
+  await check("offer_rejections count matches the garbage this suite published", async () => {
+    // Counted, not height-matched: offer_rejections.celestia_height holds an
+    // EffectstreamBlockNumber, not a Celestia height (see ISSUES.md), so the
+    // heights cannot be correlated with what blob.Submit reported.
     const rows = await rejectionRows(db);
-    const garbageHeights = new Set(
-      ledger.garbage.filter((g) => g.via === "celestia" && g.celestiaHeight).map((g) => g.celestiaHeight!),
-    );
-    const casualtyBudget = ledger.casualties().length + 4; // + chaos resubmit duplicates
-    let unmapped = 0;
-    let preRun = 0;
-    for (const r of rows) {
-      const h = Number(r.celestia_height);
-      if (h <= ledger.startCelestiaHeight) {
-        preRun++; // artifacts of earlier runs against a persistent devnet
-        continue;
-      }
-      if (!garbageHeights.has(h)) unmapped++;
-    }
-    if (preRun > 0) note("rejections", `${preRun} pre-run rejection rows excluded (height ≤ ${ledger.startCelestiaHeight})`);
-    return unmapped <= casualtyBudget;
+    const total = rows.reduce((n, r) => n + Number(r.count), 0);
+    const ours = ledger.garbage.filter((g) => g.via === "celestia").length;
+    const casualtyBudget = ledger.casualties().length + 4; // + chaos resubmits
+    note("rejections", `${total} recorded, ${ours} deliberate celestia publishes`);
+    return total >= ours && total <= ours + casualtyBudget;
   });
 
   // ── 10. Operational stragglers ───────────────────────────────────────────

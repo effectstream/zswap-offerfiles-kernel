@@ -34,7 +34,7 @@ export interface ApiZswap {
   offerId: string | null;
   offerBech32?: string;
   blobChars?: number;
-  celestiaHeight?: string;
+  blockHeight?: string;  // effectstream L2 block, not a Celestia height
   computed: {
     gives: ApiTokenLeg[];
     wants: ApiTokenLeg[];

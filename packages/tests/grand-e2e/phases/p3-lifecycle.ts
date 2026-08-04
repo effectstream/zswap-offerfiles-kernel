@@ -1,5 +1,5 @@
 // Phase 3 — every lifecycle transition, precisely, one at a time:
-//   consumed (shielded, unshielded, mixed), all four cancel shapes, the
+//   consumed (shielded, unshielded), all four cancel shapes, the
 //   documented unshielded-only classification gap, and an expiry-fated offer
 //   whose sweep is asserted at the end of phase 5.
 
@@ -94,14 +94,15 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
     if (ok && rec.state === "indexed") await settleAndAssert(db, takers[1]!, rec, built.blob, "uu swap");
   }
 
-  // ── consumed: mixed (shielded give / unshielded want) ────────────────────
+  // ── consumed: shielded↔shielded on the second token pair ─────────────────
+  // (was a cross-layer offer; that shape is not supported — see ISSUES.md)
   {
-    const a = amountsFor(11, "TB", "UB");
-    const rec = mkRecord(11, "settled", "mixed-sg", makers[3]!.seed, "TB", "UB", a.give, a.want);
+    const a = amountsFor(11, "TB", "TA");
+    const rec = mkRecord(11, "settled", "ss", makers[3]!.seed, "TB", "TA", a.give, a.want);
     const built = await buildOffer(makers[3]!, rec);
     storeBlob(built.hash, built.blob);
-    const ok = await check("mixed offer indexed", () => publishAndIndex(db, rec, built));
-    if (ok && rec.state === "indexed") await settleAndAssert(db, takers[2]!, rec, built.blob, "mixed swap");
+    const ok = await check("second-pair shielded offer indexed", () => publishAndIndex(db, rec, built));
+    if (ok && rec.state === "indexed") await settleAndAssert(db, takers[2]!, rec, built.blob, "second-pair shielded swap");
   }
 
   // ── the four cancel shapes ───────────────────────────────────────────────

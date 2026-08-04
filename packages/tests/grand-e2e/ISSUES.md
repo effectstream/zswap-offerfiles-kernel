@@ -19,97 +19,139 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 ---
 
-## 1. Mixed offers: the unshielded want output is silently never created
+## 1. `celestiaHeight` was not a Celestia height — **RESOLVED by renaming**
 
-**Verdict: TEST BUG in the suite's offer construction — but with a product
-question attached. Severity: medium.**
+The API served `celestiaHeight` on every offer (and on `offer_indexed` SSE
+events) that was actually the indexer's own effectstream/L2 block height. The
+STM writes `data.blockHeight`, typed `EffectstreamBlockNumber`; proven against
+the suite's ledger, where an offer published via `blob.Submit` at Celestia
+height **1734** was stored and served as **1776**, with the gap growing since
+the two are different clocks.
 
-A shielded-give / unshielded-want offer is rejected `NOT_A_SWAP`
-("1 give, 0 wants"). It is **not** a leg-derivation bug: the transaction
-genuinely has no unshielded output.
+### Why it is not fixed "properly"
 
-### Reproduce
+The Celestia inclusion height never reaches the STM. The DA primitive builds
+its state-machine input from the blob payload alone:
 
-```bash
-bun run packages/tests/grand-e2e/triage-mixed-offer.ts
+```ts
+const { payload } = primitiveTransactionData.output;
+generateRawStmInput(this.grammar, this.stateMachinePrefix, { payload })
 ```
 
-### Observed
+The height is known at the fetcher (`blob.GetAll` is per-height) and dropped at
+that boundary. Carrying it through would mean adding a parameter to every
+primitive — a refactor rejected as disproportionate for a display field.
 
-```
-── validator verdict ──
-ok:    false
-code:  NOT_A_SWAP
-gives: [{"token":"0000…0000","amount":"1000","kind":"SHIELDED"}]
-wants: []
+`sync_protocol_pagination` does hold the real height and hash (verified: stored
+hash matched `header.GetByHeight` exactly), but it keeps **one row per
+protocol**, not a history, so past offers cannot be resolved — and reading the
+current page at ingestion would be non-deterministic, breaking replay
+equality, which is the one property this system cannot trade away.
 
-tx imbalances (ground truth):
-  seg0 shielded 000000000000 = 1000
+### Decision: rename, don't refactor
 
-── verdict ──
-TEST BUG: the tx never carried an unshielded output.
-```
+No consumer computes against Celestia semantics — the value is stored, copied
+through the archive CTEs, and displayed. The rejected-blob scrub keys on
+`effectstream_block_height`, which is already correct precisely because both
+sides are L2. So only the *name* and the *docs* were wrong.
 
-The raw transaction imbalances — read straight off the ledger object, bypassing
-`deriveLegs()` entirely — show **only** a shielded entry. `deriveLegs` is
-reporting the transaction accurately.
+- REST and SSE now expose **`blockHeight`**, documented as the indexer's L2 height.
+- `API.md` no longer teaches feeding it to `blob.GetAll`; it points at `offerId`
+  (the sha256 of the exact published bytes) for locating a blob on the namespace.
+- The DB column keeps its legacy `celestia_height` name behind a comment — it is
+  internal, and a migration was not worth it.
 
-### What was ruled out
+**Not a MIP change:** `celestiaHeight` was never in `OffchainOfferPayload`
+(`version`, `offerId?`, `offerBech32?`, `computed{…}`) — it was our own additive
+field, so no spec revision or team sign-off was required.
 
-| Hypothesis | Result |
-|---|---|
-| `deriveLegs()` misses unshielded wants | **Ruled out** — no unshielded imbalance exists to miss |
-| The `finalizeTransaction()` vs `signRecipe()` branch drops it | **Ruled out** — forcing the `signRecipe` path gives a byte-identical outcome (16439 vs 16440 chars, same verdict) |
-| Same-color netting (shielded NIGHT vs unshielded NIGHT) | **Ruled out** — the suite's p3 offer used distinct colors (TB→UB) and failed identically |
-| The call shape is type-illegal | **Ruled out** — `CombinedSwapOutputs = ShieldedTokenTransfer \| UnshieldedTokenTransfer`, so an unshielded output is a legal argument |
+### If the by-height workflow is ever needed
 
-### Open product question
-
-`initSwap` accepts a type-legal unshielded desired output alongside a shielded
-input and **silently returns a transaction without it — no error, no warning**.
-Either mixed-layer swaps are unsupported (then rejecting the argument loudly
-beats dropping it), or this is an SDK defect. Worth raising upstream; MIP-0006
-mixed offers depend on the answer.
-
-### Mitigation applied (suite side)
-
-1. `phases/p5-load.ts` — `mixed-sg` / `mixed-ug` removed from `LAYERS`.
-   Restore them once the SDK either supports the combination or rejects it.
-2. `actors/wallets.ts` — `buildOffer` now runs `validateZswapOffer` on what it
-   actually built and throws with the derived legs if it is not a valid offer.
-   The old `try/catch` fallback could never have caught this: the failing path
-   throws nothing, it just returns a transaction missing a leg. With the guard
-   the failure names itself at construction instead of surfacing much later as
-   an opaque `NOT_A_SWAP` at ingestion, misattributed to the indexer.
+The fix is upstream and small: have the DA primitive include the inclusion
+height in the payload it forwards, alongside `namespace` and `commitment`.
 
 ---
 
-## 2. State-transition errors are invisible
+## 2. Cross-layer offers fail with a misleading code — **suite no longer builds them**
 
-**Verdict: PRODUCT ERGONOMICS. Severity: medium.**
+**Cross-layer (shielded ↔ unshielded) swaps are not a supported offer shape.**
+The suite originally built them because HANDOFF §7 asks for "~25% mixed"; that
+was a misreading on my part, and those offers have been removed
+(`Layer` is now `"ss" | "uu"`).
 
-The runtime routes STF errors to telemetry only (`process-blocks.ts` STEP 5).
-A clean SQL failure therefore surfaced as an unexplained process exit — this is
-**why the NUL crash (PR #22) took hours instead of minutes** to localise, and
-it will do the same to the next STF bug.
+Keeping the note because the *failure mode* is worth knowing, and there is a
+real gap behind it.
 
-### Reproduce
+### What happened
 
-```bash
-grep -rn "log.remote" node_modules/@effectstream/runtime/src/process-blocks.ts
+`wallet-sdk-facade@4.1.0`'s `initSwap` decides layer participation from inputs
+**or** outputs:
+
+```js
+hasUnshieldedPart = (unshieldedInputs && Object.keys(unshieldedInputs).length > 0)
+                    || unshieldedOutputs.length > 0;
 ```
 
-Patch that catch to `console.error`, trigger any STF failure, and confirm the
-error text now appears. The patch is wiped by `bun install`, so the durable fix
-belongs upstream.
+but constructs that half only when the **inputs** are defined:
 
-### Fix
+```js
+unshieldedTx = hasUnshieldedPart && unshieldedInputs !== undefined ? … : undefined;
+```
 
-Surface STF errors at `console.error` at least in development.
+A shielded-give / unshielded-want request therefore passes the guard and has
+its outputs **silently discarded**, producing a one-sided transaction. The
+result is a confusing `NOT_A_SWAP` ("1 give, 0 wants") that points at the
+indexer rather than at the request.
+
+### The gap worth deciding on
+
+Nothing in the validator enforces "give and want share a layer". `NOT_A_SWAP`
+fires only because the SDK dropped a leg — an accident, not a rule. A
+correctly-built cross-layer offer from another wallet implementation would
+reach `isTwoSided()` with a legitimate give and want on different layers and,
+as far as the code shows, be **indexed**.
+
+If cross-layer offers must never be tradeable, that belongs in the ladder as
+its own explicit check and code — not left to an SDK quirk. Worth confirming
+against MIP-0006 before adding.
+
+### Suite state
+
+- `ledger.ts` — `Layer` is `"ss" | "uu"`; cross-layer is unrepresentable.
+- `phases/p3-lifecycle.ts` — the former cross-layer case is now a
+  shielded↔shielded swap on the second token pair.
+- `phases/p5-load.ts` — `LAYERS` carries only same-layer entries.
+- `actors/wallets.ts` — `buildOffer` still validates what it built, so any
+  future silently-dropped leg fails at construction rather than at ingestion.
 
 ---
 
-## 3. No green end-to-end run; `baseline.json` still empty
+## 3. State-transition errors are invisible — **FIXED in our code**
+
+The runtime reports STF errors to telemetry only (`log.remote`, line 262 of
+`process-blocks.ts`), so a failing transition produced no console output: the
+block transaction aborted and the next statement died with Postgres `25P02`,
+surfacing as an unexplained process exit. That is exactly how the `0x00` scrub
+crash presented — hours of bisecting a silent death whose cause was a one-line
+SQL error the engine had already caught and hidden.
+
+### Fix (no `node_modules` patch)
+
+`state-machine.ts` now registers every transition through `addTransition()`,
+which logs and **rethrows**, so rollback semantics are unchanged and only
+visibility is added. Kept in our code so it survives `bun install`.
+
+### Verify
+
+Trigger any STF failure and confirm the console shows:
+
+```
+[STF] transition "<name>" FAILED (block N) — this aborts the block transaction: <error>
+```
+
+---
+
+## 4. No green end-to-end run; `baseline.json` still empty
 
 **Status: in progress.** Runs 1–8 died in setup for operational reasons (proof
 server storms, coin-reservation deadlocks, a node-side cap on fan-out tx size);
@@ -141,9 +183,10 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
-| 1 | Mixed-offer unshielded want silently dropped | test bug + upstream question | Medium | mitigated in-suite; raise with the wallet SDK |
-| 2 | STF errors invisible (telemetry only) | product ergonomics | Medium | upstream — `console.error` in dev |
-| 3 | No green run / empty `baseline.json` | in progress | — | next full run |
+| 1 | ~~`celestiaHeight` mislabeled~~ | **RESOLVED** — renamed to `blockHeight`, docs corrected | — | upstream primitive fix deferred by decision |
+| 2 | Cross-layer offers unenforced in the ladder | gap — decide | Low/Medium | suite no longer builds them; add an explicit rule if they must be refused |
+| 3 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |
+| 4 | No green run / empty `baseline.json` | in progress | — | run 12 hit 50 pass / 1 fail in 35 min; both causes now fixed |
 
 ### Fixed
 

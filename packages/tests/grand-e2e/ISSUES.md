@@ -19,59 +19,66 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 ---
 
-## 1. Batcher holds 5 transactions of dust — settlement load impossible — **BLOCKS THE SUITE**
+## 1. Dust economics cap the dev chain at ~10 batcher transactions — **BLOCKS LOAD TESTING**
 
-**Verdict: PROVISIONING + PRODUCT. Severity: high.** Not a slow batcher — one
-that settles **five** transactions, then livelocks.
+**Verdict: PROVISIONING (dev chainspec). Severity: high.** Not a bug in the
+batcher's logic — an allocation fact, now measured from the ledger source.
 
-### The arithmetic, from the batcher's own boot log
+### The numbers (ledger `dust.rs`, `INITIAL_PARAMETERS`)
 
-| | |
+| quantity | value |
 |---|---|
-| dust balance at boot | `1.25e24` specks = **1,250,000,000 DUST** |
-| cost per balancing tx | **250,000,000 DUST** |
-| **capacity** | **5.0 transactions** before regeneration |
+| `night_dust_ratio` | `5 * SPECKS_PER_DUST / STARS_PER_NIGHT` → **5 DUST per NIGHT** (the cap) |
+| `generation_decay_rate` | `8_267` → **time to fill 0 → cap ≈ 1 week** |
+| cost per balancing tx | **250,000,000 DUST** (measured) |
+| ⇒ NIGHT required to fund **one** transaction | **50,000,000 NIGHT** |
+| batcher dust at boot | 1,250,000,000 DUST = **exactly 5 transactions** |
+| genesis NIGHT holding | 250,000,000 NIGHT = another **5 transactions** worth |
 
-Which is exactly why it reports `worker slots: 5 (5 UTXOs, cost=1/tx, cap=5)`.
-The suite needs ~250 settlement/cancel transactions at `GRAND_OFFERS=250`, and
-~600 at the handoff's full scale.
+So the whole reachable dev supply funds roughly **ten** batcher transactions,
+and a spent stream needs about **a week** to refill. Waiting is not an option
+inside a test run.
 
-### What happens after the fifth
+### How dust actually works (confirmed in `semantics.rs`)
 
-Every cycle waits 60 s for regeneration, tries anyway ("will likely fail and
-re-queue"), fails, re-queues — forever. 71-87 cycles observed per run, queue
-pinned at 250-282, and **nothing surfaced**: `/status` and `/queue-stats` keep
-reporting `isInitialized: true` with a static pending count. Three runs died
-this way (77, 84 and ~90 min), each *after* setup had succeeded.
+1. An address receives NIGHT and registers → one dust UTXO, value 0, cap
+   `night x 5 DUST`, filling at rate R.
+2. **Further NIGHT transfers need no re-registration**: delegation is
+   address-level (`state.dust.generation.address_delegation.get(&address)` →
+   `fresh_dust_output`), so 10 more NIGHT UTXOs give 11 dust UTXOs, cap 11N,
+   rate 11R.
+3. Node throughput caps around 7.5 tx/s regardless (see
+   `acedward/midnight-wallet-dust-utxo-example`), so dust — not the node — is
+   our binding constraint.
 
-### This reframes PR #23
+### Why the first provisioning attempt failed
 
-`BATCHER_MAX_SLOTS_PER_WALLET=5` does not buy sustained 5x throughput. Against
-a five-transaction budget it spends the **entire** dust supply in one batch.
-Slots and dust must be provisioned together — raising slots alone converts a
-slow pipeline into an immediately starved one.
+`provision-batcher-dust.ts` sent **1 NIGHT per UTXO** — a cap of **5 DUST**
+against a **250,000,000 DUST** per-transaction cost, about seven orders of
+magnitude short. The 20 UTXOs and their dust streams *were* created correctly
+(step 2 above works); they were simply worth nothing, which is why the
+batcher's usable count stayed at 5.
 
-### Fixes
+### Solutions
 
-1. **Provision the batcher** (unblocks the suite): register far more NIGHT for
-   dust generation, sized to `expected tx/hour x 250,000,000 DUST`. The dev
-   chainspec currently affords five transactions — a smoke test, nothing more.
-2. **Do not livelock** (product): back off and surface dust exhaustion rather
-   than retrying a balance the code itself predicts will fail. A queue that
-   never drains behind a healthy-looking `/status` is the worst failure shape
-   for an operator.
-3. **Suite alternative**: settle directly, takers paying their own fees, as
-   `api-examples/11-settle-offer.ts` already does via
-   `wallet.submitTransaction`. Needs each taker funded with NIGHT and
-   registered for dust, but removes the shared bottleneck and exercises a
-   documented settlement path.
+1. **Raise the dev allocation** (only option that runs the load phase as
+   designed): give the batcher wallet `N x 50,000,000 NIGHT` with dust at cap
+   — ~1.25e10 NIGHT for a 250-offer run. It is a dev chain; NIGHT is free.
+   The allocation is baked into the `midnight-node` binary's undeployed
+   chainspec, so it is an infra change, not an app change.
+2. **Provision from genesis** — `provision-batcher-dust.ts` works, but genesis
+   holds only ~5 transactions' worth, so it can at most double capacity. A
+   stopgap, not a fix. Use a large per-UTXO amount, not 1 NIGHT.
+3. **Scale the suite to the budget** — keep settlements under ~8 per stack
+   boot. p1, p3 and p3b need only a handful and stay meaningful; p5's 100
+   settlements do not fit.
 
-### Current status
+### Recommendation
 
-Setup completes cleanly — 640 coins direct from genesis, batcher untouched,
-~40 min — and the run reaches p1 → p2 → p4 → p3 with **43 passes**. Every
-failure past that point is this one cause: settlements time out, so archival,
-classification, SSE and chart assertions all fail downstream.
+(1) for real load runs; (3) immediately, so p5/p6/p7 execute end-to-end at
+least once and produce a calibrated baseline. The suite should also *measure*
+this at p0 and say plainly how many settlements the current stack can afford,
+rather than discovering it as a timeout 40 minutes in.
 
 ---
 

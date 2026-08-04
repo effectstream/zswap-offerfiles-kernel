@@ -19,65 +19,56 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 ---
 
-## 1. `celestiaHeight` is not a Celestia height — **NEW, user-facing**
+## 1. `celestiaHeight` was not a Celestia height — **RESOLVED by renaming**
 
-**Verdict: PRODUCT BUG. Severity: medium-high** — it silently breaks the
-independent-verification workflow `API.md` documents.
+The API served `celestiaHeight` on every offer (and on `offer_indexed` SSE
+events) that was actually the indexer's own effectstream/L2 block height. The
+STM writes `data.blockHeight`, typed `EffectstreamBlockNumber`; proven against
+the suite's ledger, where an offer published via `blob.Submit` at Celestia
+height **1734** was stored and served as **1776**, with the gap growing since
+the two are different clocks.
 
-Every offer served by the API carries `celestiaHeight`, and
-`/v1/health/sync` reports `recent_rejections[].celestia_height`. Neither is a
-Celestia height. The STM writes `data.blockHeight`, which `@effectstream/sm`
-types as `EffectstreamBlockNumber` — the L2 block height. The Celestia height
-is not present in the STF input at all.
+### Why it is not fixed "properly"
 
-### Reproduce
-
-Publish a blob directly, note the height `blob.Submit` returns, then compare
-it with what the node stored:
-
-```bash
-bun run packages/tests/grand-e2e/triage-mixed-offer.ts   # any direct publish works
-psql -h 127.0.0.1 -U postgres -d postgres \
-  -c "SELECT offer_hash, celestia_height FROM offer_file"
-```
-
-### Observed
-
-| Source | Height |
-|---|---|
-| `blob.Submit` returned (real Celestia inclusion) | **1734** |
-| `offer_file.celestia_height` stored / served | **1776** |
-
-Same for rejections — measured offsets of 42, 47 and 67 on one run, and the
-gap **grows**, because the two are different clocks rather than a lag.
-
-Mechanism, in `state-machine.ts`:
+The Celestia inclusion height never reaches the STM. The DA primitive builds
+its state-machine input from the blob payload alone:
 
 ```ts
-celestia_height: data.blockHeight,   // EffectstreamBlockNumber, not Celestia
+const { payload } = primitiveTransactionData.output;
+generateRawStmInput(this.grammar, this.stateMachinePrefix, { payload })
 ```
 
-### Why it matters
+The height is known at the fetcher (`blob.GetAll` is per-height) and dropped at
+that boundary. Carrying it through would mean adding a parameter to every
+primitive — a refactor rejected as disproportionate for a display field.
 
-`API.md` explicitly teaches using this value to fetch the blob straight from
-the DA layer (`blob.GetAll` at a height) for archival, mirroring, or
-independent verification — the property the shared namespace exists to
-provide. Anyone following that reads the wrong Celestia block and finds
-nothing. Determinism is unaffected (the L2 height replays identically), so
-nothing else in the system notices.
+`sync_protocol_pagination` does hold the real height and hash (verified: stored
+hash matched `header.GetByHeight` exactly), but it keeps **one row per
+protocol**, not a history, so past offers cannot be resolved — and reading the
+current page at ingestion would be non-deterministic, breaking replay
+equality, which is the one property this system cannot trade away.
 
-### Fix — pick one
+### Decision: rename, don't refactor
 
-- **Rename and document** (cheap, accurate): the column and API field become
-  `blockHeight` / `effectstreamHeight`, and `API.md` stops promising a
-  Celestia height.
-- **Carry the real height** (correct, upstream): the framework's Celestia
-  primitive would need to include the inclusion height in its payload — today
-  it carries `suppliedValue`, `namespace`, `commitment`, `blobIndex` and no
-  height — after which the STM can store it.
+No consumer computes against Celestia semantics — the value is stored, copied
+through the archive CTEs, and displayed. The rejected-blob scrub keys on
+`effectstream_block_height`, which is already correct precisely because both
+sides are L2. So only the *name* and the *docs* were wrong.
 
-Until one lands, `offerId` (content hash) is the only reliable way to locate
-an offer's blob on Celestia.
+- REST and SSE now expose **`blockHeight`**, documented as the indexer's L2 height.
+- `API.md` no longer teaches feeding it to `blob.GetAll`; it points at `offerId`
+  (the sha256 of the exact published bytes) for locating a blob on the namespace.
+- The DB column keeps its legacy `celestia_height` name behind a comment — it is
+  internal, and a migration was not worth it.
+
+**Not a MIP change:** `celestiaHeight` was never in `OffchainOfferPayload`
+(`version`, `offerId?`, `offerBech32?`, `computed{…}`) — it was our own additive
+field, so no spec revision or team sign-off was required.
+
+### If the by-height workflow is ever needed
+
+The fix is upstream and small: have the DA primitive include the inclusion
+height in the payload it forwards, alongside `namespace` and `commitment`.
 
 ---
 
@@ -192,7 +183,7 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
-| 1 | `celestiaHeight` is the L2 height, not Celestia's | **product bug** | Medium-High | rename+document, or carry the real height upstream |
+| 1 | ~~`celestiaHeight` mislabeled~~ | **RESOLVED** — renamed to `blockHeight`, docs corrected | — | upstream primitive fix deferred by decision |
 | 2 | Cross-layer offers unenforced in the ladder | gap — decide | Low/Medium | suite no longer builds them; add an explicit rule if they must be refused |
 | 3 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |
 | 4 | No green run / empty `baseline.json` | in progress | — | run 12 hit 50 pass / 1 fail in 35 min; both causes now fixed |

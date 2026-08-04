@@ -385,7 +385,7 @@ addTransition("celestia-zswap", function* (data) {
     console.warn("[ZSWAP] Rejected offer", {
       code,
       reason,
-      celestiaHeight: data.blockHeight,
+      blockHeight: data.blockHeight,
       ...extra,
     });
     // Same block, same transaction as the accounting INSERT — atomic. The
@@ -405,7 +405,7 @@ addTransition("celestia-zswap", function* (data) {
       type: "offer_rejected",
       code,
       reason,
-      celestiaHeight: data.blockHeight,
+      blockHeight: data.blockHeight,
       ...extra,
     });
   };
@@ -678,7 +678,7 @@ addTransition("celestia-zswap", function* (data) {
     });
 
     console.log(`[ZSWAP] Saved at Celestia block ${data.blockHeight}`);
-    emitAppEvent({ type: "offer_indexed", offerId: offerFileId, offerHash, celestiaHeight: data.blockHeight, gives, wants });
+    emitAppEvent({ type: "offer_indexed", offerId: offerFileId, offerHash, blockHeight: data.blockHeight, gives, wants });
   } catch (e) {
     console.error("[ZSWAP] Failed to save offer file", e);
   }

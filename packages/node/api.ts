@@ -214,7 +214,10 @@ export const apiRouter: StartConfigApiRouter = async function (
         offerId: offer.offer_hash,
         // offerBech32 omitted — see above; blobChars sizes the fetch.
         blobChars: offer.blob_chars,
-        celestiaHeight: offer.celestia_height,
+        // The effectstream (L2) block that indexed this offer — NOT a Celestia
+        // height. The Celestia inclusion height is dropped one layer above us,
+        // at the primitive boundary; see ISSUES.md.
+        blockHeight: offer.celestia_height,
         computed: {
           gives: byOffer.get(offer.id)?.gives ?? [],
           wants: byOffer.get(offer.id)?.wants ?? [],
@@ -272,7 +275,8 @@ export const apiRouter: StartConfigApiRouter = async function (
       version: 1 as const,
       offerId: offer.offer_hash,
       offerBech32: offer.transaction_hex,
-      celestiaHeight: offer.celestia_height,
+      // effectstream (L2) block height — see the note on the list route.
+      blockHeight: offer.celestia_height,
       ttlSeconds: offer.ttl_seconds,
       computed: {
         gives,

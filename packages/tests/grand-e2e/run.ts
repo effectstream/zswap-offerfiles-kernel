@@ -31,6 +31,7 @@ import { p0Smoke } from "./phases/p0-smoke.ts";
 import { p1Happy } from "./phases/p1-happy.ts";
 import { p2Api } from "./phases/p2-api.ts";
 import { p3Lifecycle } from "./phases/p3-lifecycle.ts";
+import { p3bCompeting } from "./phases/p3b-competing.ts";
 import { p4Adversarial } from "./phases/p4-adversarial.ts";
 import { p5Load } from "./phases/p5-load.ts";
 import { spawnedProcesses } from "./phases/p6-chaos.ts";
@@ -97,39 +98,39 @@ function writeScorecard(determinism: DeterminismOutcome | null): void {
   }
   lines.push(``);
 
-  lines.push(`## 🔴 CRITICAL — unauthenticated remote node crash (found by this suite, NOT patched)`);
+  lines.push(`## Product bugs found by this suite (all fixed)`);
   lines.push(``);
   lines.push(
-    `**One 0x00 byte in any namespace blob kills every ZSwap-DA indexer.** Nothing ever *writes* a NUL ` +
-      `into a text column — JSON escaping makes the write legal. It bites where the blob body is used as ` +
-      `a **lookup key**: the STM's scrub (\`deleteRejectedAccountingRow\`) asks Postgres to extract the ` +
-      `stored body back to text with \`->>\` and compare it to the raw latin1 string as a parameter. Both ` +
-      `halves are illegal — the extraction raises \`unsupported Unicode escape sequence\` and the ` +
-      `parameter raises \`invalid byte sequence for encoding "UTF8": 0x00\`. STF errors go to telemetry ` +
-      `only (HANDOFF gotcha #2), so nothing is logged; the next statement in the same block transaction ` +
-      `dies \`25P02 current transaction is aborted\`, exiting the sync process (code 1) and taking the ` +
-      `orchestrator with it.`,
+    `- **\`0x00\` in any blob body crashed the node** (PR #22). The rejection path used the blob body ` +
+      `as a lookup key; Postgres cannot represent NUL in text, so the block transaction aborted and the ` +
+      `sync process exited — taking the orchestrator with it. Not adversarial-only: the live crash came ` +
+      `from an ordinary \`NOT_A_SWAP\` rejection of a well-formed transaction, and every real Midnight ` +
+      `transaction contains 0x00. On a permissionless namespace it doubled as an unauthenticated remote ` +
+      `crash for one blob fee. Fixed by matching the body's JSON encoding instead.`,
   );
-  lines.push(``);
   lines.push(
-    `Blast radius exceeds the poison blob: the failing half is the extraction of the **stored** row, so ` +
-      `the scrub dies for every blob sharing that Celestia height, legitimate offers included. And since ` +
-      `the namespace is permissionless **by design**, this is an unauthenticated remote crash of the ` +
-      `whole network's indexers for one blob fee — binary junk contains 0x00 by default, so it is the ` +
-      `ordinary outcome of spam, not a sophisticated attack, on the exact path built to survive hostile ` +
-      `input.`,
+    `- **Batcher settled one transaction at a time** (PR #23). The balancer ran a single worker (~2.4 ` +
+      `tx/min) — the whole system's settlement ceiling — because the SDK's per-wallet slot cap was left ` +
+      `at 1 while the wallet already held 5 dust UTXOs. Now configurable; 5x on dev.`,
   );
-  lines.push(``);
   lines.push(
-    `**No migration required.** Never extract the body to text: matching the whole document ` +
-      `(\`payload::text = :param\`) or the existing generated column (\`payload_hash = md5(:param)\`) both ` +
-      `delete the row correctly, because the JSON text carries the escape as literal characters, leaving ` +
-      `the parameter clean ASCII. The \`payload_hash\` form is additionally an index probe on ` +
-      `(primitive_name, effectstream_block_height, payload_hash) rather than today's body comparison. ` +
-      `Reproduced standalone in seconds via \`bun run packages/tests/grand-e2e/nul-crash-repro.ts\` ` +
-      `(PGlite, no stack). Per the handoff this is reported, not worked around: the suite's garbage ` +
-      `fixtures are NUL-free so the remaining checks can run, and \`GRAND_NUL_CRASH_REPRO=1\` publishes ` +
-      `one NUL-bearing blob to reproduce the crash on demand.`,
+    `- **Rate limiting answered \`500 INTERNAL\` instead of \`429\`** (PR #24). The limiter worked and set ` +
+      `correct headers, but \`errorResponseBuilder\` omitted \`statusCode\`, so the error handler's 4xx ` +
+      `branch missed and clients were told "server fault" rather than "back off".`,
+  );
+  lines.push(
+    `- **\`TOO_LARGE\` was unreachable over HTTP** (PR #24). Fastify's 1 MiB body limit fired before the ` +
+      `validator, since \`OFFER_MAX_BYTES\` is 1 MiB *decoded* and bech32m inflates ~1.6x.`,
+  );
+  lines.push(
+    `- **\`celestiaHeight\` was never a Celestia height** (PR #25) — it is the indexer's own L2 block ` +
+      `height, so the documented \`blob.GetAll\` verification workflow could not work. Renamed to ` +
+      `\`blockHeight\`; the real height is dropped at the DA primitive boundary, and carrying it through ` +
+      `was judged disproportionate for a display field.`,
+  );
+  lines.push(
+    `- **State-transition errors were invisible** (PR #25), reported to telemetry only — which is why ` +
+      `the NUL crash took hours to localise rather than minutes. Transitions now log and rethrow.`,
   );
   lines.push(``);
   lines.push(`## Documented gaps asserted as current behavior`);
@@ -200,6 +201,7 @@ async function main(): Promise<void> {
     await p2Api(db, art);
     await p4Adversarial(db, art);
     await p3Lifecycle(db, actors);
+    await p3bCompeting(db, actors);
     await p5Load(db, actors, art);
     await p7bAudit(db, sse);
     determinism = await p7Determinism(db);

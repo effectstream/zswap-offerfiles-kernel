@@ -114,6 +114,10 @@ export interface Actors {
   makers: PoolWallet[];
   cancelSingles: PoolWallet[]; // one-coin wallets (single-one-tx shape)
   cancelDoubles: PoolWallet[]; // two-coin wallets (split/partial/consolidated)
+  /** One shielded coin, backing two mutually exclusive offers. */
+  competingShielded: PoolWallet;
+  /** One unshielded UTXO, backing two mutually exclusive offers. */
+  competingUnshielded: PoolWallet;
   takers: PoolWallet[];
 }
 
@@ -129,7 +133,15 @@ async function buildPoolWallet(name: string, seedHex: string): Promise<PoolWalle
 const CANCEL_SINGLE_SEEDS = [CANCEL_SINGLE_SEED, "c2".padStart(64, "0")];
 const CANCEL_DOUBLE_SEEDS = [CANCEL_DOUBLE_SEED, "c3".padStart(64, "0")];
 
+// Competing-offer specialists: each holds EXACTLY ONE coin/UTXO, so two
+// offers built from it are guaranteed to select the same input and therefore
+// share a nullifier (or unshielded spend ref). Any wallet with a choice of
+// coins would silently pick a different one and the offers would not compete.
+const COMPETING_SHIELDED_SEED = "e0".padStart(64, "0");
+const COMPETING_UNSHIELDED_SEED = "e1".padStart(64, "0");
+
 export const CANCEL_COIN = 1000n; // exact denomination the cancel cycles use
+export const COMPETING_COIN = 1500n; // the single coin two competing offers share
 
 /** Give color per specialist: singles use TA/TB, doubles use TB/TA. */
 export const cancelGiveToken = (kind: "single" | "double", i: number): TokenKey =>
@@ -376,6 +388,8 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   const cancelSingles = await Promise.all(CANCEL_SINGLE_SEEDS.map((s, i) => buildPoolWallet(`CS${i}`, s)));
   const cancelDoubles = await Promise.all(CANCEL_DOUBLE_SEEDS.map((s, i) => buildPoolWallet(`CD${i}`, s)));
   const takers = await Promise.all(TAKER_SEEDS.map((s, i) => buildPoolWallet(`T${i}`, s)));
+  const competingShielded = await buildPoolWallet("CMP-S", COMPETING_SHIELDED_SEED);
+  const competingUnshielded = await buildPoolWallet("CMP-U", COMPETING_UNSHIELDED_SEED);
 
   const plan = defaultFundingPlan(totalOffers);
 
@@ -415,6 +429,9 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   cancelSingles.forEach((c, i) =>
     outsByKey[cancelGiveToken("single", i)].push({ receiverAddress: c.shieldedAddr, amount: CANCEL_COIN }),
   );
+  // Exactly one coin each: TA (shielded) and UA (unshielded).
+  outsByKey.TA.push({ receiverAddress: competingShielded.shieldedAddr, amount: COMPETING_COIN });
+  outsByKey.UA.push({ receiverAddress: competingUnshielded.unshieldedObj, amount: COMPETING_COIN });
   cancelDoubles.forEach((c, i) =>
     outsByKey[cancelGiveToken("double", i)].push({ receiverAddress: c.shieldedAddr, amount: CANCEL_COIN * 2n }),
   );
@@ -465,6 +482,9 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   const splitJobs: Promise<void>[] = grants.map(splitGrant);
   // Cancel specialists were funded with exact denominations already — the
   // double wallets just split their 2× grant into two exact coins.
+  // Exactly one coin each: TA (shielded) and UA (unshielded).
+  outsByKey.TA.push({ receiverAddress: competingShielded.shieldedAddr, amount: COMPETING_COIN });
+  outsByKey.UA.push({ receiverAddress: competingUnshielded.unshieldedObj, amount: COMPETING_COIN });
   cancelDoubles.forEach((c, i) => {
     const key = cancelGiveToken("double", i);
     const color = ledger.colors[key]!;
@@ -486,7 +506,7 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   }
   await drainBatcherQueue("funding-splits");
   console.log(`${TAG} funding complete (batcher queue drained).`);
-  return { genesis, genesisPw, deployed, makers, cancelSingles, cancelDoubles, takers };
+  return { genesis, genesisPw, deployed, makers, cancelSingles, cancelDoubles, competingShielded, competingUnshielded, takers };
 }
 
 // ── Offer construction / publication ─────────────────────────────────────────
@@ -773,7 +793,7 @@ export function makeRefill(genesisPw: PoolWallet, target: PoolWallet, giveToken:
 }
 
 export async function stopActors(a: Actors): Promise<void> {
-  const all = [a.genesis, ...[...a.makers, ...a.cancelSingles, ...a.cancelDoubles, ...a.takers].map((p) => p.wr)];
+  const all = [a.genesis, ...[...a.makers, ...a.cancelSingles, ...a.cancelDoubles, a.competingShielded, a.competingUnshielded, ...a.takers].map((p) => p.wr)];
   for (const wr of all) await wr.wallet.stop().catch(() => {});
 }
 

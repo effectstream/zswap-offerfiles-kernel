@@ -183,6 +183,8 @@
         "@midnight-ntwrk/ledger-v8": "8.1.0",
         "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
         "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+        "@midnightntwrk/wallet-sdk-hd": "3.0.3",
+        "@midnightntwrk/wallet-sdk-unshielded-wallet": "3.1.0",
         "@noble/curves": "^1.9.7",
         "@noble/hashes": "^1.8.0",
         "@scure/base": "^2.0.0",

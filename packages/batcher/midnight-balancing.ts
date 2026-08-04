@@ -47,5 +47,9 @@ export function createMidnightBalancingAdapter(
     syncProtocolName: "parallelMidnight",
     walletResult: walletResultPromise as any,
     walletFundingTimeoutSeconds: 7200,
+    // Concurrency ceiling. Real slots = min(floor(dustUtxos/costPerTx), this);
+    // one wallet with one big NIGHT UTXO still gets one slot, so raising this
+    // only helps once the wallet's NIGHT is split into multiple dust UTXOs.
+    maxSlotsPerWallet: batcherConfig.maxSlotsPerWallet,
   });
 }

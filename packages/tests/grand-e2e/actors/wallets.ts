@@ -392,120 +392,90 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   const competingUnshielded = await buildPoolWallet("CMP-U", COMPETING_UNSHIELDED_SEED);
 
   const plan = defaultFundingPlan(totalOffers);
-
-  // Per-offer coins come from CHUNK-sized split txs (small proves — a big
-  // request outlives the prover client's timeout under load). Every split tx
-  // must be INDEPENDENT: a split that needs a previous split's change waits
-  // on the whole batcher queue and dies "insufficient funds". So the genesis
-  // fan-out grants each (wallet, color) exactly one funding coin PER CHUNK,
-  // each worth chunk×denom; each split then spends exactly one funding coin.
-  const CHUNK = 8;
+  // FUNDING: genesis emits the FINAL per-offer denominations directly.
+  //
+  // Earlier this was two-stage — genesis granted a large coin, then each
+  // wallet split it into per-offer coins. Those split txs pay no fees, so they
+  // went through the batcher, and at ~100+ of them the batcher exhausted its
+  // dust and livelocked (see ISSUES.md: it retries a balance it predicts will
+  // fail, forever, draining nothing). Funding a test fixture must not depend
+  // on the component under test having spare fee capacity.
+  //
+  // Genesis pays its own fees and holds the dust to do it, so emitting the
+  // final denominations from genesis removes the batcher from setup entirely.
+  // It costs more genesis transactions — chunked below — but they are
+  // independent of batcher health and of each other's timing.
   interface Grant {
     pw: PoolWallet;
     key: TokenKey;
     denom: bigint;
-    chunks: number;
+    coins: number;
   }
   const grants: Grant[] = [];
-  const chunksFor = (coins: number) => Math.ceil(coins / CHUNK);
   makers.forEach((m, i) => {
-    grants.push({ pw: m, key: i % 2 === 0 ? "TA" : "TB", denom: SHIELDED_COIN, chunks: chunksFor(plan.makerShieldedCoins) });
-    grants.push({ pw: m, key: i % 2 === 0 ? "UA" : "UB", denom: UNSHIELDED_COIN, chunks: chunksFor(plan.makerUnshieldedCoins) });
+    grants.push({ pw: m, key: i % 2 === 0 ? "TA" : "TB", denom: SHIELDED_COIN, coins: plan.makerShieldedCoins });
+    grants.push({ pw: m, key: i % 2 === 0 ? "UA" : "UB", denom: UNSHIELDED_COIN, coins: plan.makerUnshieldedCoins });
   });
   takers.forEach((t) => {
     for (const key of ["TA", "TB", "UA", "UB"] as const) {
-      grants.push({ pw: t, key, denom: TAKER_COIN, chunks: chunksFor(plan.takerCoinsPerColor) });
+      grants.push({ pw: t, key, denom: TAKER_COIN, coins: plan.takerCoinsPerColor });
     }
   });
 
-  console.log(`${TAG} funding fan-out (shielded)…`);
   const outsByKey: Record<TokenKey, { receiverAddress: unknown; amount: bigint }[]> = { TA: [], TB: [], UA: [], UB: [] };
   for (const g of grants) {
     const addr = isShieldedKey(g.key) ? g.pw.shieldedAddr : g.pw.unshieldedObj;
-    for (let c = 0; c < g.chunks; c++) {
-      outsByKey[g.key].push({ receiverAddress: addr, amount: g.denom * BigInt(CHUNK) });
+    for (let c = 0; c < g.coins; c++) {
+      outsByKey[g.key].push({ receiverAddress: addr, amount: g.denom });
     }
   }
+  // Specialists hold EXACT coin counts so their coin selection has no freedom:
+  // cancel singles one coin, cancel doubles two, competing wallets exactly one.
   cancelSingles.forEach((c, i) =>
     outsByKey[cancelGiveToken("single", i)].push({ receiverAddress: c.shieldedAddr, amount: CANCEL_COIN }),
   );
-  // Exactly one coin each: TA (shielded) and UA (unshielded).
+  cancelDoubles.forEach((c, i) => {
+    const key = cancelGiveToken("double", i);
+    outsByKey[key].push({ receiverAddress: c.shieldedAddr, amount: CANCEL_COIN });
+    outsByKey[key].push({ receiverAddress: c.shieldedAddr, amount: CANCEL_COIN });
+  });
   outsByKey.TA.push({ receiverAddress: competingShielded.shieldedAddr, amount: COMPETING_COIN });
   outsByKey.UA.push({ receiverAddress: competingUnshielded.unshieldedObj, amount: COMPETING_COIN });
-  cancelDoubles.forEach((c, i) =>
-    outsByKey[cancelGiveToken("double", i)].push({ receiverAddress: c.shieldedAddr, amount: CANCEL_COIN * 2n }),
-  );
+
+  const totalOuts = Object.values(outsByKey).reduce((n, a) => n + a.length, 0);
+  console.log(`${TAG} funding fan-out: ${totalOuts} coins direct from genesis (no batcher)…`);
   await genesisFanOut(genesis, true, ledger.colors.TA!, outsByKey.TA);
   await genesisFanOut(genesis, true, ledger.colors.TB!, outsByKey.TB);
-  console.log(`${TAG} funding fan-out (unshielded)…`);
   await genesisFanOut(genesis, false, ledger.colors.UA!, outsByKey.UA);
   await genesisFanOut(genesis, false, ledger.colors.UB!, outsByKey.UB);
 
-  // Wait for funds to land, then self-split into per-offer coins. Wallets
-  // prove in parallel; the batcher (ONE worker) queues everything no-wait and
-  // we drain its queue once at the end.
-  console.log(`${TAG} waiting for funds + self-splitting into per-offer coins…`);
-  // Transient-fault tolerance: proving and batcher submission both hiccup
-  // under load; a split tx is safe to rebuild (selfSplit reverts its recipe
-  // on failure, releasing the coins).
-  const retrySplit = async (label: string, fn: () => Promise<void>) => {
-    let lastErr: unknown;
-    for (let i = 0; i < 6; i++) {
-      try {
-        return await fn();
-      } catch (e) {
-        lastErr = e;
-        console.warn(`${TAG} split retry ${i + 1}/6 for ${label}: ${e instanceof Error ? e.message : e}`);
-        await sleep(45_000); // let the proof server drain before re-sending
-      }
-    }
-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
-  };
-  const splitGrant = async (g: Grant) => {
-    const color = ledger.colors[g.key]!;
-    const expectTotal = g.denom * BigInt(CHUNK) * BigInt(g.chunks);
-    const landed = isShieldedKey(g.key)
-      ? await waitForShielded(g.pw.wr, color, expectTotal, 60)
-      : await waitForUnshielded(g.pw.wr, color, expectTotal, 60);
-    if (landed < expectTotal) throw new Error(`${g.pw.name} funding of ${g.key} did not land (${landed}/${expectTotal})`);
-    for (let c = 0; c < g.chunks; c++) {
-      // Each chunk spends exactly one funding coin (chunk×denom) — no change,
-      // no dependency on any other split confirming first.
-      await retrySplit(`${g.pw.name}/${g.key}#${c}`, () =>
-        g.pw.run(() =>
-          selfSplit(g.pw, isShieldedKey(g.key), Array.from({ length: CHUNK }, () => ({ color, amount: g.denom })), false),
-        ),
-      );
-    }
-  };
+  // Confirm every wallet actually holds what it was granted before any offer
+  // is built — a missing coin here surfaces as a confusing build failure later.
+  console.log(`${TAG} verifying balances landed…`);
+  const expect: { pw: PoolWallet; key: TokenKey; total: bigint }[] = grants.map((g) => ({
+    pw: g.pw,
+    key: g.key,
+    total: g.denom * BigInt(g.coins),
+  }));
+  cancelSingles.forEach((c, i) => expect.push({ pw: c, key: cancelGiveToken("single", i), total: CANCEL_COIN }));
+  cancelDoubles.forEach((c, i) => expect.push({ pw: c, key: cancelGiveToken("double", i), total: CANCEL_COIN * 2n }));
+  expect.push({ pw: competingShielded, key: "TA", total: COMPETING_COIN });
+  expect.push({ pw: competingUnshielded, key: "UA", total: COMPETING_COIN });
 
-  const splitJobs: Promise<void>[] = grants.map(splitGrant);
-  // Cancel specialists were funded with exact denominations already — the
-  // double wallets just split their 2× grant into two exact coins.
-  // Exactly one coin each: TA (shielded) and UA (unshielded).
-  outsByKey.TA.push({ receiverAddress: competingShielded.shieldedAddr, amount: COMPETING_COIN });
-  outsByKey.UA.push({ receiverAddress: competingUnshielded.unshieldedObj, amount: COMPETING_COIN });
-  cancelDoubles.forEach((c, i) => {
-    const key = cancelGiveToken("double", i);
-    const color = ledger.colors[key]!;
-    splitJobs.push(
-      (async () => {
-        const landed = await waitForShielded(c.wr, color, CANCEL_COIN * 2n, 60);
-        if (landed < CANCEL_COIN * 2n) throw new Error(`${c.name} cancel funding did not land`);
-        await retrySplit(`${c.name}/${key}`, () =>
-          c.run(() => selfSplit(c, true, [{ color, amount: CANCEL_COIN }, { color, amount: CANCEL_COIN }], false)),
-        );
-      })(),
-    );
-  });
-
-  const settled = await Promise.allSettled(splitJobs);
-  const failed = settled.filter((s) => s.status === "rejected") as PromiseRejectedResult[];
-  if (failed.length > 0) {
-    throw new Error(`funding self-splits failed (${failed.length}): ${failed[0]!.reason}`);
+  const landed = await Promise.allSettled(
+    expect.map(async (e) => {
+      const color = ledger.colors[e.key]!;
+      const got = isShieldedKey(e.key)
+        ? await waitForShielded(e.pw.wr, color, e.total, 60)
+        : await waitForUnshielded(e.pw.wr, color, e.total, 60);
+      if (got < e.total) throw new Error(`${e.pw.name}/${e.key}: ${got} < ${e.total}`);
+    }),
+  );
+  const short = landed.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+  if (short.length > 0) {
+    throw new Error(`funding did not land for ${short.length} wallet/color pairs: ${short[0]!.reason}`);
   }
-  await drainBatcherQueue("funding-splits");
-  console.log(`${TAG} funding complete (batcher queue drained).`);
+  console.log(`${TAG} funding complete (${totalOuts} coins, batcher untouched).`);
   return { genesis, genesisPw, deployed, makers, cancelSingles, cancelDoubles, competingShielded, competingUnshielded, takers };
 }
 

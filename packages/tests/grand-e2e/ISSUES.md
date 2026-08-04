@@ -183,7 +183,8 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
-| 1 | ~~`celestiaHeight` mislabeled~~ | **RESOLVED** — renamed to `blockHeight`, docs corrected | — | upstream primitive fix deferred by decision |
+| 1 | Batcher livelocks on dust exhaustion | **product bug** | High | back off + surface; scale dust with slots |
+| — | ~~`celestiaHeight` mislabeled~~ | **RESOLVED** — renamed to `blockHeight`, docs corrected | — | upstream primitive fix deferred by decision |
 | 2 | Cross-layer offers unenforced in the ladder | gap — decide | Low/Medium | suite no longer builds them; add an explicit rule if they must be refused |
 | 3 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |
 | 4 | No green run / empty `baseline.json` | in progress | — | run 12 hit 50 pass / 1 fail in 35 min; both causes now fixed |

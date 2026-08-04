@@ -18,25 +18,34 @@ OUT=$HERE/out
 mkdir -p "$OUT"
 say() { echo "[$(date +%H:%M:%S)] $*"; }
 
+# Reap our own leftovers. Must run before EVERY attempt, not just the first:
+# a failed attempt's midnight-indexer outlives the orchestrator's SIGTERM by a
+# few seconds, and the next attempt's `--clean` deletes indexer.sqlite out from
+# under it — which surfaces as `run Sqlite migrations: disk I/O error` and
+# kills the retry too. The batcher matters for the same reason plus a worse
+# one: it holds the same wallet seed as the next stack's batcher, so two
+# compete for one wallet's dust coins. A provisioning run whose stack died
+# retries wallet sync forever.
+#
+# -u restricts matching to our own uid. Unrelated projects on this box run
+# identically-named processes (e.g. an indexer-standalone container as uid
+# 10001); those are not ours to signal and must not be touched.
+reap_orphans() {
+  local pat pid
+  for pat in 'packages/batcher/[b]atcher.ts' '[p]rovision-batcher-dust.ts' '[i]ndexer-standalone'; do
+    for pid in $(pgrep -u "$(id -u)" -f "$pat" 2>/dev/null); do
+      say "reaping orphan $pid ($pat)"; kill "$pid" 2>/dev/null
+    done
+  done
+  sleep 4
+}
+
 if [[ "${1:-}" != "--keep-stack" ]]; then
   say "shutting the stack down"
   curl -s -X POST --max-time 10 http://127.0.0.1:4747/shutdown >/dev/null 2>&1
   for i in $(seq 60); do ss -ltn 2>/dev/null | grep -qE ":(9999|4747)\b" || break; sleep 2; done
 
-  # Reap orphans. /shutdown does not always take the batcher with it, and a
-  # provisioning run whose stack died underneath it spins on wallet-sync retries
-  # forever. Both outlive their orchestrator, and a surviving batcher is the
-  # dangerous one: it holds the SAME wallet seed as the batcher the next stack
-  # starts, so two of them compete for one wallet's dust coins. Observed after
-  # an aborted run: a batcher 10 min stale and a provisioning process 83 min
-  # stale, still burning CPU. Patterns are bracketed and this runs from a script
-  # file, so neither matches the driver's own argv.
-  for pat in 'packages/batcher/[b]atcher.ts' '[p]rovision-batcher-dust.ts' 'grand-e2e/[r]un.ts'; do
-    for pid in $(pgrep -f "$pat" 2>/dev/null); do
-      say "reaping orphan $pid ($pat)"; kill "$pid" 2>/dev/null
-    done
-  done
-  sleep 3
+  reap_orphans
 
   # midnight-mint-test-tokens intermittently fails on a brand-new chain with
   # `RpcError: 1010: Invalid Transaction: Custom error: 196`, and the
@@ -48,6 +57,7 @@ if [[ "${1:-}" != "--keep-stack" ]]; then
     say "bootstrap failed — retrying"
     curl -s -X POST --max-time 10 http://127.0.0.1:4747/shutdown >/dev/null 2>&1
     sleep 10
+    reap_orphans
     [[ $attempt == 3 ]] && { say "stack would not bootstrap; see $OUT/stack.log"; exit 1; }
   done
 fi

@@ -117,20 +117,6 @@ export default {
 
 
     {
-      name: "batcher-dust-provision",
-      description:
-        "Give the batcher wallet N separate NIGHT UTXOs BEFORE it starts, so its " +
-        "startup dust registration turns each one into an independent fee stream",
-      cwd: root,
-      args: ["run", "packages/tests/grand-e2e/provision-batcher-dust.ts", "20"],
-      waitToExit: true,
-      // NOT critical: without it the batcher still runs, just with the handful
-      // of dust streams the chainspec gives it (~5 balancing txs before it
-      // starves — see packages/tests/grand-e2e/ISSUES.md).
-      dependsOn: [MidnightNames.CONTRACT_DEPLOY],
-    },
-
-    {
       name: "batcher",
       description: "ZSwap-DA balancing batcher (Celestia + Midnight, port 3334)",
       args: ["run", "packages/batcher/batcher.dev.ts"],
@@ -138,7 +124,7 @@ export default {
       type: "system-dependency",
       link: "http://localhost:3334",
       stopProcessAtPort: [3334],
-      dependsOn: [...midnightDeps, "batcher-dust-provision"],
+      dependsOn: [...midnightDeps],
     },
 
     // The frontend lives in paima-engine/templates/zswap-da — run it separately

@@ -19,66 +19,60 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 ---
 
-## 1. Dust economics cap the dev chain at ~10 batcher transactions — **BLOCKS LOAD TESTING**
+## 1. Batcher starves at 5 concurrent settlements — **coin count, not balance**
 
-**Verdict: PROVISIONING (dev chainspec). Severity: high.** Not a bug in the
-batcher's logic — an allocation fact, now measured from the ledger source.
+**Verdict: PROVISIONING (fixable from the suite). Severity: high.**
 
-### The numbers (ledger `dust.rs`, `INITIAL_PARAMETERS`)
+### What actually constrains it
 
-| quantity | value |
+Dust *balance* is never the limit. Measured fees from the ledger's own
+`calculateTransactionFee` (reference repo `POST /fees`, 1 DUST = 1e15 specks):
+
+| tx shape | fee |
 |---|---|
-| `night_dust_ratio` | `5 * SPECKS_PER_DUST / STARS_PER_NIGHT` → **5 DUST per NIGHT** (the cap) |
-| `generation_decay_rate` | `8_267` → **time to fill 0 → cap ≈ 1 week** |
-| cost per balancing tx | **250,000,000 DUST** (measured) |
-| ⇒ NIGHT required to fund **one** transaction | **50,000,000 NIGHT** |
-| batcher dust at boot | 1,250,000,000 DUST = **exactly 5 transactions** |
-| genesis NIGHT holding | 250,000,000 NIGHT = another **5 transactions** worth |
+| contract call, single | **290 specks** |
+| NIGHT transfer, balanced | **715 specks** |
 
-So the whole reachable dev supply funds roughly **ten** batcher transactions,
-and a spent stream needs about **a week** to refill. Waiting is not an option
-inside a test run.
+Generation on a dev chain runs ~15 orders of magnitude above that. The real
+constraints are **per-coin**:
 
-### How dust actually works (confirmed in `semantics.rs`)
+1. **Parallelism = dust-coin count.** Each in-flight transaction locks one
+   whole dust coin until its change matures. The batcher boots with **5**
+   coins ⇒ 5 concurrent settlements, then the
+   `no dust UTXOs yet, waiting up to 60000ms for regeneration` loop — the
+   coins are *locked*, not empty.
+2. **Each coin must clear the `additionalFeeOverhead` margin (3e14 specks).**
+   A coin's cap is `NIGHT x 5 DUST` and fills over ~a week, so a coin minted
+   from a tiny NIGHT UTXO is worthless for a long time and fails
+   "could not balance dust".
 
-1. An address receives NIGHT and registers → one dust UTXO, value 0, cap
-   `night x 5 DUST`, filling at rate R.
-2. **Further NIGHT transfers need no re-registration**: delegation is
-   address-level (`state.dust.generation.address_delegation.get(&address)` →
-   `fresh_dust_output`), so 10 more NIGHT UTXOs give 11 dust UTXOs, cap 11N,
-   rate 11R.
-3. Node throughput caps around 7.5 tx/s regardless (see
-   `acedward/midnight-wallet-dust-utxo-example`), so dust — not the node — is
-   our binding constraint.
+### Fix
 
-### Why the first provisioning attempt failed
+Send the batcher ~20 **large** NIGHT UTXOs *after* it has registered — each
+becomes an independent dust stream (delegation is address-level:
+`semantics.rs` consults `address_delegation` then calls `fresh_dust_output`,
+so no re-registration is needed). `provision-batcher-dust.ts` does this with
+`PER_UTXO = 5e12` stars (5M NIGHT ⇒ cap 2.5e22 specks).
 
-`provision-batcher-dust.ts` sent **1 NIGHT per UTXO** — a cap of **5 DUST**
-against a **250,000,000 DUST** per-transaction cost, about seven orders of
-magnitude short. The 20 UTXOs and their dust streams *were* created correctly
-(step 2 above works); they were simply worth nothing, which is why the
-batcher's usable count stayed at 5.
+**Ordering matters:** provisioning must run *after* registration. Registration
+"rotates" pre-existing UTXOs, consolidating them into at most two outputs — so
+funding first destroys the very coins you are trying to create.
 
-### Solutions
+### Corrections to earlier analysis in this file
 
-1. **Raise the dev allocation** (only option that runs the load phase as
-   designed): give the batcher wallet `N x 50,000,000 NIGHT` with dust at cap
-   — ~1.25e10 NIGHT for a 250-offer run. It is a dev chain; NIGHT is free.
-   The allocation is baked into the `midnight-node` binary's undeployed
-   chainspec, so it is an infra change, not an app change.
-2. **Provision from genesis** — `provision-batcher-dust.ts` works, but genesis
-   holds only ~5 transactions' worth, so it can at most double capacity. A
-   stopgap, not a fix. Use a large per-UTXO amount, not 1 NIGHT.
-3. **Scale the suite to the budget** — keep settlements under ~8 per stack
-   boot. p1, p3 and p3b need only a handful and stay meaningful; p5's 100
-   settlements do not fit.
+Two previous entries here were wrong and are withdrawn:
 
-### Recommendation
+- *"a balancing tx costs 250,000,000 DUST"* — misread. The batcher logs
+  `formatDust(dustCost)`, which divides specks by 1e15; that line is a
+  reserve/cap figure, not the fee. Real fees are hundreds of **specks**.
+- *"the dev chain can only fund ~10 transactions, raise the chainspec NIGHT
+  allocation"* — false, and the recommendation was withdrawn. Total NIGHT was
+  never the constraint; coin count and coin size are.
 
-(1) for real load runs; (3) immediately, so p5/p6/p7 execute end-to-end at
-least once and produce a calibrated baseline. The suite should also *measure*
-this at p0 and say plainly how many settlements the current stack can afford,
-rather than discovering it as a timeout 40 minutes in.
+The livelock itself still stands as a product issue: retrying a balance the
+code predicts will fail, indefinitely, behind a `/status` that keeps reporting
+`isInitialized: true`, is the wrong failure shape. It should back off and
+surface the condition.
 
 ---
 

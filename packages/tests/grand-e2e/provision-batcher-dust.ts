@@ -40,9 +40,20 @@ const NIGHT = "0".repeat(64);
 // seed against one node force each other to disconnect.
 const BATCHER_SEED = "0000000000000000000000000000000000000000000000000000000000000003";
 const COUNT = Number(process.argv[2] ?? 20);
-/** Per-UTXO NIGHT. Each UTXO is one dust stream; size it so the stream
- *  regenerates faster than the batcher spends it. */
-const PER_UTXO = 1_000_000n;
+/** Per-UTXO NIGHT, in STARS (1 NIGHT = 1e6 stars).
+ *
+ *  Size matters more than total. A dust coin's cap is `NIGHT x 5 DUST` and it
+ *  fills over ~a week, while balancing reserves an `additionalFeeOverhead`
+ *  margin of 3e14 specks PER COIN. A coin from a tiny NIGHT UTXO is therefore
+ *  worthless for a long time and fails with "could not balance dust" — the
+ *  reference repo calls these "near-worthless dust coins from micro NIGHT
+ *  UTXOs", and an earlier version of this script created exactly that by
+ *  sending 1 NIGHT each.
+ *
+ *  5e12 stars = 5,000,000 NIGHT ⇒ cap 2.5e22 specks, which clears the margin
+ *  by eight orders of magnitude even when barely matured. 20 of these still
+ *  leaves genesis ~1.5e14 stars for its own (tiny: ~715 specks) fees. */
+const PER_UTXO = 5_000_000_000_000n;
 
 /** Pure seed → unshielded keystore. No wallet, no sync, so no seed conflict
  *  with the running batcher. */

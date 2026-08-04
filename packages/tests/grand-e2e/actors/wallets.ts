@@ -334,14 +334,28 @@ export interface FundingPlan {
 }
 
 export function defaultFundingPlan(totalOffers: number): FundingPlan {
-  // Settled/cancelled coins recycle on-chain; only expired+live fates lock a
-  // coin permanently plus a working set for in-flight offers — sized to that,
-  // not to the raw offer count (each split output is real proving time).
-  const perMaker = Math.ceil(totalOffers / MAKER_SEEDS.length);
+  // Size to what the run ACTUALLY spends, not to a fixed ceiling.
+  //
+  // This used to mint 432 coins for a 25-offer run: `takerCoinsPerColor` was a
+  // flat 12 (6 takers x 4 colors x 12 = 288 coins) and the maker figures had a
+  // +6 floor that dominated once the per-maker share dropped to ~3 offers.
+  // Genesis has only a handful of NIGHT UTXOs to draw on, so 432 coins meant
+  // ~36 sequential fan-out chunks, each spending the previous chunk's
+  // unconfirmed change — which is the entire source of the benign-but-noisy
+  // "Insufficient funds" retries in setup.
+  //
+  // Coins are consumed one per offer built, and settled/cancelled coins
+  // recycle on-chain, so the real need is (offers this wallet makes) plus a
+  // small working set for offers in flight.
+  const makers = MAKER_SEEDS.length;
+  const takers = TAKER_SEEDS.length;
+  const perMaker = Math.ceil(totalOffers / makers);
+  // Takers spend one coin per settlement they perform, in the want-color only.
+  const settlements = Math.ceil(totalOffers * 0.4);
   return {
-    makerShieldedCoins: Math.ceil(perMaker * 0.55) + 6,
-    makerUnshieldedCoins: Math.ceil(perMaker * 0.4) + 6,
-    takerCoinsPerColor: 12,
+    makerShieldedCoins: Math.ceil(perMaker * 0.6) + 2,
+    makerUnshieldedCoins: Math.ceil(perMaker * 0.4) + 2,
+    takerCoinsPerColor: Math.ceil(settlements / takers) + 2,
   };
 }
 

@@ -19,7 +19,64 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 ---
 
-## 1. `celestiaHeight` was not a Celestia height — **RESOLVED by renaming**
+## 1. Batcher starves at 5 concurrent settlements — **coin count, not balance**
+
+**Verdict: PROVISIONING (fixable from the suite). Severity: high.**
+
+### What actually constrains it
+
+Dust *balance* is never the limit. Measured fees from the ledger's own
+`calculateTransactionFee` (reference repo `POST /fees`, 1 DUST = 1e15 specks):
+
+| tx shape | fee |
+|---|---|
+| contract call, single | **290 specks** |
+| NIGHT transfer, balanced | **715 specks** |
+
+Generation on a dev chain runs ~15 orders of magnitude above that. The real
+constraints are **per-coin**:
+
+1. **Parallelism = dust-coin count.** Each in-flight transaction locks one
+   whole dust coin until its change matures. The batcher boots with **5**
+   coins ⇒ 5 concurrent settlements, then the
+   `no dust UTXOs yet, waiting up to 60000ms for regeneration` loop — the
+   coins are *locked*, not empty.
+2. **Each coin must clear the `additionalFeeOverhead` margin (3e14 specks).**
+   A coin's cap is `NIGHT x 5 DUST` and fills over ~a week, so a coin minted
+   from a tiny NIGHT UTXO is worthless for a long time and fails
+   "could not balance dust".
+
+### Fix
+
+Send the batcher ~20 **large** NIGHT UTXOs *after* it has registered — each
+becomes an independent dust stream (delegation is address-level:
+`semantics.rs` consults `address_delegation` then calls `fresh_dust_output`,
+so no re-registration is needed). `provision-batcher-dust.ts` does this with
+`PER_UTXO = 5e12` stars (5M NIGHT ⇒ cap 2.5e22 specks).
+
+**Ordering matters:** provisioning must run *after* registration. Registration
+"rotates" pre-existing UTXOs, consolidating them into at most two outputs — so
+funding first destroys the very coins you are trying to create.
+
+### Corrections to earlier analysis in this file
+
+Two previous entries here were wrong and are withdrawn:
+
+- *"a balancing tx costs 250,000,000 DUST"* — misread. The batcher logs
+  `formatDust(dustCost)`, which divides specks by 1e15; that line is a
+  reserve/cap figure, not the fee. Real fees are hundreds of **specks**.
+- *"the dev chain can only fund ~10 transactions, raise the chainspec NIGHT
+  allocation"* — false, and the recommendation was withdrawn. Total NIGHT was
+  never the constraint; coin count and coin size are.
+
+The livelock itself still stands as a product issue: retrying a balance the
+code predicts will fail, indefinitely, behind a `/status` that keeps reporting
+`isInitialized: true`, is the wrong failure shape. It should back off and
+surface the condition.
+
+---
+
+## 2. `celestiaHeight` was not a Celestia height — **RESOLVED by renaming**
 
 The API served `celestiaHeight` on every offer (and on `offer_indexed` SSE
 events) that was actually the indexer's own effectstream/L2 block height. The
@@ -72,7 +129,7 @@ height in the payload it forwards, alongside `namespace` and `commitment`.
 
 ---
 
-## 2. Cross-layer offers fail with a misleading code — **suite no longer builds them**
+## 3. Cross-layer offers fail with a misleading code — **suite no longer builds them**
 
 **Cross-layer (shielded ↔ unshielded) swaps are not a supported offer shape.**
 The suite originally built them because HANDOFF §7 asks for "~25% mixed"; that
@@ -126,7 +183,7 @@ against MIP-0006 before adding.
 
 ---
 
-## 3. State-transition errors are invisible — **FIXED in our code**
+## 4. State-transition errors are invisible — **FIXED in our code**
 
 The runtime reports STF errors to telemetry only (`log.remote`, line 262 of
 `process-blocks.ts`), so a failing transition produced no console output: the
@@ -151,29 +208,52 @@ Trigger any STF failure and confirm the console shows:
 
 ---
 
-## 4. No green end-to-end run; `baseline.json` still empty
+## 5. Green end-to-end run — **ACHIEVED 2026-08-04**
 
-**Status: in progress.** Runs 1–8 died in setup for operational reasons (proof
-server storms, coin-reservation deadlocks, a node-side cap on fan-out tx size);
-run 9 reached 53 passes before the NUL crash; run 10 was superseded; run 11 was
-stopped deliberately to reproduce the issues in this file without contending
-for the genesis wallet and the rate-limit budget.
+**Status: done.** `143 checks, 0 failures, 50.3 min` at `GRAND_OFFERS=25`, exit
+0, `SCORECARD.md` all-green, and `baseline.json` calibrated from the run so
+later runs enforce at x1.2.
 
-Run 12 is the first attempt with **every known blocker fixed** — PR #22 (NUL
-crash), PR #23 (batcher ceiling) and PR #24 (rate limit, `TOO_LARGE`, docs,
-corrected assertions, mixed layers excluded, build-time offer guard) — run from
-a branch with all three merged. Note that a run needs all of them *together*:
-a branch off `main` alone still carries the NUL crash and the 1-slot batcher.
+Runs 1-8 died in setup for operational reasons; run 9 reached 53 passes before
+the NUL crash; runs 10-11 were superseded or stopped deliberately. Runs 12-15
+each got further and each surfaced something real:
 
-### Test
+| run | outcome | what it cost / taught |
+|---|---|---|
+| 12 | 108 pass / 9 fail | first near-complete run; p7a fell back |
+| 13 | 4 fail | ttl/root windows never exported to the node |
+| 14 | pulled in p5 | 25 batcher slots starved the box; 13 casualties |
+| 15 | **143 / 0** | 7 slots, clean stack, determinism ran for real |
+
+### Reproducing it
+
+The run is driven by `fresh-run.sh`, which exists because three things must be
+true at once and none of them are defaults:
 
 ```bash
-GRAND_OFFERS=250 bun run test:grand     # calibration scale
-GRAND_OFFERS=500 bun run test:grand     # full scale (handoff target)
+./packages/tests/grand-e2e/fresh-run.sh          # 25 offers, ~50 min
+GRAND_OFFERS=250 ./packages/tests/grand-e2e/fresh-run.sh
 ```
 
-**Pass:** exit 0, all-green `SCORECARD.md`, `out/metrics.json` written. Then
-commit those numbers into `baseline.json` so later runs enforce at ×1.2.
+1. **A wiped PGlite.** The audit sums the whole database, so a warm stack fails
+   the chart checks with the previous run's fills.
+2. **`ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600` exported before the
+   orchestrator starts.** The node reads them only at startup. Without them a
+   run fails four checks that look unrelated, ~20 min in.
+3. **`BATCHER_MAX_SLOTS_PER_WALLET=7` plus ~20 fat NIGHT UTXOs provisioned
+   *after* registration.** Slots are `min(dust coins / cost, cap)` and the cap
+   defaults to 1; registration rotates pre-existing UTXOs into at most two
+   outputs, so funding first destroys the coins it is trying to create.
+
+7 and not 100: removing the dust bottleneck exposes the **proof server** as the
+next ceiling. 25 slots drove load average to 25-30 on a 16-core box, starved
+the celestia devnet (block production ~6/min -> 1-3/min, 11x "underlying
+subscription is stuck"), and offers began dying with `blob.Submit failed: The
+operation timed out`. Neither resulting failure named the proof server.
+
+Note `baseline.json` is calibrated at 25 offers on one box; re-calibrate for a
+different scale. `publishToIndexed` p95 (~24 s) is dominated by the celestia
+`delayMs`, not by node work.
 
 ---
 
@@ -183,7 +263,10 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
-| 1 | ~~`celestiaHeight` mislabeled~~ | **RESOLVED** — renamed to `blockHeight`, docs corrected | — | upstream primitive fix deferred by decision |
+| 1 | Batcher livelocks on dust exhaustion | **product bug** | High | back off + surface; scale dust with slots |
+| 2 | `pair_stats.last_traded_at` uses SQL `NOW()` | **product bug** | Medium | breaks replay determinism and mis-orders the pair list after a resync; use the block timestamp |
+| 3 | Root window not enforced on read | **product bug** | Low/Medium | pruning is write-triggered and `isKnownRoot` has no age predicate; a quiet chain keeps accepting expired roots |
+| — | ~~`celestiaHeight` mislabeled~~ | **RESOLVED** — renamed to `blockHeight`, docs corrected | — | upstream primitive fix deferred by decision |
 | 2 | Cross-layer offers unenforced in the ladder | gap — decide | Low/Medium | suite no longer builds them; add an explicit rule if they must be refused |
 | 3 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |
 | 4 | No green run / empty `baseline.json` | in progress | — | run 12 hit 50 pass / 1 fail in 35 min; both causes now fixed |
@@ -200,3 +283,84 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 | `API.md` promised token auto-registration | doc corrected to state colors are NOT auto-registered, and why | matches `state-machine.ts` |
 | Suite asserted removed `404 UNKNOWN_TOKEN` | assertion rewritten to the `$1` fallback contract | includes the not-persisted property (0 `token_prices` rows) |
 | Suite asserted auto-registration | assertion inverted to assert absence | — |
+
+---
+
+## `pair_stats.last_traded_at` is wall-clock, not chain time
+
+**Status:** OPEN — product bug, found by p7a-determinism on 2026-08-04. Not patched.
+
+`upsertPairStatsByOfferId` ([queries.app.ts:446](../../database/sql/queries.app.ts))
+writes the column with SQL `NOW()`:
+
+```sql
+INSERT INTO pair_stats (pair_key, base_color, quote_color, trade_count, last_price, last_traded_at)
+SELECT ..., w.amount::numeric / NULLIF(g.amount::numeric, 0),
+       NOW()                       -- <-- wall-clock at write time
+```
+
+So the column records **when this node indexed the fill**, not when the trade
+happened. Two nodes replaying identical chain data disagree — measured by the
+determinism phase, instance B replaying instance A's chain from height 1:
+
+```
+pair 0488d606…  last_price 0.80368098159509202454  (identical)
+    A last_traded_at = 2026-08-04T19:54:32.242Z
+    B last_traded_at = 2026-08-04T20:16:10.538Z
+pair 571366…    last_price 1.4612500000000000      (identical)
+    A last_traded_at = 2026-08-04T19:53:39.316Z
+    B last_traded_at = 2026-08-04T20:16:09.688Z
+```
+
+Everything else in `pair_stats` matched exactly, and `offer_hash` sets were
+identical across both nodes — the wall-clock stamp is the only divergence.
+
+**Why it matters beyond determinism.** A node that was offline and catches up
+stamps every historical trade with its catch-up time, so the pair list — which
+orders by `last_traded_at DESC` ([queries.app.ts:499](../../database/sql/queries.app.ts))
+— comes back in the wrong order, and the API reports trade times that never
+happened. The codebase already states the rule it is breaking, in
+[state-machine.ts:330](../../node/state-machine.ts): *"keyed on the block
+timestamp, never wall-clock."*
+
+**Fix:** thread the archiving block's timestamp into the upsert instead of
+`NOW()`. The call site (`api.ts:102`) handles an event that knows its block.
+
+**Suite behaviour meanwhile:** `diffStates` excludes `last_traded_at` from the
+determinism diff and prints `last_traded_at EXCLUDED and it DID differ` when it
+reproduces, so the run can be green without hiding the defect.
+
+---
+
+## The root window is not enforced on read
+
+**Status:** OPEN — product issue, found while triaging a p4 failure on
+2026-08-04. Not patched.
+
+Two facts combine:
+
+1. `pruneKnownRoots` is called **only** inside the `midnight-zswap-root`
+   transition ([state-machine.ts:343](../../node/state-machine.ts)), with a
+   cutoff derived from the block being processed. Pruning is write-triggered,
+   so when the chain stops producing zswap roots nothing prunes.
+2. `isKnownRoot` is `SELECT 1 FROM known_roots WHERE root = :root!` — no age
+   predicate.
+
+So on a chain that goes quiet, roots stay in the table past
+`ROOT_WINDOW_SECONDS`, and the submit gate keeps accepting offers proving
+against them. The window silently extends for as long as the quiet lasts.
+
+**Measured.** Audit-time snapshot after a ~20 min replay with no offers
+flowing: 10 rows spanning 594 s (inside the 600 s window) but 23 minutes old —
+none pruned. Separately, with the node left on its 3600 s default, the
+"foreign" Lace fixture was **accepted** (HTTP 200, stored as `offer_file` id=3)
+because its root was still present at 20 min old; it is rejected as
+`ROOT_UNKNOWN` only once new roots arrive and drive a prune.
+
+**Impact:** low on a busy chain, where roots arrive constantly. It matters for
+a quiet or stalled chain, and it makes the window's meaning depend on traffic
+rather than on time.
+
+**Fix:** add the age predicate to the read (`AND last_seen_ms >= :cutoff`), or
+prune on a timer as well as on write. The read-side predicate is the cheaper
+and more honest of the two — it makes the window true by construction.

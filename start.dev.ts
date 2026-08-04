@@ -115,6 +115,7 @@ export default {
       ],
     },
 
+
     {
       name: "batcher",
       description: "ZSwap-DA balancing batcher (Celestia + Midnight, port 3334)",

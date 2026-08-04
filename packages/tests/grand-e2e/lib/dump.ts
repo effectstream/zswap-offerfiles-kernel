@@ -94,6 +94,32 @@ export function diffStates(a: StateDump, b: StateDump, heightsMatch: boolean): D
         tableReports.push(`~ known_tokens: ${before - rowsA.length} API-registered row(s) excluded (request-driven)`);
       }
     }
+    if (table === "pair_stats") {
+      // PRODUCT BUG, not a test volatile — see ISSUES.md "pair_stats
+      // last_traded_at is wall-clock". upsertPairStatsByOfferId writes
+      // last_traded_at with SQL NOW() (queries.app.ts), so the column records
+      // when THIS NODE indexed the fill, not when the trade happened. Two
+      // nodes replaying the same chain therefore disagree:
+      //   A last_traded_at=2026-08-04T19:54:32.242Z
+      //   B last_traded_at=2026-08-04T20:16:10.538Z   (same pair, same
+      //                                                last_price, replayed)
+      // Excluded from the diff so the determinism check reports the state that
+      // IS derived from chain data; the defect is tracked in the scorecard
+      // rather than silently tolerated. Everything else in pair_stats
+      // (pair_key, colors, trade_count, last_price) is compared as normal.
+      const strip = (rows: Record<string, unknown>[]) =>
+        rows.map(({ last_traded_at: _t, ...rest }) => rest);
+      const differed = rowsA.some((r, i) =>
+        String(r["last_traded_at"]) !== String(rowsB[i]?.["last_traded_at"]),
+      );
+      rowsA = strip(rowsA);
+      rowsB = strip(rowsB);
+      tableReports.push(
+        differed
+          ? "~ pair_stats: last_traded_at EXCLUDED and it DID differ — reproduces the wall-clock NOW() bug"
+          : "~ pair_stats: last_traded_at excluded (wall-clock NOW(); see ISSUES.md)",
+      );
+    }
     if (table === "known_roots" && !heightsMatch) {
       // Dumped at slightly different heights: the still-current root keeps
       // re-upserting last_seen_ms, and the prune cutoff slides with it. Drop

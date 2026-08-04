@@ -61,8 +61,21 @@ function preVerify(fix: ApiFixture): ApiFixture {
   return fix;
 }
 
-/** The Lace-made fixture offer — parses fine, but its coins/roots don't exist
- *  on a fresh dev chain, so the submit gate answers ROOT_UNKNOWN. */
+/**
+ * The Lace-made fixture offer — parses fine, but its coins don't exist here, so
+ * the submit gate answers ROOT_UNKNOWN.
+ *
+ * PRECONDITION: the chain must be OLDER than ROOT_WINDOW_SECONDS. "Foreign" is
+ * not a property of the blob — a dev chain starts from the same genesis state
+ * the fixture was built against, so the early root it proves against is
+ * genuinely present in this node's known_roots and its Merkle proof genuinely
+ * verifies. It only becomes unknown once that root ages out of the window.
+ *
+ * Measured: with the node left on its 3600s default the fixture was ACCEPTED
+ * (HTTP 200, stored as offer_file id=3) with its root just 20 min old. With
+ * ROOT_WINDOW_SECONDS=600 and a suite that reaches p4 ~15 min in, it ages out
+ * and the gate rejects as expected. A much faster run would flake here.
+ */
 export function foreignRootBlob(): string {
   const p = new URL("../../../validator/fixtures/valid-offer.bech32", import.meta.url).pathname;
   return readFileSync(p, "utf-8").trim();

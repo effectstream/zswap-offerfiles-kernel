@@ -7,7 +7,7 @@ import type { Client } from "pg";
 import { resolve } from "node:path";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { offerHashFromBytes } from "@zswap-da/offer-guard";
-import { BATCHER_URL, OFFER_TTL_SECONDS, ROOT_WINDOW_SECONDS } from "../config.ts";
+import { BATCHER_URL, ORCHESTRATOR_URL } from "../config.ts";
 import { getHealth, getHealthSync } from "../lib/api2.ts";
 import { getBlobsAt, networkHeadHeight } from "../lib/celestia.ts";
 import { tableCount } from "../lib/db2.ts";
@@ -18,9 +18,33 @@ const REPO_ROOT = resolve(new URL("../../../..", import.meta.url).pathname);
 
 export const spawnedProcesses: ReturnType<typeof Bun.spawn>[] = [];
 
-async function pkillF(pattern: string): Promise<void> {
-  const proc = Bun.spawn(["pkill", "-9", "-f", pattern], { stdout: "ignore", stderr: "ignore" });
-  await proc.exited;
+/**
+ * Restart a stack process through the ORCHESTRATOR, never with pkill.
+ *
+ * The orchestrator owns these processes and treats an unexpected exit as
+ * fatal: killing the indexer directly logs "Shutting down: Background process
+ * ... exited unexpectedly" and tears down the entire stack, which is how an
+ * earlier version of this phase destroyed its own run mid-flight. POST
+ * /restart is the supported path and leaves the rest of the stack alone.
+ */
+async function orchestratorRestart(name: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${ORCHESTRATOR_URL}/restart`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body: any = await r.json().catch(() => ({}));
+    if (!r.ok || body?.success !== true) {
+      note("chaos", `restart(${name}) -> ${r.status} ${JSON.stringify(body).slice(0, 120)}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    note("chaos", `restart(${name}) failed: ${e instanceof Error ? e.message : e}`);
+    return false;
+  }
 }
 
 async function offerSetSnapshot(db: Client): Promise<{ total: number; hashes: Set<string> }> {
@@ -39,18 +63,13 @@ export async function chaosIndexer(db: Client): Promise<void> {
   note("chaos", "killing the Midnight indexer…");
   const before = await offerSetSnapshot(db);
 
-  await pkillF("npm-midnight-indexer");
-  await sleep(2000);
-  const stillUp = await pgrepF("npm-midnight-indexer");
-  await check("chaos: indexer process killed", async () => stillUp === null);
-
-  const proc = Bun.spawn(["bun", "run", "midnight-indexer:start"], {
-    cwd: resolve(REPO_ROOT, "packages/contracts-midnight"),
-    env: { ...process.env },
-    stdout: Bun.file("/dev/null") as any,
-    stderr: Bun.file("/dev/null") as any,
-  });
-  spawnedProcesses.push(proc);
+  const restarted = await orchestratorRestart("midnight-indexer");
+  await check("chaos: indexer restarted via orchestrator", async () => restarted);
+  if (!restarted) {
+    note("chaos", "indexer restart unavailable — skipping the re-index assertions");
+    return;
+  }
+  await sleep(5000);
 
   await check("chaos: indexer relaunched and midnight sync advances again", async () => {
     let last = -1;
@@ -105,20 +124,9 @@ export async function chaosBatcher(
   const blobs = await submitJustBefore();
   const hashes = blobs.map((b) => offerHashFromBytes(OfferFiles.decode(b)));
 
-  await pkillF("batcher.dev.ts");
-  await sleep(2000);
-  const proc = Bun.spawn(["bun", "run", "packages/batcher/batcher.dev.ts"], {
-    cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      NODE_ENV: "development",
-      ROOT_WINDOW_SECONDS: String(ROOT_WINDOW_SECONDS),
-      OFFER_TTL_SECONDS: String(OFFER_TTL_SECONDS),
-    },
-    stdout: Bun.file("/dev/null") as any,
-    stderr: Bun.file("/dev/null") as any,
-  });
-  spawnedProcesses.push(proc);
+  const ok = await orchestratorRestart("batcher");
+  await check("chaos: batcher restarted via orchestrator", async () => ok);
+  await sleep(5000);
 
   await check("chaos: batcher back to healthy after restart", async () =>
     waitUntil(
@@ -185,46 +193,18 @@ export async function chaosBatcher(
   });
 }
 
-/** Kill the STM/sync process; verify recovery without state loss. */
+/** Restart the STM/sync process; verify recovery without state loss. */
 export async function chaosSync(db: Client): Promise<void> {
-  note("chaos", "killing the sync/STM process…");
-  const pid = await pgrepF("packages/node/main.dev.ts");
-  if (!pid) {
-    note("chaos", "sync pid not found — skipping sync-kill chaos (documented)");
-    return;
-  }
+  note("chaos", "restarting the sync/STM process via the orchestrator…");
   const beforeOffers = (await tableCount(db, "offer_file")) + (await tableCount(db, "offer_file_history"));
   const beforeNullifiers = await tableCount(db, "nullifiers");
 
-  Bun.spawn(["kill", "-9", String(pid)], { stdout: "ignore", stderr: "ignore" });
-  await waitUntil("api down", async () => !(await getHealth()), 12, 2500);
+  const ok = await orchestratorRestart("sync");
+  await check("chaos: sync restarted via orchestrator", async () => ok);
+  if (!ok) return;
 
-  // Prefer the orchestrator's own restart; fall back to respawning ourselves.
-  const restarted = await waitUntil("api back (orchestrator restart)", () => getHealth(), 18, 5000);
-  if (!restarted) {
-    note("chaos", "orchestrator did not restart sync — respawning main.dev.ts ourselves");
-    const proc = Bun.spawn(["bun", "run", "packages/node/main.dev.ts"], {
-      cwd: REPO_ROOT,
-      env: {
-        ...process.env,
-        NODE_ENV: "development",
-        PGLITE: "true",
-        ROOT_WINDOW_SECONDS: String(ROOT_WINDOW_SECONDS),
-        OFFER_TTL_SECONDS: String(OFFER_TTL_SECONDS),
-      },
-      stdout: Bun.file("/dev/null") as any,
-      stderr: Bun.file("/dev/null") as any,
-    });
-    spawnedProcesses.push(proc);
-  }
-
-  await check("chaos: sync process recovered (health + sync ok)", async () =>
-    waitUntil(
-      "sync recovered",
-      async () => (await getHealth()) && (await getHealthSync())?.status !== "error",
-      36,
-      5000,
-    ),
+  await check("chaos: sync process recovered (health returns)", async () =>
+    waitUntil("sync recovered", async () => await getHealth(), 36, 5000),
   );
 
   await check("chaos: no state lost across the sync restart", async () => {

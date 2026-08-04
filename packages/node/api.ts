@@ -45,10 +45,19 @@ export const apiRouter: StartConfigApiRouter = async function (
   dbConn: any,
 ): Promise<void> {
   // 60 requests/min per IP — applied to every route in this router.
+  //
+  // `statusCode` is load-bearing, not decoration: @fastify/rate-limit THROWS
+  // whatever this builder returns (`throw params.errorResponseBuilder(...)`),
+  // and our setErrorHandler below routes on `error.statusCode`. Omitting it
+  // made every throttled request answer `500 INTERNAL` instead of 429 — the
+  // limiter counted correctly and set the x-ratelimit-* headers, but told
+  // clients "server fault" instead of "back off", so no caller could throttle
+  // itself. Verified: 90 requests gave {200:56, 500:34}.
   await server.register(rateLimit, {
     max: 60,
     timeWindow: "1 minute",
     errorResponseBuilder: () => ({
+      statusCode: 429,
       error: "RATE_LIMITED",
       reason: "Too many requests — please wait before retrying.",
     }),
@@ -533,6 +542,16 @@ export const apiRouter: StartConfigApiRouter = async function (
   server.post(
     "/v1/offers",
     {
+      // Fastify's default bodyLimit is 1 MiB, but OFFER_MAX_BYTES is 1 MiB
+      // DECODED and bech32m inflates the wire form ~1.6x — so every blob big
+      // enough to earn `TOO_LARGE` was answered `413 BAD_REQUEST` by the HTTP
+      // layer before the validator ever saw it, making the documented code
+      // unreachable over HTTP (it could still fire on the Celestia path).
+      // Sized so the validator owns the verdict: bech32m overhead (~1.6x) plus
+      // JSON envelope, with a hard ceiling still well below anything that
+      // could exhaust memory. Blobs past THIS are still 413 — that is the
+      // transport refusing to buffer, which is the right layer for it.
+      bodyLimit: Math.ceil(OFFER_MAX_BYTES * 2),
       schema: {
         body: {
           type: "object",

@@ -64,7 +64,14 @@ interface Plan {
   cancels: { rec: OfferRecord; pw: PoolWallet; shape: CancelShape; kind: "single" | "double"; ki: number }[];
 }
 
-const LAYERS: OfferRecord["layer"][] = ["ss", "ss", "uu", "mixed-sg", "ss", "uu", "mixed-ug", "ss"];
+// Mixed layers are excluded pending an upstream answer: initSwap accepts a
+// type-legal unshielded desired output alongside a shielded input and
+// silently returns a transaction WITHOUT it (no error), so every such offer
+// is rejected NOT_A_SWAP. Proven with triage-mixed-offer.ts by reading the
+// transaction's raw imbalances — deriveLegs reports the tx correctly, the tx
+// simply lacks the output. Restore "mixed-sg"/"mixed-ug" here once the SDK
+// either supports the combination or rejects it loudly. See ISSUES.md.
+const LAYERS: OfferRecord["layer"][] = ["ss", "ss", "uu", "ss", "uu", "ss"];
 
 function layerTokens(layer: OfferRecord["layer"], makerIdx: number): { give: TokenKey; want: TokenKey } {
   const even = makerIdx % 2 === 0;

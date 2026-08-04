@@ -34,6 +34,11 @@ const sdkConfig: SdkBatcherConfig<DefaultBatcherInput> = {
   confirmationLevel: "wait-receipt",
   enableEventSystem: false,
   port: batcherConfig.port,
+  // #847: these were accepted-but-ignored before 0.103.1 (retry limit was
+  // hardcoded to 3). Only genuine input failures charge retries now; infra
+  // failures park inputs and cool the target down for retryDelayMs.
+  ...(batcherConfig.maxRetries !== undefined && { maxRetries: batcherConfig.maxRetries }),
+  ...(batcherConfig.retryDelayMs !== undefined && { retryDelayMs: batcherConfig.retryDelayMs }),
 };
 
 const storage = new FileStorage(batcherConfig.storageDir);

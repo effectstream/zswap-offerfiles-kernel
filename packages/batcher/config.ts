@@ -19,6 +19,18 @@ export interface BatcherConfig {
   // "worker slots: N (M UTXOs, cost=…, cap=…)" line on startup for what you
   // got. The proof server becomes the next ceiling.
   maxSlotsPerWallet: number;
+  // 0.103.1 (effectstream#847) hardening knobs. All optional: undefined defers
+  // to the SDK's defaults. maxRetries/retryDelayMs go to the core batcher
+  // (per-input retry budget + infra-failure cooldown — both existed before
+  // #847 but were never read); the rest go to the midnight balancing adapter.
+  maxRetries: number | undefined;
+  retryDelayMs: number | undefined;
+  // Balancing adapter: how long to wait for a dust coin to become spendable,
+  // the value below which a coin does not count as capacity (specks; #847's
+  // value-aware gate), and the /send-input size cap.
+  dustWaitTimeoutMs: number | undefined;
+  minSpendableDustPerCoin: bigint | undefined;
+  maxInputChars: number | undefined;
   midnight: {
     id: string;
     indexer: string;
@@ -72,6 +84,14 @@ export function loadBatcherConfig(): BatcherConfig {
     storageDir: ENV.getString("BATCHER_STORAGE_DIR", DEFAULT_STORAGE_DIR),
     walletSeed: ENV.getString("BATCHER_WALLET_SEED") || BATCHER_SEED,
     maxSlotsPerWallet: ENV.getNumber("BATCHER_MAX_SLOTS_PER_WALLET", 1),
+    maxRetries: optionalNumber("BATCHER_MAX_RETRIES"),
+    retryDelayMs: optionalNumber("BATCHER_RETRY_DELAY_MS"),
+    dustWaitTimeoutMs: optionalNumber("BATCHER_DUST_WAIT_TIMEOUT_MS"),
+    minSpendableDustPerCoin: (() => {
+      const raw = ENV.getString("BATCHER_MIN_SPENDABLE_DUST_PER_COIN", "");
+      return raw ? BigInt(raw) : undefined;
+    })(),
+    maxInputChars: optionalNumber("BATCHER_MAX_INPUT_CHARS"),
     midnight: {
       id: midnightNetworkConfig.id,
       indexer: midnightNetworkConfig.indexer,

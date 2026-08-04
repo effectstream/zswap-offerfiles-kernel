@@ -23,6 +23,22 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 **Verdict: PROVISIONING (fixable from the suite). Severity: high.**
 
+> **Update 2026-08-04:** the *livelock* half of this issue is **fixed upstream**
+> in `@effectstream/batcher-sdk` 0.103.1
+> ([effectstream#847](https://github.com/effectstream/effectstream/pull/847)),
+> which root-caused it with a Dockerized adversarial harness: the doom loop
+> needs an infrastructure seed (indexer outage, misprovisioning) after which the
+> old mechanics turned a transient condition into silent input loss. 0.103.1
+> classifies infra-vs-input failures (infra parks inputs, cools the target, and
+> charges no retries), gates capacity on *spendable* dust value rather than coin
+> count, honors `maxRetries`/`retryDelayMs` (previously accepted but ignored),
+> rejects poison/oversized payloads at `/send-input` with a 400, and reverts
+> dust bookings on `signRecipe`/submit-timeout failures. This repo wires the new
+> knobs through `BATCHER_MAX_RETRIES`, `BATCHER_RETRY_DELAY_MS`,
+> `BATCHER_DUST_WAIT_TIMEOUT_MS`, `BATCHER_MIN_SPENDABLE_DUST_PER_COIN` and
+> `BATCHER_MAX_INPUT_CHARS`. The provisioning guidance below (fat NIGHT UTXOs
+> after registration) still applies — coins are still the parallelism unit.
+
 ### What actually constrains it
 
 Dust *balance* is never the limit. Measured fees from the ledger's own
@@ -263,7 +279,7 @@ different scale. `publishToIndexed` p95 (~24 s) is dominated by the celestia
 
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
-| 1 | Batcher livelocks on dust exhaustion | **product bug** | High | back off + surface; scale dust with slots |
+| — | ~~Batcher livelocks on dust exhaustion~~ | **FIXED upstream** — batcher-sdk 0.103.1 (effectstream#847) | — | infra-vs-input classification, dust-aware capacity, honored retry config |
 | 2 | `pair_stats.last_traded_at` uses SQL `NOW()` | **product bug** | Medium | breaks replay determinism and mis-orders the pair list after a resync; use the block timestamp |
 | 3 | Root window not enforced on read | **product bug** | Low/Medium | pruning is write-triggered and `isKnownRoot` has no age predicate; a quiet chain keeps accepting expired roots |
 | — | ~~`celestiaHeight` mislabeled~~ | **RESOLVED** — renamed to `blockHeight`, docs corrected | — | upstream primitive fix deferred by decision |

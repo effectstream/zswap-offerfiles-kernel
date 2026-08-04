@@ -51,5 +51,10 @@ export function createMidnightBalancingAdapter(
     // one wallet with one big NIGHT UTXO still gets one slot, so raising this
     // only helps once the wallet's NIGHT is split into multiple dust UTXOs.
     maxSlotsPerWallet: batcherConfig.maxSlotsPerWallet,
+    // #847 hardening: value-aware dust gate, wait budget, intake size cap.
+    // undefined defers to SDK defaults (1.5x wallet overhead / 60s / 500k).
+    dustWaitTimeoutMs: batcherConfig.dustWaitTimeoutMs,
+    minSpendableDustPerCoin: batcherConfig.minSpendableDustPerCoin,
+    maxInputChars: batcherConfig.maxInputChars,
   });
 }

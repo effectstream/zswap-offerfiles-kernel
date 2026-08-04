@@ -258,3 +258,84 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 | `API.md` promised token auto-registration | doc corrected to state colors are NOT auto-registered, and why | matches `state-machine.ts` |
 | Suite asserted removed `404 UNKNOWN_TOKEN` | assertion rewritten to the `$1` fallback contract | includes the not-persisted property (0 `token_prices` rows) |
 | Suite asserted auto-registration | assertion inverted to assert absence | — |
+
+---
+
+## `pair_stats.last_traded_at` is wall-clock, not chain time
+
+**Status:** OPEN — product bug, found by p7a-determinism on 2026-08-04. Not patched.
+
+`upsertPairStatsByOfferId` ([queries.app.ts:446](../../database/sql/queries.app.ts))
+writes the column with SQL `NOW()`:
+
+```sql
+INSERT INTO pair_stats (pair_key, base_color, quote_color, trade_count, last_price, last_traded_at)
+SELECT ..., w.amount::numeric / NULLIF(g.amount::numeric, 0),
+       NOW()                       -- <-- wall-clock at write time
+```
+
+So the column records **when this node indexed the fill**, not when the trade
+happened. Two nodes replaying identical chain data disagree — measured by the
+determinism phase, instance B replaying instance A's chain from height 1:
+
+```
+pair 0488d606…  last_price 0.80368098159509202454  (identical)
+    A last_traded_at = 2026-08-04T19:54:32.242Z
+    B last_traded_at = 2026-08-04T20:16:10.538Z
+pair 571366…    last_price 1.4612500000000000      (identical)
+    A last_traded_at = 2026-08-04T19:53:39.316Z
+    B last_traded_at = 2026-08-04T20:16:09.688Z
+```
+
+Everything else in `pair_stats` matched exactly, and `offer_hash` sets were
+identical across both nodes — the wall-clock stamp is the only divergence.
+
+**Why it matters beyond determinism.** A node that was offline and catches up
+stamps every historical trade with its catch-up time, so the pair list — which
+orders by `last_traded_at DESC` ([queries.app.ts:499](../../database/sql/queries.app.ts))
+— comes back in the wrong order, and the API reports trade times that never
+happened. The codebase already states the rule it is breaking, in
+[state-machine.ts:330](../../node/state-machine.ts): *"keyed on the block
+timestamp, never wall-clock."*
+
+**Fix:** thread the archiving block's timestamp into the upsert instead of
+`NOW()`. The call site (`api.ts:102`) handles an event that knows its block.
+
+**Suite behaviour meanwhile:** `diffStates` excludes `last_traded_at` from the
+determinism diff and prints `last_traded_at EXCLUDED and it DID differ` when it
+reproduces, so the run can be green without hiding the defect.
+
+---
+
+## The root window is not enforced on read
+
+**Status:** OPEN — product issue, found while triaging a p4 failure on
+2026-08-04. Not patched.
+
+Two facts combine:
+
+1. `pruneKnownRoots` is called **only** inside the `midnight-zswap-root`
+   transition ([state-machine.ts:343](../../node/state-machine.ts)), with a
+   cutoff derived from the block being processed. Pruning is write-triggered,
+   so when the chain stops producing zswap roots nothing prunes.
+2. `isKnownRoot` is `SELECT 1 FROM known_roots WHERE root = :root!` — no age
+   predicate.
+
+So on a chain that goes quiet, roots stay in the table past
+`ROOT_WINDOW_SECONDS`, and the submit gate keeps accepting offers proving
+against them. The window silently extends for as long as the quiet lasts.
+
+**Measured.** Audit-time snapshot after a ~20 min replay with no offers
+flowing: 10 rows spanning 594 s (inside the 600 s window) but 23 minutes old —
+none pruned. Separately, with the node left on its 3600 s default, the
+"foreign" Lace fixture was **accepted** (HTTP 200, stored as `offer_file` id=3)
+because its root was still present at 20 min old; it is rejected as
+`ROOT_UNKNOWN` only once new roots arrive and drive a prune.
+
+**Impact:** low on a busy chain, where roots arrive constantly. It matters for
+a quiet or stalled chain, and it makes the window's meaning depend on traffic
+rather than on time.
+
+**Fix:** add the age predicate to the read (`AND last_seen_ms >= :cutoff`), or
+prune on a timer as well as on write. The read-side predicate is the cheaper
+and more honest of the two — it makes the window true by construction.

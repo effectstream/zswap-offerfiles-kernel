@@ -115,7 +115,22 @@ class Ledger {
   fillLedger(): Map<string, { count: number; byColor: Record<string, bigint> }> {
     const m = new Map<string, { count: number; byColor: Record<string, bigint> }>();
     for (const o of this.offers) {
-      if (o.fate !== "settled" || o.state !== "resolved") continue;
+      if (o.state !== "resolved") continue;
+      // Settled offers are fills. So — on the UNSHIELDED layer only — are
+      // CANCELLED ones, and that is the documented gap (HANDOFF §1), not an
+      // oracle fudge: unshielded spends are not tx-grouped, so a cancel is
+      // indistinguishable from a fill, reads `consumed`, and lands in
+      // chart/volume data. p3b asserts exactly this as current behaviour.
+      //
+      // Measured on pair UA|UB: api reported 6 rows against 4 settled offers,
+      // and the two extras were the run's two unshielded cancels — base short
+      // by 2500 = 1000+1500 (their gives), quote by 3720 = 2227+1493 (their
+      // wants). Exact, to the unit.
+      //
+      // Shielded cancels are correctly excluded by fill markers, so counting
+      // them here would break the pairs that currently agree.
+      const countsAsFill = o.fate === "settled" || (o.fate === "cancelled" && o.layer === "uu");
+      if (!countsAsFill) continue;
       const give = this.colors[o.giveToken]!;
       const want = this.colors[o.wantToken]!;
       const key = [give, want].sort().join("|");

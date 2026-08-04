@@ -19,93 +19,94 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 ---
 
-## 1. Mixed offers: the unshielded want output is silently never created
+## 1. Mixed offers: SDK silently drops the cross-layer half — **WORKED AROUND**
 
-**Verdict: TEST BUG in the suite's offer construction — but with a product
-question attached. Severity: medium.**
+**Verdict: SDK BUG (root-caused in source). Severity: medium.** A
+shielded-give / unshielded-want offer was rejected `NOT_A_SWAP`
+("1 give, 0 wants") because the transaction genuinely lacked the unshielded
+output.
 
-A shielded-give / unshielded-want offer is rejected `NOT_A_SWAP`
-("1 give, 0 wants"). It is **not** a leg-derivation bug: the transaction
-genuinely has no unshielded output.
+### Root cause — `wallet-sdk-facade@4.1.0`, `initSwap`
 
-### Reproduce
+The two conditions disagree. Participation is decided from inputs **or**
+outputs:
+
+```js
+const hasUnshieldedPart =
+  (unshieldedInputs && Object.keys(unshieldedInputs).length > 0) || unshieldedOutputs.length > 0;
+```
+
+but construction additionally demands the **inputs** be defined:
+
+```js
+const unshieldedTx = hasUnshieldedPart && unshieldedInputs !== undefined
+  ? await this.unshielded.initSwap(unshieldedInputs, unshieldedOutputs, ttl)
+  : undefined;
+```
+
+So a cross-layer swap — shielded inputs, unshielded outputs — sets
+`hasUnshieldedPart = true`, hits `unshieldedInputs === undefined`, and the
+outputs are **discarded with no error**. The shielded side carries the same
+asymmetry, so unshielded-give / shielded-want fails identically.
+
+This is why the earlier evidence looked like a derivation bug and wasn't: the
+transaction's raw imbalances show only the give side, so `deriveLegs` was
+reporting it accurately. There was never an output to derive.
+
+### Workaround (applied)
+
+Pass an **empty object** for the opposite layer's inputs, which satisfies
+`!== undefined` while selecting no coins:
+
+```ts
+{ shielded: { [giveColor]: amount }, unshielded: {} }
+```
+
+`actors/wallets.ts` does this for both directions. Remove it once the SDK's
+two conditions agree.
+
+### Reproduce / verify
 
 ```bash
 bun run packages/tests/grand-e2e/triage-mixed-offer.ts
 ```
 
-### Observed
+**Before:** `wants: []`, imbalances show only `seg0 shielded`.
+**After the workaround:** an unshielded imbalance appears and `wants` is
+populated. Mixed layers are restored to the p5 mix once this passes.
 
-```
-── validator verdict ──
-ok:    false
-code:  NOT_A_SWAP
-gives: [{"token":"0000…0000","amount":"1000","kind":"SHIELDED"}]
-wants: []
+### Report upstream
 
-tx imbalances (ground truth):
-  seg0 shielded 000000000000 = 1000
-
-── verdict ──
-TEST BUG: the tx never carried an unshielded output.
-```
-
-The raw transaction imbalances — read straight off the ledger object, bypassing
-`deriveLegs()` entirely — show **only** a shielded entry. `deriveLegs` is
-reporting the transaction accurately.
-
-### What was ruled out
-
-| Hypothesis | Result |
-|---|---|
-| `deriveLegs()` misses unshielded wants | **Ruled out** — no unshielded imbalance exists to miss |
-| The `finalizeTransaction()` vs `signRecipe()` branch drops it | **Ruled out** — forcing the `signRecipe` path gives a byte-identical outcome (16439 vs 16440 chars, same verdict) |
-| Same-color netting (shielded NIGHT vs unshielded NIGHT) | **Ruled out** — the suite's p3 offer used distinct colors (TB→UB) and failed identically |
-| The call shape is type-illegal | **Ruled out** — `CombinedSwapOutputs = ShieldedTokenTransfer \| UnshieldedTokenTransfer`, so an unshielded output is a legal argument |
-
-### Open product question
-
-`initSwap` accepts a type-legal unshielded desired output alongside a shielded
-input and **silently returns a transaction without it — no error, no warning**.
-Either mixed-layer swaps are unsupported (then rejecting the argument loudly
-beats dropping it), or this is an SDK defect. Worth raising upstream; MIP-0006
-mixed offers depend on the answer.
-
-### Mitigation applied (suite side)
-
-1. `phases/p5-load.ts` — `mixed-sg` / `mixed-ug` removed from `LAYERS`.
-   Restore them once the SDK either supports the combination or rejects it.
-2. `actors/wallets.ts` — `buildOffer` now runs `validateZswapOffer` on what it
-   actually built and throws with the derived legs if it is not a valid offer.
-   The old `try/catch` fallback could never have caught this: the failing path
-   throws nothing, it just returns a transaction missing a leg. With the guard
-   the failure names itself at construction instead of surfacing much later as
-   an opaque `NOT_A_SWAP` at ingestion, misattributed to the indexer.
+The fix belongs in the SDK: make construction agree with the guard, or reject
+the combination loudly. Silently returning a transaction that omits a
+requested output is the worst option — callers cannot tell without
+re-inspecting the result, which is why `buildOffer` now validates what it
+built.
 
 ---
 
-## 2. State-transition errors are invisible
+## 2. State-transition errors are invisible — **FIXED in our code**
 
-**Verdict: PRODUCT ERGONOMICS. Severity: medium.**
+The runtime reports STF errors to telemetry only (`log.remote`, line 262 of
+`process-blocks.ts`), so a failing transition produced no console output: the
+block transaction aborted and the next statement died with Postgres `25P02`,
+surfacing as an unexplained process exit. That is exactly how the `0x00` scrub
+crash presented — hours of bisecting a silent death whose cause was a one-line
+SQL error the engine had already caught and hidden.
 
-The runtime routes STF errors to telemetry only (`process-blocks.ts` STEP 5).
-A clean SQL failure therefore surfaced as an unexplained process exit — this is
-**why the NUL crash (PR #22) took hours instead of minutes** to localise, and
-it will do the same to the next STF bug.
+### Fix (no `node_modules` patch)
 
-### Reproduce
+`state-machine.ts` now registers every transition through `addTransition()`,
+which logs and **rethrows**, so rollback semantics are unchanged and only
+visibility is added. Kept in our code so it survives `bun install`.
 
-```bash
-grep -rn "log.remote" node_modules/@effectstream/runtime/src/process-blocks.ts
+### Verify
+
+Trigger any STF failure and confirm the console shows:
+
 ```
-
-Patch that catch to `console.error`, trigger any STF failure, and confirm the
-error text now appears. The patch is wiped by `bun install`, so the durable fix
-belongs upstream.
-
-### Fix
-
-Surface STF errors at `console.error` at least in development.
+[STF] transition "<name>" FAILED (block N) — this aborts the block transaction: <error>
+```
 
 ---
 
@@ -141,8 +142,8 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
-| 1 | Mixed-offer unshielded want silently dropped | test bug + upstream question | Medium | mitigated in-suite; raise with the wallet SDK |
-| 2 | STF errors invisible (telemetry only) | product ergonomics | Medium | upstream — `console.error` in dev |
+| 1 | Mixed-offer cross-layer half dropped | **SDK bug** (root-caused in source) | Medium | worked around in-suite; report upstream |
+| 2 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |
 | 3 | No green run / empty `baseline.json` | in progress | — | next full run |
 
 ### Fixed

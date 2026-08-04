@@ -113,6 +113,40 @@ function unshieldedOwnerToCanonicalHex(value: unknown): string {
 
 const stm = new Stm<typeof grammar, {}>(grammar);
 
+/**
+ * Register a transition whose failures are VISIBLE.
+ *
+ * The runtime catches state-transition errors and reports them to telemetry
+ * only (`log.remote` in process-blocks.ts), so on a dev box a failing
+ * transition produces no console output at all — the block transaction just
+ * aborts and the next statement dies with a Postgres 25P02, surfacing as an
+ * unexplained process exit. That is precisely how the 0x00 scrub crash
+ * presented: hours of bisecting a silent death whose cause was a one-line SQL
+ * error the engine had already caught and hidden.
+ *
+ * This wrapper logs and RETHROWS, so the runtime's rollback semantics are
+ * unchanged — the only difference is that the operator can see what broke.
+ * Kept in our code rather than as a node_modules patch so it survives
+ * `bun install`.
+ */
+function addTransition(
+  name: string,
+  fn: (data: any) => Generator<any, any, any>,
+): void {
+  stm.addStateTransition(name as any, function* (data: any) {
+    try {
+      return yield* fn(data);
+    } catch (err) {
+      console.error(
+        `[STF] transition "${name}" FAILED (block ${data?.blockHeight ?? "?"}) — ` +
+          `this aborts the block transaction:`,
+        err,
+      );
+      throw err;
+    }
+  } as any);
+}
+
 // Midnight:NullifierAndCommitment (effectstream#838) — one input per zswap
 // ledger event, discriminated on payload.kind:
 //   "nullifier"  → a shielded coin was SPENT  (ZswapInput)
@@ -121,7 +155,7 @@ const stm = new Stm<typeof grammar, {}>(grammar);
 // fill-vs-cancel evidence: a fill's single settlement tx spends ALL of an
 // offer's nullifiers AND creates the offer's output commitments; see
 // cancelledPredicate in the database package.
-stm.addStateTransition("midnight-zswap-event", function* (data) {
+addTransition("midnight-zswap-event", function* (data) {
   const { payload } = data.parsedInput;
 
   if (payload?.kind === "commitment") {
@@ -195,7 +229,7 @@ stm.addStateTransition("midnight-zswap-event", function* (data) {
 // indexer's per-tx `unshieldedSpentOutputs`). Match against the
 // (owner, intent_hash, output_no) triples captured at offer-publication
 // time and archive any matched offer.
-stm.addStateTransition("midnight-unshielded-spend", function* (data) {
+addTransition("midnight-unshielded-spend", function* (data) {
   const { payload } = data.parsedInput;
   const owner = unshieldedOwnerToCanonicalHex(payload?.owner);
   const intentHash = bytesOrStringToHex(payload?.intentHash);
@@ -259,7 +293,7 @@ stm.addStateTransition("midnight-unshielded-spend", function* (data) {
 // Records the (owner, intent_hash, output_no) triple in the permanent
 // created_unshielded set so the offer validator can reject offers that
 // reference a UTXO the chain never created (existence check).
-stm.addStateTransition("midnight-unshielded-create", function* (data) {
+addTransition("midnight-unshielded-create", function* (data) {
   const { payload } = data.parsedInput;
   const owner = unshieldedOwnerToCanonicalHex(payload?.owner);
   const intentHash = bytesOrStringToHex(payload?.intentHash);
@@ -294,7 +328,7 @@ stm.addStateTransition("midnight-unshielded-create", function* (data) {
 // window, mirroring the ledger's `past_roots`. The offer validator checks an
 // offer's input root against this set (root-known liveness). Deterministic:
 // keyed on the block timestamp, never wall-clock.
-stm.addStateTransition("midnight-zswap-root", function* (data) {
+addTransition("midnight-zswap-root", function* (data) {
   const root = canonicalRootHex(String(data.parsedInput.payload?.root ?? ""));
   if (!root) {
     console.warn("[MIDNIGHT] Skipping empty zswap-root payload");
@@ -314,7 +348,7 @@ stm.addStateTransition("midnight-zswap-root", function* (data) {
   }
 });
 
-stm.addStateTransition("celestia-zswap", function* (data) {
+addTransition("celestia-zswap", function* (data) {
   const { payload } = data.parsedInput;
   // MIP-0006: the DA blob is the RAW MIP-0005 transaction bytes, not the
   // bech32m string. The framework fetcher sets suppliedValue = atob(blob.data),
@@ -650,7 +684,7 @@ stm.addStateTransition("celestia-zswap", function* (data) {
   }
 });
 
-stm.addStateTransition("midnight-zswap", function* (data) {
+addTransition("midnight-zswap", function* (data) {
   const snapshot = extractMidnightLedgerSnapshot(data.parsedInput.payload);
   if (!snapshot) return;
 
@@ -662,7 +696,7 @@ stm.addStateTransition("midnight-zswap", function* (data) {
 
 // Scheduled TTL cleanup: if the offer is still active in the main table,
 // move it to history and mark it as archived due to TTL.
-stm.addStateTransition("zswap-ttl-cleanup", function* (data) {
+addTransition("zswap-ttl-cleanup", function* (data) {
   const { offerId } = data.parsedInput;
 
   try {

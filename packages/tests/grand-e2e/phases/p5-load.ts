@@ -212,6 +212,9 @@ async function apiInvalidStorm(db: Client, art: P1Artifacts): Promise<{ okCodes:
     "NULLIFIER_SPENT",
     "UTXO_NOT_LIVE",
     "RATE_LIMITED",
+    // The consumed-offer fixture proves against a root that ages out of the
+    // 600 s window mid-storm, so ROOT_UNKNOWN is a correct rejection here.
+    "ROOT_UNKNOWN",
   ]);
   let okCodes = 0;
   let rate429 = 0;

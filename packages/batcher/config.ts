@@ -10,6 +10,15 @@ export interface BatcherConfig {
   pollingIntervalMs: number;
   storageDir: string;
   walletSeed: string | string[];
+  // Max concurrent balancing txs PER wallet. The SDK computes actual slots as
+  // min(floor(dustUtxoCount / costPerTx), maxSlotsPerWallet), so this is only
+  // a ceiling — real concurrency is still bounded by how many dust UTXOs the
+  // wallet holds (one NIGHT UTXO registered for dust ≈ one slot). Default 1
+  // preserves the SDK's serialized behavior; raise it AND split the wallet's
+  // NIGHT into that many dust UTXOs to actually parallelize. Watch the
+  // "worker slots: N (M UTXOs, cost=…, cap=…)" line on startup for what you
+  // got. The proof server becomes the next ceiling.
+  maxSlotsPerWallet: number;
   midnight: {
     id: string;
     indexer: string;
@@ -62,6 +71,7 @@ export function loadBatcherConfig(): BatcherConfig {
     pollingIntervalMs: ENV.getNumber("BATCHER_POLLING_INTERVAL_MS", 250),
     storageDir: ENV.getString("BATCHER_STORAGE_DIR", DEFAULT_STORAGE_DIR),
     walletSeed: ENV.getString("BATCHER_WALLET_SEED") || BATCHER_SEED,
+    maxSlotsPerWallet: ENV.getNumber("BATCHER_MAX_SLOTS_PER_WALLET", 1),
     midnight: {
       id: midnightNetworkConfig.id,
       indexer: midnightNetworkConfig.indexer,

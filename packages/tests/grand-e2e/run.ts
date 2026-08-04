@@ -98,7 +98,32 @@ function writeScorecard(determinism: DeterminismOutcome | null): void {
   }
   lines.push(``);
 
-  lines.push(`## Product bugs found by this suite (all fixed)`);
+  lines.push(`## Product bugs found by this suite — OPEN`);
+  lines.push(``);
+  lines.push(
+    `- **\`pair_stats.last_traded_at\` is wall-clock, not chain time.** ` +
+      `\`upsertPairStatsByOfferId\` writes it with SQL \`NOW()\`, so the column records when THIS ` +
+      `NODE indexed the fill rather than when the trade happened. Instance B replaying instance ` +
+      `A's chain from height 1 produced identical \`last_price\` and identical \`offer_hash\` sets ` +
+      `but timestamps ~22 min later — the determinism diff above reports it whenever it ` +
+      `reproduces. Beyond replay: a node catching up after downtime stamps every historical ` +
+      `trade with its catch-up time, and the pair list orders by \`last_traded_at DESC\`. The ` +
+      `codebase already states the rule being broken, in state-machine.ts: "keyed on the block ` +
+      `timestamp, never wall-clock." Fix: thread the archiving block's timestamp into the upsert.`,
+  );
+  lines.push(
+    `- **The root window is not enforced on read.** \`pruneKnownRoots\` is called only inside the ` +
+      `\`midnight-zswap-root\` transition, so pruning is write-triggered and stops when the chain ` +
+      `stops producing roots; \`isKnownRoot\` is \`SELECT 1 FROM known_roots WHERE root = :root\` ` +
+      `with no age predicate. On a quiet chain, roots outlive \`ROOT_WINDOW_SECONDS\` and the ` +
+      `submit gate keeps accepting offers proving against them — measured: 10 rows spanning 594s ` +
+      `(inside the 600s window) but 23 min old, none pruned; and with the node on its 3600s ` +
+      `default the foreign Lace fixture was accepted (HTTP 200, stored) on a 20-min-old root. ` +
+      `Low impact on a busy chain, but it makes the window depend on traffic rather than time. ` +
+      `Fix: add \`AND last_seen_ms >= :cutoff\` to the read.`,
+  );
+  lines.push(``);
+  lines.push(`## Product bugs found by this suite — fixed`);
   lines.push(``);
   lines.push(
     `- **\`0x00\` in any blob body crashed the node** (PR #22). The rejection path used the blob body ` +

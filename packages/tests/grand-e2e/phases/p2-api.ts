@@ -103,11 +103,16 @@ export async function p2Api(db: Client, art: P1Artifacts): Promise<void> {
   });
 
   // ── Token registry ────────────────────────────────────────────────────────
-  await check("known-tokens lists NIGHT + auto-registered offer colors", async () => {
+  // Colors are deliberately NOT auto-registered at indexing: a color in an
+  // offer says nothing about its name, and unshielded legs would be typed
+  // wrong by construction, so registering on sight would publish guessed
+  // names in a table clients use to label trades. Assert the ABSENCE — the
+  // suite previously asserted the opposite because API.md promised it.
+  await check("known-tokens lists NIGHT and does NOT auto-register offer colors", async () => {
     const r = await getKnownTokens();
     if (r.status !== 200 || !Array.isArray(r.body)) return false;
     const colors = new Set(r.body.map((t: any) => t.token_color ?? t.tokenColor));
-    return colors.has(NIGHT) && colors.has(ta) && colors.has(tb);
+    return colors.has(NIGHT) && !colors.has(ta) && !colors.has(tb);
   });
 
   const throwaway = "ee".repeat(32);
@@ -135,9 +140,21 @@ export async function p2Api(db: Client, art: P1Artifacts): Promise<void> {
       typeof b.sponsored === "boolean"
     );
   });
-  await check("quote with unknown token → 404 UNKNOWN_TOKEN", async () => {
-    const r = await getQuote({ from_token: "aa".repeat(32), to_token: tb, from_amount: "1" });
-    return r.status === 404 && r.body?.error === "UNKNOWN_TOKEN";
+  // Unknown colors quote at a neutral $1 demo fallback (two unknowns ⇒ 1:1)
+  // instead of 404 UNKNOWN_TOKEN, which used to wall off the demo whenever a
+  // wallet held a color nobody had hand-registered. The fallback must NOT be
+  // persisted: a squatted $1 row would poison the real price once the token
+  // is registered later.
+  await check("quote with unknown tokens → neutral $1 fallback, not 404", async () => {
+    const a = "aa".repeat(32);
+    const b = "bb".repeat(32);
+    const r = await getQuote({ from_token: a, to_token: b, from_amount: "1000000" });
+    if (r.status !== 200 || r.body?.market_rate !== 1) return false;
+    const rows = await db.query(
+      `SELECT count(*)::int AS n FROM token_prices WHERE token_color = $1 OR token_color = $2`,
+      [a, b],
+    );
+    return Number(rows.rows[0]?.n) === 0; // fallback price never written
   });
   await check("quote with malformed color → 400", async () => {
     const r = await getQuote({ from_token: "nothex", to_token: tb, from_amount: "1" });

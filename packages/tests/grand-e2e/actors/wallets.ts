@@ -25,6 +25,7 @@ import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
+import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
 import { offerHashFromBlob } from "@zswap-da/offer-guard";
 
@@ -570,6 +571,29 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
       throw e;
     }
     const blob = OfferFiles.encode(finalized.serialize());
+
+    // Validate what we actually built, at the source. The wallet SDK can
+    // return a transaction that silently omits a requested leg — an
+    // unshielded desired output next to a shielded input is accepted, then
+    // dropped, with no error (see ISSUES.md "mixed offers"). Without this
+    // guard the offer looks fine locally and only dies much later as an
+    // opaque NOT_A_SWAP at ingestion, attributed to the indexer rather than
+    // to construction. Failing here instead makes buildOffer's retry loop
+    // surface the real reason.
+    const built = validateZswapOffer(blob, {
+      refState: getBlankRefState(net.id),
+      tblock: new Date(),
+      maxBytes: 1024 * 1024,
+      crypto: "defer", // proofs are the node's job; we only check structure
+    });
+    if (!built.ok) {
+      throw new Error(
+        `offer#${rec.index} (${rec.layer} ${rec.giveToken}->${rec.wantToken}) built INVALID: ` +
+          `${built.code} — ${built.reason} ` +
+          `[gives=${JSON.stringify(built.gives ?? [])} wants=${JSON.stringify(built.wants ?? [])}]`,
+      );
+    }
+
     const hash = offerHashFromBlob(blob);
     rec.hasFillMarkers = wantShielded;
     return { blob, hash, finalized };

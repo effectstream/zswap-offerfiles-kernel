@@ -136,8 +136,11 @@ export type CelestiaGarbageKind =
  *  carries a real transaction's 0x00 bytes and so trips the NUL crash below;
  *  it returns only once that is fixed (or with the repro flag set). */
 export function celestiaGarbageKinds(): CelestiaGarbageKind[] {
-  const safe: CelestiaGarbageKind[] = ["random-bytes", "truncated-tx", "bech32-string-as-utf8"];
-  return NUL_CRASH_REPRO ? [...safe, "replayed-real-blob"] : safe;
+  // All four are safe again: `replayed-real-blob` carries a real transaction's
+  // 0x00 bytes, which used to crash the node on the rejection path. With the
+  // scrub fixed (it no longer matches the body as text) a NUL-bearing body is
+  // just another rejection, so the dedup path is exercised again.
+  return ["random-bytes", "truncated-tx", "bech32-string-as-utf8", "replayed-real-blob"];
 }
 
 /**

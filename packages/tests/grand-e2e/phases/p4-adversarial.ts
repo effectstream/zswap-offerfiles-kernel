@@ -101,21 +101,19 @@ export async function p4Adversarial(db: Client, art: P1Artifacts): Promise<void>
   }
   note("celestia garbage", `published at heights ${heights.join(", ")}`);
 
+  // Counted, NOT matched by height: `offer_rejections.celestia_height` does
+  // not hold a Celestia height. The STM writes `data.blockHeight`, which is
+  // an EffectstreamBlockNumber — measured 42–67 blocks away from the height
+  // `blob.Submit` reported, and the gap grows. See ISSUES.md.
+  const totalRejections = async (): Promise<number> =>
+    (await rejectionRows(db)).reduce((n, r) => n + Number(r.count), 0);
+  const rejectionsBeforeCount = before.size === 0
+    ? 0
+    : rejectionsBefore.reduce((n, r) => n + Number(r.count), 0);
   await check("garbage blobs produce offer_rejections rows (bodies deleted)", async () => {
     return waitUntil(
       "rejection rows appear",
-      async () => {
-        const rows = await rejectionRows(db);
-        let newCount = 0;
-        for (const r of rows) {
-          const prev = before.get(`${r.celestia_height}|${r.code}`) ?? 0;
-          if (heights.includes(Number(r.celestia_height)) && r.count > prev) newCount += r.count - prev;
-          else if (heights.includes(Number(r.celestia_height)) && !before.has(`${r.celestia_height}|${r.code}`)) {
-            newCount += r.count;
-          }
-        }
-        return newCount >= kinds.length;
-      },
+      async () => (await totalRejections()) >= rejectionsBeforeCount + kinds.length,
       24,
       5000,
     );

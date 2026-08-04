@@ -19,7 +19,69 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 ---
 
-## 1. Cross-layer offers fail with a misleading code — **suite no longer builds them**
+## 1. `celestiaHeight` is not a Celestia height — **NEW, user-facing**
+
+**Verdict: PRODUCT BUG. Severity: medium-high** — it silently breaks the
+independent-verification workflow `API.md` documents.
+
+Every offer served by the API carries `celestiaHeight`, and
+`/v1/health/sync` reports `recent_rejections[].celestia_height`. Neither is a
+Celestia height. The STM writes `data.blockHeight`, which `@effectstream/sm`
+types as `EffectstreamBlockNumber` — the L2 block height. The Celestia height
+is not present in the STF input at all.
+
+### Reproduce
+
+Publish a blob directly, note the height `blob.Submit` returns, then compare
+it with what the node stored:
+
+```bash
+bun run packages/tests/grand-e2e/triage-mixed-offer.ts   # any direct publish works
+psql -h 127.0.0.1 -U postgres -d postgres \
+  -c "SELECT offer_hash, celestia_height FROM offer_file"
+```
+
+### Observed
+
+| Source | Height |
+|---|---|
+| `blob.Submit` returned (real Celestia inclusion) | **1734** |
+| `offer_file.celestia_height` stored / served | **1776** |
+
+Same for rejections — measured offsets of 42, 47 and 67 on one run, and the
+gap **grows**, because the two are different clocks rather than a lag.
+
+Mechanism, in `state-machine.ts`:
+
+```ts
+celestia_height: data.blockHeight,   // EffectstreamBlockNumber, not Celestia
+```
+
+### Why it matters
+
+`API.md` explicitly teaches using this value to fetch the blob straight from
+the DA layer (`blob.GetAll` at a height) for archival, mirroring, or
+independent verification — the property the shared namespace exists to
+provide. Anyone following that reads the wrong Celestia block and finds
+nothing. Determinism is unaffected (the L2 height replays identically), so
+nothing else in the system notices.
+
+### Fix — pick one
+
+- **Rename and document** (cheap, accurate): the column and API field become
+  `blockHeight` / `effectstreamHeight`, and `API.md` stops promising a
+  Celestia height.
+- **Carry the real height** (correct, upstream): the framework's Celestia
+  primitive would need to include the inclusion height in its payload — today
+  it carries `suppliedValue`, `namespace`, `commitment`, `blobIndex` and no
+  height — after which the STM can store it.
+
+Until one lands, `offerId` (content hash) is the only reliable way to locate
+an offer's blob on Celestia.
+
+---
+
+## 2. Cross-layer offers fail with a misleading code — **suite no longer builds them**
 
 **Cross-layer (shielded ↔ unshielded) swaps are not a supported offer shape.**
 The suite originally built them because HANDOFF §7 asks for "~25% mixed"; that
@@ -73,7 +135,7 @@ against MIP-0006 before adding.
 
 ---
 
-## 2. State-transition errors are invisible — **FIXED in our code**
+## 3. State-transition errors are invisible — **FIXED in our code**
 
 The runtime reports STF errors to telemetry only (`log.remote`, line 262 of
 `process-blocks.ts`), so a failing transition produced no console output: the
@@ -98,7 +160,7 @@ Trigger any STF failure and confirm the console shows:
 
 ---
 
-## 3. No green end-to-end run; `baseline.json` still empty
+## 4. No green end-to-end run; `baseline.json` still empty
 
 **Status: in progress.** Runs 1–8 died in setup for operational reasons (proof
 server storms, coin-reservation deadlocks, a node-side cap on fan-out tx size);
@@ -130,9 +192,10 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
-| 1 | Cross-layer offers unenforced in the ladder | gap — decide | Low/Medium | suite no longer builds them; add an explicit rule if they must be refused |
-| 2 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |
-| 3 | No green run / empty `baseline.json` | in progress | — | next full run |
+| 1 | `celestiaHeight` is the L2 height, not Celestia's | **product bug** | Medium-High | rename+document, or carry the real height upstream |
+| 2 | Cross-layer offers unenforced in the ladder | gap — decide | Low/Medium | suite no longer builds them; add an explicit rule if they must be refused |
+| 3 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |
+| 4 | No green run / empty `baseline.json` | in progress | — | run 12 hit 50 pass / 1 fail in 35 min; both causes now fixed |
 
 ### Fixed
 

@@ -19,7 +19,63 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 ---
 
-## 1. `celestiaHeight` was not a Celestia height — **RESOLVED by renaming**
+## 1. Batcher holds 5 transactions of dust — settlement load impossible — **BLOCKS THE SUITE**
+
+**Verdict: PROVISIONING + PRODUCT. Severity: high.** Not a slow batcher — one
+that settles **five** transactions, then livelocks.
+
+### The arithmetic, from the batcher's own boot log
+
+| | |
+|---|---|
+| dust balance at boot | `1.25e24` specks = **1,250,000,000 DUST** |
+| cost per balancing tx | **250,000,000 DUST** |
+| **capacity** | **5.0 transactions** before regeneration |
+
+Which is exactly why it reports `worker slots: 5 (5 UTXOs, cost=1/tx, cap=5)`.
+The suite needs ~250 settlement/cancel transactions at `GRAND_OFFERS=250`, and
+~600 at the handoff's full scale.
+
+### What happens after the fifth
+
+Every cycle waits 60 s for regeneration, tries anyway ("will likely fail and
+re-queue"), fails, re-queues — forever. 71-87 cycles observed per run, queue
+pinned at 250-282, and **nothing surfaced**: `/status` and `/queue-stats` keep
+reporting `isInitialized: true` with a static pending count. Three runs died
+this way (77, 84 and ~90 min), each *after* setup had succeeded.
+
+### This reframes PR #23
+
+`BATCHER_MAX_SLOTS_PER_WALLET=5` does not buy sustained 5x throughput. Against
+a five-transaction budget it spends the **entire** dust supply in one batch.
+Slots and dust must be provisioned together — raising slots alone converts a
+slow pipeline into an immediately starved one.
+
+### Fixes
+
+1. **Provision the batcher** (unblocks the suite): register far more NIGHT for
+   dust generation, sized to `expected tx/hour x 250,000,000 DUST`. The dev
+   chainspec currently affords five transactions — a smoke test, nothing more.
+2. **Do not livelock** (product): back off and surface dust exhaustion rather
+   than retrying a balance the code itself predicts will fail. A queue that
+   never drains behind a healthy-looking `/status` is the worst failure shape
+   for an operator.
+3. **Suite alternative**: settle directly, takers paying their own fees, as
+   `api-examples/11-settle-offer.ts` already does via
+   `wallet.submitTransaction`. Needs each taker funded with NIGHT and
+   registered for dust, but removes the shared bottleneck and exercises a
+   documented settlement path.
+
+### Current status
+
+Setup completes cleanly — 640 coins direct from genesis, batcher untouched,
+~40 min — and the run reaches p1 → p2 → p4 → p3 with **43 passes**. Every
+failure past that point is this one cause: settlements time out, so archival,
+classification, SSE and chart assertions all fail downstream.
+
+---
+
+## 2. `celestiaHeight` was not a Celestia height — **RESOLVED by renaming**
 
 The API served `celestiaHeight` on every offer (and on `offer_indexed` SSE
 events) that was actually the indexer's own effectstream/L2 block height. The
@@ -72,7 +128,7 @@ height in the payload it forwards, alongside `namespace` and `commitment`.
 
 ---
 
-## 2. Cross-layer offers fail with a misleading code — **suite no longer builds them**
+## 3. Cross-layer offers fail with a misleading code — **suite no longer builds them**
 
 **Cross-layer (shielded ↔ unshielded) swaps are not a supported offer shape.**
 The suite originally built them because HANDOFF §7 asks for "~25% mixed"; that
@@ -126,7 +182,7 @@ against MIP-0006 before adding.
 
 ---
 
-## 3. State-transition errors are invisible — **FIXED in our code**
+## 4. State-transition errors are invisible — **FIXED in our code**
 
 The runtime reports STF errors to telemetry only (`log.remote`, line 262 of
 `process-blocks.ts`), so a failing transition produced no console output: the
@@ -151,7 +207,7 @@ Trigger any STF failure and confirm the console shows:
 
 ---
 
-## 4. No green end-to-end run; `baseline.json` still empty
+## 5. No green end-to-end run; `baseline.json` still empty
 
 **Status: in progress.** Runs 1–8 died in setup for operational reasons (proof
 server storms, coin-reservation deadlocks, a node-side cap on fan-out tx size);

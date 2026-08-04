@@ -111,9 +111,17 @@ Surface STF errors at `console.error` at least in development.
 
 ## 3. No green end-to-end run; `baseline.json` still empty
 
-**Status: in progress.** Runs 1–8 died in setup for operational reasons; run 9
-reached 53 passes before the NUL crash; runs 10–11 were superseded by fixes.
-With PR #22 and PR #23 in place the next run is the first with no known blocker.
+**Status: in progress.** Runs 1–8 died in setup for operational reasons (proof
+server storms, coin-reservation deadlocks, a node-side cap on fan-out tx size);
+run 9 reached 53 passes before the NUL crash; run 10 was superseded; run 11 was
+stopped deliberately to reproduce the issues in this file without contending
+for the genesis wallet and the rate-limit budget.
+
+Run 12 is the first attempt with **every known blocker fixed** — PR #22 (NUL
+crash), PR #23 (batcher ceiling) and PR #24 (rate limit, `TOO_LARGE`, docs,
+corrected assertions, mixed layers excluded, build-time offer guard) — run from
+a branch with all three merged. Note that a run needs all of them *together*:
+a branch off `main` alone still carries the NUL crash and the 1-slot batcher.
 
 ### Test
 

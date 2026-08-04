@@ -528,22 +528,14 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
     const wantShielded = isShieldedKey(rec.wantToken);
     const giveColor = ledger.colors[rec.giveToken]!;
     const wantColor = ledger.colors[rec.wantToken]!;
-    // WORKAROUND for an SDK bug in facade initSwap (wallet-sdk-facade 4.1.0).
-    // It decides whether a layer participates from inputs OR outputs:
-    //     hasUnshieldedPart = (unshieldedInputs && keys > 0) || unshieldedOutputs.length > 0
-    // but then builds that half only when the INPUTS are defined:
-    //     unshieldedTx = hasUnshieldedPart && unshieldedInputs !== undefined ? … : undefined
-    // So a cross-layer swap — shielded give, unshielded want — passes the
-    // guard and is then silently dropped, yielding a one-sided transaction
-    // that the ladder rejects as NOT_A_SWAP with no hint as to why. Same
-    // asymmetry on the shielded side.
-    //
-    // Passing an EMPTY object for the opposite layer makes `!== undefined`
-    // true while keeping the layer's coin selection empty, so the outputs
-    // survive. Remove once the SDK's two conditions agree. See ISSUES.md.
+    // Give and want are always on the SAME value layer: cross-layer
+    // (shielded↔unshielded) swaps are not a supported offer shape, so the
+    // suite never constructs one. See ISSUES.md for why the earlier
+    // cross-layer attempt produced a confusing NOT_A_SWAP rather than a
+    // clear refusal.
     const desiredInputs = giveShielded
-      ? ({ shielded: { [giveColor]: BigInt(rec.giveAmount) }, unshielded: {} } as any)
-      : ({ unshielded: { [giveColor]: BigInt(rec.giveAmount) }, shielded: {} } as any);
+      ? { shielded: { [giveColor]: BigInt(rec.giveAmount) } }
+      : ({ unshielded: { [giveColor]: BigInt(rec.giveAmount) } } as any);
     const desiredOutputs = [
       {
         type: wantShielded ? "shielded" : "unshielded",

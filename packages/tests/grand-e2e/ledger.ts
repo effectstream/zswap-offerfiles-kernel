@@ -12,7 +12,9 @@ export type CancelShape =
   | "split-two-tx" // two input coins, spent across two txs
   | "partial" // two input coins, only one ever spent
   | "consolidated-one-tx"; // two input coins, both spent in ONE self-tx without markers
-export type Layer = "ss" | "uu" | "mixed-sg" | "mixed-ug";
+// Give and want always share a value layer. Cross-layer (shielded<->unshielded)
+// swaps are not a supported offer shape, so the suite never builds one.
+export type Layer = "ss" | "uu";
 
 export interface OfferRecord {
   index: number;

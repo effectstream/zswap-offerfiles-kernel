@@ -19,69 +19,57 @@ NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 BATCHER_MAX_S
 
 ---
 
-## 1. Mixed offers: SDK silently drops the cross-layer half — **WORKED AROUND**
+## 1. Cross-layer offers fail with a misleading code — **suite no longer builds them**
 
-**Verdict: SDK BUG (root-caused in source). Severity: medium.** A
-shielded-give / unshielded-want offer was rejected `NOT_A_SWAP`
-("1 give, 0 wants") because the transaction genuinely lacked the unshielded
-output.
+**Cross-layer (shielded ↔ unshielded) swaps are not a supported offer shape.**
+The suite originally built them because HANDOFF §7 asks for "~25% mixed"; that
+was a misreading on my part, and those offers have been removed
+(`Layer` is now `"ss" | "uu"`).
 
-### Root cause — `wallet-sdk-facade@4.1.0`, `initSwap`
+Keeping the note because the *failure mode* is worth knowing, and there is a
+real gap behind it.
 
-The two conditions disagree. Participation is decided from inputs **or**
-outputs:
+### What happened
 
-```js
-const hasUnshieldedPart =
-  (unshieldedInputs && Object.keys(unshieldedInputs).length > 0) || unshieldedOutputs.length > 0;
-```
-
-but construction additionally demands the **inputs** be defined:
+`wallet-sdk-facade@4.1.0`'s `initSwap` decides layer participation from inputs
+**or** outputs:
 
 ```js
-const unshieldedTx = hasUnshieldedPart && unshieldedInputs !== undefined
-  ? await this.unshielded.initSwap(unshieldedInputs, unshieldedOutputs, ttl)
-  : undefined;
+hasUnshieldedPart = (unshieldedInputs && Object.keys(unshieldedInputs).length > 0)
+                    || unshieldedOutputs.length > 0;
 ```
 
-So a cross-layer swap — shielded inputs, unshielded outputs — sets
-`hasUnshieldedPart = true`, hits `unshieldedInputs === undefined`, and the
-outputs are **discarded with no error**. The shielded side carries the same
-asymmetry, so unshielded-give / shielded-want fails identically.
+but constructs that half only when the **inputs** are defined:
 
-This is why the earlier evidence looked like a derivation bug and wasn't: the
-transaction's raw imbalances show only the give side, so `deriveLegs` was
-reporting it accurately. There was never an output to derive.
-
-### Workaround (applied)
-
-Pass an **empty object** for the opposite layer's inputs, which satisfies
-`!== undefined` while selecting no coins:
-
-```ts
-{ shielded: { [giveColor]: amount }, unshielded: {} }
+```js
+unshieldedTx = hasUnshieldedPart && unshieldedInputs !== undefined ? … : undefined;
 ```
 
-`actors/wallets.ts` does this for both directions. Remove it once the SDK's
-two conditions agree.
+A shielded-give / unshielded-want request therefore passes the guard and has
+its outputs **silently discarded**, producing a one-sided transaction. The
+result is a confusing `NOT_A_SWAP` ("1 give, 0 wants") that points at the
+indexer rather than at the request.
 
-### Reproduce / verify
+### The gap worth deciding on
 
-```bash
-bun run packages/tests/grand-e2e/triage-mixed-offer.ts
-```
+Nothing in the validator enforces "give and want share a layer". `NOT_A_SWAP`
+fires only because the SDK dropped a leg — an accident, not a rule. A
+correctly-built cross-layer offer from another wallet implementation would
+reach `isTwoSided()` with a legitimate give and want on different layers and,
+as far as the code shows, be **indexed**.
 
-**Before:** `wants: []`, imbalances show only `seg0 shielded`.
-**After the workaround:** an unshielded imbalance appears and `wants` is
-populated. Mixed layers are restored to the p5 mix once this passes.
+If cross-layer offers must never be tradeable, that belongs in the ladder as
+its own explicit check and code — not left to an SDK quirk. Worth confirming
+against MIP-0006 before adding.
 
-### Report upstream
+### Suite state
 
-The fix belongs in the SDK: make construction agree with the guard, or reject
-the combination loudly. Silently returning a transaction that omits a
-requested output is the worst option — callers cannot tell without
-re-inspecting the result, which is why `buildOffer` now validates what it
-built.
+- `ledger.ts` — `Layer` is `"ss" | "uu"`; cross-layer is unrepresentable.
+- `phases/p3-lifecycle.ts` — the former cross-layer case is now a
+  shielded↔shielded swap on the second token pair.
+- `phases/p5-load.ts` — `LAYERS` carries only same-layer entries.
+- `actors/wallets.ts` — `buildOffer` still validates what it built, so any
+  future silently-dropped leg fails at construction rather than at ingestion.
 
 ---
 
@@ -142,7 +130,7 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
-| 1 | Mixed-offer cross-layer half dropped | **SDK bug** (root-caused in source) | Medium | worked around in-suite; report upstream |
+| 1 | Cross-layer offers unenforced in the ladder | gap — decide | Low/Medium | suite no longer builds them; add an explicit rule if they must be refused |
 | 2 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |
 | 3 | No green run / empty `baseline.json` | in progress | — | next full run |
 

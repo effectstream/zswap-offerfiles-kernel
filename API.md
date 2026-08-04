@@ -369,7 +369,13 @@ curl http://host:9999/v1/known-tokens
 ]
 ```
 
-New token colors are auto-registered when a valid offer containing them is indexed.
+Token colors are **not** auto-registered when an offer is indexed. A color
+appearing in an offer says nothing about its name, and an offer's value layer
+cannot be inferred per-color, so registering on sight would write guessed names
+and kinds into a table clients use to label trades. Unknown colors render as
+their raw color until a name is registered deliberately (see
+`POST /v1/known-tokens`, `ENABLE_TOKEN_REGISTRY`) or the Midnight
+token-metadata standard lands.
 
 ---
 
@@ -441,12 +447,24 @@ curl -X POST http://host:9999/v1/offers \
 
 | Error code | Meaning |
 |---|---|
-| `INVALID_FORMAT` | Blob is not a valid `swapoffer1…` encoding |
-| `INVALID_PROOF` | Cryptographic proof verification failed |
+| `BAD_ENCODING` | Blob is not a valid `swapoffer1…` bech32m encoding (wrong HRP, bad charset, bad checksum) |
+| `BAD_DESERIALIZE` | Decoded bytes are not a ledger `Transaction` |
+| `TOO_LARGE` | Decoded transaction exceeds `OFFER_MAX_BYTES` |
+| `NO_SPENDABLE_INPUT` | The transaction spends nothing — nothing to swap |
+| `NOT_A_SWAP` | Not two-sided: needs ≥1 give **and** ≥1 want (MIP-0006) |
+| `PROOF_INVALID` | ZK proof verification failed |
+| `SIGNATURE_INVALID` | Signature verification failed |
 | `NULLIFIER_SPENT` | A shielded input coin is already spent on Midnight |
 | `UTXO_NOT_LIVE` | An unshielded UTXO was spent or was never created on-chain |
 | `ROOT_UNKNOWN` | The shielded input proves against a Merkle root outside the `ROOT_WINDOW_SECONDS` retention window |
+| `ROOT_UNREADABLE` | The input's Merkle root could not be extracted (fail-closed) |
 | `DUPLICATE_OFFER` (`409`) | Byte-identical offer already indexed (open **or** archived) — rejected before any Celestia fee |
+| `RATE_LIMITED` (`429`) | More than 60 requests/min from this IP |
+
+Non-`400` transport failures you may also see: a request body larger than
+twice `OFFER_MAX_BYTES` is refused by the HTTP layer as
+`413 {"error":"BAD_REQUEST","reason":"Request body is too large"}` — the
+transport declining to buffer it, before any validation runs.
 
 Validation consults the node's local state only — no live RPC calls are made. `ROOT_UNKNOWN` can fire while the node is still syncing (the root simply hasn't arrived yet). Retry once `/v1/health/sync` reports `"status":"ok"`.
 

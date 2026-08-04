@@ -122,11 +122,21 @@ export const NODE_B_SYNC_TIMEOUT_MS = 45 * 60_000;
 export const DIFF_EXCLUDED_TABLES: Record<string, string> = {
   token_prices: "request-driven (first /v1/quote writes the row) — not chain-derived",
 };
-// Wall-clock columns excluded per HANDOFF §9.
+// Columns excluded from the determinism diff, per HANDOFF §9.
+//
+// The bar for an entry is MEANING, not mechanism: the column must record a
+// fact about THIS NODE ("when I first saw / stored this"), which two correct
+// replicas legitimately disagree on. "It's a timestamp that differs between
+// nodes" is not sufficient — differing between nodes is precisely the symptom
+// the diff exists to catch, and excluding by mechanism is how the wall-clock
+// archived_at bug stayed invisible until pair_stats.last_traded_at (absent
+// from this list only by oversight) exposed the class.
+//
+// archived_at is deliberately NOT here anymore: it is chain-derived (the L2
+// block timestamp of the archiving event) and MUST match across replicas.
 export const DIFF_EXCLUDED_COLUMNS = new Set([
-  "created_at",
-  "recorded_at",
-  "archived_at",
+  "created_at",  // when this node's row was inserted — local observation
+  "recorded_at", // when this node recorded the liveness-set entry — local observation
 ]);
 
 export const OUT_DIR = new URL("./out/", import.meta.url).pathname;

@@ -109,8 +109,8 @@ test("an archived anchor still resolves (cursor survives consume mid-pagination)
   // Move offer 23 to history the way the archive queries do (same id and
   // created_at), then page from its hash — pagination continues unbroken.
   await client.query(
-    `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason)
-     SELECT id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, 'CONSUMED'
+    `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
+     SELECT id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, 'CONSUMED', NOW()
      FROM offer_file WHERE id = 23`,
   );
   await client.query("DELETE FROM offer_file WHERE id = 23");

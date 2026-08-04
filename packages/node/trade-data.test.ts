@@ -42,9 +42,10 @@ async function seedFill(
     [id, 1000 + id, `fill-${id}`, String(minutesAgo)],
   );
   await client.query(
-    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind)
-     VALUES ($1, $2, $3, 'GIVING', 'SHIELDED'), ($1, $4, $5, 'WANTING', 'SHIELDED')`,
-    [id, colors[0], String(baseAmt), colors[1], String(quoteAmt)],
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+     VALUES ($1, $2, $3, 'GIVING', 'SHIELDED', NOW() - ($6 || ' minutes')::interval),
+            ($1, $4, $5, 'WANTING', 'SHIELDED', NOW() - ($6 || ' minutes')::interval)`,
+    [id, colors[0], String(baseAmt), colors[1], String(quoteAmt), String(minutesAgo)],
   );
 }
 

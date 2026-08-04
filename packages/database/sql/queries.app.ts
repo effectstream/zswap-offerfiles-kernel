@@ -135,35 +135,43 @@ const HISTORY_COLUMNS = `
         created_at,
         ttl_seconds`;
 
+// Every _history INSERT carries :archived_at! — the L2 block timestamp of the
+// archiving event, passed by the state machine from data.blockTimestamp. The
+// columns are NOT NULL with no default (000-init.sql), so forgetting the param
+// is a hard error, never a silent fall-back to node-local NOW(). This is what
+// makes archive timestamps identical across replicas (asserted by the
+// grand-e2e determinism phase) and correct after a resync.
 const archiveOfferSql = (matched: string, reason: "CONSUMED" | "TTL") => `
 WITH matched AS (
 ${matched}
 ),
 archived_offer AS (
     INSERT INTO offer_file_history (${HISTORY_COLUMNS},
-        archive_reason
+        archive_reason,
+        archived_at
     )
     SELECT${HISTORY_COLUMNS},
-        '${reason}'
+        '${reason}',
+        :archived_at!
     FROM offer_file
     WHERE id IN (SELECT offer_file_id FROM matched)
     RETURNING id
 ),
 archived_tokens AS (
-    INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind)
-    SELECT offer_file_id, token_color, amount, direction, kind
+    INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+    SELECT offer_file_id, token_color, amount, direction, kind, :archived_at!
     FROM offer_file_tokens
     WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
 ),
 archived_nullifiers AS (
-    INSERT INTO offer_file_nullifiers_history (offer_file_id, nullifier)
-    SELECT offer_file_id, nullifier
+    INSERT INTO offer_file_nullifiers_history (offer_file_id, nullifier, archived_at)
+    SELECT offer_file_id, nullifier, :archived_at!
     FROM offer_file_nullifiers
     WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
 ),
 archived_unshielded_spends AS (
-    INSERT INTO offer_file_unshielded_spends_history (offer_file_id, owner, intent_hash, output_no)
-    SELECT offer_file_id, owner, intent_hash, output_no
+    INSERT INTO offer_file_unshielded_spends_history (offer_file_id, owner, intent_hash, output_no, archived_at)
+    SELECT offer_file_id, owner, intent_hash, output_no, :archived_at!
     FROM offer_file_unshielded_spends
     WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
 ),
@@ -444,6 +452,13 @@ export const getTokenByColor = prepared<IGetTokenByColorParams, IGetTokenByColor
 export interface IUpsertPairStatsByOfferIdParams { offer_id: number }
 export type IUpsertPairStatsByOfferIdResult = void;
 export const upsertPairStatsByOfferId = prepared<IUpsertPairStatsByOfferIdParams, IUpsertPairStatsByOfferIdResult>(
+      // last_traded_at is the archived row's chain-derived timestamp — the L2
+      // block time of the settlement, identical on every replica. It must NOT
+      // be NOW(): this upsert runs in an api.ts event listener after the
+      // archive commits, so NOW() here recorded when THIS NODE indexed the
+      // fill (divergent across replicas; after a resync it stamped historical
+      // trades with catch-up time and mis-ordered GetPairs, which sorts on
+      // this column).
       `INSERT INTO pair_stats (pair_key, base_color, quote_color, trade_count, last_price, last_traded_at)
        SELECT
            LEAST(g.token_color, w.token_color) || '|' || GREATEST(g.token_color, w.token_color),
@@ -451,7 +466,7 @@ export const upsertPairStatsByOfferId = prepared<IUpsertPairStatsByOfferIdParams
            GREATEST(g.token_color, w.token_color),
            1,
            w.amount::numeric / NULLIF(g.amount::numeric, 0),
-           NOW()
+           h.archived_at
        FROM (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
              FROM offer_file_tokens_history
              WHERE direction = 'GIVING' AND offer_file_id = :offer_id!
@@ -460,6 +475,7 @@ export const upsertPairStatsByOfferId = prepared<IUpsertPairStatsByOfferIdParams
              FROM offer_file_tokens_history
              WHERE direction = 'WANTING' AND offer_file_id = :offer_id!
              GROUP BY 1, 2) w ON w.offer_file_id = g.offer_file_id
+       JOIN offer_file_history h ON h.id = g.offer_file_id
        WHERE g.offer_file_id = :offer_id!
          AND NOT ${cancelledPredicate("g.offer_file_id")}
        ON CONFLICT (pair_key) DO UPDATE SET
@@ -776,7 +792,7 @@ export const resolveOfferCursor = prepared<IResolveOfferCursorParams, IResolveOf
 
 export interface IArchiveOfferResult { id: number }
 
-export interface IArchiveOfferByNullifierWithHashParams { nullifier: string }
+export interface IArchiveOfferByNullifierWithHashParams { nullifier: string; archived_at: DateOrString }
 export const archiveOfferByNullifierWithHash = prepared<IArchiveOfferByNullifierWithHashParams, IArchiveOfferResult>(
       archiveOfferSql(
         `    SELECT DISTINCT offer_file_id
@@ -790,6 +806,7 @@ export interface IArchiveOfferByUnshieldedSpendWithHashParams {
   owner: string;
   intent_hash: string;
   output_no: number;
+  archived_at: DateOrString;
 }
 export const archiveOfferByUnshieldedSpendWithHash = prepared<IArchiveOfferByUnshieldedSpendWithHashParams, IArchiveOfferResult>(
       archiveOfferSql(
@@ -802,7 +819,7 @@ export const archiveOfferByUnshieldedSpendWithHash = prepared<IArchiveOfferByUns
       ),
 );
 
-export interface IArchiveOfferByIdTtlWithHashParams { offer_file_id: number }
+export interface IArchiveOfferByIdTtlWithHashParams { offer_file_id: number; archived_at: DateOrString }
 export const archiveOfferByIdTtlWithHash = prepared<IArchiveOfferByIdTtlWithHashParams, IArchiveOfferResult>(
       archiveOfferSql(
         `    SELECT id AS offer_file_id
@@ -925,6 +942,39 @@ export const upsertKnownRootWithFirstSeen = prepared<IUpsertKnownRootWithFirstSe
          SET height = EXCLUDED.height,
              last_seen_ms = EXCLUDED.last_seen_ms,
              first_seen_ms = COALESCE(known_roots.first_seen_ms, EXCLUDED.first_seen_ms)`,
+);
+
+// Root-known WITH the window enforced at read time. Supersedes the generated
+// IsKnownRoot at both gates (API submit, STM ingestion), which had no age
+// predicate — and pruning alone cannot provide one, because pruneKnownRoots
+// only runs inside the midnight-zswap-root transition: when the chain stops
+// producing roots, nothing prunes, and a quiet chain kept accepting offers
+// proving against roots far outside ROOT_WINDOW_SECONDS (measured: rows 23
+// minutes stale, none pruned; the "foreign" Lace fixture accepted on a
+// 20-minute-old root).
+//
+// The MAX(height) escape is not a convenience — it is semantic parity with the
+// ledger. past_roots is a TimeFilterMap that RE-INSERTS the current root every
+// block (see the comment on rootTimingForRoots below), but our zswap-root
+// primitive only fires when the root ADVANCES, so on a quiet chain the current
+// root's last_seen_ms goes stale even though the real chain still accepts it.
+// A bare age predicate would falsely reject offers the chain would settle.
+// PruneKnownRoots guards the same edge with `height < MAX(height)`.
+//
+// :cutoff_ms! must be chain-derived (same clock as last_seen_ms — the L2 block
+// timestamp): data.blockTimestamp at the STM gate, the latest processed
+// block's ms_timestamp at the API gate. Never wall-clock.
+export interface IIsKnownRootLiveParams {
+  root: string;
+  cutoff_ms: NumberOrString;
+}
+export interface IIsKnownRootLiveResult { present: number }
+export const isKnownRootLive = prepared<IIsKnownRootLiveParams, IIsKnownRootLiveResult>(
+      `SELECT 1 AS present
+       FROM known_roots
+       WHERE root = :root!
+         AND (last_seen_ms >= :cutoff_ms!
+              OR height >= (SELECT MAX(height) FROM known_roots))`,
 );
 
 // Root timing for a set of shielded input roots. Called at ingestion with

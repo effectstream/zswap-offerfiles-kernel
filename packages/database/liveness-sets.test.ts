@@ -17,6 +17,7 @@ const {
   isUnshieldedCreated,
   upsertKnownRoot,
   isKnownRoot,
+  isKnownRootLive,
   pruneKnownRoots,
 } = await import("@zswap-da/database");
 
@@ -79,6 +80,27 @@ test("upsertKnownRoot refreshes height + last_seen_ms on conflict", async () => 
   const rows = await client.query("SELECT height, last_seen_ms FROM known_roots WHERE root = 'rootB'");
   expect(Number(rows.rows[0].height)).toBe(9);
   expect(Number(rows.rows[0].last_seen_ms)).toBe(900);
+});
+
+test("isKnownRootLive enforces the window at READ time (quiet-chain case)", async () => {
+  // Pruning is write-triggered (midnight-zswap-root transition), so on a quiet
+  // chain aged rows simply survive in the table. The read must not trust
+  // presence alone — but it must keep the CURRENT root valid regardless of
+  // age, because the ledger's past_roots re-inserts it every block while our
+  // primitive only fires on root ADVANCE.
+  await client.query("DELETE FROM known_roots");
+  await upsertKnownRoot.run({ root: "aged", height: 10, last_seen_ms: 1_000 }, client);
+  await upsertKnownRoot.run({ root: "fresh", height: 20, last_seen_ms: 5_000 }, client);
+  await upsertKnownRoot.run({ root: "current", height: 30, last_seen_ms: 1_200 }, client);
+  const cutoff_ms = 4_000;
+  // aged: present in the table but outside the window -> NOT live.
+  expect((await isKnownRootLive.run({ root: "aged", cutoff_ms }, client)).length).toBe(0);
+  // fresh: inside the window -> live.
+  expect((await isKnownRootLive.run({ root: "fresh", cutoff_ms }, client)).length).toBe(1);
+  // current (MAX height): stale by timestamp yet still live — the escape.
+  expect((await isKnownRootLive.run({ root: "current", cutoff_ms }, client)).length).toBe(1);
+  // unknown root stays unknown whatever the cutoff.
+  expect((await isKnownRootLive.run({ root: "nope", cutoff_ms: 0 }, client)).length).toBe(0);
 });
 
 test("pruneKnownRoots drops aged roots but never the latest height", async () => {

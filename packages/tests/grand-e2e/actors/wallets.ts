@@ -528,6 +528,11 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
     const wantShielded = isShieldedKey(rec.wantToken);
     const giveColor = ledger.colors[rec.giveToken]!;
     const wantColor = ledger.colors[rec.wantToken]!;
+    // Give and want are always on the SAME value layer: cross-layer
+    // (shielded↔unshielded) swaps are not a supported offer shape, so the
+    // suite never constructs one. See ISSUES.md for why the earlier
+    // cross-layer attempt produced a confusing NOT_A_SWAP rather than a
+    // clear refusal.
     const desiredInputs = giveShielded
       ? { shielded: { [giveColor]: BigInt(rec.giveAmount) } }
       : ({ unshielded: { [giveColor]: BigInt(rec.giveAmount) } } as any);

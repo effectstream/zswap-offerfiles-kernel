@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 
 export type AppEvent =
-  | { type: "offer_indexed"; offerId: number; offerHash: string; celestiaHeight: number | string; gives: unknown[]; wants: unknown[] }
+  | { type: "offer_indexed"; offerId: number; offerHash: string; blockHeight: number | string; gives: unknown[]; wants: unknown[] }
   | {
       type: "offer_consumed";
       offerId: number;
@@ -15,7 +15,7 @@ export type AppEvent =
       code?: string;
       reason?: string;
       offerHash?: string;
-      celestiaHeight: number | string;
+      blockHeight: number | string;
     };
 
 export const eventBus = new EventEmitter();

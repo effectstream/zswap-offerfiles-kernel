@@ -735,6 +735,10 @@ export async function runCancelCycle(
   refill: () => Promise<void>,
 ): Promise<boolean> {
   const built = await buildOffer(pw, rec);
+  // Store it like every other publish path: the p7b audit reads every ledger
+  // offer's blob back to check its status, and a missing file aborts the whole
+  // audit with ENOENT rather than failing one assertion.
+  storeBlob(built.hash, built.blob);
   const ok = await publishAndIndex(db, rec, built);
   if (!ok) return false;
 

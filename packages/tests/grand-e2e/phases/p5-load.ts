@@ -457,7 +457,12 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     });
     await check("5a: storm indexed nothing", async () => {
       const indexedNow = (await tableCount(db, "offer_file")) + (await tableCount(db, "offer_file_history"));
-      const legitNew = ledger.offers.filter((o) => o.phase === "p5" && o.state !== "planned" && o.state !== "casualty").length;
+      // startsWith("p5"), not === "p5": the chaos offers are tagged
+      // "p5-chaos" and are just as legitimate, so excluding them made their
+      // rows look like storm-indexed garbage.
+      const legitNew = ledger.offers.filter(
+        (o) => o.phase.startsWith("p5") && o.state !== "planned" && o.state !== "casualty",
+      ).length;
       return indexedNow <= offersBeforeStorm + historyBeforeStorm + legitNew;
     });
 

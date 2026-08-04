@@ -99,9 +99,21 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
     const disagreements: string[] = [];
     for (let i = 0; i < auditable.length; i += 50) {
       const batch = auditable.slice(i, i + 50);
-      const res = await postStatusByBlob({ offers: batch.map((o) => loadBlob(o.offerHash!)) });
+      // Tolerate a missing blob: report it as a disagreement instead of
+      // aborting the entire audit with ENOENT.
+      const usable = batch.filter((o) => {
+        try {
+          loadBlob(o.offerHash!);
+          return true;
+        } catch {
+          disagreements.push(`#${o.index}(${o.fate})→blob-missing`);
+          return false;
+        }
+      });
+      if (usable.length === 0) continue;
+      const res = await postStatusByBlob({ offers: usable.map((o) => loadBlob(o.offerHash!)) });
       const statuses: any[] = res.body?.statuses ?? [];
-      batch.forEach((rec, j) => {
+      usable.forEach((rec, j) => {
         const got = statuses[j]?.status;
         if (!expectedStatus(rec, auditStart).includes(got)) {
           disagreements.push(`#${rec.index}(${rec.fate}${rec.layer === "uu" && rec.fate === "cancelled" ? "/gap" : ""})→${got}`);

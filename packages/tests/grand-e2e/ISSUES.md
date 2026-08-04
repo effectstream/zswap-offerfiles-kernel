@@ -208,29 +208,52 @@ Trigger any STF failure and confirm the console shows:
 
 ---
 
-## 5. No green end-to-end run; `baseline.json` still empty
+## 5. Green end-to-end run — **ACHIEVED 2026-08-04**
 
-**Status: in progress.** Runs 1–8 died in setup for operational reasons (proof
-server storms, coin-reservation deadlocks, a node-side cap on fan-out tx size);
-run 9 reached 53 passes before the NUL crash; run 10 was superseded; run 11 was
-stopped deliberately to reproduce the issues in this file without contending
-for the genesis wallet and the rate-limit budget.
+**Status: done.** `143 checks, 0 failures, 50.3 min` at `GRAND_OFFERS=25`, exit
+0, `SCORECARD.md` all-green, and `baseline.json` calibrated from the run so
+later runs enforce at x1.2.
 
-Run 12 is the first attempt with **every known blocker fixed** — PR #22 (NUL
-crash), PR #23 (batcher ceiling) and PR #24 (rate limit, `TOO_LARGE`, docs,
-corrected assertions, mixed layers excluded, build-time offer guard) — run from
-a branch with all three merged. Note that a run needs all of them *together*:
-a branch off `main` alone still carries the NUL crash and the 1-slot batcher.
+Runs 1-8 died in setup for operational reasons; run 9 reached 53 passes before
+the NUL crash; runs 10-11 were superseded or stopped deliberately. Runs 12-15
+each got further and each surfaced something real:
 
-### Test
+| run | outcome | what it cost / taught |
+|---|---|---|
+| 12 | 108 pass / 9 fail | first near-complete run; p7a fell back |
+| 13 | 4 fail | ttl/root windows never exported to the node |
+| 14 | pulled in p5 | 25 batcher slots starved the box; 13 casualties |
+| 15 | **143 / 0** | 7 slots, clean stack, determinism ran for real |
+
+### Reproducing it
+
+The run is driven by `fresh-run.sh`, which exists because three things must be
+true at once and none of them are defaults:
 
 ```bash
-GRAND_OFFERS=250 bun run test:grand     # calibration scale
-GRAND_OFFERS=500 bun run test:grand     # full scale (handoff target)
+./packages/tests/grand-e2e/fresh-run.sh          # 25 offers, ~50 min
+GRAND_OFFERS=250 ./packages/tests/grand-e2e/fresh-run.sh
 ```
 
-**Pass:** exit 0, all-green `SCORECARD.md`, `out/metrics.json` written. Then
-commit those numbers into `baseline.json` so later runs enforce at ×1.2.
+1. **A wiped PGlite.** The audit sums the whole database, so a warm stack fails
+   the chart checks with the previous run's fills.
+2. **`ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600` exported before the
+   orchestrator starts.** The node reads them only at startup. Without them a
+   run fails four checks that look unrelated, ~20 min in.
+3. **`BATCHER_MAX_SLOTS_PER_WALLET=7` plus ~20 fat NIGHT UTXOs provisioned
+   *after* registration.** Slots are `min(dust coins / cost, cap)` and the cap
+   defaults to 1; registration rotates pre-existing UTXOs into at most two
+   outputs, so funding first destroys the coins it is trying to create.
+
+7 and not 100: removing the dust bottleneck exposes the **proof server** as the
+next ceiling. 25 slots drove load average to 25-30 on a 16-core box, starved
+the celestia devnet (block production ~6/min -> 1-3/min, 11x "underlying
+subscription is stuck"), and offers began dying with `blob.Submit failed: The
+operation timed out`. Neither resulting failure named the proof server.
+
+Note `baseline.json` is calibrated at 25 offers on one box; re-calibrate for a
+different scale. `publishToIndexed` p95 (~24 s) is dominated by the celestia
+`delayMs`, not by node work.
 
 ---
 
@@ -241,6 +264,8 @@ commit those numbers into `baseline.json` so later runs enforce at ×1.2.
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
 | 1 | Batcher livelocks on dust exhaustion | **product bug** | High | back off + surface; scale dust with slots |
+| 2 | `pair_stats.last_traded_at` uses SQL `NOW()` | **product bug** | Medium | breaks replay determinism and mis-orders the pair list after a resync; use the block timestamp |
+| 3 | Root window not enforced on read | **product bug** | Low/Medium | pruning is write-triggered and `isKnownRoot` has no age predicate; a quiet chain keeps accepting expired roots |
 | — | ~~`celestiaHeight` mislabeled~~ | **RESOLVED** — renamed to `blockHeight`, docs corrected | — | upstream primitive fix deferred by decision |
 | 2 | Cross-layer offers unenforced in the ladder | gap — decide | Low/Medium | suite no longer builds them; add an explicit rule if they must be refused |
 | 3 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |

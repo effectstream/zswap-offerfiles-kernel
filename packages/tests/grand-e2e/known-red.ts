@@ -92,6 +92,20 @@ export const KNOWN_RED: Record<string, KnownRed> = {
   // deterministic property: the two routes must not disagree in any way OTHER
   // than that known inversion.
 
+  // ── PR-G — expiresAt derived without the MAX(height) escape (§2.6) ─────────
+  // The ledger's past_roots re-inserts the CURRENT root every block; our
+  // midnight-zswap-root primitive fires only when the root ADVANCES. The
+  // ingestion gate compensates for that asymmetry (isKnownRootLive's MAX(height)
+  // escape); the expiresAt derivation does not — it reads raw last_seen_ms.
+  //
+  // On a chain with no shielded activity the newest root's last_seen goes stale,
+  // so a freshly indexed offer is served an expiry that has ALREADY PASSED.
+  // Measured: ingested 18:34:20, expiresAt 18:23:36 — eleven minutes before it
+  // existed — while the same offer passed the settleability check.
+  "p8-served ▸ served expiresAt is in the future for offers reported live": {
+    id: "RED-8", pr: "PR-G", why: "expiresAt uses raw last_seen_ms, no MAX(height) escape (§2.6)",
+  },
+
   // NOT REGISTERED YET, and both for the same reason — the FIXTURE does not
   // exist, so registering the check would produce a permanently-stale entry
   // that reads as work-in-flight when nothing is in flight:

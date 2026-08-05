@@ -244,6 +244,13 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
       const archivedAt = archivedAtByRow.get(rec.rowId!);
       if (terminals.length === 0 && archivedAt && sse.wasListeningAt(archivedAt)) missingTerminal++;
       if (terminals.length >= 1 && archivedAt) {
+        // NOTE the clocks: terminal.at is suite wall clock; archived_at is the
+        // L2 block timestamp (chain-derived since the archived_at fix). This
+        // lag therefore spans block-timestamp -> STM execution -> event bus ->
+        // SSE delivery — an end-to-end chain-to-client latency, NOT pure
+        // socket delivery. The baseline reflects that (p95 ~2.7s, dominated by
+        // ~1.5-2.5s STM executor lag on dev); the pre-fix 66ms baseline was
+        // only achievable because archived_at used to be wall-clock NOW().
         sseDeliveryLags.push(Math.max(0, terminals[0]!.at - archivedAt));
       }
     }

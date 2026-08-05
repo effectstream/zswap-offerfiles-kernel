@@ -67,7 +67,7 @@ what did not:
 | T-D2 price orientation + inversion | ✅ `p2`, anchored to a known fill |
 | T-D3 `/v1/pairs` vs `/v1/chart/stats` | ✅ `p7b` (unregistered — see §1.2) + **red** in `fill-vs-cancel.test.ts` |
 | T-D4 `trade_count` + chain ordering | ✅ `p7b` |
-| T-D5 multi-leg | ⚠️ **gap CONFIRMED** by the same probe (4 fabricated pairs); fixture now unblocked — add a 3rd color (§2.5) |
+| T-D5 multi-leg | ✅ **red** `multileg-pairs.test.ts` — one settlement, four prices (§2.5) |
 | T-E1 N-way competition | ✅ `p3b`, 3 competitors per layer |
 | T-E2 partial overlap between live offers | ⛔ deferred — needs denomination-controlled funding |
 | T-E3 cross-door competition | ✅ `p3b`, one competitor via `blob.Submit` |
@@ -375,6 +375,32 @@ One transaction, four fabricated trades at four different prices, every leg's
 volume counted twice. Two of those pairs are cross-LAYER pairs that describe no
 market at all — the indexer would create `pair_stats` rows for pairings that
 never traded.
+
+**Measured, not argued** (`packages/database/multileg-pairs.test.ts`, which
+seeds one 4-leg CONSUMED offer and runs the real queries):
+
+| pair | fills | price | vol_base | vol_quote |
+|---|---|---|---|---|
+| A/C | 1 | **1.5057** | 1317 | 1983 |
+| A/D | 1 | **1.3865** | 1317 | 1826 |
+| B/C | 1 | **1.3926** | 1424 | 1983 |
+| B/D | 1 | **1.2823** | 1424 | 1826 |
+
+Four trade-history rows for one settlement; every colour's volume reported at
+exactly 2x what moved when summed across pairs.
+
+**Be precise about which half is the defect.** Classification is fine — the
+offer is correctly CONSUMED and each pair correctly reports `fills=1`. Supply is
+real — `open_count=1` on four pairs, and the tokens genuinely are on offer. The
+fault is the step between: the offer -> pair mapping is one-to-many (gives x
+wants), while every market indicator assumes one-to-one.
+
+The volume double-count is arguable — per pair each figure is defensible, and it
+doubles only if you sum across pairs, which is a convention question. **The price
+is not arguable.** One transaction has one exchange rate; the API reports four,
+each manufactured by ignoring the other legs. On the open side the same fan-out
+advertises four executable-looking quotes, none of which a taker can execute: A/C
+at 1.5057 also requires supplying D and receiving B.
 
 The fixture is also no longer blocked. `mintShielded(deployed, sepByte, …)`
 parameterizes the color by domain separator on the ALREADY-DEPLOYED contract, so

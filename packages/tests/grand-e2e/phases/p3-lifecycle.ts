@@ -15,6 +15,9 @@ import {
   cancelGiveToken,
   cancelWantToken,
   makeRefill,
+  makerShieldedKey,
+  makerUnshieldedKey,
+  oppositeKey,
   publishAndIndex,
   runCancelCycle,
   selfSplit,
@@ -238,9 +241,16 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
   // P2pAtomicSwaps.earliestIntentTtl and bounded on-chain by `global_ttl`.
   // Only the shielded branch has ever been asserted.
   {
-    const a = amountsFor(40, "UA", "UB");
-    const rec = mkRecord(40, "expired", "uu", makers[5]!.seed, "UA", "UB", a.give, a.want);
-    const built = await buildOffer(makers[5]!, rec);
+    // Give the color THIS maker is actually funded with (parity rule — see
+    // makerUnshieldedKey). Picking maker and color independently asks a wallet
+    // to spend something it never held, which surfaces ~100 s later as an
+    // opaque Wallet.InsufficientFunds from inside buildOffer's retry loop.
+    const mi = 5;
+    const give = makerUnshieldedKey(mi);
+    const want = oppositeKey(give);
+    const a = amountsFor(40, give, want);
+    const rec = mkRecord(40, "expired", "uu", makers[mi]!.seed, give, want, a.give, a.want);
+    const built = await buildOffer(makers[mi]!, rec);
     storeBlob(built.hash, built.blob);
     const ok = await check("unshielded expiry-fated offer indexed", () => publishAndIndex(db, rec, built));
     if (ok) {
@@ -269,9 +279,12 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
   // difference is that the offer's terms actually executed. If the predicate
   // is wrong anywhere, it is wrong here, and it has never been run.
   {
-    const selfMaker = makers[6]!;
-    const a = amountsFor(41, "TA", "TB");
-    const rec = mkRecord(41, "settled", "ss", selfMaker.seed, "TA", "TB", a.give, a.want);
+    const mi = 6;
+    const selfMaker = makers[mi]!;
+    const give = makerShieldedKey(mi);
+    const want = oppositeKey(give);
+    const a = amountsFor(41, give, want);
+    const rec = mkRecord(41, "settled", "ss", selfMaker.seed, give, want, a.give, a.want);
     const built = await buildOffer(selfMaker, rec);
     storeBlob(built.hash, built.blob);
     const ok = await check("self-fill offer indexed", () => publishAndIndex(db, rec, built));
@@ -279,8 +292,8 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
       // The maker balances its OWN offer — it holds both colors.
       await settleAndAssert(db, selfMaker, rec, built.blob, "maker self-fill");
       await check("maker self-fill counts as a trade, not a cancel", async () => {
-        const base = ledger.colors.TA!;
-        const quote = ledger.colors.TB!;
+        const base = ledger.colors[give]!;
+        const quote = ledger.colors[want]!;
         const hist = await getChartHistory(base, quote);
         if (hist.status !== 200 || !Array.isArray(hist.body)) return false;
         return hist.body.some((t: any) => Number(t.amt) === Number(rec.giveAmount));

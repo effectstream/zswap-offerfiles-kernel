@@ -17,7 +17,7 @@ import {
   publishCelestiaGarbage,
   STRUCTURAL_CODES,
 } from "../actors/adversary.ts";
-import { buildOneSidedOffer, type Actors } from "../actors/wallets.ts";
+import { buildOneSidedOffer, makerShieldedKey, type Actors } from "../actors/wallets.ts";
 import { getHealth, submitOffer2 } from "../lib/api2.ts";
 import { submitBlobRaw } from "../lib/celestia.ts";
 import { offerRowByHash, rejectionRows, rejectionTotalsByCode, tableCount } from "../lib/db2.ts";
@@ -36,14 +36,20 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
   // as an indexer error (ISSUES.md §3). This builds a give-only transaction on
   // purpose and requires both gates to name it.
   {
-    const oneSided = await buildOneSidedOffer(actors.makers[7]!);
-    if (!oneSided) {
+    // Colors are NOT free to choose: each maker holds one shielded color by
+    // index parity, so the give must come from makerShieldedKey or the wallet
+    // is asked to spend something it never held.
+    const makerIdx = 7;
+    const built = await buildOneSidedOffer(actors.makers[makerIdx]!, makerShieldedKey(makerIdx));
+    if ("skipped" in built) {
       note(
         "NOT_A_SWAP fixture",
-        "could not build a one-sided transaction — wallet-sdk-facade no longer drops the " +
-          "mismatched leg, so the two-sided rule is UNTESTED this run (see ISSUES.md §3)",
+        `not built (${built.skipped}) — the MIP-0006 two-sided rule is UNTESTED this run. ` +
+          "If the reason is that the SDK produced a valid two-sided offer, ISSUES.md §3 is " +
+          "stale and this fixture needs a different construction.",
       );
     } else {
+      const oneSided = built.blob;
       const res = await submitOffer2(oneSided);
       ledger.addGarbage({
         kind: "api:NOT_A_SWAP-one-sided",

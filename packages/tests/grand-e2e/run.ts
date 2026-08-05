@@ -19,6 +19,7 @@ import { SseRecorder } from "./lib/sse.ts";
 import {
   allResults,
   beginPhase,
+  check,
   endPhases,
   ensureOutDir,
   failures,
@@ -227,6 +228,36 @@ function writeScorecard(determinism: DeterminismOutcome | null): void {
   console.log(`\nSCORECARD written to packages/tests/grand-e2e/SCORECARD.md`);
 }
 
+/**
+ * Run one phase so that a throw inside it costs THAT phase, not the run.
+ *
+ * Phases are long and expensive — a full pass is ~50 minutes of chain work —
+ * and most of a phase's value is independent of the others. Before this, every
+ * phase shared one try/catch, so a single unguarded throw anywhere ended
+ * everything after it: measured, a fixture builder asking a wallet for a color
+ * it was never funded with killed a run at 48 checks, and p3, p3b, p5, p8, p7b
+ * and p7a never executed. The failure was one line; the cost was the whole
+ * afternoon.
+ *
+ * The exception is recorded as a normal failure (so it gates the run and lands
+ * in the scorecard) and the next phase starts. p1 stays fatal — it produces the
+ * artifacts every later phase reads, so continuing past it would only generate
+ * misleading failures.
+ */
+async function runPhase(name: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    beginPhase(name);
+    await check(
+      `${name} completed without throwing`,
+      async () => false,
+      `phase aborted: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    console.error(`[grand-e2e] phase ${name} threw — continuing with the next phase:`, e);
+  }
+}
+
 async function main(): Promise<void> {
   ensureOutDir();
   const startedAt = Date.now();
@@ -259,16 +290,19 @@ async function main(): Promise<void> {
     const art = await p1Happy(db, actors, sse);
     if (!art) throw new Error("p1 happy path failed — aborting (nothing downstream can pass)");
 
-    await p2Api(db, art);
-    await p4Adversarial(db, art, actors);
-    await p3Lifecycle(db, actors);
-    await p3bCompeting(db, actors);
-    await p5Load(db, actors, art);
+    // Each phase isolated: one phase throwing must not cost the other five.
+    await runPhase("p2-api", () => p2Api(db, art));
+    await runPhase("p4-adversarial", () => p4Adversarial(db, art, actors!));
+    await runPhase("p3-lifecycle", () => p3Lifecycle(db, actors!));
+    await runPhase("p3b-competing", () => p3bCompeting(db, actors!));
+    await runPhase("p5-load", () => p5Load(db, actors!, art));
     // p8 before p7b: it needs a populated live book, and p7b's audit is the
     // wrap-up. Both must precede the determinism replay, which quiets the chain.
-    await p8Served(db);
-    await p7bAudit(db, sse);
-    determinism = await p7Determinism(db);
+    await runPhase("p8-served", () => p8Served(db));
+    await runPhase("p7b-audit", () => p7bAudit(db, sse));
+    await runPhase("p7a-determinism", async () => {
+      determinism = await p7Determinism(db);
+    });
   } catch (e) {
     console.error("\n[grand-e2e] fatal:", e);
     process.exitCode = 1;

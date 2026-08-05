@@ -140,6 +140,23 @@ const CANCEL_DOUBLE_SEEDS = [CANCEL_DOUBLE_SEED, "c3".padStart(64, "0")];
 const COMPETING_SHIELDED_SEED = "e0".padStart(64, "0");
 const COMPETING_UNSHIELDED_SEED = "e1".padStart(64, "0");
 
+/**
+ * Which colors maker `i` is actually funded with. Makers are NOT funded in all
+ * four colors — each gets one shielded and one unshielded color by index
+ * parity, so a fixture that picks a maker and a color independently can ask a
+ * wallet to spend something it has never held. That is a `Wallet.
+ * InsufficientFunds` deep inside the SDK, ~100 s of buildOffer retries away
+ * from the line that caused it.
+ *
+ * Exported so the fan-out and every fixture read the SAME rule; duplicating
+ * `i % 2 === 0 ? "TA" : "TB"` at a call site is how the two drift apart.
+ */
+export const makerShieldedKey = (i: number): TokenKey => (i % 2 === 0 ? "TA" : "TB");
+export const makerUnshieldedKey = (i: number): TokenKey => (i % 2 === 0 ? "UA" : "UB");
+/** The other color on the same layer — what a maker can legitimately want. */
+export const oppositeKey = (k: TokenKey): TokenKey =>
+  k === "TA" ? "TB" : k === "TB" ? "TA" : k === "UA" ? "UB" : "UA";
+
 export const CANCEL_COIN = 1000n; // exact denomination the cancel cycles use
 export const COMPETING_COIN = 1500n; // the single coin two competing offers share
 
@@ -427,8 +444,8 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   }
   const grants: Grant[] = [];
   makers.forEach((m, i) => {
-    grants.push({ pw: m, key: i % 2 === 0 ? "TA" : "TB", denom: SHIELDED_COIN, coins: plan.makerShieldedCoins });
-    grants.push({ pw: m, key: i % 2 === 0 ? "UA" : "UB", denom: UNSHIELDED_COIN, coins: plan.makerUnshieldedCoins });
+    grants.push({ pw: m, key: makerShieldedKey(i), denom: SHIELDED_COIN, coins: plan.makerShieldedCoins });
+    grants.push({ pw: m, key: makerUnshieldedKey(i), denom: UNSHIELDED_COIN, coins: plan.makerUnshieldedCoins });
   });
   takers.forEach((t) => {
     for (const key of ["TA", "TB", "UA", "UB"] as const) {
@@ -620,47 +637,68 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
  * output, yielding exactly the give-only transaction we want. Everything
  * about it is legitimate except that it is not an offer.
  *
- * Returns null rather than throwing if the SDK ever stops dropping the leg —
- * at which point the fixture is no longer one-sided and the caller must know
- * that instead of asserting a code it earned for the wrong reason.
+ * `giveKey` MUST be a color this maker is funded with — see makerShieldedKey.
+ *
+ * NEVER throws. A fixture builder that can throw takes the whole run with it:
+ * this is called outside a check(), so an exception propagates to run.ts and
+ * aborts every remaining phase. That is exactly what happened on the first
+ * attempt — a hardcoded TA against an odd-indexed maker funded in TB ended a
+ * 15-minute run at 48 checks. Returning null degrades to one skipped fixture
+ * with a loud note, which is the correct blast radius for a fixture.
  */
-export async function buildOneSidedOffer(pw: PoolWallet): Promise<string | null> {
-  return pw.run(async () => {
-    const giveColor = ledger.colors.TA!;
-    const wantColor = ledger.colors.UB!; // other layer — the dropped leg
-    const recipe = await pw.wr.wallet.initSwap(
-      { shielded: { [giveColor]: GIVE_MIN } },
-      [{
-        type: "unshielded",
-        outputs: [{ type: wantColor, amount: GIVE_MIN, receiverAddress: pw.unshieldedObj }],
-      } as any],
-      shieldedKeys(pw.wr),
-      { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
-    );
-    let finalized: any;
-    try {
-      finalized = await withProveSlot(() => pw.wr.wallet.finalizeTransaction(recipe.transaction));
-    } catch {
-      await (pw.wr.wallet as any).revert(recipe).catch(() => {});
-      return null;
-    }
-    const blob = OfferFiles.encode(finalized.serialize());
-    // Release the coin: this transaction is never published, and holding the
-    // reservation would starve the maker for the rest of the run.
-    await (pw.wr.wallet as any).revert(finalized).catch(() => {});
+export async function buildOneSidedOffer(
+  pw: PoolWallet,
+  giveKey: TokenKey,
+): Promise<{ blob: string } | { skipped: string }> {
+  try {
+    return await pw.run(async () => {
+      const giveColor = ledger.colors[giveKey]!;
+      // The dropped leg: an unshielded OUTPUT needs no funding of its own.
+      const wantColor = ledger.colors[isShieldedKey(giveKey) ? "UB" : "TB"]!;
+      const recipe = await pw.wr.wallet.initSwap(
+        isShieldedKey(giveKey)
+          ? { shielded: { [giveColor]: GIVE_MIN } }
+          : ({ unshielded: { [giveColor]: GIVE_MIN } } as any),
+        [{
+          type: isShieldedKey(giveKey) ? "unshielded" : "shielded",
+          outputs: [{
+            type: wantColor,
+            amount: GIVE_MIN,
+            receiverAddress: isShieldedKey(giveKey) ? pw.unshieldedObj : pw.shieldedAddr,
+          }],
+        } as any],
+        shieldedKeys(pw.wr),
+        { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
+      );
+      let finalized: any;
+      try {
+        finalized = await withProveSlot(() => pw.wr.wallet.finalizeTransaction(recipe.transaction));
+      } catch (e) {
+        await (pw.wr.wallet as any).revert(recipe).catch(() => {});
+        return { skipped: `finalize failed: ${e instanceof Error ? e.message : String(e)}` };
+      }
+      const blob = OfferFiles.encode(finalized.serialize());
+      // Release the coin: this transaction is never published, and holding the
+      // reservation would starve the maker for the rest of the run.
+      await (pw.wr.wallet as any).revert(finalized).catch(() => {});
 
-    const v = validateZswapOffer(blob, {
-      refState: getBlankRefState(net.id),
-      tblock: new Date(),
-      maxBytes: 1024 * 1024,
-      crypto: "defer",
+      const v = validateZswapOffer(blob, {
+        refState: getBlankRefState(net.id),
+        tblock: new Date(),
+        maxBytes: 1024 * 1024,
+        crypto: "defer",
+      });
+      // Only NOT_A_SWAP proves the fixture is what it claims. Anything else —
+      // including success — means the SDK behaved differently and the fixture
+      // would be asserting a code for the wrong reason.
+      if (v.code !== "NOT_A_SWAP") {
+        return { skipped: `built ${v.ok ? "a VALID two-sided offer" : v.code} instead of NOT_A_SWAP` };
+      }
+      return { blob };
     });
-    // Only NOT_A_SWAP proves the fixture is what it claims. Anything else —
-    // including success — means the SDK behaved differently and the fixture
-    // would be asserting a code for the wrong reason.
-    if (v.code !== "NOT_A_SWAP") return null;
-    return blob;
-  });
+  } catch (e) {
+    return { skipped: `wallet error: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }
 
 /** Publish via the planned path and wait for the offer_file row. */

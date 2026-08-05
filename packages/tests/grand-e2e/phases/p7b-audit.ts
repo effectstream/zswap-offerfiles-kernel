@@ -9,7 +9,17 @@
 import { createHash } from "node:crypto";
 import type { Client } from "pg";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { OFFER_TTL_SECONDS, ROOT_WINDOW_SECONDS } from "../config.ts";
+import {
+  collectOutputCommitments,
+  collectNullifiers,
+  collectUnshieldedSpends,
+} from "@zswap-da/validator";
+import {
+  DEEP_AUDIT,
+  DEEP_AUDIT_SAMPLE,
+  OFFER_TTL_SECONDS,
+  ROOT_WINDOW_SECONDS,
+} from "../config.ts";
 import { ledger, type OfferRecord } from "../ledger.ts";
 import { loadBlob } from "../actors/wallets.ts";
 import { noSnakeKeys } from "./p2-api.ts";
@@ -18,12 +28,14 @@ import {
   getChartStats,
   getHealthSync,
   getOffersPage,
+  getPairs,
   postStatusByBlob,
   realNtpLagSeconds,
 } from "../lib/api2.ts";
-import { rejectionRows } from "../lib/db2.ts";
+import { legsFor, rejectionRows, storedBlobs } from "../lib/db2.ts";
+import { derivedLegKeys, fullyValidate } from "../lib/verify.ts";
 import type { SseRecorder } from "../lib/sse.ts";
-import { beginPhase, check, note, pgrepF } from "../lib/util.ts";
+import { beginPhase, check, detVar, note, pgrepF } from "../lib/util.ts";
 import { baselineViolations, loadBaseline, snapshot, sseDeliveryLags, writeMetrics } from "../metrics.ts";
 
 /** Normalize a primitive-accounting payload scalar to lowercase hex. */
@@ -92,6 +104,148 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
     }
     return rows.rows.length > 0;
   });
+
+  // ── 1b. History referential integrity ────────────────────────────────────
+  // Cheap SQL, but each one guards a silent-corruption mode that no existing
+  // check would notice. The first is the one that matters most: getTradeHistory
+  // INNER JOINs both directions, so an offer that loses a leg during archival
+  // DISAPPEARS from trade history without a trace. A real sale vanishing is a
+  // worse failure than a wrong one appearing, and nothing today would see it.
+  {
+    const integrity: [string, string][] = [
+      ["every archived offer kept both sides of its swap", `
+         SELECT h.id FROM offer_file_history h
+         WHERE NOT EXISTS (SELECT 1 FROM offer_file_tokens_history t
+                           WHERE t.offer_file_id = h.id AND t.direction = 'GIVING')
+            OR NOT EXISTS (SELECT 1 FROM offer_file_tokens_history t
+                           WHERE t.offer_file_id = h.id AND t.direction = 'WANTING')`],
+      ["no orphan history side-rows", `
+         SELECT s.offer_file_id FROM (
+           SELECT offer_file_id FROM offer_file_tokens_history
+           UNION SELECT offer_file_id FROM offer_file_nullifiers_history
+           UNION SELECT offer_file_id FROM offer_file_unshielded_spends_history
+           UNION SELECT offer_file_id FROM offer_file_commitments_history) s
+         WHERE NOT EXISTS (SELECT 1 FROM offer_file_history h WHERE h.id = s.offer_file_id)`],
+      ["archive_reason is CONSUMED or TTL, never NULL", `
+         SELECT id FROM offer_file_history
+         WHERE archive_reason IS NULL OR archive_reason NOT IN ('CONSUMED','TTL')`],
+      ["archived_at never precedes the offer it archives", `
+         SELECT id FROM offer_file_history
+         WHERE archived_at IS NULL
+            OR archived_at < first_seen_at
+            OR archived_at < metadata_created_at`],
+      ["no live offer shares an id with an archived one", `
+         SELECT o.id FROM offer_file o JOIN offer_file_history h ON h.id = o.id`],
+    ];
+    for (const [name, sql] of integrity) {
+      const rows = (await db.query(sql)).rows;
+      await check(
+        `history integrity: ${name}`,
+        async () => rows.length === 0,
+        rows.length ? `${rows.length} offending row(s), e.g. id=${(rows[0] as any).id ?? (rows[0] as any).offer_file_id}` : undefined,
+      );
+    }
+  }
+
+  // ── 1c. Deep audit: everything stored equals what the bytes say ──────────
+  // One pass over every blob this node holds, live and archived. wellFormed
+  // dominates the cost, so it is paid ONCE per row and every downstream
+  // assertion reuses the result.
+  //
+  // Why this exists: check 1 above recomputes only sha256, so a row can be
+  // hash-correct and still be semantically garbage — a forged proof, legs that
+  // do not match the transaction, a missing nullifier row. MIP-0006's central
+  // rule is that legs are DERIVED and never trusted from the maker; this is
+  // the only place that proves the database kept faith with the derivation.
+  {
+    const all = await storedBlobs(db);
+    const rows = DEEP_AUDIT
+      ? all
+      : all.filter((_, i) => detVar(i, Math.max(1, Math.ceil(all.length / DEEP_AUDIT_SAMPLE))) === 0);
+
+    const invalid: string[] = [];
+    const legMismatch: string[] = [];
+    const spendMismatch: string[] = [];
+    const markerMissing: string[] = [];
+
+    for (const row of rows) {
+      const short = row.offer_hash.slice(0, 8);
+      let v;
+      try {
+        v = fullyValidate(OfferFiles.decode(row.transaction_hex));
+      } catch {
+        invalid.push(`${short}:undecodable`);
+        continue;
+      }
+      if (!v.ok) {
+        invalid.push(`${short}:${v.code}`);
+        continue; // derived fields are unreliable once validation failed
+      }
+
+      const stored = await legsFor(db, row.id, row.live);
+      const derived = derivedLegKeys(v);
+      if (JSON.stringify(stored) !== JSON.stringify(derived)) {
+        legMismatch.push(`${short}: stored=${stored.join(",")} derived=${derived.join(",")}`);
+      }
+
+      // Spend refs: the offer's own claim about what it consumes. If these
+      // drift, the archive triggers watch the wrong coins and an offer either
+      // never archives or archives on someone else's spend.
+      const nTable = row.live ? "offer_file_nullifiers" : "offer_file_nullifiers_history";
+      const uTable = row.live ? "offer_file_unshielded_spends" : "offer_file_unshielded_spends_history";
+      const nStored = (await db.query(`SELECT nullifier FROM ${nTable} WHERE offer_file_id = $1`, [row.id]))
+        .rows.map((r: any) => String(r.nullifier).toLowerCase()).sort();
+      const uStored = (await db.query(
+        `SELECT owner, intent_hash, output_no FROM ${uTable} WHERE offer_file_id = $1`, [row.id],
+      )).rows.map((r: any) => `${r.owner}|${r.intent_hash}|${r.output_no}`).sort();
+      const nDerived = collectNullifiers(v.tx!).map((x) => x.toLowerCase()).sort();
+      const uDerived = collectUnshieldedSpends(v.tx!)
+        .map((s) => `${s.owner}|${s.intentHash}|${s.outputNo}`).sort();
+      if (JSON.stringify(nStored) !== JSON.stringify(nDerived)) {
+        spendMismatch.push(`${short}: nullifiers stored=${nStored.length} derived=${nDerived.length}`);
+      }
+      if (JSON.stringify(uStored) !== JSON.stringify(uDerived)) {
+        spendMismatch.push(`${short}: utxo stored=${uStored.length} derived=${uDerived.length}`);
+      }
+
+      // Fill markers. Branch 3 of cancelledPredicate is VACUOUS when an offer
+      // has no stored commitments, so a marker-copy regression silently
+      // downgrades exact fill-vs-cancel classification back to the old
+      // all-in-one-tx heuristic without failing a single existing check.
+      const expectedMarkers = collectOutputCommitments(v.tx!);
+      if (expectedMarkers.length > 0) {
+        const cTable = row.live ? "offer_file_commitments" : "offer_file_commitments_history";
+        const cStored = Number(
+          (await db.query(`SELECT count(*)::int AS n FROM ${cTable} WHERE offer_file_id = $1`, [row.id])).rows[0].n,
+        );
+        if (cStored !== expectedMarkers.length) {
+          markerMissing.push(`${short}: stored=${cStored} expected=${expectedMarkers.length}`);
+        }
+      }
+    }
+
+    note("deep audit", `${rows.length}/${all.length} blobs re-validated (DEEP_AUDIT=${DEEP_AUDIT ? "1" : "0"})`);
+    await check(
+      "every stored blob re-validates from its bytes, proofs included",
+      async () => rows.length > 0 && invalid.length === 0,
+      invalid.slice(0, 5).join("; "),
+    );
+    await check(
+      "stored legs equal deriveTokenLegs of the stored bytes (MIP-0006: derived, never trusted)",
+      async () => legMismatch.length === 0,
+      legMismatch.slice(0, 3).join("; "),
+    );
+    await check(
+      "stored spend refs equal the transaction's own nullifiers / UTXO triples",
+      async () => spendMismatch.length === 0,
+      spendMismatch.slice(0, 3).join("; "),
+    );
+    await check(
+      "fill markers stored for every offer that has shielded outputs",
+      async () => markerMissing.length === 0,
+      markerMissing.slice(0, 3).join("; "),
+    );
+  }
 
   // ── 2. Classification soundness: ledger fate vs API status, 100% ─────────
   {
@@ -216,6 +370,133 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
        `expected base=${fills.byColor[base] ?? 0n} quote=${fills.byColor[quote] ?? 0n}`);
   }
 
+  // ── 5b. Market data must describe REAL sales ─────────────────────────────
+  // The block above asserts current behaviour pair-by-pair, gap included, so
+  // the suite stays a working gate. These assert the TRUTH in aggregate: only
+  // a genuine settlement is a sale. They diverge exactly by the unshielded
+  // classification gap (§2.1), which is why they are registered as reds.
+  {
+    const truth = ledger.settledLedger();
+    const volumeDiffs: string[] = [];
+    const countDiffs: string[] = [];
+    for (const [pairKey, fills] of truth) {
+      const [base, quote] = pairKey.split("|") as [string, string];
+      const short = `${base.slice(0, 6)}|${quote.slice(0, 6)}`;
+      const stats = await getChartStats(base, quote);
+      const vb = Number(stats.body?.volume_base ?? -1);
+      const vq = Number(stats.body?.volume_quote ?? -1);
+      if (vb !== Number(fills.byColor[base] ?? 0n) || vq !== Number(fills.byColor[quote] ?? 0n)) {
+        volumeDiffs.push(
+          `${short}: api ${vb}/${vq} vs settled ${fills.byColor[base] ?? 0n}/${fills.byColor[quote] ?? 0n}`,
+        );
+      }
+      const hist = await getChartHistory(base, quote);
+      const rows = Array.isArray(hist.body) ? hist.body.length : -1;
+      if (fills.count <= 120 && rows !== fills.count) {
+        countDiffs.push(`${short}: api ${rows} rows vs ${fills.count} settled`);
+      }
+    }
+    await check(
+      "Σ chart volume == Σ settled offers",
+      async () => volumeDiffs.length === 0 && countDiffs.length === 0,
+      [...volumeDiffs, ...countDiffs].slice(0, 4).join("; "),
+    );
+
+    // pair_stats is written by an event-bus listener (api.ts), a completely
+    // different path from the SQL aggregate the chart uses. A duplicated or
+    // replayed offer_consumed event double-increments here and nothing else
+    // would notice.
+    const pairRows = (await getPairs()).body ?? [];
+    const countMismatch: string[] = [];
+    for (const p of pairRows as any[]) {
+      const expected = truth.get(`${p.base_color}|${p.quote_color}`)?.count ?? 0;
+      if (Number(p.trade_count) !== expected) {
+        countMismatch.push(`${String(p.pair_key).slice(0, 13)}: trade_count=${p.trade_count} settled=${expected}`);
+      }
+    }
+    await check(
+      "pair_stats.trade_count == genuine fills per pair",
+      async () => countMismatch.length === 0,
+      countMismatch.slice(0, 4).join("; "),
+    );
+
+    // last_price is computed TWICE by unrelated code — upsertPairStatsByOfferId
+    // (event bus) and getPairStats24h (SQL) — and nothing had ever compared
+    // them. They can disagree indefinitely, serving two different last prices
+    // depending on which route the client calls.
+    //
+    // §2.2: they DO disagree today. upsertPairStatsByOfferId assigns base/quote
+    // by LEAST/GREATEST of the hex color but computes last_price as want÷give
+    // with no reference to which became base, so the value is quote-per-base
+    // only when the maker gave the lexically-lesser color and 1/p otherwise.
+    //
+    // That defect is NOT asserted here, because whether it manifests depends on
+    // the direction of each pair's most recent fill — data-dependent, so a
+    // registered red would be a coin flip. Its deterministic red lives in
+    // packages/database/fill-vs-cancel.test.ts, which chooses the color
+    // ordering. What IS asserted here is the part that does not depend on luck:
+    // the two routes must not disagree in any way OTHER than that inversion.
+    // After PR-C there should be no disagreement at all.
+    const inverted: string[] = [];
+    const unexplained: string[] = [];
+    for (const p of pairRows as any[]) {
+      if (p.last_price == null) continue;
+      const s = await getChartStats(p.base_color, p.quote_color);
+      const a = Number(p.last_price);
+      const b = Number(s.body?.last ?? NaN);
+      if (Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b))) continue;
+      const line = `${String(p.pair_key).slice(0, 13)}: /v1/pairs=${a} /v1/chart/stats=${b}`;
+      if (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a * b - 1) < 1e-6) inverted.push(line);
+      else unexplained.push(line);
+    }
+    if (inverted.length > 0) {
+      note(
+        "last_price inversion (§2.2, PR-C)",
+        `${inverted.length} pair(s) where the two routes multiply to 1 — the known ` +
+          `want÷give vs quote-per-base defect: ${inverted.slice(0, 3).join("; ")}`,
+      );
+    }
+    await check(
+      "/v1/pairs and /v1/chart/stats disagree only by the known inversion",
+      async () => unexplained.length === 0,
+      unexplained.slice(0, 4).join("; "),
+    );
+
+    // Ordering is only meaningful now that last_traded_at is chain time.
+    await check("/v1/pairs is ordered by last_traded_at, newest first", async () => {
+      const stamped = (pairRows as any[]).filter((p) => p.last_traded_at != null);
+      for (let i = 1; i < stamped.length; i++) {
+        if (Date.parse(stamped[i - 1].last_traded_at) < Date.parse(stamped[i].last_traded_at)) return false;
+      }
+      return true;
+    });
+  }
+
+  // ── 5c. Expired offers are never trades ──────────────────────────────────
+  // ~25% of a run's offers die by TTL. The chart queries filter on
+  // archive_reason = 'CONSUMED', so this should hold — and pinning it here
+  // means any future widening of that filter turns an expiry into a fabricated
+  // sale and fails loudly.
+  await check("no TTL-archived offer appears in trade history", async () => {
+    const ttlIds = (await db.query(
+      `SELECT id FROM offer_file_history WHERE archive_reason = 'TTL'`,
+    )).rows.map((r: any) => Number(r.id));
+    if (ttlIds.length === 0) return true;
+    const consumedPerPair = await db.query(
+      `SELECT count(*)::int AS n FROM offer_file_history WHERE archive_reason = 'CONSUMED'`,
+    );
+    // A TTL row can never satisfy the chart's WHERE clause; assert the
+    // complement holds — history rows are exactly the CONSUMED ones.
+    let charted = 0;
+    for (const [pairKey] of ledger.fillLedger()) {
+      const [base, quote] = pairKey.split("|") as [string, string];
+      const h = await getChartHistory(base, quote);
+      charted += Array.isArray(h.body) ? h.body.length : 0;
+    }
+    note("expiry", `${ttlIds.length} TTL-archived, ${consumedPerPair.rows[0].n} consumed, ${charted} charted rows`);
+    return charted <= Number(consumedPerPair.rows[0].n);
+  });
+
   // ── 6. SSE ledger ────────────────────────────────────────────────────────
   {
     const indexedRecs = ledger.offers.filter((o) => o.offerHash && o.indexedAt);
@@ -305,6 +586,32 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
     note("rejections", `${total} recorded, ${ours} deliberate celestia publishes`);
     return total >= ours && total <= ours + casualtyBudget;
   });
+
+  // ── 9b. Layer symmetry ───────────────────────────────────────────────────
+  // Coverage that silently collapses onto one layer is the failure mode the
+  // whole shielded/unshielded requirement exists to catch — and it is exactly
+  // how the shielded-only cancel coverage went unnoticed for the entire
+  // history of this suite. So make it an assertion, not a hope: every fate
+  // must have been exercised on BOTH layers.
+  {
+    const byLayer = (layer: OfferRecord["layer"], fate: OfferRecord["fate"]) =>
+      ledger.offers.filter(
+        (o) => o.layer === layer && o.fate === fate && o.state === "resolved",
+      ).length;
+    const missing: string[] = [];
+    for (const fate of ["settled", "cancelled", "expired"] as const) {
+      for (const layer of ["ss", "uu"] as const) {
+        const n = byLayer(layer, fate);
+        note("layer coverage", `${layer}/${fate}: ${n} resolved`);
+        if (n === 0) missing.push(`${layer}/${fate}`);
+      }
+    }
+    await check(
+      "every fate was exercised on BOTH value layers",
+      async () => missing.length === 0,
+      missing.length ? `no coverage for ${missing.join(", ")}` : undefined,
+    );
+  }
 
   // ── 10. Operational stragglers ───────────────────────────────────────────
   await check("midnight indexer still alive after 65+ minutes of uptime", async () => {

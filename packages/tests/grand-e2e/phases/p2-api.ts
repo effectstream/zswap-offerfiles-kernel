@@ -173,6 +173,42 @@ export async function p2Api(db: Client, art: P1Artifacts): Promise<void> {
     return s.status === 200 && h.status === 200 && Array.isArray(h.body);
   });
 
+  // ── Price orientation ────────────────────────────────────────────────────
+  // Exactly one fill exists at this point (p1's settled TA→TB offer), so the
+  // expected number is not a self-consistency argument — it is the maker's own
+  // terms, straight out of the ledger.
+  //
+  // This matters because the stored pair key is LEAST||GREATEST of the hex
+  // COLOR, so which side is "base" depends on the lexical ordering of a hash,
+  // not on anything the maker chose. It is the likeliest place in the system
+  // for a silent 1/x to reach a user's screen — and one of the two price paths
+  // does exactly that (§2.2, proven in fill-vs-cancel.test.ts).
+  {
+    const p1 = ledger.offers.find((o) => o.index === 1);
+    const expected = p1 ? Number(p1.wantAmount) / Number(p1.giveAmount) : NaN;
+    const close = (a: number, b: number) => Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(a), Math.abs(b));
+
+    await check("chart price is quote-per-base, matching the maker's own terms", async () => {
+      const s = await getChartStats(ta, tb); // ta = give, tb = want
+      return Number.isFinite(expected) && close(Number(s.body?.last), expected);
+    }, `expected ${expected}`);
+
+    await check("chart price inverts exactly when base and quote swap", async () => {
+      const fwd = Number((await getChartStats(ta, tb)).body?.last);
+      const rev = Number((await getChartStats(tb, ta)).body?.last);
+      return fwd > 0 && rev > 0 && close(fwd * rev, 1);
+    });
+
+    await check("chart volumes swap with base and quote", async () => {
+      const fwd = (await getChartStats(ta, tb)).body ?? {};
+      const rev = (await getChartStats(tb, ta)).body ?? {};
+      return (
+        Number(fwd.volume_base) === Number(rev.volume_quote) &&
+        Number(fwd.volume_quote) === Number(rev.volume_base)
+      );
+    });
+  }
+
   // ── Midnight config ───────────────────────────────────────────────────────
   await check("midnight config exposes contract + endpoints, no secrets", async () => {
     const r = await getMidnightConfig();

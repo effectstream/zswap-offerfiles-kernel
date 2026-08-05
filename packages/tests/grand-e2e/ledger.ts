@@ -113,6 +113,25 @@ class Ledger {
    * the two directions combined).
    */
   fillLedger(): Map<string, { count: number; byColor: Record<string, bigint> }> {
+    return this.aggregate(false);
+  }
+
+  /**
+   * The same aggregation with the unshielded gap REMOVED — only genuine
+   * settlements count. This is what the numbers should be; `fillLedger()` is
+   * what they currently are.
+   *
+   * Both exist on purpose. `fillLedger()` asserts CURRENT behaviour per-pair so
+   * the suite stays a working gate; this one asserts the TRUTH in aggregate and
+   * is registered as a known red (RED-5) until PR-B lands tx-grouping for
+   * unshielded spends. When they agree, the gap is closed and this method
+   * replaces the other.
+   */
+  settledLedger(): Map<string, { count: number; byColor: Record<string, bigint> }> {
+    return this.aggregate(true);
+  }
+
+  private aggregate(settledOnly: boolean): Map<string, { count: number; byColor: Record<string, bigint> }> {
     const m = new Map<string, { count: number; byColor: Record<string, bigint> }>();
     for (const o of this.offers) {
       if (o.state !== "resolved") continue;
@@ -129,7 +148,9 @@ class Ledger {
       //
       // Shielded cancels are correctly excluded by fill markers, so counting
       // them here would break the pairs that currently agree.
-      const countsAsFill = o.fate === "settled" || (o.fate === "cancelled" && o.layer === "uu");
+      const countsAsFill = settledOnly
+        ? o.fate === "settled"
+        : o.fate === "settled" || (o.fate === "cancelled" && o.layer === "uu");
       if (!countsAsFill) continue;
       const give = this.colors[o.giveToken]!;
       const want = this.colors[o.wantToken]!;

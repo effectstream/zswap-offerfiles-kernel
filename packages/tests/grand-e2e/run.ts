@@ -260,7 +260,7 @@ async function main(): Promise<void> {
     if (!art) throw new Error("p1 happy path failed — aborting (nothing downstream can pass)");
 
     await p2Api(db, art);
-    await p4Adversarial(db, art);
+    await p4Adversarial(db, art, actors);
     await p3Lifecycle(db, actors);
     await p3bCompeting(db, actors);
     await p5Load(db, actors, art);

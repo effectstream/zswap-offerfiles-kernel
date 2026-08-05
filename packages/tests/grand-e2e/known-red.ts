@@ -92,20 +92,23 @@ export const KNOWN_RED: Record<string, KnownRed> = {
   // deterministic property: the two routes must not disagree in any way OTHER
   // than that known inversion.
 
-  // ── PR-E — cross-layer offers unenforced (§2.4) ────────────────────────────
-  // Nothing in the ladder requires a give and a want to share a value layer;
-  // NOT_A_SWAP fires today only because wallet-sdk-facade silently drops a leg.
-  "p4-adversarial ▸ submit rejects a genuine cross-layer offer as CROSS_LAYER": {
-    id: "RED-8", pr: "PR-E", why: "no same-layer rule in the ladder (§2.4)",
-  },
-
-  // ── PR-F — multi-leg offers mis-priced (§2.5) ──────────────────────────────
-  // The market queries join per (offer, color) filtered to (base, quote), so a
-  // 3-leg offer becomes two 'trades' at two wrong prices with one leg's volume
-  // counted twice.
-  "p3-lifecycle ▸ a 3-leg offer is refused as MULTI_LEG_UNSUPPORTED": {
-    id: "RED-9", pr: "PR-F", why: "multi-leg offers are indexed and mis-priced (§2.5)",
-  },
+  // NOT REGISTERED YET, and both for the same reason — the FIXTURE does not
+  // exist, so registering the check would produce a permanently-stale entry
+  // that reads as work-in-flight when nothing is in flight:
+  //
+  // §2.4 cross-layer (PR-E). Needs a GENUINE cross-layer transaction, which
+  //   wallet-sdk-facade cannot build — it silently drops the mismatched leg
+  //   (ISSUES.md §3), which is what p4's one-sided NOT_A_SWAP fixture exploits.
+  //   Constructing one means merging a shielded give-only tx with an unshielded
+  //   want-only tx via the ledger's Transaction.merge, and whether the ledger
+  //   permits that combination is itself unknown. Until then the rule is
+  //   unenforced AND untested — recorded in PRODUCTION-READINESS.md §2.4.
+  //
+  // §2.5 multi-leg (PR-F). A same-layer 3-leg offer needs THREE colors on one
+  //   layer; the suite mints two per layer (TA/TB, UA/UB), and a cross-layer
+  //   third leg is unbuildable for the reason above. Adding a third shielded
+  //   color to setupActors is the prerequisite, and the ruling on what the
+  //   behaviour should even be is still open.
 };
 
 /** Registered ids that never appeared in a run — a stale registry hides work. */

@@ -17,17 +17,72 @@ import {
   publishCelestiaGarbage,
   STRUCTURAL_CODES,
 } from "../actors/adversary.ts";
+import { buildOneSidedOffer, type Actors } from "../actors/wallets.ts";
 import { getHealth, submitOffer2 } from "../lib/api2.ts";
 import { submitBlobRaw } from "../lib/celestia.ts";
 import { offerRowByHash, rejectionRows, rejectionTotalsByCode, tableCount } from "../lib/db2.ts";
 import { offerHashFromBlob } from "@zswap-da/offer-guard";
 import { beginPhase, check, note, sleep, waitUntil } from "../lib/util.ts";
 
-export async function p4Adversarial(db: Client, art: P1Artifacts): Promise<void> {
+export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors): Promise<void> {
   beginPhase("p4-adversarial");
 
   const offersBefore = await tableCount(db, "offer_file");
   const historyBefore = await tableCount(db, "offer_file_history");
+
+  // ── The MIP-0006 two-sided rule, at both doors ───────────────────────────
+  // The most important semantic rule in the spec, and until now it had only
+  // ever fired by accident — as a symptom of the SDK dropping a leg, reported
+  // as an indexer error (ISSUES.md §3). This builds a give-only transaction on
+  // purpose and requires both gates to name it.
+  {
+    const oneSided = await buildOneSidedOffer(actors.makers[7]!);
+    if (!oneSided) {
+      note(
+        "NOT_A_SWAP fixture",
+        "could not build a one-sided transaction — wallet-sdk-facade no longer drops the " +
+          "mismatched leg, so the two-sided rule is UNTESTED this run (see ISSUES.md §3)",
+      );
+    } else {
+      const res = await submitOffer2(oneSided);
+      ledger.addGarbage({
+        kind: "api:NOT_A_SWAP-one-sided",
+        via: "api",
+        expectedCodes: ["NOT_A_SWAP"],
+        offerHash: offerHashFromBlob(oneSided),
+        at: Date.now(),
+        gotCode: res.body?.error,
+        gotStatus: res.status,
+      });
+      await check(
+        "submit rejects a give-only transaction as NOT_A_SWAP (MIP-0006 two-sided rule)",
+        async () => res.status === 400 && res.body?.error === "NOT_A_SWAP",
+        `got ${res.status} ${res.body?.error}`,
+      );
+
+      const before = await rejectionTotalsByCode(db);
+      const height = await submitBlobRaw(OfferFiles.decode(oneSided));
+      ledger.addGarbage({
+        kind: "celestia:NOT_A_SWAP-one-sided",
+        via: "celestia",
+        expectedCodes: ["NOT_A_SWAP"],
+        offerHash: offerHashFromBlob(oneSided),
+        celestiaHeight: height,
+        at: Date.now(),
+      });
+      await check("celestia door records NOT_A_SWAP for the same transaction", async () =>
+        waitUntil(
+          "NOT_A_SWAP recorded",
+          async () => {
+            const now = await rejectionTotalsByCode(db);
+            return (now.NOT_A_SWAP ?? 0) > (before.NOT_A_SWAP ?? 0);
+          },
+          24,
+          5000,
+        ),
+      );
+    }
+  }
 
   // ── API fixtures ──────────────────────────────────────────────────────────
   for (const fix of apiFixtures(art.liveBlob, art.consumedBlob)) {

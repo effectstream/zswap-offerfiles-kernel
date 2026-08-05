@@ -138,6 +138,57 @@ test("no fills at all falls back to open-book mid (unchanged behaviour)", async 
   expect(s.volume_base).toBe(0);
 });
 
+// ── KNOWN RED — PR-D (PRODUCTION-READINESS.md §2.3) ─────────────────────────
+//
+// getPairStats24h bounds its window with `NOW() - INTERVAL '24 hours'` while
+// comparing against `h.archived_at`, which since the chain-time fix is the L2
+// BLOCK timestamp. Two clocks, one comparison — the same defect class that fix
+// closed one layer down, and closing it is what made this one reachable.
+//
+// Any node whose chain clock is not wall clock (a replica catching up, a
+// replay, a devnet anchored in the past, an NTP anchor pinned by
+// GRAND_NTP_START_TIME) reports zero volume and a collapsed high/low while
+// /v1/chart/history still lists every fill. The API contradicts itself.
+//
+// The fix parameterises the cutoff from `effectstream_blocks.ms_timestamp` at
+// the tip — the same value api.ts already fetches for the root-window gate.
+// This test seeds that tip, so it goes green the moment the cutoff follows it.
+//
+// `test.failing` is the unit-level equivalent of the suite's KNOWN_RED
+// registry: it keeps CI honest today and FAILS the moment the fix lands
+// without this marker being removed.
+// Verified to fail for the RIGHT reason: `last` reads 2.5 (the fill is present
+// and priced correctly) while volume_base reads 0 — the window, and only the
+// window, drops it.
+test.failing("24h window follows the CHAIN clock, not the wall clock", async () => {
+  // This node is 48 h behind wall clock, and its tip block says so.
+  await client.query(`CREATE SCHEMA IF NOT EXISTS effectstream`);
+  await client.query(`CREATE TABLE IF NOT EXISTS effectstream.effectstream_blocks (
+      block_height BIGINT PRIMARY KEY,
+      ms_timestamp BIGINT,
+      effectstream_block_hash BYTEA,
+      main_chain_block_hash BYTEA)`);
+  const chainNowMs = Date.now() - 48 * 3600_000;
+  await client.query(
+    `INSERT INTO effectstream.effectstream_blocks (block_height, ms_timestamp) VALUES (1, $1)
+     ON CONFLICT (block_height) DO UPDATE SET ms_timestamp = EXCLUDED.ms_timestamp`,
+    [String(chainNowMs)],
+  );
+
+  // One fill, one hour of CHAIN time ago — squarely inside any 24 h window
+  // measured on the clock that stamped it.
+  const LAGGED = "a".repeat(64);
+  await seedFill(10, 25, 49 * 60, [LAGGED, QUOTE]);
+
+  const s = await realStats(client, LAGGED, QUOTE);
+  // `last` is not window-bound, so it is right even today. Asserting it first
+  // isolates the failure to the WINDOW rather than to the fill being missing.
+  expect(s.last).toBeCloseTo(2.5, 9);
+  expect(s.volume_base).toBe(10);
+  expect(s.volume_quote).toBe(25);
+  expect(s.high).toBeCloseTo(2.5, 9);
+});
+
 test("stats query hits the (archive_reason, archived_at) index, no seq scan of history", async () => {
   const r = await client.query(`EXPLAIN
     SELECT COUNT(*) FROM offer_file_history h

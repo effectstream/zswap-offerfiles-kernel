@@ -257,3 +257,71 @@ test("pair_stats writer refuses cancelled offers", async () => {
   expect(r.rows.length).toBe(1);
   expect(r.rows[0].trade_count).toBe(1);
 });
+
+// ── KNOWN RED — PR-C (PRODUCTION-READINESS.md §2.2) ─────────────────────────
+//
+// upsertPairStatsByOfferId assigns base_color/quote_color by LEAST/GREATEST of
+// the hex color, but computes last_price as `w.amount / g.amount` with no
+// reference to which of them became base:
+//
+//   gives the lesser color (= base)  → want/give = quote per base  ✔
+//   gives the greater color (= quote) → want/give = base per quote  ✘  1/p
+//
+// Every other price path normalises explicitly — getPairStats24h does
+// `CASE WHEN g.token_color = :base THEN w/g ELSE g/w END`, and trade-data.ts's
+// toFill() does the same in JS. Only this one does not, so `/v1/pairs`'s price
+// column flips meaning with the direction of the most recent trade and
+// disagrees with `/v1/chart/stats` by a factor of p².
+//
+// This lives at unit level because the direction is only controllable here: in
+// an e2e run, whether the last fill on a pair went the "wrong" way is data
+// dependent, and a coin-flip red would fail the build at random.
+//
+// The two offers below are economically IDENTICAL — 10 LO against 20 HI — and
+// differ only in which side the maker took. Their recorded price must not.
+// Verified to fail for the RIGHT reason: the forward direction records 2 and
+// the reverse records 0.5 — same trade, reciprocal price.
+test.failing("pair_stats.last_price is quote-per-base in BOTH trade directions", async () => {
+  const LO = "1".repeat(64); // lexically lesser  → becomes base_color
+  const HI = "9".repeat(64); // lexically greater → becomes quote_color
+
+  // Archived CONSUMED offers with no nullifiers: classification falls through
+  // every cancelledPredicate branch to `consumed`, so the writer accepts them.
+  const seedDirected = async (id: number, give: string, giveAmt: string, want: string, wantAmt: string) => {
+    await client.query(
+      `INSERT INTO offer_file_history
+         (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
+       VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '30 minutes')`,
+      [id, 900 + id, `blob-${id}`, hashOf(id)],
+    );
+    await client.query(
+      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+       VALUES ($1, $2, $3, 'GIVING',  'SHIELDED', NOW() - INTERVAL '30 minutes'),
+              ($1, $4, $5, 'WANTING', 'SHIELDED', NOW() - INTERVAL '30 minutes')`,
+      [id, give, giveAmt, want, wantAmt],
+    );
+  };
+
+  await client.query("DELETE FROM pair_stats");
+  // Direction 1 — maker gives the lesser color. Price = 20/10 = 2.
+  await seedDirected(901, LO, "10", HI, "20");
+  await upsertPairStatsByOfferId.run({ offer_id: 901 }, client);
+  const forward = await client.query(
+    `SELECT base_color, last_price::float8 AS p FROM pair_stats WHERE base_color = $1`, [LO],
+  );
+  expect(forward.rows[0].p).toBeCloseTo(2, 9); // passes today
+
+  // Direction 2 — maker gives the greater color. Same trade, same pair, and
+  // the same quote-per-base price of 2. Today this records 0.5.
+  await seedDirected(902, HI, "20", LO, "10");
+  await upsertPairStatsByOfferId.run({ offer_id: 902 }, client);
+  const reverse = await client.query(
+    `SELECT last_price::float8 AS p FROM pair_stats WHERE base_color = $1`, [LO],
+  );
+  expect(reverse.rows[0].p).toBeCloseTo(2, 9);
+
+  // And the authoritative SQL aggregate must agree with the stored column —
+  // the cross-route disagreement users actually see.
+  const stats = (await getPairStats24h.run({ base: LO, quote: HI }, client))[0];
+  expect(Number(stats!.last_price)).toBeCloseTo(Number(reverse.rows[0].p), 9);
+});

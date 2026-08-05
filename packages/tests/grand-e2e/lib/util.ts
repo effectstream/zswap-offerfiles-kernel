@@ -5,6 +5,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { OUT_DIR } from "../config.ts";
+import { KNOWN_RED, unseenRedIds, type KnownRed } from "../known-red.ts";
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -19,9 +20,14 @@ export interface CheckResult {
   ok: boolean;
   detail?: string;
   ms: number;
+  /** Set when this check is registered in KNOWN_RED — see known-red.ts. */
+  red?: KnownRed;
+  /** True when a KNOWN_RED check PASSED: the fix landed, the entry did not. */
+  xpass?: boolean;
 }
 
 const results: CheckResult[] = [];
+const seenRedKeys = new Set<string>();
 let currentPhase = "p?";
 let phaseStartMs = 0;
 const phaseDurations: Record<string, number> = {};
@@ -52,7 +58,37 @@ export async function check(
   } catch (e) {
     extra = `${detail ? detail + "; " : ""}threw: ${e instanceof Error ? e.message : String(e)}`;
   }
-  results.push({ phase: currentPhase, name, ok, detail: extra, ms: Date.now() - started });
+  const ms = Date.now() - started;
+
+  // Expected-failure handling. A registered check is asserting the truth about
+  // a known product defect (known-red.ts): failing is the expected state and
+  // must not gate the run, while PASSING means the fix landed and the registry
+  // is stale — which DOES gate, because nothing else would ever make a fix PR
+  // delete its own entry.
+  //
+  // The returned boolean is deliberately the RAW verdict either way, so callers
+  // that branch on it (`if (!ok) continue`) behave exactly as before. Only what
+  // is RECORDED changes.
+  const red = KNOWN_RED[full];
+  if (red) {
+    seenRedKeys.add(full);
+    if (ok) {
+      results.push({
+        phase: currentPhase, name, ok: false, ms, red, xpass: true,
+        detail: `XPASS ${red.id}: now passes — delete the KNOWN_RED entry (${red.pr})`,
+      });
+      console.log(`[XPASS] ${full}  ← ${red.id} fixed; remove from KNOWN_RED (${red.pr})`);
+    } else {
+      results.push({
+        phase: currentPhase, name, ok: true, ms, red,
+        detail: `KNOWN RED ${red.id} (${red.pr}) — ${red.why}${extra ? `; observed: ${extra}` : ""}`,
+      });
+      console.log(`[RED ] ${full}  ← ${red.id} expected-fail, ${red.pr}${extra ? `  (${extra})` : ""}`);
+    }
+    return ok;
+  }
+
+  results.push({ phase: currentPhase, name, ok, detail: extra, ms });
   console.log(`[${ok ? "PASS" : "FAIL"}] ${full}${!ok && extra ? `  (${extra})` : ""}`);
   return ok;
 }
@@ -69,6 +105,22 @@ export function allResults(): CheckResult[] {
 
 export function failures(): CheckResult[] {
   return results.filter((r) => !r.ok);
+}
+
+/** Checks that failed as expected — the punch list, rendered in the scorecard. */
+export function knownReds(): CheckResult[] {
+  return results.filter((r) => r.red && !r.xpass);
+}
+
+/**
+ * Registered reds that never ran. Reported, NOT gated: a run that aborts early
+ * (or skips a phase on a casualty) legitimately leaves entries unseen, so
+ * failing here would punish unrelated breakage. The signal that matters is
+ * that the entry's check has vanished from the suite — visible as the missing
+ * name in the scorecard.
+ */
+export function staleReds(): KnownRed[] {
+  return unseenRedIds(seenRedKeys);
 }
 
 export function phaseTimings(): Record<string, number> {

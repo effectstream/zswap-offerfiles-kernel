@@ -6,7 +6,8 @@ import {
   insertKnownToken,
   isNullifierSpent,
   isUnshieldedCreated,
-  isKnownRoot,
+  isKnownRootLive,
+  getLatestEffectstreamBlock,
   getTokenPrice,
   upsertTokenPrice,
   checkTokenNameExists,
@@ -22,7 +23,7 @@ import {
   resolveOfferCursor,
 } from "@zswap-da/database";
 
-import { isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, midnightContract } from "./env.ts";
+import { isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WINDOW_SECONDS, midnightContract } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
@@ -628,9 +629,20 @@ export const apiRouter: StartConfigApiRouter = async function (
           });
         }
       }
-      // Root-known: each shielded input must prove against a known recent root.
+      // Root-known: each shielded input must prove against a known recent
+      // root, with the window enforced at read time. The cutoff is derived
+      // from the latest PROCESSED block's timestamp — the same L2 clock that
+      // stamps known_roots.last_seen_ms — never from the wall clock, and never
+      // from MAX(last_seen_ms) (which stops advancing exactly when the window
+      // needs to close). isKnownRootLive keeps the newest root valid
+      // regardless of age, mirroring the ledger's past_roots re-insertion.
+      const latestBlock = (await getLatestEffectstreamBlock.run(undefined, dbConn))[0];
+      const chainNowMs = latestBlock ? Number(latestBlock.ms_timestamp) : 0;
       for (const root of validation.inputRoots ?? []) {
-        const known = await isKnownRoot.run({ root }, dbConn);
+        const known = await isKnownRootLive.run(
+          { root, cutoff_ms: chainNowMs - ROOT_WINDOW_SECONDS * 1000 },
+          dbConn,
+        );
         if (known.length === 0) {
           const tip = await getSyncStatus(dbConn).catch(() => null as any);
           const rootsMeta = tip?.sets?.known_roots;

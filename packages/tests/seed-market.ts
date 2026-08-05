@@ -105,9 +105,9 @@ async function seedHistory(p: (typeof PAIRS)[number]) {
       [id, 1000 + id, `seed-hist-${id}`, seedHash(`seed-hist-${id}`), at],
     );
     await q(
-      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind) VALUES
-       ($1,$2,$3,'GIVING','SHIELDED'), ($1,$4,$5,'WANTING','SHIELDED')`,
-      [id, give[0], String(give[1]), want[0], String(want[1])],
+      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at) VALUES
+       ($1,$2,$3,'GIVING','SHIELDED',$6), ($1,$4,$5,'WANTING','SHIELDED',$6)`,
+      [id, give[0], String(give[1]), want[0], String(want[1]), at],
     );
     fills++;
   }

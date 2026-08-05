@@ -137,16 +137,19 @@ test("archiveOfferByNullifierWithHash carries offer_hash into history", async ()
     client,
   );
   const archived = await archiveOfferByNullifierWithHash.run(
-    { nullifier: "null-b" },
+    { nullifier: "null-b", archived_at: new Date("2026-01-02T03:04:05Z") },
     client,
   );
   expect(archived.length).toBe(1);
 
   const hist = await client.query(
-    "SELECT offer_hash, archive_reason FROM offer_file_history WHERE id = $1",
+    "SELECT offer_hash, archive_reason, archived_at FROM offer_file_history WHERE id = $1",
     [id],
   );
   expect(hist.rows[0].offer_hash).toBe(HASH_B);
+  // archived_at is exactly the timestamp the caller passed (the L2 block time
+  // at the state machine) — never a DB-side NOW().
+  expect(new Date(hist.rows[0].archived_at).toISOString()).toBe("2026-01-02T03:04:05.000Z");
 
   const status = await getOfferStatusByHash.run({ offer_hash: HASH_B }, client);
   expect(status.length).toBe(1);

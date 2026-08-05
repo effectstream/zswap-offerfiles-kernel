@@ -264,8 +264,8 @@ different scale. `publishToIndexed` p95 (~24 s) is dominated by the celestia
 | # | Issue | Verdict | Severity | Next step |
 |---|---|---|---|---|
 | 1 | Batcher livelocks on dust exhaustion | **product bug** | High | back off + surface; scale dust with slots |
-| 2 | `pair_stats.last_traded_at` uses SQL `NOW()` | **product bug** | Medium | breaks replay determinism and mis-orders the pair list after a resync; use the block timestamp |
-| 3 | Root window not enforced on read | **product bug** | Low/Medium | pruning is write-triggered and `isKnownRoot` has no age predicate; a quiet chain keeps accepting expired roots |
+| — | ~~`pair_stats.last_traded_at` / `archived_at` wall-clock~~ | **FIXED** — chain-derived, NOT NULL, enforced by the determinism diff | — | `fix/chain-time-and-root-window` |
+| — | ~~Root window not enforced on read~~ | **FIXED** — `isKnownRootLive` at both gates, chain-derived cutoff, MAX(height) escape | — | `fix/chain-time-and-root-window` |
 | — | ~~`celestiaHeight` mislabeled~~ | **RESOLVED** — renamed to `blockHeight`, docs corrected | — | upstream primitive fix deferred by decision |
 | 2 | Cross-layer offers unenforced in the ladder | gap — decide | Low/Medium | suite no longer builds them; add an explicit rule if they must be refused |
 | 3 | ~~STF errors invisible~~ | **FIXED** — `addTransition()` logs and rethrows | — | verify on next STF failure |
@@ -288,7 +288,20 @@ different scale. `publishToIndexed` p95 (~24 s) is dominated by the celestia
 
 ## `pair_stats.last_traded_at` is wall-clock, not chain time
 
-**Status:** OPEN — product bug, found by p7a-determinism on 2026-08-04. Not patched.
+**Status:** FIXED 2026-08-04 (`fix/chain-time-and-root-window`), together with the
+same defect in `archived_at` — every archive INSERT omitted the column and fell
+to `DEFAULT NOW()`, which is why the determinism diff had to exclude it. Now:
+every `*_history` INSERT carries `:archived_at!` = `data.blockTimestamp` (L2
+block time, replica-deterministic); the columns are `NOT NULL` with **no
+default**, so forgetting the param is a hard error rather than silent
+wall-clock; `pair_stats.last_traded_at` copies the archived row's timestamp
+(`JOIN offer_file_history`); and the determinism diff **enforces** both columns
+(`archived_at` removed from `DIFF_EXCLUDED_COLUMNS`, the `pair_stats`
+special-case deleted from dump.ts). Unit-proven in `offer-hash.test.ts`
+(exact timestamp round-trip) and `fill-vs-cancel.test.ts` (last_traded_at =
+archive time, 30 min in the past, never NOW()).
+
+Original report:
 
 `upsertPairStatsByOfferId` ([queries.app.ts:446](../../database/sql/queries.app.ts))
 writes the column with SQL `NOW()`:
@@ -334,8 +347,20 @@ reproduces, so the run can be green without hiding the defect.
 
 ## The root window is not enforced on read
 
-**Status:** OPEN — product issue, found while triaging a p4 failure on
-2026-08-04. Not patched.
+**Status:** FIXED 2026-08-04 (`fix/chain-time-and-root-window`). The read side
+now enforces the window: both gates (API submit, STM ingestion) use
+`isKnownRootLive`, which requires `last_seen_ms >= cutoff` **or** the root to
+hold `MAX(height)` — the escape mirrors the ledger's `past_roots` re-insertion
+(our zswap-root primitive only fires on root ADVANCE, so the current root's
+timestamp goes stale on a quiet chain even though the real chain still accepts
+it; a bare age predicate would falsely reject). Cutoffs are chain-derived on
+the same clock as `last_seen_ms`: `data.blockTimestamp` at the STM gate, the
+latest processed block's `ms_timestamp` at the API gate — never wall-clock, and
+never `MAX(last_seen_ms)` (which stops advancing exactly when the window needs
+to close). Unit-proven in `liveness-sets.test.ts` (quiet-chain case: aged root
+rejected, current root accepted).
+
+Original report:
 
 Two facts combine:
 

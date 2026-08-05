@@ -1,8 +1,8 @@
 {
-  "_note": "Calibrated from the first fully-green run (2026-08-04, 143 checks / 0 failures, 50.3 min) at GRAND_OFFERS=25 with the batcher at 7 slots. Enforcement is baseline x 1.2. Re-calibrate for a different scale or a different box: these are wall-clock numbers and publishToIndexed is dominated by the celestia delayMs, not by node work.",
+  "_note": "Calibrated from the first fully-green run (2026-08-04, 143 checks / 0 failures, 50.3 min) at GRAND_OFFERS=25 with the batcher at 7 slots. Enforcement is baseline x 1.2. Re-calibrate for a different scale or a different box: these are wall-clock numbers and publishToIndexed is dominated by the celestia delayMs, not by node work. sseDeliveryLagP95Ms was recalibrated (66 -> 2674) when archived_at became chain-derived: the metric compares SSE arrival (wall clock) against archived_at, so it now measures block-timestamp -> client delivery INCLUDING STM executor lag (~1.5-2.5s on dev), not pure socket delivery. The old 66ms number was only possible because archived_at used to BE wall-clock NOW() \u2014 the bug.",
   "submitP95Ms": 6654,
   "publishToIndexedP95Ms": 23983,
   "bookReadP95Ms": 10,
-  "sseDeliveryLagP95Ms": 66,
+  "sseDeliveryLagP95Ms": 2674,
   "maxStmLagBlocks": 89
 }

@@ -100,10 +100,10 @@ test("market queries count a dual-kind leg ONCE, summed by color (join-duplicati
      VALUES (500, 1, 'blob-500', '${"e".repeat(64)}', NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '10 minutes')`,
   );
   await client.query(
-    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind) VALUES
-       (500, '${BASE}', '10', 'GIVING', 'SHIELDED'),
-       (500, '${BASE}', '5',  'GIVING', 'UNSHIELDED'),
-       (500, '${QUOTE}', '30', 'WANTING', 'SHIELDED')`,
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at) VALUES
+       (500, '${BASE}', '10', 'GIVING', 'SHIELDED', NOW() - INTERVAL '10 minutes'),
+       (500, '${BASE}', '5',  'GIVING', 'UNSHIELDED', NOW() - INTERVAL '10 minutes'),
+       (500, '${QUOTE}', '30', 'WANTING', 'SHIELDED', NOW() - INTERVAL '10 minutes')`,
   );
   const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE }, client))[0];
   expect(s.fills_24h).toBe(1);

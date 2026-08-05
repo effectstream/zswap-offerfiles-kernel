@@ -41,7 +41,7 @@ import {
 } from "../actors/wallets.ts";
 import {
   bech32GarbageBlob,
-  celestiaGarbageKinds,
+  stormGarbageKinds,
   cryptoTamperBlob,
   publishCelestiaGarbage,
 } from "../actors/adversary.ts";
@@ -248,7 +248,7 @@ async function apiInvalidStorm(db: Client, art: P1Artifacts): Promise<{ okCodes:
 }
 
 async function celestiaGarbageStorm(art: P1Artifacts): Promise<number> {
-  const kinds = celestiaGarbageKinds();
+  const kinds = stormGarbageKinds();
   let published = 0;
   for (let i = 0; i < STORM_CELESTIA_GARBAGE_COUNT; i++) {
     const kind = kinds[i % kinds.length]!;

@@ -6,13 +6,13 @@ argued:
 | | Property | Status today |
 |---|---|---|
 | a | Bad data cannot get into the history | **partial** — the ladder is unit-tested, but 6 of its 14 reject codes never fire against a real gate, and history has no integrity audit at all |
-| b | Bad transactions don't reach users | **weak** — nothing re-validates what the API actually serves |
+| b | Bad transactions don't reach users | **weak** — nothing re-validates what the API actually serves, and `expiresAt` is already in the past at ingestion on a quiet chain (§2.6) |
 | c | All data is correctly logged as real sales | **broken on the unshielded path** — and the suite currently asserts the break as correct behaviour |
 | d | History and pricing is correct | **broken** — `/v1/pairs.last_price` is inverted for half of all trades; the 24 h window still mixes clocks |
 | e | Duplicate zswaps allowed, accepting one disables the others | **partial** — only the N=2, single-input, same-door case |
 | f | Works for shielded *and* unshielded | **no** — cancels, chaos, TTL sweep and the liveness gate are shielded-only |
 
-Five product defects are named in §2. Every one of them gets a **failing test
+Six product defects are named in §2. Every one of them gets a **failing test
 first** (PR-A), then a fix in its own PR, then the same test green.
 
 ---
@@ -58,7 +58,7 @@ what did not:
 | T-A4 history referential integrity | ✅ `p7b`, 5 SQL assertions |
 | T-A5 every stored blob re-validates (proofs included) | ✅ `p7b` deep pass, `GRAND_DEEP_AUDIT` |
 | T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass |
-| T-B1…B4 what the API serves | ✅ new `p8-served` phase |
+| T-B1…B4 what the API serves | ✅ new `p8-served` phase — **found §2.6** |
 | T-C1 unshielded cancels read `cancelled` | ✅ **red** RED-1a/b/c, RED-2 |
 | T-C2 Σ volume == Σ settled | ✅ **red** RED-5, RED-6 |
 | T-C3 expiries are never trades | ✅ `p7b` |
@@ -119,7 +119,8 @@ unanswered question.
 | **D** | 24 h stats window clock (§2.3) | `getPairStats24h`, `trade-data.ts` |
 | **E** | Cross-layer rule (§2.4) | validator ladder, new reject code |
 | **F** | Multi-leg offers (§2.5) | validator ladder **or** the market queries — needs a ruling |
-| **G** | Sweep: reds that turn out to be unreachable-code findings; delete `KNOWN_RED` | docs |
+| **G** | `expiresAt` already-expired on a quiet chain (§2.6) | `state-machine.ts` expiry derivation |
+| **H** | Sweep: reds that turn out to be unreachable-code findings; delete `KNOWN_RED` | docs |
 
 PR-A is deliberately product-inert. Its job is to make every defect **visible
 and reproducible** before anyone touches the code that causes it, so each later
@@ -355,6 +356,49 @@ price and attribute them properly (needs a defined convention for what the price
 of a basket even is). Recommend rejecting.
 
 **Red in PR-A:** T-D5.
+
+### 2.6 `expiresAt` is already in the past when the offer is indexed → **PR-G**
+
+*(found by p8 on the third full run — the first run where p8 had a populated
+book to audit)*
+
+**Measured.** A probe offer published by p8 and indexed at chain time
+**18:34:20** was served `expiresAt = 18:23:36` — **eleven minutes before it was
+ingested**. At the same moment `known_roots` held 5 rows whose newest
+`last_seen_ms` was 18:13:36, and `18:13:36 + ROOT_WINDOW(600 s) = 18:23:36`
+exactly. The same offer **passed** p8's settleability check.
+
+**Cause — an asymmetry the codebase already documents, compensated for in one
+place and not the other.** The ledger's `past_roots` re-inserts the *current*
+root every block; our `midnight-zswap-root` primitive fires only when the root
+**advances** ([state-machine.ts:333](../../node/state-machine.ts)). On a chain
+with no shielded activity — the quiesce before the determinism replay, or any
+quiet period in production — the newest root's `last_seen_ms` goes stale while
+the chain still accepts proofs against it.
+
+- The **ingestion gate** handles this: `isKnownRootLive` accepts a root that
+  holds `MAX(height)` regardless of age (PR #28).
+- The **expiry derivation** does not
+  ([state-machine.ts:561-573](../../node/state-machine.ts)): it computes
+  `expiresAt = earliest root's last_seen_ms + ROOT_WINDOW` from the raw column,
+  with no such escape.
+
+**Why this is more than "conservative".** The code anticipates being a floor —
+*"this value is therefore a conservative FLOOR … the floor never over-promises
+fillability"*. That reasoning justifies under-promising. It does not survive the
+floor landing in the **past at the moment of ingestion**: a field that is always
+already expired carries no information and actively misleads. A client doing the
+obvious thing — filter `expiresAt > now` — discards offers that are genuinely
+fillable, while `status` on the same payload says `live`. The API contradicts
+itself on a single response.
+
+**Fix (PR-G):** apply the same escape the read gate uses. If the offer's
+earliest root is the current (`MAX(height)`) root, its effective last-seen is
+this block, so `expiresAt = data.blockTimestamp + ROOT_WINDOW_SECONDS * 1000`.
+Otherwise keep the existing derivation.
+
+**Red in PR-A:** RED-8 (`p8-served ▸ served expiresAt is in the future for
+offers reported live`).
 
 ---
 

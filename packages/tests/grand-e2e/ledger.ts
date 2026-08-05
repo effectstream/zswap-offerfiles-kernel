@@ -136,10 +136,13 @@ class Ledger {
     for (const o of this.offers) {
       if (o.state !== "resolved") continue;
       // Settled offers are fills. So — on the UNSHIELDED layer only — are
-      // CANCELLED ones, and that is the documented gap (HANDOFF §1), not an
-      // oracle fudge: unshielded spends are not tx-grouped, so a cancel is
-      // indistinguishable from a fill, reads `consumed`, and lands in
-      // chart/volume data. p3b asserts exactly this as current behaviour.
+      // CANCELLED ones, and that is the §2.1 defect, not an oracle fudge:
+      // unshielded spends are not tx-grouped, so a cancel is indistinguishable
+      // from a fill, reads `consumed`, and lands in chart/volume data.
+      //
+      // Modelled HERE so the per-pair chart checks keep asserting current
+      // behaviour precisely; settledLedger() below asserts the truth. PR-B
+      // deletes this branch and the two collapse into one.
       //
       // Measured on pair UA|UB: api reported 6 rows against 4 settled offers,
       // and the two extras were the run's two unshielded cancels — base short

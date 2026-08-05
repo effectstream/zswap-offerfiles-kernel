@@ -519,16 +519,21 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
 let chaosExtraIndex = 900;
 function planExtraChaosOffers(actors: Actors): OfferRecord[] {
   const out: OfferRecord[] = [];
+  // One of each layer. Restart-recovery was proven for shielded offers only
+  // for this suite's whole history; an unshielded offer takes a different
+  // ingestion path (created_unshielded liveness instead of the root gate), so
+  // "no state lost across a restart" was never actually asserted for it.
   for (let i = 0; i < 2; i++) {
     const idx = chaosExtraIndex++;
     const makerIdx = idx % actors.makers.length;
-    const { give, want } = layerTokens("ss", makerIdx);
+    const layer: OfferRecord["layer"] = i === 0 ? "ss" : "uu";
+    const { give, want } = layerTokens(layer, makerIdx);
     const a = amountsFor(idx, give, want);
     out.push(
       ledger.addOffer({
         index: idx,
         fate: "expired", // never touched after indexing — swept with the rest
-        layer: "ss",
+        layer,
         makerSeed: actors.makers[makerIdx]!.seed,
         giveToken: give,
         wantToken: want,

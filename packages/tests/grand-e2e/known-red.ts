@@ -51,8 +51,18 @@ export const KNOWN_RED: Record<string, KnownRed> = {
   // flips expectedStatus() in p7b and the fill ledger, which changes what the
   // chart checks expect — register them as one set or p7b fails for an
   // unrelated-looking reason.
-  "p3-lifecycle ▸ unshielded-only walk-away reads cancelled": {
-    id: "RED-1", pr: "PR-B", why: "unshielded spends are not tx-grouped (§2.1)",
+  // Three shapes, because branches 1 and 2 of cancelledPredicate do not merely
+  // misclassify on the unshielded layer — they cannot fire at all, since
+  // nothing records which transaction spent an unshielded UTXO. A fix that
+  // only handled the single-coin walk-away would leave both branches dead.
+  "p3-lifecycle ▸ unshielded cancel single-one-tx: archived + status cancelled": {
+    id: "RED-1a", pr: "PR-B", why: "no unshielded fill markers (§2.1)",
+  },
+  "p3-lifecycle ▸ unshielded cancel split-two-tx: archived + status cancelled": {
+    id: "RED-1b", pr: "PR-B", why: "unshielded spends are not tx-grouped — branch 2 dead (§2.1)",
+  },
+  "p3-lifecycle ▸ unshielded cancel partial: archived + status cancelled": {
+    id: "RED-1c", pr: "PR-B", why: "unshielded spends are not recorded — branch 1 dead (§2.1)",
   },
   "p3b-competing ▸ unshielded: loser reads cancelled (fill markers separate them)": {
     id: "RED-2", pr: "PR-B", why: "unshielded spends are not tx-grouped (§2.1)",

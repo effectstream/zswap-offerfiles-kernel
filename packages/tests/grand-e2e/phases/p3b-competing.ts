@@ -157,14 +157,21 @@ export async function p3bCompeting(db: Client, actors: Actors): Promise<void> {
       return s.body?.status === "consumed";
     });
 
-    if (shielded) {
+    {
       // The real assertion: the loser must be distinguished from the winner
-      // using ONLY the fill markers, since both share the nullifier.
+      // using ONLY the fill markers, since both consume the same input.
+      //
+      // Asserted for BOTH layers. On the unshielded layer it is a registered
+      // red (RED-2, PR-B): midnight-unshielded-spend discards the txHash the
+      // primitive already supplies, so unshielded spends cannot be tx-grouped
+      // and the loser is indistinguishable from the winner. That is not a
+      // limitation to assert as behaviour — it lets anyone mint volume on any
+      // unshielded pair for the price of a self-transfer (§2.1).
       const ok = await check(`${label}: loser reads cancelled (fill markers separate them)`, async () => {
         const s = await getOfferStatus(loser.offerHash!);
         return s.body?.status === "cancelled";
       });
-      if (!ok) {
+      if (!ok && shielded) {
         // Diagnose rather than just fail: was it the ordering risk?
         const st = (await getOfferStatus(loser.offerHash!)).body?.status;
         const markers = await db.query(
@@ -190,33 +197,18 @@ export async function p3bCompeting(db: Client, actors: Actors): Promise<void> {
             `input in the following block, once the data has settled. Open an issue with this line attached.`,
         );
       }
-    } else {
-      // Documented gap (HANDOFF §1): unshielded spends are not tx-grouped, so
-      // an unshielded-only loser cannot be distinguished and reads consumed.
-      await check(
-        `${label}: KNOWN GAP — loser also reads consumed (unshielded spends not tx-grouped)`,
-        async () => {
-          const s = await getOfferStatus(loser.offerHash!);
-          return s.body?.status === "consumed";
-        },
-      );
     }
 
-    // (B) the settled offer must show up as a trade.
+    // (B) exactly ONE trade. The loser never traded — its input was taken by
+    // the winner — so it must contribute no volume and no history row.
     //
-    // Shielded: exactly ONE trade — the loser is classified `cancelled`, and a
-    // cancel contributes no volume.
-    //
-    // Unshielded: TWO, and that is the documented gap made visible. Because
-    // unshielded spends are not tx-grouped, the loser also reads `consumed`,
-    // so chart/volume data counts a cancelled offer as a fill. The offer never
-    // traded — its input was spent by the winner — yet it inflates the pair's
-    // history and volume. Asserted as current behaviour; this is the concrete
-    // harm of the gap, beyond a wrong status string.
-    const expectedTrades = shielded ? 1 : 2;
+    // On the unshielded layer this is registered red RED-3 (PR-B) and it is
+    // the concrete harm behind the wrong status string: the loser is counted
+    // as a fill, inflating this pair's history, volume and last price. Anyone
+    // can manufacture that with a self-transfer, which is why it is asserted
+    // as a defect rather than as documented behaviour.
     await check(
-      `${label}: trade history counts ${expectedTrades}` +
-        (shielded ? " (cancel adds no volume)" : " — KNOWN GAP: cancelled loser counted as a fill"),
+      `${label}: trade history counts 1 (cancel adds no volume)`,
       async () => {
         const base = ledger.colors[winner.giveToken]!;
         const quote = ledger.colors[winner.wantToken]!;
@@ -224,7 +216,7 @@ export async function p3bCompeting(db: Client, actors: Actors): Promise<void> {
         if (hist.status !== 200 || !Array.isArray(hist.body)) return false;
         const winnerAmt = Number(winner.giveAmount);
         const trades = hist.body.filter((t: any) => Number(t.amt) === winnerAmt);
-        return trades.length === expectedTrades;
+        return trades.length === 1;
       },
     );
 

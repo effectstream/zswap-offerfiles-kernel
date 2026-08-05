@@ -56,8 +56,9 @@ function expectedStatus(rec: OfferRecord, now: number): string[] {
     case "settled":
       return ["consumed"];
     case "cancelled":
-      // Documented gap: unshielded-only offers cannot classify cancelled.
-      return rec.layer === "uu" ? ["consumed"] : ["cancelled"];
+      // Both layers. On `uu` this is registered red RED-4 (PR-B) — the
+      // unshielded classification gap makes every walk-away read `consumed`.
+      return ["cancelled"];
     case "expired":
       return ["expired"];
     case "live": {
@@ -270,7 +271,10 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
       usable.forEach((rec, j) => {
         const got = statuses[j]?.status;
         if (!expectedStatus(rec, auditStart).includes(got)) {
-          disagreements.push(`#${rec.index}(${rec.fate}${rec.layer === "uu" && rec.fate === "cancelled" ? "/gap" : ""})→${got}`);
+          // Tag the ones attributable to the unshielded classification defect
+          // (§2.1) so the red's detail line separates them from a genuine
+          // classification regression on the shielded path.
+          disagreements.push(`#${rec.index}(${rec.fate}${rec.layer === "uu" && rec.fate === "cancelled" ? "/§2.1" : ""})→${got}`);
         }
       });
     }

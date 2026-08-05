@@ -24,7 +24,19 @@
 import type { Client } from "pg";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { createHash } from "node:crypto";
-import { OFFER_TTL_SECONDS, ROOT_WINDOW_SECONDS } from "../config.ts";
+import { OFFER_TTL_SECONDS, ROOT_WINDOW_SECONDS, type TokenKey } from "../config.ts";
+import { ledger } from "../ledger.ts";
+import {
+  amountsFor,
+  buildOffer,
+  makerShieldedKey,
+  makerUnshieldedKey,
+  oppositeKey,
+  publishAndIndex,
+  storeBlob,
+  type Actors,
+  type PoolWallet,
+} from "../actors/wallets.ts";
 import { getOfferByHash, getOffersPage, getOfferStatus } from "../lib/api2.ts";
 import { derivedLegKeys, fullyValidate } from "../lib/verify.ts";
 import { beginPhase, check, detVar, note } from "../lib/util.ts";
@@ -37,6 +49,17 @@ interface Served {
   bech32: string;
   computed: any;
   listRow: any;
+}
+
+/**
+ * When the node accepted this offer — the only correct `tblock` for
+ * re-validating it (see lib/verify.ts). `computed.firstSeenAt` is chain time
+ * and is exactly what the STM stamped at ingestion; falling back to now is
+ * safe here because a LIVE offer has not outlived its own TTL by definition.
+ */
+function acceptedAt(s: Served): Date {
+  const t = Date.parse(s.computed?.firstSeenAt ?? "");
+  return Number.isFinite(t) ? new Date(t) : new Date();
 }
 
 /** Can this offer still be settled, judged against the node's own chain sets? */
@@ -89,8 +112,56 @@ async function settleability(
   return { ok: true, why: "" };
 }
 
-export async function p8Served(db: Client): Promise<void> {
+export async function p8Served(db: Client, actors: Actors): Promise<void> {
   beginPhase("p8-served");
+
+  // ── Publish this phase's OWN offers first ────────────────────────────────
+  // p8 runs after p5, which takes ~23 minutes; every live-fated offer
+  // published early in that phase has been swept by its 600 s TTL long before
+  // we get here. Measured: the book was EMPTY and the phase completed in 36 ms,
+  // "passing" six checks that examined nothing. A phase whose assertions
+  // silently become vacuous is worse than one that fails — it reports
+  // confidence it has not earned.
+  //
+  // So the book this phase audits is one it created: two fresh offers, one per
+  // value layer, indexed moments before the checks run. Whatever else is still
+  // live gets audited alongside them.
+  {
+    const fresh: { pw: PoolWallet; give: TokenKey; idx: number; layer: "ss" | "uu" }[] = [
+      { pw: actors.makers[0]!, give: makerShieldedKey(0), idx: 50, layer: "ss" },
+      { pw: actors.makers[2]!, give: makerUnshieldedKey(2), idx: 51, layer: "uu" },
+    ];
+    let published = 0;
+    for (const f of fresh) {
+      try {
+        const want = oppositeKey(f.give);
+        const a = amountsFor(f.idx, f.give, want);
+        const rec = ledger.addOffer({
+          index: f.idx,
+          fate: "live",
+          layer: f.layer,
+          makerSeed: f.pw.seed,
+          giveToken: f.give,
+          wantToken: want,
+          giveAmount: a.give.toString(),
+          wantAmount: a.want.toString(),
+          publishPath: "api",
+          phase: "p8",
+          state: "planned",
+        });
+        const built = await buildOffer(f.pw, rec);
+        storeBlob(built.hash, built.blob);
+        if (await publishAndIndex(db, rec, built)) published++;
+      } catch (e) {
+        note("p8 seed", `could not publish the ${f.layer} probe offer: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    await check(
+      "p8 seeded a live book to audit (both layers)",
+      async () => published === fresh.length,
+      `${published}/${fresh.length} probe offers indexed`,
+    );
+  }
 
   // ── Collect the live book, then fetch each offer's detail ────────────────
   const listRows: any[] = [];
@@ -158,7 +229,7 @@ export async function p8Served(db: Client): Promise<void> {
     for (const s of served) {
       let v;
       try {
-        v = fullyValidate(OfferFiles.decode(s.bech32));
+        v = fullyValidate(OfferFiles.decode(s.bech32), acceptedAt(s));
       } catch {
         invalid.push(`${s.offerId.slice(0, 8)}:undecodable`);
         continue;
@@ -241,11 +312,26 @@ export async function p8Served(db: Client): Promise<void> {
   // ── 5. The list route serves ONLY live offers ────────────────────────────
   // p7b's live-set audit compares against the suite's own ledger and so cannot
   // see an offer the suite never created. This asks the API about itself.
-  await check("every offer in the list reads status=live", async () => {
+  await check("the list never serves an offer that is already consumed or gone", async () => {
+    // `expired` is NOT a failure here. The list and these probes are separate
+    // calls seconds apart, and the TTL sweep runs continuously — an offer that
+    // crosses its deadline in between has been correctly swept, and failing on
+    // it would make this check flake at roughly the sweep rate.
+    //
+    // What must never happen is the list serving an offer that has SETTLED or
+    // been cancelled: those are dead, their inputs are spent, and a taker
+    // acting on one burns fees for nothing. That, and an offer the API cannot
+    // resolve at all, are the real defects.
     const wrong: string[] = [];
+    let sweptDuringProbe = 0;
     for (const s of served) {
       const st = (await getOfferStatus(s.offerId)).body?.status;
-      if (st !== "live") wrong.push(`${s.offerId.slice(0, 8)}:${st}`);
+      if (st === "live") continue;
+      if (st === "expired") sweptDuringProbe++;
+      else wrong.push(`${s.offerId.slice(0, 8)}:${st}`);
+    }
+    if (sweptDuringProbe > 0) {
+      note("p8", `${sweptDuringProbe} offer(s) swept by TTL between the list and the status probe`);
     }
     return wrong.length === 0;
   });

@@ -15,7 +15,6 @@ import {
   cancelGiveToken,
   cancelWantToken,
   makeRefill,
-  makerShieldedKey,
   makerUnshieldedKey,
   oppositeKey,
   publishAndIndex,
@@ -279,9 +278,14 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
   // difference is that the offer's terms actually executed. If the predicate
   // is wrong anywhere, it is wrong here, and it has never been run.
   {
-    const mi = 6;
-    const selfMaker = makers[mi]!;
-    const give = makerShieldedKey(mi);
+    // A self-fill needs ONE wallet holding BOTH sides — the give color to make
+    // the offer and the want color to settle it. Makers cannot do this: each
+    // holds a single shielded color by parity, so a maker can build the offer
+    // and then cannot pay for it (measured: `Insufficient funds` at the
+    // balancing step). Takers are funded in all four colors, so the self-filler
+    // is a taker acting as its own maker — which is what a real self-fill is.
+    const selfMaker = takers[5]!;
+    const give = "TA" as const;
     const want = oppositeKey(give);
     const a = amountsFor(41, give, want);
     const rec = mkRecord(41, "settled", "ss", selfMaker.seed, give, want, a.give, a.want);

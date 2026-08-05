@@ -24,23 +24,37 @@ import {
 const MAX_BYTES = 1024 * 1024;
 
 /**
- * Full ladder, proofs and signatures included. `tblock` is wall clock: the
- * suite runs against a live chain whose block time tracks it, and the only
- * time-sensitive step is wellFormed's TTL check, which a freshly-published
- * offer passes either way.
+ * Full ladder, proofs and signatures included.
+ *
+ * `tblock` MATTERS and must be the moment the node accepted the offer, not
+ * now. `wellFormed` runs `ttl_check_weak` over the transaction's intents, so
+ * any offer with an unshielded leg carries a real deadline (Intent.ttl is
+ * non-optional) — and re-validating it after that deadline fails, correctly,
+ * for a blob that was perfectly valid when indexed.
+ *
+ * Measured the hard way: auditing with wall-clock `new Date()` flagged three
+ * archived offers as PROOF_INVALID at the end of a 55-minute run. All three
+ * had unshielded inputs and intent TTLs that had passed minutes earlier. The
+ * code compounded the confusion — validate.ts labels every non-signature
+ * wellFormed failure PROOF_INVALID, so an expiry reads as a forged proof.
+ *
+ * Callers pass the stored `metadata_created_at` (the L2 block timestamp of
+ * ingestion). That also makes the audit ask the RIGHT question: not "would we
+ * accept this now" but "was this genuinely valid at the moment we accepted
+ * it" — which is the invariant the history is supposed to hold.
  */
-export function fullyValidate(raw: Uint8Array): OfferValidation {
+export function fullyValidate(raw: Uint8Array, acceptedAt: Date): OfferValidation {
   return validateZswapOfferBytes(raw, {
     refState: getBlankRefState(net.id),
-    tblock: new Date(),
+    tblock: acceptedAt,
     maxBytes: MAX_BYTES,
     crypto: "verify",
   });
 }
 
 /** Convenience for the many call sites holding a stored bech32m string. */
-export function fullyValidateBech32(blob: string): OfferValidation {
-  return fullyValidate(OfferFiles.decode(blob));
+export function fullyValidateBech32(blob: string, acceptedAt: Date): OfferValidation {
+  return fullyValidate(OfferFiles.decode(blob), acceptedAt);
 }
 
 /**

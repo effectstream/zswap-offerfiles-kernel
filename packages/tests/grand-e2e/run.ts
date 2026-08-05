@@ -298,7 +298,7 @@ async function main(): Promise<void> {
     await runPhase("p5-load", () => p5Load(db, actors!, art));
     // p8 before p7b: it needs a populated live book, and p7b's audit is the
     // wrap-up. Both must precede the determinism replay, which quiets the chain.
-    await runPhase("p8-served", () => p8Served(db));
+    await runPhase("p8-served", () => p8Served(db, actors!));
     await runPhase("p7b-audit", () => p7bAudit(db, sse));
     await runPhase("p7a-determinism", async () => {
       determinism = await p7Determinism(db);

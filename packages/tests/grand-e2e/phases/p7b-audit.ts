@@ -173,13 +173,18 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
       const short = row.offer_hash.slice(0, 8);
       let v;
       try {
-        v = fullyValidate(OfferFiles.decode(row.transaction_hex));
+        // tblock = when the node ACCEPTED it, never now. An offer with an
+        // unshielded leg carries a real intent TTL, so re-validating a
+        // legitimately-indexed offer after that deadline fails — and
+        // validate.ts reports the expiry as PROOF_INVALID, which reads as a
+        // forged proof. See lib/verify.ts.
+        v = fullyValidate(OfferFiles.decode(row.transaction_hex), new Date(row.metadata_created_at));
       } catch {
         invalid.push(`${short}:undecodable`);
         continue;
       }
       if (!v.ok) {
-        invalid.push(`${short}:${v.code}`);
+        invalid.push(`${short}:${v.code}@${new Date(row.metadata_created_at).toISOString()}`);
         continue; // derived fields are unreliable once validation failed
       }
 

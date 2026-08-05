@@ -15,6 +15,8 @@ const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const { migrationTable, getPairStats24h, getTradeHistory, getPairs, upsertPairStatsByOfferId } =
   await import("@zswap-da/database");
+// The exact functions api.ts calls for /v1/chart/stats and /v1/chart/history.
+const { realStats, realHistory } = await import("../node/trade-data.ts");
 
 import { afterAll, expect, test } from "bun:test";
 
@@ -93,6 +95,32 @@ for (const [k, actual] of [["A", 1317], ["B", 1424], ["C", 1983], ["D", 1826]] a
   console.log(`    ${k}: reported ${got}, actually moved ${actual}${got !== actual ? `  <-- x${(got / actual).toFixed(0)}` : ""}`);
 }
 
+// ── The actual HTTP responses a client receives ──────────────────────────
+const short = (o: any) => JSON.stringify(o, (k, v) =>
+  typeof v === "string" && /^[0-9a-f]{64}$/.test(v) ? NAME[v] ?? v.slice(0, 6) : v);
+
+console.log("\n──────── GET /v1/chart/stats?base=A&quote=C ────────");
+console.log(short(await realStats(client, A, C)));
+console.log("\n──────── GET /v1/chart/stats?base=A&quote=D ────────");
+console.log(short(await realStats(client, A, D)));
+console.log("   ^ same 1317 units of A, two different last prices\n");
+
+console.log("──────── GET /v1/chart/history?base=A&quote=C ────────");
+console.log(short(await realHistory(client, A, C)));
+console.log("──────── GET /v1/chart/history?base=A&quote=D ────────");
+console.log(short(await realHistory(client, A, D)));
+console.log("   ^ the SAME settlement, same timestamp, same size, two prices\n");
+
+console.log("──────── GET /v1/pairs ────────");
+const pairs = await getPairs.run(undefined, client);
+console.log(short(pairs.map((p: any) => ({
+  pairKey: `${NAME[p.base_color]}|${NAME[p.quote_color]}`,
+  tradeCount: p.trade_count,
+  lastPrice: p.last_price ? Number(p.last_price).toFixed(4) : null,
+  openCount: p.open_count,
+}))));
+console.log("   ^ 4 markets, 4 trade_counts, from 1 settled + 1 open offer");
+
 // The assertion, stated on the unarguable part.
 const prices = new Set<string>();
 for (const [base, quote] of [[A, C], [A, D], [B, C], [B, D]] as [string, string][]) {
@@ -102,14 +130,7 @@ for (const [base, quote] of [[A, C], [A, D], [B, C], [B, D]] as [string, string]
 expect(tradeRows).toBe(1);          // one settlement, one trade
 expect(prices.size).toBe(1);        // one settlement, one rate
 
-const pairs = await getPairs.run(undefined, client);
-console.log(`\nWhat /v1/pairs reports: ${pairs.length} pair rows from 1 settled + 1 open offer`);
-for (const p of pairs) {
-  console.log(
-    `  ${NAME[p.base_color]}/${NAME[p.quote_color]}: trade_count=${p.trade_count} ` +
-      `last_price=${p.last_price ? Number(p.last_price).toFixed(4) : "—"} open_count=${p.open_count}`,
-  );
-}
+
 
 });
 

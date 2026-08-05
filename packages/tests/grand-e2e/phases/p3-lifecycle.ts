@@ -4,6 +4,8 @@
 //   whose sweep is asserted at the end of phase 5.
 
 import type { Client } from "pg";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
+import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 import { ARCHIVE_WAIT_TRIES } from "../config.ts";
 import { ledger, type CancelShape, type OfferRecord } from "../ledger.ts";
 import {
@@ -25,7 +27,7 @@ import { buildWallet } from "../../lib/wallet.ts";
 import { unshieldedAddressObj, waitForSync, waitForUnshielded } from "../../lib/wallet.ts";
 import { mintUnshielded } from "../../lib/offer-files.ts";
 import { PoolWallet as PW } from "../actors/wallets.ts";
-import { getOfferByHash, getOfferStatus } from "../lib/api2.ts";
+import { getChartHistory, getOfferByHash, getOfferStatus } from "../lib/api2.ts";
 import { historyRowByHash, offerRowByHash } from "../lib/db2.ts";
 import { beginPhase, check, note, waitUntil } from "../lib/util.ts";
 import { TOKEN_SEPS } from "../config.ts";
@@ -226,6 +228,62 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
         if (!exp) return false;
         const t = Date.parse(exp);
         return t > Date.now() - 60_000 && t < Date.now() + 45 * 60_000;
+      });
+    }
+  }
+
+  // ── expiry semantics, UNSHIELDED: a genuinely different derivation ───────
+  // The shielded branch above computes a root-window floor. Unshielded offers
+  // have no proof root at all — they expire on `Intent.ttl`, read by
+  // P2pAtomicSwaps.earliestIntentTtl and bounded on-chain by `global_ttl`.
+  // Only the shielded branch has ever been asserted.
+  {
+    const a = amountsFor(40, "UA", "UB");
+    const rec = mkRecord(40, "expired", "uu", makers[5]!.seed, "UA", "UB", a.give, a.want);
+    const built = await buildOffer(makers[5]!, rec);
+    storeBlob(built.hash, built.blob);
+    const ok = await check("unshielded expiry-fated offer indexed", () => publishAndIndex(db, rec, built));
+    if (ok) {
+      const intentTtl = P2pAtomicSwaps.earliestIntentTtl(OfferFiles.fromBech32(built.blob) as any);
+      await check("unshielded expiresAt equals the offer's own intent TTL", async () => {
+        const d = await getOfferByHash(built.hash);
+        return !!intentTtl && d.body?.computed?.expiresAt === intentTtl;
+      }, `intentTtl=${intentTtl}`);
+
+      // state-machine.ts calls the OFFER_TTL_SECONDS branch "defensive only —
+      // it should be unreachable for a well-formed offer", because
+      // UnshieldedOffer exists only inside an Intent and Intent.ttl is
+      // non-optional. Never checked. If this fails, that comment is wrong and
+      // some unshielded offers are getting an invented expiry.
+      await check(
+        "the OFFER_TTL fallback branch is unreachable for a well-formed unshielded offer",
+        async () => intentTtl !== undefined,
+      );
+    }
+  }
+
+  // ── maker self-fill: the exact cancel/fill boundary ──────────────────────
+  // cancelledPredicate claims "a tx that recreates the exact commitments is a
+  // maker self-fill: the offer's terms executed, so consumed is the right
+  // answer". Identical spender, identical outputs to a walk-away — the only
+  // difference is that the offer's terms actually executed. If the predicate
+  // is wrong anywhere, it is wrong here, and it has never been run.
+  {
+    const selfMaker = makers[6]!;
+    const a = amountsFor(41, "TA", "TB");
+    const rec = mkRecord(41, "settled", "ss", selfMaker.seed, "TA", "TB", a.give, a.want);
+    const built = await buildOffer(selfMaker, rec);
+    storeBlob(built.hash, built.blob);
+    const ok = await check("self-fill offer indexed", () => publishAndIndex(db, rec, built));
+    if (ok) {
+      // The maker balances its OWN offer — it holds both colors.
+      await settleAndAssert(db, selfMaker, rec, built.blob, "maker self-fill");
+      await check("maker self-fill counts as a trade, not a cancel", async () => {
+        const base = ledger.colors.TA!;
+        const quote = ledger.colors.TB!;
+        const hist = await getChartHistory(base, quote);
+        if (hist.status !== 200 || !Array.isArray(hist.body)) return false;
+        return hist.body.some((t: any) => Number(t.amt) === Number(rec.giveAmount));
       });
     }
   }

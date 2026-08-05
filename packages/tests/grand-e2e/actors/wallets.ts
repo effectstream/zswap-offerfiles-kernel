@@ -609,6 +609,60 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
   });
 }
 
+/**
+ * A structurally valid transaction that is NOT a swap: one give, zero wants.
+ *
+ * MIP-0006's two-sided rule is the most important semantic rule in the spec,
+ * and no fixture has ever exercised it against a running node — `NOT_A_SWAP`
+ * has only ever been produced by accident (ISSUES.md §3). This builds one on
+ * purpose, using the SDK defect as the tool: request a shielded input against
+ * an UNSHIELDED desired output and wallet-sdk-facade silently drops the
+ * output, yielding exactly the give-only transaction we want. Everything
+ * about it is legitimate except that it is not an offer.
+ *
+ * Returns null rather than throwing if the SDK ever stops dropping the leg —
+ * at which point the fixture is no longer one-sided and the caller must know
+ * that instead of asserting a code it earned for the wrong reason.
+ */
+export async function buildOneSidedOffer(pw: PoolWallet): Promise<string | null> {
+  return pw.run(async () => {
+    const giveColor = ledger.colors.TA!;
+    const wantColor = ledger.colors.UB!; // other layer — the dropped leg
+    const recipe = await pw.wr.wallet.initSwap(
+      { shielded: { [giveColor]: GIVE_MIN } },
+      [{
+        type: "unshielded",
+        outputs: [{ type: wantColor, amount: GIVE_MIN, receiverAddress: pw.unshieldedObj }],
+      } as any],
+      shieldedKeys(pw.wr),
+      { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
+    );
+    let finalized: any;
+    try {
+      finalized = await withProveSlot(() => pw.wr.wallet.finalizeTransaction(recipe.transaction));
+    } catch {
+      await (pw.wr.wallet as any).revert(recipe).catch(() => {});
+      return null;
+    }
+    const blob = OfferFiles.encode(finalized.serialize());
+    // Release the coin: this transaction is never published, and holding the
+    // reservation would starve the maker for the rest of the run.
+    await (pw.wr.wallet as any).revert(finalized).catch(() => {});
+
+    const v = validateZswapOffer(blob, {
+      refState: getBlankRefState(net.id),
+      tblock: new Date(),
+      maxBytes: 1024 * 1024,
+      crypto: "defer",
+    });
+    // Only NOT_A_SWAP proves the fixture is what it claims. Anything else —
+    // including success — means the SDK behaved differently and the fixture
+    // would be asserting a code for the wrong reason.
+    if (v.code !== "NOT_A_SWAP") return null;
+    return blob;
+  });
+}
+
 /** Publish via the planned path and wait for the offer_file row. */
 export async function publishAndIndex(
   db: Client,

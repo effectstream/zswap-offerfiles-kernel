@@ -44,6 +44,71 @@ first** (PR-A), then a fix in its own PR, then the same test green.
 
 ## 1. How this lands: one base PR, then one PR per fix
 
+### 1.0 Implementation status
+
+**PR-A is implemented** on `test/production-readiness-base`. What landed, and
+what did not:
+
+| Test | Status |
+|---|---|
+| T-A1 Celestia door asserted by code | ✅ `p4` + `celestiaFixtures()`, incl. crypto-tamper and aged-root families |
+| T-A2 `NOT_A_SWAP` at both doors | ✅ `buildOneSidedOffer()`; skips with a loud note if the SDK stops dropping the leg |
+| T-A2 `NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` / `ROOT_UNREADABLE` | ⛔ not built — see §1.0.1 |
+| T-A3 cross-layer | ⛔ **fixture unbuildable today** — see §1.0.1 |
+| T-A4 history referential integrity | ✅ `p7b`, 5 SQL assertions |
+| T-A5 every stored blob re-validates (proofs included) | ✅ `p7b` deep pass, `GRAND_DEEP_AUDIT` |
+| T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass |
+| T-B1…B4 what the API serves | ✅ new `p8-served` phase |
+| T-C1 unshielded cancels read `cancelled` | ✅ **red** RED-1a/b/c, RED-2 |
+| T-C2 Σ volume == Σ settled | ✅ **red** RED-5, RED-6 |
+| T-C3 expiries are never trades | ✅ `p7b` |
+| T-C4 maker self-fill | ✅ `p3` |
+| T-D1 chain-clock 24 h window | ✅ **red** `trade-data.test.ts` (`test.failing`) |
+| T-D2 price orientation + inversion | ✅ `p2`, anchored to a known fill |
+| T-D3 `/v1/pairs` vs `/v1/chart/stats` | ✅ `p7b` (unregistered — see §1.2) + **red** in `fill-vs-cancel.test.ts` |
+| T-D4 `trade_count` + chain ordering | ✅ `p7b` |
+| T-D5 multi-leg | ⛔ **fixture unbuildable today** — see §1.0.1 |
+| T-E1 N-way competition | ✅ `p3b`, 3 competitors per layer |
+| T-E2 partial overlap between live offers | ⛔ deferred — needs denomination-controlled funding |
+| T-E3 cross-door competition | ✅ `p3b`, one competitor via `blob.Submit` |
+| T-E4 loser arrives after the winner settled | ✅ `p3b`, both doors, by code |
+| T-E5 two takers, one coin | ⛔ deferred |
+| T-E6 same-block byte-identical duplicates | ✅ `p4` |
+| T-F1 cancel shapes, unshielded | ✅ **red** RED-1a/b/c — 3 of the 4 shapes |
+| T-F2 `UTXO_NOT_LIVE` | ✅ via T-E4's unshielded arm |
+| T-F3 unshielded `expiresAt` + unreachable fallback | ✅ `p3` |
+| T-F4 chaos batch mixed-layer | ✅ `p5` |
+| T-F5 layer symmetry | ✅ `p7b` + scorecard split |
+
+#### 1.0.1 Why three fixtures could not be built
+
+Not deferred for effort — **blocked on something concrete**, and worth stating
+plainly rather than shipping a fixture that earns the right code for the wrong
+reason:
+
+- **Cross-layer (T-A3).** `wallet-sdk-facade` cannot build one: it silently
+  drops the mismatched leg (ISSUES.md §3). That defect is precisely what makes
+  T-A2's one-sided fixture possible, so the same SDK cannot produce both. A
+  genuine cross-layer transaction means merging a shielded give-only tx with an
+  unshielded want-only tx through the ledger's own `Transaction.merge`, and
+  whether the ledger permits that combination is itself unknown. Until someone
+  answers that, the same-layer rule is **unenforced and untested**.
+- **Multi-leg (T-D5).** A same-layer 3-leg offer needs three colors on one
+  layer. The suite mints two per layer (TA/TB, UA/UB), and the third leg cannot
+  come from the other layer for the reason above. Prerequisite: a third
+  shielded color in `setupActors`. The ruling on the desired behaviour is also
+  still open.
+- **`NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` (T-A2).** The SDK will not build an
+  input-free swap, and every token tag it can emit is
+  `shielded`/`unshielded`/`dust`. Both stay covered at validator-unit level
+  against transaction doubles. If they prove unreachable through any real
+  wallet, that is a finding in itself — a fail-closed branch no real input can
+  reach is either dead code or a defence against a future wire format.
+
+T-E2 and T-E5 are ordinary deferrals: both need new wallet plumbing
+(denomination-controlled funding; concurrent taker settlement) rather than an
+unanswered question.
+
 ### 1.1 PR sequence
 
 | PR | Contents | Product code touched |

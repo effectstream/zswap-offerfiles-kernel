@@ -68,14 +68,15 @@ async function seedArchived(
     [id, 100 + id, `blob-${id}`, hashOf(id), reason],
   );
   await client.query(
-    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind)
-     VALUES ($1, $2, '10', 'GIVING', 'SHIELDED'), ($1, $3, '20', 'WANTING', 'SHIELDED')`,
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+     VALUES ($1, $2, '10', 'GIVING', 'SHIELDED', NOW() - INTERVAL '30 minutes'),
+            ($1, $3, '20', 'WANTING', 'SHIELDED', NOW() - INTERVAL '30 minutes')`,
     [id, pair[0], pair[1]],
   );
   for (const n of nullifiers) {
     await client.query(
-      `INSERT INTO offer_file_nullifiers_history (offer_file_id, nullifier)
-       VALUES ($1, $2)`,
+      `INSERT INTO offer_file_nullifiers_history (offer_file_id, nullifier, archived_at)
+       VALUES ($1, $2, NOW() - INTERVAL '30 minutes')`,
       [id, n],
     );
   }
@@ -229,6 +230,22 @@ test("chart stats count only genuine fills — cancels contribute nothing", asyn
 test("trade history hides cancels", async () => {
   const rows = await getTradeHistory.run({ base: BASE, quote: QUOTE }, client);
   expect(rows.length).toBe(3);
+});
+
+test("pair_stats.last_traded_at is the archived block time, not NOW()", async () => {
+  // The fixture archives rows with archived_at = NOW() - 30 minutes. If the
+  // upsert still stamped NOW() (the old bug: node-local wall clock, divergent
+  // across replicas and wrong after a resync), last_traded_at would be ~now.
+  await upsertPairStatsByOfferId.run({ offer_id: 1 }, client);
+  const r = await client.query(
+    `SELECT (NOW() - last_traded_at) >= INTERVAL '29 minutes' AS chain_derived,
+            last_traded_at = (SELECT archived_at FROM offer_file_history WHERE id = 1) AS matches_archive
+     FROM pair_stats`,
+  );
+  expect(r.rows.length).toBe(1);
+  expect(r.rows[0].chain_derived).toBe(true);
+  expect(r.rows[0].matches_archive).toBe(true);
+  await client.query("DELETE FROM pair_stats");
 });
 
 test("pair_stats writer refuses cancelled offers", async () => {

@@ -33,7 +33,7 @@ import {
   isUnshieldedCreated,
   upsertKnownRootWithFirstSeen,
   getEarliestRootFirstSeen,
-  isKnownRoot,
+  isKnownRootLive,
   pruneKnownRoots,
 } from "@zswap-da/database";
 
@@ -193,6 +193,7 @@ addTransition("midnight-zswap-event", function* (data) {
 
     const archived = yield* World.resolve(archiveOfferByNullifierWithHash, {
       nullifier,
+      archived_at: new Date(data.blockTimestamp),
     });
     if (archived.length === 0) {
       // No offer indexed yet — early-arrival race. The row stays in
@@ -260,6 +261,7 @@ addTransition("midnight-unshielded-spend", function* (data) {
       owner,
       intent_hash: intentHash,
       output_no: outputNo,
+      archived_at: new Date(data.blockTimestamp),
     });
     if (archived.length === 0) {
       console.log(
@@ -487,9 +489,15 @@ addTransition("celestia-zswap", function* (data) {
 
   // ── Root-known: drop offers whose shielded input proves against a root the
   // chain never held / that has aged out (midnight-zswap-root populates
-  // known_roots). inputRoots are canonical hex == the indexer's root form. ──
+  // known_roots). inputRoots are canonical hex == the indexer's root form.
+  // The window is enforced HERE, at read time, with this block's own
+  // timestamp as the cutoff — pruning is event-driven and stops on a quiet
+  // chain, so presence in known_roots alone is not recency. ──
   for (const root of result.inputRoots ?? []) {
-    const known = yield* World.resolve(isKnownRoot, { root });
+    const known = yield* World.resolve(isKnownRootLive, {
+      root,
+      cutoff_ms: data.blockTimestamp - ROOT_WINDOW_SECONDS * 1000,
+    });
     if (known.length === 0) {
       yield* rejectOffer(
         "ROOT_UNKNOWN",
@@ -655,7 +663,10 @@ addTransition("celestia-zswap", function* (data) {
     for (const nullifierStr of nullifierStrs) {
       const seen = yield* World.resolve(findUnmatchedNullifier, { nullifier: nullifierStr });
       if (seen.length === 0) continue;
-      const archived = yield* World.resolve(archiveOfferByNullifierWithHash, { nullifier: nullifierStr });
+      const archived = yield* World.resolve(archiveOfferByNullifierWithHash, {
+        nullifier: nullifierStr,
+        archived_at: new Date(data.blockTimestamp),
+      });
       yield* World.resolve(markNullifierMatched, { nullifier: nullifierStr });
       for (const row of archived) {
         emitAppEvent({ type: "offer_consumed", offerId: row.id, nullifier: nullifierStr });
@@ -702,6 +713,9 @@ addTransition("zswap-ttl-cleanup", function* (data) {
   try {
     const archived = yield* World.resolve(archiveOfferByIdTtlWithHash, {
       offer_file_id: offerId,
+      // The scheduled input executes inside an L2 block like any other
+      // transition, so this is the deterministic expiry time, not wall-clock.
+      archived_at: new Date(data.blockTimestamp),
     });
 
     if (archived.length === 0) {

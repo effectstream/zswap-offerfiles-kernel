@@ -110,7 +110,13 @@ CREATE TABLE offer_file_history (
     -- full resync. Only safe when archive-triggering events come from
     -- finalized blocks.
     archive_reason TEXT,
-    archived_at TIMESTAMPTZ DEFAULT NOW()
+    -- The L2 block timestamp of the archiving event (chain-derived, replica-
+    -- deterministic) — NOT the wall clock of whichever node ran the archive.
+    -- NOT NULL and no default on purpose: an INSERT that forgets this column
+    -- must fail loudly rather than silently record node-local time. Served as
+    -- the trade timestamp (at_ms) by GetTradeHistory and copied into
+    -- pair_stats.last_traded_at.
+    archived_at TIMESTAMPTZ NOT NULL
 );
 
 -- trade-data.ts HISTORY_SQL: WHERE archive_reason = 'CONSUMED' ORDER BY archived_at DESC LIMIT 120
@@ -123,7 +129,7 @@ CREATE TABLE offer_file_tokens_history (
     token_color TEXT NOT NULL,
     amount TEXT NOT NULL,
     direction TEXT NOT NULL,
-    archived_at TIMESTAMPTZ DEFAULT NOW()
+    archived_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_offer_file_tokens_history_offer_file_id
@@ -133,7 +139,7 @@ CREATE TABLE offer_file_nullifiers_history (
     id SERIAL PRIMARY KEY,
     offer_file_id INTEGER NOT NULL,
     nullifier TEXT NOT NULL,
-    archived_at TIMESTAMPTZ DEFAULT NOW()
+    archived_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE offer_file_unshielded_spends_history (
@@ -142,7 +148,7 @@ CREATE TABLE offer_file_unshielded_spends_history (
     owner TEXT NOT NULL,
     intent_hash TEXT NOT NULL,
     output_no INTEGER NOT NULL,
-    archived_at TIMESTAMPTZ DEFAULT NOW()
+    archived_at TIMESTAMPTZ NOT NULL
 );
 
 -- Unified nullifier table (replaces seen_nullifiers + spent_nullifiers).

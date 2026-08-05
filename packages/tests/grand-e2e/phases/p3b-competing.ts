@@ -26,6 +26,8 @@
 // suspicion.
 
 import type { Client } from "pg";
+import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
+import { offerHashFromBlob } from "@zswap-da/offer-guard";
 import { ARCHIVE_WAIT_TRIES } from "../config.ts";
 import { ledger, type OfferRecord } from "../ledger.ts";
 import {
@@ -36,72 +38,95 @@ import {
   settleOffer,
   storeBlob,
   type Actors,
+  type BuiltOffer,
   type PoolWallet,
 } from "../actors/wallets.ts";
-import { getChartHistory, getOfferStatus } from "../lib/api2.ts";
-import { historyRowByHash, offerRowByHash } from "../lib/db2.ts";
+import { getChartHistory, getOfferStatus, submitOffer2 } from "../lib/api2.ts";
+import { submitBlobRaw } from "../lib/celestia.ts";
+import { historyRowByHash, offerRowByHash, rejectionTotalsByCode } from "../lib/db2.ts";
 import { beginPhase, check, note, waitUntil } from "../lib/util.ts";
+
+/** How many competitors share one coin. A maker laddering the same coin at
+ *  several prices is the NORMAL pattern, not an edge case — two proved only
+ *  that the winner beats *a* loser, never that accepting one disables ALL the
+ *  others. */
+const COMPETITORS = 3;
 
 interface Competitors {
   winner: OfferRecord;
-  loser: OfferRecord;
+  losers: OfferRecord[];
   winnerBlob: string;
+  /** Built from the same coin but NEVER published — submitted only AFTER the
+   *  winner settles, so the liveness gate is the only thing that can refuse
+   *  it. Detached from the ledger: it is adversarial input, not an offer. */
+  heldBack: { rec: OfferRecord; blob: string } | null;
 }
 
-/** Build two offers from ONE coin. The wallet reserves an input as soon as a
- *  recipe is finalized, so the first offer must be reverted before the second
- *  can select the same coin — revert releases the reservation without
+/** Build N+1 offers from ONE coin. The wallet reserves an input as soon as a
+ *  recipe is finalized, so each offer must be reverted before the next can
+ *  select the same coin — revert releases the reservation without
  *  invalidating the already-serialized bytes. */
-async function buildCompetingPair(
+async function buildCompetingSet(
   db: Client,
   pw: PoolWallet,
   shielded: boolean,
   idxBase: number,
 ): Promise<Competitors | null> {
   const give = shielded ? ("TA" as const) : ("UA" as const);
-  const wantA = shielded ? ("TB" as const) : ("UB" as const);
-  // Same give coin, DIFFERENT wants — two genuinely different offers that
-  // happen to be funded by one input.
-  const mk = (index: number, want: typeof wantA, fate: OfferRecord["fate"]): OfferRecord =>
-    ledger.addOffer({
-      index,
-      fate,
-      layer: shielded ? "ss" : "uu",
-      makerSeed: pw.seed,
-      giveToken: give,
-      wantToken: want,
-      giveAmount: COMPETING_COIN.toString(),
-      wantAmount: amountsFor(index, give, want).want.toString(),
-      publishPath: "api",
-      phase: "p3b",
-      state: "planned",
+  const want = shielded ? ("TB" as const) : ("UB" as const);
+  const layer = shielded ? ("ss" as const) : ("uu" as const);
+
+  // Same give coin, different asks — genuinely different offers that happen to
+  // be funded by one input. The ask varies by +7·i so no two are byte-identical
+  // (a byte-identical sibling is content-hash dedup, a different test).
+  const mkFields = (index: number, fate: OfferRecord["fate"], bump: bigint, path: "api" | "celestia") => ({
+    index,
+    fate,
+    layer,
+    makerSeed: pw.seed,
+    giveToken: give,
+    wantToken: want,
+    giveAmount: COMPETING_COIN.toString(),
+    wantAmount: (amountsFor(idxBase, give, want).want + bump).toString(),
+    publishPath: path,
+    phase: "p3b" as const,
+    state: "planned" as const,
+  });
+
+  const built: { rec: OfferRecord; b: BuiltOffer }[] = [];
+  for (let i = 0; i <= COMPETITORS; i++) {
+    // Competitor 1 publishes via raw blob.Submit so the STM's own dedup and
+    // liveness ordering decides, not the API's — the two doors are different
+    // code paths and only one of them can be bypassed by an attacker.
+    const path = i === 1 ? ("celestia" as const) : ("api" as const);
+    const fate: OfferRecord["fate"] = i === 0 ? "settled" : "cancelled";
+    const fields = mkFields(idxBase + i, fate, BigInt(7 * i), path);
+    // The last one is held back and never published — keep it OUT of the
+    // ledger so it is not counted as an unresolved offer.
+    const rec: OfferRecord = i === COMPETITORS ? { ...fields } : ledger.addOffer({ ...fields });
+    const b = await buildOffer(pw, rec);
+    storeBlob(b.hash, b.blob);
+    await pw.run(async () => {
+      await (pw.wr.wallet as any).revert(b.finalized);
     });
-
-  const winner = mk(idxBase, wantA, "settled");
-  const builtWinner = await buildOffer(pw, winner);
-  storeBlob(builtWinner.hash, builtWinner.blob);
-  // Release the coin so the second offer selects the SAME input.
-  await pw.run(async () => {
-    await (pw.wr.wallet as any).revert(builtWinner.finalized);
-  });
-
-  const loser = mk(idxBase + 1, wantA, "cancelled");
-  // Vary the ask so the two offers are not byte-identical (a duplicate would
-  // be rejected by content-hash dedup, which is a different test).
-  loser.wantAmount = (BigInt(loser.wantAmount) + 7n).toString();
-  const builtLoser = await buildOffer(pw, loser);
-  storeBlob(builtLoser.hash, builtLoser.blob);
-  await pw.run(async () => {
-    await (pw.wr.wallet as any).revert(builtLoser.finalized);
-  });
-
-  const okW = await publishAndIndex(db, winner, builtWinner);
-  const okL = await publishAndIndex(db, loser, builtLoser);
-  if (!okW || !okL) {
-    note("competing", `publish failed (winner=${okW} loser=${okL}) — skipping this pair`);
-    return null;
+    built.push({ rec, b });
   }
-  return { winner, loser, winnerBlob: builtWinner.blob };
+
+  const published = built.slice(0, COMPETITORS);
+  for (const { rec, b } of published) {
+    if (!(await publishAndIndex(db, rec, b))) {
+      note("competing", `publish failed for #${rec.index} — skipping this set`);
+      return null;
+    }
+  }
+
+  const held = built[COMPETITORS]!;
+  return {
+    winner: published[0]!.rec,
+    losers: published.slice(1).map((p) => p.rec),
+    winnerBlob: published[0]!.b.blob,
+    heldBack: { rec: held.rec, blob: held.b.blob },
+  };
 }
 
 /** Do the two offers really share an input? If not, the test proves nothing. */
@@ -121,13 +146,15 @@ export async function p3bCompeting(db: Client, actors: Actors): Promise<void> {
     ["shielded", actors.competingShielded, true, 20],
     ["unshielded", actors.competingUnshielded, false, 30],
   ] as const) {
-    const pair = await buildCompetingPair(db, pw, shielded, idxBase);
-    if (!pair) continue;
-    const { winner, loser, winnerBlob } = pair;
+    const set = await buildCompetingSet(db, pw, shielded, idxBase);
+    if (!set) continue;
+    const { winner, losers, winnerBlob, heldBack } = set;
+    const loser = losers[0]!; // the one the marker diagnostics report on
 
-    await check(`${label}: both offers indexed and share one input`, async () =>
-      sharesInput(db, winner, loser, shielded),
-    );
+    await check(`${label}: all ${COMPETITORS} offers indexed and share one input`, async () => {
+      for (const l of losers) if (!(await sharesInput(db, winner, l, shielded))) return false;
+      return true;
+    });
 
     // Settle exactly ONE of them.
     const taker = actors.takers[shielded ? 3 : 4]!;
@@ -137,20 +164,26 @@ export async function p3bCompeting(db: Client, actors: Actors): Promise<void> {
     });
     if (!settled) continue;
 
-    await check(`${label}: BOTH offers archived (one input, both mutually exclusive)`, async () =>
+    // "Accepting one disables the others" — ALL of them, not just one. A maker
+    // laddering a coin at several prices is the normal case, and a taker who
+    // acts on any surviving sibling burns fees on an unfillable offer.
+    await check(`${label}: ALL ${COMPETITORS} offers archived (one input, mutually exclusive)`, async () =>
       waitUntil(
-        "both archived",
-        async () =>
-          (await offerRowByHash(db, winner.offerHash!)) === null &&
-          (await offerRowByHash(db, loser.offerHash!)) === null,
+        "all archived",
+        async () => {
+          for (const o of [winner, ...losers]) {
+            if ((await offerRowByHash(db, o.offerHash!)) !== null) return false;
+          }
+          return true;
+        },
         ARCHIVE_WAIT_TRIES,
         5000,
       ),
     );
-    winner.state = "resolved";
-    winner.resolvedAt = Date.now();
-    loser.state = "resolved";
-    loser.resolvedAt = Date.now();
+    for (const o of [winner, ...losers]) {
+      o.state = "resolved";
+      o.resolvedAt = Date.now();
+    }
 
     await check(`${label}: winner reads consumed`, async () => {
       const s = await getOfferStatus(winner.offerHash!);
@@ -168,8 +201,11 @@ export async function p3bCompeting(db: Client, actors: Actors): Promise<void> {
       // limitation to assert as behaviour — it lets anyone mint volume on any
       // unshielded pair for the price of a self-transfer (§2.1).
       const ok = await check(`${label}: loser reads cancelled (fill markers separate them)`, async () => {
-        const s = await getOfferStatus(loser.offerHash!);
-        return s.body?.status === "cancelled";
+        for (const l of losers) {
+          const s = await getOfferStatus(l.offerHash!);
+          if (s.body?.status !== "cancelled") return false;
+        }
+        return true;
       });
       if (!ok && shielded) {
         // Diagnose rather than just fail: was it the ordering risk?
@@ -222,5 +258,63 @@ export async function p3bCompeting(db: Client, actors: Actors): Promise<void> {
 
     const hist = await historyRowByHash(db, loser.offerHash!);
     note(`${label} loser`, `archive_reason=${hist?.archive_reason} (CONSUMED is expected — the read-time rule reclassifies)`);
+
+    // (C) A competitor that arrives AFTER the coin is gone.
+    //
+    // This is the only fixture in the suite where LIVENESS is provably the
+    // thing that rejects. p4's replay fixture re-submits the SAME offer, so
+    // content dedup fires first and its expectedCodes has to accept three
+    // different answers — the liveness gate is never proven to be what did the
+    // rejecting. A *different* offer over the same spent coin has no dedup
+    // match, so nothing but liveness can stop it.
+    if (heldBack) {
+      const expected = shielded ? "NULLIFIER_SPENT" : "UTXO_NOT_LIVE";
+      const res = await submitOffer2(heldBack.blob);
+      ledger.addGarbage({
+        kind: `api:post-settlement-${shielded ? "shielded" : "unshielded"}`,
+        via: "api",
+        expectedCodes: [expected],
+        offerHash: offerHashFromBlob(heldBack.blob),
+        at: Date.now(),
+        gotCode: res.body?.error,
+        gotStatus: res.status,
+      });
+      await check(
+        `${label}: a NEW offer over the spent coin is refused ${expected} at the API`,
+        async () => res.status === 400 && res.body?.error === expected,
+        `got ${res.status} ${res.body?.error}`,
+      );
+
+      // …and at the door that cannot be bypassed. The API can be skipped
+      // entirely by posting to the namespace, so the STM must refuse it too —
+      // with the same code, recorded in offer_rejections.
+      const before = await rejectionTotalsByCode(db);
+      const height = await submitBlobRaw(OfferFiles.decode(heldBack.blob));
+      ledger.addGarbage({
+        kind: `celestia:post-settlement-${shielded ? "shielded" : "unshielded"}`,
+        via: "celestia",
+        expectedCodes: [expected],
+        offerHash: offerHashFromBlob(heldBack.blob),
+        celestiaHeight: height,
+        at: Date.now(),
+      });
+      await check(
+        `${label}: the same offer is refused ${expected} at the Celestia door`,
+        async () =>
+          waitUntil(
+            "rejection recorded",
+            async () => {
+              const now = await rejectionTotalsByCode(db);
+              return (now[expected] ?? 0) > (before[expected] ?? 0);
+            },
+            24,
+            5000,
+          ),
+      );
+      await check(
+        `${label}: the post-settlement offer was never indexed`,
+        async () => (await offerRowByHash(db, offerHashFromBlob(heldBack.blob))) === null,
+      );
+    }
   }
 }

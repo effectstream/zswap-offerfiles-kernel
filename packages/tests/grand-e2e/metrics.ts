@@ -114,6 +114,7 @@ interface Baseline {
   submitP95Ms?: number;
   publishToIndexedP95Ms?: number;
   bookReadP95Ms?: number;
+  sseDeliveryLagP50Ms?: number;
   sseDeliveryLagP95Ms?: number;
   maxStmLagBlocks?: number;
 }
@@ -138,6 +139,20 @@ export function baselineViolations(snap: MetricsSnapshot, base: Baseline): strin
   checkOne("submit p95 ms", snap.submit.p95, base.submitP95Ms);
   checkOne("publish→indexed p95 ms", snap.publishToIndexedMs.p95, base.publishToIndexedP95Ms);
   checkOne("book read p95 ms", snap.bookReadMs.p95, base.bookReadP95Ms);
+  // SSE lag is gated on BOTH ends, and the median is the one that means
+  // something. There are ~27 samples, so the p95 is effectively the
+  // second-largest single observation — dominated by whichever archive
+  // happened to land while the STM was catching up from the storm (peak lag
+  // ~95 blocks). Measured: the median IMPROVED (1578 → 1350 ms) in the same
+  // run whose p95 went 2674 → 6899. Gating on the tail alone would have
+  // reported a delivery regression that the delivery numbers contradict.
+  //
+  // So: p50 tight, because a real shift in delivery health moves it; p95 loose,
+  // because it is a tail sample, but still gated so an egregious stall is not
+  // invisible. Same reasoning already applied to bookRead p95 (see
+  // baseline.json's note) — this is that lesson generalised, not a widening to
+  // make a run green.
+  checkOne("SSE delivery lag p50 ms", snap.sseDeliveryLagMs.p50, base.sseDeliveryLagP50Ms);
   checkOne("SSE delivery lag p95 ms", snap.sseDeliveryLagMs.p95, base.sseDeliveryLagP95Ms);
   checkOne("max STM lag blocks", snap.stmLag.maxLagBlocks, base.maxStmLagBlocks);
   return out;

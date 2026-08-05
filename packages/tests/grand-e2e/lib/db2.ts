@@ -82,14 +82,17 @@ export interface StoredBlobRow {
   offer_hash: string;
   transaction_hex: string;
   live: boolean;
+  /** L2 block time of ingestion — the ONLY correct tblock for re-validating
+   *  this blob (see lib/verify.ts). */
+  metadata_created_at: Date;
 }
 
 /** Every blob this node holds, live and archived — the audit's full surface. */
 export async function storedBlobs(db: Client): Promise<StoredBlobRow[]> {
   const r = await db.query(
-    `SELECT id, offer_hash, transaction_hex, TRUE  AS live FROM offer_file
+    `SELECT id, offer_hash, transaction_hex, metadata_created_at, TRUE  AS live FROM offer_file
      UNION ALL
-     SELECT id, offer_hash, transaction_hex, FALSE AS live FROM offer_file_history
+     SELECT id, offer_hash, transaction_hex, metadata_created_at, FALSE AS live FROM offer_file_history
      ORDER BY id`,
   );
   return r.rows as StoredBlobRow[];

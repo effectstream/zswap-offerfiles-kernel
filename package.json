@@ -22,10 +22,10 @@
     "docs:preview": "bun run --filter @zswap-da/docs-playground preview"
   },
   "dependencies": {
-    "@effectstream/celestia": "0.103.0",
-    "@effectstream/midnight-contracts": "0.103.0",
+    "@effectstream/celestia": "0.103.1",
+    "@effectstream/midnight-contracts": "0.103.1",
     "@effectstream/mip-zswap-offer": "0.3.0",
-    "@effectstream/orchestrator": "0.103.0",
+    "@effectstream/orchestrator": "0.103.1",
     "@electric-sql/pglite": "^0.3.14",
     "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
     "@scure/bip39": "^2.2.0",

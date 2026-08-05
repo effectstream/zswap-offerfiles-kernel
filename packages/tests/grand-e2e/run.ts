@@ -132,7 +132,10 @@ function writeScorecard(determinism: DeterminismOutcome | null): void {
   lines.push(
     `- **Batcher settled one transaction at a time** (PR #23). The balancer ran a single worker (~2.4 ` +
       `tx/min) — the whole system's settlement ceiling — because the SDK's per-wallet slot cap was left ` +
-      `at 1 while the wallet already held 5 dust UTXOs. Now configurable; 5x on dev.`,
+      `at 1 while the wallet already held 5 dust UTXOs. Now configurable; 5x on dev. The dust-exhaustion ` +
+      `LIVELOCK behind the ceiling was then fixed upstream in batcher-sdk 0.103.1 (effectstream#847): infra ` +
+      `failures park inputs instead of charging retries, capacity is gated on spendable dust value, and ` +
+      `poison payloads are rejected at intake.`,
   );
   lines.push(
     `- **Rate limiting answered \`500 INTERNAL\` instead of \`429\`** (PR #24). The limiter worked and set ` +

@@ -54,7 +54,7 @@ what did not:
 | T-A1 Celestia door asserted by code | ✅ `p4` + `celestiaFixtures()`, incl. crypto-tamper and aged-root families |
 | T-A2 `NOT_A_SWAP` at both doors | ✅ `buildOneSidedOffer()`; skips with a loud note if the SDK stops dropping the leg |
 | T-A2 `NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` / `ROOT_UNREADABLE` | ⛔ not built — see §1.0.1 |
-| T-A3 cross-layer | ⛔ **fixture unbuildable today** — see §1.0.1 |
+| T-A3 cross-layer | ⚠️ **gap CONFIRMED reachable** by `probe-cross-layer.ts`; e2e fixture still to build (§2.4) |
 | T-A4 history referential integrity | ✅ `p7b`, 5 SQL assertions |
 | T-A5 every stored blob re-validates (proofs included) | ✅ `p7b` deep pass, `GRAND_DEEP_AUDIT` |
 | T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass |
@@ -67,7 +67,7 @@ what did not:
 | T-D2 price orientation + inversion | ✅ `p2`, anchored to a known fill |
 | T-D3 `/v1/pairs` vs `/v1/chart/stats` | ✅ `p7b` (unregistered — see §1.2) + **red** in `fill-vs-cancel.test.ts` |
 | T-D4 `trade_count` + chain ordering | ✅ `p7b` |
-| T-D5 multi-leg | ⛔ **fixture unbuildable today** — see §1.0.1 |
+| T-D5 multi-leg | ⚠️ **gap CONFIRMED** by the same probe (4 fabricated pairs); fixture now unblocked — add a 3rd color (§2.5) |
 | T-E1 N-way competition | ✅ `p3b`, 3 competitors per layer |
 | T-E2 partial overlap between live offers | ⛔ deferred — needs denomination-controlled funding |
 | T-E3 cross-door competition | ✅ `p3b`, one competitor via `blob.Submit` |
@@ -80,32 +80,32 @@ what did not:
 | T-F4 chaos batch mixed-layer | ✅ `p5` |
 | T-F5 layer symmetry | ✅ `p7b` + scorecard split |
 
-#### 1.0.1 Why three fixtures could not be built
+#### 1.0.1 The two "unbuildable" fixtures — RESOLVED, and both gaps confirmed
 
-Not deferred for effort — **blocked on something concrete**, and worth stating
-plainly rather than shipping a fixture that earns the right code for the wrong
-reason:
+Both were blocked on the same wrong assumption: that a wallet is the only way
+to make a transaction. It is not — **balancing is itself a merge**, and the
+ledger exposes `Transaction.merge()` directly. `probe-cross-layer.ts` settles
+both questions in seconds, with no stack, using real offers from a completed
+run. See §2.4 and §2.5 for the measurements.
 
-- **Cross-layer (T-A3).** `wallet-sdk-facade` cannot build one: it silently
-  drops the mismatched leg (ISSUES.md §3). That defect is precisely what makes
-  T-A2's one-sided fixture possible, so the same SDK cannot produce both. A
-  genuine cross-layer transaction means merging a shielded give-only tx with an
-  unshielded want-only tx through the ledger's own `Transaction.merge`, and
-  whether the ledger permits that combination is itself unknown. Until someone
-  answers that, the same-layer rule is **unenforced and untested**.
-- **Multi-leg (T-D5).** A same-layer 3-leg offer needs three colors on one
-  layer. The suite mints two per layer (TA/TB, UA/UB), and the third leg cannot
-  come from the other layer for the reason above. Prerequisite: a third
-  shielded color in `setupActors`. The ruling on the desired behaviour is also
-  still open.
-- **`NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` (T-A2).** The SDK will not build an
+- **Cross-layer (T-A3).** The merge succeeds, the result is two-sided across
+  both layers, and our validator **accepts it through the full ladder including
+  `wellFormed`**. The gap is real and reachable; the e2e fixture is now a
+  matter of building it, not of discovering whether it can exist.
+- **Multi-leg (T-D5).** The same merged transaction has 2 gives × 2 wants and
+  would register as **four** trades at four different prices. The fixture is
+  also unblocked independently: `mintShielded(deployed, sepByte, …)`
+  parameterizes the color by domain separator on the already-deployed contract,
+  so a third shielded color is one `TOKEN_SEPS` entry plus a funding grant — no
+  new contract needed.
+- **`NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` (T-A2).** Still unbuilt. The SDK will not build an
   input-free swap, and every token tag it can emit is
   `shielded`/`unshielded`/`dust`. Both stay covered at validator-unit level
   against transaction doubles. If they prove unreachable through any real
   wallet, that is a finding in itself — a fail-closed branch no real input can
   reach is either dead code or a defence against a future wire format.
 
-T-E2 and T-E5 are ordinary deferrals: both need new wallet plumbing
+The remaining deferrals, T-E2 and T-E5, are ordinary ones: both need new wallet plumbing
 (denomination-controlled funding; concurrent taker settlement) rather than an
 unanswered question.
 
@@ -321,7 +321,26 @@ data — `effectstream_blocks.ms_timestamp` at the tip, the value
 
 **Red in PR-A:** T-D1 (unit).
 
-### 2.4 Cross-layer offers are unenforced → **PR-E** *(needs a ruling)*
+### 2.4 Cross-layer offers are unenforced → **PR-E** — **CONFIRMED REACHABLE**
+
+**No longer speculative.** `probe-cross-layer.ts` merges a real shielded offer
+with a real unshielded one from a completed run via the ledger's own
+`Transaction.merge()`, and the result:
+
+```
+  merged: gives UNSHIELDED:1454bec2=1317 SHIELDED:3b2bc2ea=1424
+          wants UNSHIELDED:c7dfbc08=1983 SHIELDED:3dc32e7e=1826
+  two-sided: true   layers: UNSHIELDED + SHIELDED
+  our validator (FULL ladder, wellFormed included): ACCEPTED
+```
+
+The merge preserves proofs and signatures, so **crypto passes** — the ladder has
+no structural objection at any step. Only liveness stops these particular bytes,
+and only because their inputs were already spent by the run that produced them.
+A maker holding two fresh halves publishes this and it is indexed.
+
+The wallet was never the obstacle: balancing is itself a merge, so the mechanism
+is ordinary and available to anyone.
 
 Recorded in [ISSUES.md](ISSUES.md) §3 and still open: nothing in the ladder
 requires a give and a want to share a value layer. `NOT_A_SWAP` fires today only
@@ -339,7 +358,28 @@ transactions"* holds: add `CROSS_LAYER` to `OfferRejectCode` and a check in
 
 **Red in PR-A:** T-A3.
 
-### 2.5 Multi-leg offers are mis-priced → **PR-F** *(needs a ruling)*
+### 2.5 Multi-leg offers are mis-priced → **PR-F** — **CONFIRMED, and it compounds with §2.4**
+
+**Measured on the same merged transaction.** Two gives × two wants = **four**
+pair combinations, every one of which the market queries match and price
+independently:
+
+```
+  pair(1454be,c7dfbc) price=1.5057  [UNSHIELDED->UNSHIELDED]
+  pair(1454be,3dc32e) price=1.3865  [UNSHIELDED->SHIELDED]
+  pair(3b2bc2,c7dfbc) price=1.3926  [SHIELDED->UNSHIELDED]
+  pair(3b2bc2,3dc32e) price=1.2823  [SHIELDED->SHIELDED]
+```
+
+One transaction, four fabricated trades at four different prices, every leg's
+volume counted twice. Two of those pairs are cross-LAYER pairs that describe no
+market at all — the indexer would create `pair_stats` rows for pairings that
+never traded.
+
+The fixture is also no longer blocked. `mintShielded(deployed, sepByte, …)`
+parameterizes the color by domain separator on the ALREADY-DEPLOYED contract, so
+a third shielded color is one entry in `TOKEN_SEPS` plus a funding grant — no
+new contract and no contract change.
 
 MIP-0006 types `gives`/`wants` as arrays; ≥1 each is the only constraint. But
 `getTradeHistory` and `getPairStats24h` join per `(offer, color)` filtered to

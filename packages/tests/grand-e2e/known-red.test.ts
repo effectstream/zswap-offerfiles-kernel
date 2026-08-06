@@ -86,7 +86,13 @@ describe("KNOWN_RED expected-failure mechanism", () => {
     expect(allResults().at(-1)!.red).toBeUndefined();
   });
 
-  test("a throwing registered check is a red, not an unhandled failure", async () => {
+  test("a THROWING registered check fails the run — a red is asserted, not crashed", async () => {
+    // This test asserted the opposite until an independent review pointed out
+    // the hole. A registered red means "the product is currently wrong", and
+    // that is signalled by the assertion returning false — never by an
+    // exception. Demoting throws made every registered check a blind spot for
+    // any crash inside it: a network fault or null deref would be swallowed as
+    // the expected failure, for as long as the entry lived.
     const { phase, name } = splitKey(REGISTERED[0]!);
     const failsBefore = failures().length;
     beginPhase(phase);
@@ -95,8 +101,11 @@ describe("KNOWN_RED expected-failure mechanism", () => {
       throw new Error("boom");
     });
 
-    expect(failures().length).toBe(failsBefore);
-    expect(allResults().at(-1)!.detail).toContain("boom");
+    expect(failures().length).toBe(failsBefore + 1);
+    const rec = allResults().at(-1)!;
+    expect(rec.ok).toBe(false);
+    expect(rec.detail).toContain("boom");
+    expect(rec.detail).toContain("not the expected defect");
   });
 
   test("registry keys that never ran are reported as stale, not silently dropped", () => {

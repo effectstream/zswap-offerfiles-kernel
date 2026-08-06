@@ -65,6 +65,17 @@ beforeAll(async () => {
   for (const migration of migrationTable) {
     await client.query(migration.sql);
   }
+  // The framework owns effectstream_blocks, so migrationTable does not create
+  // it. Create it EMPTY here: the earlier tests then exercise the real
+  // "no processed block yet" fallback rather than relying on a swallowed
+  // undefined-relation error, which is what they did before chainWindowStart
+  // dropped its catch.
+  await client.query(`CREATE SCHEMA IF NOT EXISTS effectstream`);
+  await client.query(`CREATE TABLE IF NOT EXISTS effectstream.effectstream_blocks (
+      block_height BIGINT PRIMARY KEY,
+      ms_timestamp BIGINT,
+      effectstream_block_hash BYTEA,
+      main_chain_block_hash BYTEA)`);
 
   // 130 in-window fills (> the 120-row display cap), oldest→newest over the
   // last ~22 h. Every fill trades 10 BASE; prices ramp 1.00 → 2.29 in cents.

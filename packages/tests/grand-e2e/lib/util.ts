@@ -52,10 +52,12 @@ export async function check(
   const started = Date.now();
   const full = `${currentPhase} ▸ ${name}`;
   let ok = false;
+  let threw = false;
   let extra = detail;
   try {
     ok = await fn();
   } catch (e) {
+    threw = true;
     extra = `${detail ? detail + "; " : ""}threw: ${e instanceof Error ? e.message : String(e)}`;
   }
   const ms = Date.now() - started;
@@ -70,7 +72,17 @@ export async function check(
   // that branch on it (`if (!ok) continue`) behave exactly as before. Only what
   // is RECORDED changes.
   const red = KNOWN_RED[full];
-  if (red) {
+  if (red && !threw) {
+    // `!threw` is load-bearing. A registered red means "this check asserts the
+    // truth and the product is currently wrong" — and a product being wrong is
+    // signalled by the assertion returning false, NEVER by an exception. A
+    // throw is a network fault, a null deref, an infra failure: unrelated
+    // breakage that would otherwise be swallowed as the expected red and hidden
+    // for as long as the entry lives.
+    //
+    // This originally demoted throws too, and the mechanism's own test codified
+    // that as intended. It was wrong: it made every registered check a blind
+    // spot for any crash inside it.
     seenRedKeys.add(full);
     if (ok) {
       results.push({
@@ -86,6 +98,18 @@ export async function check(
       console.log(`[RED ] ${full}  ← ${red.id} expected-fail, ${red.pr}${extra ? `  (${extra})` : ""}`);
     }
     return ok;
+  }
+
+  if (red && threw) {
+    // Registered, but it crashed rather than asserting. Count the red as seen
+    // (it did run) and fail the run — the entry is not evidence for this.
+    seenRedKeys.add(full);
+    results.push({
+      phase: currentPhase, name, ok: false, ms,
+      detail: `THREW inside registered red ${red.id} — not the expected defect: ${extra}`,
+    });
+    console.log(`[FAIL] ${full}  ← threw inside ${red.id}; a red is asserted, not crashed  (${extra})`);
+    return false;
   }
 
   results.push({ phase: currentPhase, name, ok, detail: extra, ms });

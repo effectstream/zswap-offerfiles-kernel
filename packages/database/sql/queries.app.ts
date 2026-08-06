@@ -315,8 +315,14 @@ export interface IGetLatestEffectstreamBlockResult {
   main_chain_block_hash: Buffer | null;
 }
 export const getLatestEffectstreamBlock = prepared<void, IGetLatestEffectstreamBlockResult>(
+      // ms_timestamp IS NOT NULL: the column is nullable, and callers use this
+      // row AS THE CHAIN CLOCK (the 24 h window cutoff, the root-window gate).
+      // A newest row with a NULL timestamp would otherwise make them fall back
+      // to wall clock — silently reintroducing the mixed-clock defect — instead
+      // of using the newest block that actually carries a time.
       `SELECT block_height, ms_timestamp, effectstream_block_hash, main_chain_block_hash
        FROM effectstream.effectstream_blocks
+       WHERE ms_timestamp IS NOT NULL
        ORDER BY block_height DESC
        LIMIT 1`,
 );

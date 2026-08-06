@@ -69,14 +69,33 @@ competitor sets (`publish failed for #20`, `#30`), producing zero checks, and p5
 batches failed to publish. Everything downstream (chart counts, volume, classification,
 `trade_count`, casualty rate) follows from offers never existing.
 
-**Root cause, most likely.** The self-fill settles on the SAME wallet that built the
-offer, and `buildOffer` leaves the give coin reserved by the recipe. Every other
-settlement uses a different wallet, so the reservation is irrelevant to it; p3b and the
-cancel cycles both `revert` before spending. **Fix is staged and uncommitted in
-`phases/p3-lifecycle.ts`** — a `revert(built.finalized)` before `settleAndAssert`.
+**ROOT CAUSE — found after the run completed, and it is not what I first said.**
 
-**Not proven.** The symptom was a *timeout*, which is also what proof-server contention
-looks like. If the next run times out again, the reservation was not the cause.
+    maxLagBlocks: 1403      (previous runs: 95, 83, 53)
+
+The STM fell ~1403 blocks — roughly 23 minutes — behind the chain. That is 15x worse
+than anything previously recorded, and it explains every failure at once: with the
+indexer that far behind, the 3-minute index-wait budget cannot be met. Offers were
+published fine; they could not be INDEXED in time. Casualty rate, both batch checks,
+p3b's skipped sets, the chart comparisons and SSE p95 29448 are all downstream of that
+single number.
+
+**The self-fill reservation was therefore NOT the trigger.** It was the first casualty —
+a settle timing out because the STM was already far behind. The `revert` fix committed
+alongside this file is still correct (it aligns the self-fill with the pattern p3b and
+the cancel cycles use) but it does not explain this run and must not be credited with
+fixing it.
+
+**Unexplained.** Why the STM lagged 1403 blocks is OPEN. The run also took 85 min vs
+~70. Candidates, none verified:
+  - box contention from something outside the suite
+  - a write-path regression from the new indexes (migration 015 adds two on offer_file /
+    offer_file_history; migration 014 adds one on unshielded_creates plus two inserts per
+    unshielded chain event — but PR-B's own run recorded maxLagBlocks 83, so 014 alone
+    does not account for it)
+  - the reaper additions interacting with the stack in a way not anticipated
+Next run should record maxLagBlocks FIRST and treat anything above ~150 as a stop
+condition rather than debugging the downstream cascade.
 
 **Confound to keep in view.** p5's own note reports the dev batcher runs one wallet at
 `maxSlotsPerWallet=1`, ~25 s/tx serialised. PR-A added ~14 on-chain offers (three

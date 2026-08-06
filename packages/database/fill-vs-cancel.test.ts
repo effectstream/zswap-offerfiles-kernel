@@ -258,7 +258,7 @@ test("pair_stats writer refuses cancelled offers", async () => {
   expect(r.rows[0].trade_count).toBe(1);
 });
 
-// ── KNOWN RED — PR-C (PRODUCTION-READINESS.md §2.2) ─────────────────────────
+// ── §2.2, FIXED in PR-C. Kept as a permanent regression guard ───────────────
 //
 // upsertPairStatsByOfferId assigns base_color/quote_color by LEAST/GREATEST of
 // the hex color, but computes last_price as `w.amount / g.amount` with no
@@ -279,9 +279,9 @@ test("pair_stats writer refuses cancelled offers", async () => {
 //
 // The two offers below are economically IDENTICAL — 10 LO against 20 HI — and
 // differ only in which side the maker took. Their recorded price must not.
-// Verified to fail for the RIGHT reason: the forward direction records 2 and
-// the reverse records 0.5 — same trade, reciprocal price.
-test.failing("pair_stats.last_price is quote-per-base in BOTH trade directions", async () => {
+// Was verified to fail for the RIGHT reason before the fix: the forward
+// direction recorded 2 and the reverse 0.5 — same trade, reciprocal price.
+test("pair_stats.last_price is quote-per-base in BOTH trade directions", async () => {
   const LO = "1".repeat(64); // lexically lesser  → becomes base_color
   const HI = "9".repeat(64); // lexically greater → becomes quote_color
 

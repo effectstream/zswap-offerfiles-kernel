@@ -42,16 +42,11 @@ INSERT INTO offer_file_tokens (
     :direction!
 );
 
-/* @name GetOfferFiles */
-SELECT DISTINCT of.*
-FROM offer_file of
-LEFT JOIN offer_file_tokens oft ON oft.offer_file_id = of.id
-WHERE
-  (:token = '' OR oft.token_color = :token!)
-  AND (:direction = 'ANY' OR oft.direction = :direction!)
-ORDER BY of.created_at DESC
-LIMIT :limit!
-OFFSET :offset!;
+/* GetOfferFiles was removed: it was the pre-cursor OFFSET pagination that
+   getOpenOffersPage replaced (api.test.ts asserts "offset is gone"), and it
+   ordered on offer_file.created_at — DEFAULT NOW(), node-local wall clock. It
+   had no callers left, so it was dead code carrying a live defect: page order
+   decided by when THIS node inserted each row. See migration 015. */
 
 /* @name GetOfferFileTokens */
 SELECT * FROM offer_file_tokens WHERE offer_file_id = :offer_file_id!;

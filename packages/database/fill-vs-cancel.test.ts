@@ -66,8 +66,8 @@ async function seedArchived(
 ) {
   await client.query(
     `INSERT INTO offer_file_history
-       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
-     VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, $5, NOW() - INTERVAL '30 minutes')`,
+       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+     VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, $5, NOW() - INTERVAL '30 minutes', NOW())`,
     [id, 100 + id, `blob-${id}`, hashOf(id), reason],
   );
   await client.query(
@@ -293,8 +293,8 @@ test("pair_stats.last_price is quote-per-base in BOTH trade directions", async (
   const seedDirected = async (id: number, give: string, giveAmt: string, want: string, wantAmt: string) => {
     await client.query(
       `INSERT INTO offer_file_history
-         (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
-       VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '30 minutes')`,
+         (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+       VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '30 minutes', NOW())`,
       [id, 900 + id, `blob-${id}`, hashOf(id)],
     );
     await client.query(

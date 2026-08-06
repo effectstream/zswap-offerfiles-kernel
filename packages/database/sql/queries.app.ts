@@ -638,7 +638,14 @@ export interface IInsertOfferFileWithHashParams {
   offer_hash: string;
   metadata_created_at: DateOrString | null;
   metadata_expires_at: DateOrString | null;
-  first_seen_at: DateOrString | null;
+  /**
+   * NOT nullable — the column is NOT NULL (migration 015) because keyset
+   * pagination orders on it. The SQL already required it (`:first_seen_at!`);
+   * the type said otherwise, so a caller could pass null and only find out at
+   * runtime. Chain-derived: state-machine.ts computes it from the earliest
+   * proof-root first-seen, or the Celestia block time.
+   */
+  first_seen_at: DateOrString;
   ttl_seconds: NumberOrString | null;
 }
 export interface IInsertOfferFileWithHashResult { id: number }
@@ -934,24 +941,28 @@ export const getOpenOffersPage = prepared<IGetOpenOffersPageParams, IGetOpenOffe
              AND oft.token_color = :token!
              AND (:direction! = 'ANY' OR oft.direction = :direction!)))
          AND (:after_id!::int IS NULL
-              OR (o.created_at, o.id) < (:after_created_at!::timestamptz, :after_id!::int))
-       ORDER BY o.created_at DESC, o.id DESC
+              OR (o.first_seen_at, o.id) < (:after_created_at!::timestamptz, :after_id!::int))
+       ORDER BY o.first_seen_at DESC, o.id DESC
        LIMIT :limit!`,
 );
 
 // Resolve an `after_hash` cursor to its keyset anchor. Checks history too:
 // if the anchor offer was consumed/expired mid-pagination its row moved
-// tables, but (created_at, id) is copied on archive, so the cursor stays
+// tables, but (first_seen_at, id) is copied on archive, so the cursor stays
 // valid and the reader continues exactly where they left off.
+//
+// Ordered on first_seen_at rather than created_at because the latter is
+// `DEFAULT NOW()` — node-local wall clock — which made page order differ
+// between replicas serving the same book. See migration 015.
 export interface IResolveOfferCursorParams { offer_hash: string }
 export interface IResolveOfferCursorResult {
   id: number;
   created_at: DateOrString | null;
 }
 export const resolveOfferCursor = prepared<IResolveOfferCursorParams, IResolveOfferCursorResult>(
-      `SELECT id, created_at FROM offer_file WHERE offer_hash = :offer_hash!
+      `SELECT id, first_seen_at AS created_at FROM offer_file WHERE offer_hash = :offer_hash!
        UNION ALL
-       SELECT id, created_at FROM offer_file_history WHERE offer_hash = :offer_hash!
+       SELECT id, first_seen_at AS created_at FROM offer_file_history WHERE offer_hash = :offer_hash!
        LIMIT 1`,
 );
 

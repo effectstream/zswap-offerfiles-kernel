@@ -36,9 +36,9 @@ async function seedFill(
   const id = nextId++;
   await client.query(
     `INSERT INTO offer_file_history
-       (id, celestia_height, transaction_hex, created_at, ttl_seconds, archive_reason, archived_at)
+       (id, celestia_height, transaction_hex, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
      VALUES ($1, $2, $3, NOW() - ($4 || ' minutes')::interval, 3600, 'CONSUMED',
-             NOW() - ($4 || ' minutes')::interval)`,
+             NOW() - ($4 || ' minutes')::interval, NOW())`,
     [id, 1000 + id, `fill-${id}`, String(minutesAgo)],
   );
   await client.query(

@@ -155,52 +155,6 @@ const insertOfferFileTokenIR: any = {"usedParamSet":{"offer_file_id":true,"token
 export const insertOfferFileToken = new PreparedQuery<IInsertOfferFileTokenParams,IInsertOfferFileTokenResult>(insertOfferFileTokenIR);
 
 
-/** 'GetOfferFiles' parameters type */
-export interface IGetOfferFilesParams {
-  direction: string;
-  limit: NumberOrString;
-  offset: NumberOrString;
-  token: string;
-}
-
-/** 'GetOfferFiles' return type */
-export interface IGetOfferFilesResult {
-  auth_scheme: string | null;
-  auth_signature: string | null;
-  auth_signer_public_key: string | null;
-  celestia_height: string;
-  created_at: Date | null;
-  id: number;
-  metadata_created_at: Date | null;
-  metadata_expires_at: Date | null;
-  metadata_maker_note: string | null;
-  transaction_hex: string;
-  ttl_seconds: string;
-}
-
-/** 'GetOfferFiles' query type */
-export interface IGetOfferFilesQuery {
-  params: IGetOfferFilesParams;
-  result: IGetOfferFilesResult;
-}
-
-const getOfferFilesIR: any = {"usedParamSet":{"token":true,"direction":true,"limit":true,"offset":true},"params":[{"name":"token","required":true,"transform":{"type":"scalar"},"locs":[{"a":110,"b":115},{"a":143,"b":149}]},{"name":"direction","required":true,"transform":{"type":"scalar"},"locs":[{"a":159,"b":168},{"a":197,"b":207}]},{"name":"limit","required":true,"transform":{"type":"scalar"},"locs":[{"a":244,"b":250}]},{"name":"offset","required":true,"transform":{"type":"scalar"},"locs":[{"a":259,"b":266}]}],"statement":"SELECT DISTINCT of.*\nFROM offer_file of\nLEFT JOIN offer_file_tokens oft ON oft.offer_file_id = of.id\nWHERE\n  (:token = '' OR oft.token_color = :token!)\n  AND (:direction = 'ANY' OR oft.direction = :direction!)\nORDER BY of.created_at DESC\nLIMIT :limit!\nOFFSET :offset!"};
-
-/**
- * Query generated from SQL:
- * ```
- * SELECT DISTINCT of.*
- * FROM offer_file of
- * LEFT JOIN offer_file_tokens oft ON oft.offer_file_id = of.id
- * WHERE
- *   (:token = '' OR oft.token_color = :token!)
- *   AND (:direction = 'ANY' OR oft.direction = :direction!)
- * ORDER BY of.created_at DESC
- * LIMIT :limit!
- * OFFSET :offset!
- * ```
- */
-export const getOfferFiles = new PreparedQuery<IGetOfferFilesParams,IGetOfferFilesResult>(getOfferFilesIR);
 
 
 /** 'GetOfferFileTokens' parameters type */

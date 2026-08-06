@@ -41,8 +41,13 @@ beforeAll(async () => {
   for (let i = 1; i <= TOTAL; i++) {
     const bucket = Math.floor((i - 1) / 5); // 0..4
     await client.query(
-      `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, ttl_seconds, created_at)
-       VALUES ($1, $2, $3, $4, 3600, TIMESTAMPTZ '2026-07-01 00:00:00+00' + ($5 || ' minutes')::interval)`,
+      // first_seen_at is the cursor key (chain-derived); created_at is kept
+      // identical here only so the fixture reads the same as it always did.
+      `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, ttl_seconds,
+         created_at, first_seen_at)
+       VALUES ($1, $2, $3, $4, 3600,
+         TIMESTAMPTZ '2026-07-01 00:00:00+00' + ($5 || ' minutes')::interval,
+         TIMESTAMPTZ '2026-07-01 00:00:00+00' + ($5 || ' minutes')::interval)`,
       [i, 100 + i, `blob-${i}`, hashOf(i), String(bucket)],
     );
   }
@@ -109,8 +114,10 @@ test("an archived anchor still resolves (cursor survives consume mid-pagination)
   // Move offer 23 to history the way the archive queries do (same id and
   // created_at), then page from its hash — pagination continues unbroken.
   await client.query(
-    `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
-     SELECT id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, 'CONSUMED', NOW()
+    `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at,
+       first_seen_at, ttl_seconds, archive_reason, archived_at)
+     SELECT id, celestia_height, transaction_hex, offer_hash, created_at,
+       first_seen_at, ttl_seconds, 'CONSUMED', NOW()
      FROM offer_file WHERE id = 23`,
   );
   await client.query("DELETE FROM offer_file WHERE id = 23");
@@ -118,8 +125,9 @@ test("an archived anchor still resolves (cursor survives consume mid-pagination)
   expect(page.map((r) => r.id)).toEqual([22, 21, 20]);
   // restore for other tests
   await client.query(
-    `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, ttl_seconds, created_at)
-     SELECT id, celestia_height, transaction_hex, offer_hash, ttl_seconds, created_at
+    `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, ttl_seconds,
+       created_at, first_seen_at)
+     SELECT id, celestia_height, transaction_hex, offer_hash, ttl_seconds, created_at, first_seen_at
      FROM offer_file_history WHERE id = 23`,
   );
   await client.query("DELETE FROM offer_file_history WHERE id = 23");

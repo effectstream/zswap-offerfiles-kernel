@@ -56,6 +56,7 @@ test("same color on both layers of the same side coexists (widened unique tuple)
       transaction_hex: "blob-dual",
       offer_hash: "d".repeat(64),
       metadata_created_at: null,
+      first_seen_at: new Date().toISOString(),
       metadata_expires_at: null,
       ttl_seconds: 3600,
     },
@@ -99,8 +100,8 @@ test("market queries count a dual-kind leg ONCE, summed by color (join-duplicati
   // fills 2); the aggregated queries must report one fill of 15 @ price 2.
   await client.query(
     `INSERT INTO offer_file_history
-       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
-     VALUES (500, 1, 'blob-500', '${"e".repeat(64)}', NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '10 minutes')`,
+       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+     VALUES (500, 1, 'blob-500', '${"e".repeat(64)}', NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '10 minutes', NOW())`,
   );
   await client.query(
     `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at) VALUES

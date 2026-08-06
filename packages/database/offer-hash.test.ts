@@ -41,6 +41,7 @@ async function insertOffer(hash: string, blob: string): Promise<number> {
       transaction_hex: blob,
       offer_hash: hash,
       metadata_created_at: new Date().toISOString(),
+      first_seen_at: new Date().toISOString(),
       metadata_expires_at: null,
       ttl_seconds: 3600,
     },

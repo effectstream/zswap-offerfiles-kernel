@@ -31,8 +31,10 @@ CREATE TABLE IF NOT EXISTS unshielded_spends (
     height      BIGINT  NOT NULL,
     PRIMARY KEY (owner, intent_hash, output_no)
 );
--- Classification asks "which spends did tx T perform".
-CREATE INDEX IF NOT EXISTS idx_unshielded_spends_tx_hash ON unshielded_spends (tx_hash);
+-- No secondary index on tx_hash: no query looks spends up that way (the
+-- predicate always joins on the PK triple), and this is one of the highest-
+-- volume insert paths in the system. 000-init.sql makes the same argument for
+-- `nullifiers` — an index that costs a write per chain event and serves no read.
 
 -- Every unshielded UTXO created on chain, kept forever — the unshielded
 -- analogue of `commitments`. `created_unshielded` cannot serve this purpose:
@@ -61,11 +63,19 @@ CREATE INDEX IF NOT EXISTS idx_unshielded_creates_marker
 -- output index, because those belong to the SETTLING intent and the maker
 -- cannot know them when publishing. Amounts are exact: the offer fixes what the
 -- maker is owed, and merging preserves outputs verbatim.
+-- `count` is load-bearing, not bookkeeping. Without it, N identical outputs
+-- collapse into one row and the marker check degrades to existence: an offer
+-- declaring 5 x 20-UB records wants=100 (deriveTokenLegs NETS the imbalance)
+-- but stores a single marker (owner, UB, "20"), so a maker self-spend creating
+-- ONE 20-UB output satisfies it and the offer classifies `consumed` — a
+-- fabricated fill at 5x its real size, for 1/5 the cost. That is a full bypass
+-- of the very check this migration exists to add, and it is attacker-chosen.
 CREATE TABLE IF NOT EXISTS offer_file_unshielded_outputs (
     offer_file_id INTEGER NOT NULL REFERENCES offer_file(id) ON DELETE CASCADE,
     owner         TEXT    NOT NULL,
     token_type    TEXT    NOT NULL,
     value         TEXT    NOT NULL,
+    count         INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (offer_file_id, owner, token_type, value)
 );
 
@@ -74,8 +84,17 @@ CREATE TABLE IF NOT EXISTS offer_file_unshielded_outputs_history (
     owner         TEXT    NOT NULL,
     token_type    TEXT    NOT NULL,
     value         TEXT    NOT NULL,
+    count         INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (offer_file_id, owner, token_type, value)
 );
+
+-- The predicate correlates on offer_file_id FIVE times per candidate row, and
+-- these history tables carry only a SERIAL primary key. Pre-existing on the
+-- shielded side too, which PR-B doubles rather than introduces — so index both.
+CREATE INDEX IF NOT EXISTS idx_offer_file_unshielded_spends_history_offer
+    ON offer_file_unshielded_spends_history (offer_file_id, owner, intent_hash, output_no);
+CREATE INDEX IF NOT EXISTS idx_offer_file_nullifiers_history_offer
+    ON offer_file_nullifiers_history (offer_file_id, nullifier);
 
 -- No tx_hash column on offer_file_unshielded_spends{,_history} on purpose: the
 -- predicate joins `unshielded_spends` on the (owner, intent_hash, output_no)

@@ -38,8 +38,8 @@ const legs: [string, string, string][] = [
 
 await client.query(
   `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at,
-     ttl_seconds, archive_reason, archived_at)
-   VALUES (1, 1, 'blob', $1, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '10 minutes')`,
+     ttl_seconds, archive_reason, archived_at, first_seen_at)
+   VALUES (1, 1, 'blob', $1, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '10 minutes', NOW())`,
   ["e".repeat(64)],
 );
 for (const [color, amt, dir] of legs) {
@@ -51,8 +51,8 @@ for (const [color, amt, dir] of legs) {
 }
 // The same offer, still open, to show the book side.
 await client.query(
-  `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, metadata_created_at, ttl_seconds)
-   VALUES (2, 1, 'blob2', $1, NOW(), 3600)`,
+  `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, metadata_created_at, ttl_seconds, first_seen_at)
+   VALUES (2, 1, 'blob2', $1, NOW(), 3600, NOW())`,
   ["f".repeat(64)],
 );
 for (const [color, amt, dir] of legs) {

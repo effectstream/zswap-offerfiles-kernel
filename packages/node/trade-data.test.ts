@@ -37,11 +37,12 @@ async function seedFill(
   await client.query(
     `INSERT INTO offer_file_history
        (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds,
-        archive_reason, archived_at)
+        archive_reason, archived_at, first_seen_at)
      VALUES ($1, $2, $3, $5, NOW() - ($4 || ' minutes')::interval, 3600, 'CONSUMED',
-             NOW() - ($4 || ' minutes')::interval)`,
-    // offer_hash is NOT NULL: the archive queries copy it from the live row, so
-    // a history row without one is a shape production cannot produce.
+             NOW() - ($4 || ' minutes')::interval, NOW())`,
+    // offer_hash and first_seen_at are both NOT NULL: the archive queries copy
+    // them from the live row, so a history row missing either is a shape
+    // production cannot produce.
     [id, 1000 + id, `fill-${id}`, String(minutesAgo), id.toString(16).padStart(64, "0")],
   );
   await client.query(

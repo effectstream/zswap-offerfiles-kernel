@@ -1,6 +1,7 @@
 import type { DBMigrations } from "@effectstream/runtime";
 import databaseSql from "./migrations/000-init.sql" with { type: "text" };
 import unshieldedClassificationSql from "./migrations/014-unshielded-classification.sql" with { type: "text" };
+import cursorChainOrderedSql from "./migrations/015-cursor-chain-ordered.sql" with { type: "text" };
 import localMigrationSql from "./migrations/local-migration.sql" with { type: "text" };
 
 // One schema file, applied from zero — see the header of 000-init.sql for why
@@ -15,6 +16,10 @@ export const migrationTable: DBMigrations[] = [
   {
     name: "014-unshielded-classification.sql",
     sql: unshieldedClassificationSql,
+  },
+  {
+    name: "015-cursor-chain-ordered.sql",
+    sql: cursorChainOrderedSql,
   },
   {
     name: "local-migration.sql",

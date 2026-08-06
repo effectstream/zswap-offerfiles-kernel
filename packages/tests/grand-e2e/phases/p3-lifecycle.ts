@@ -293,6 +293,20 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
     storeBlob(built.hash, built.blob);
     const ok = await check("self-fill offer indexed", () => publishAndIndex(db, rec, built));
     if (ok) {
+      // Release the give coin before self-settling.
+      //
+      // Every OTHER settlement in the suite is performed by a different wallet,
+      // so the maker's reservation is irrelevant to it. This one is not: the
+      // same wallet balances the offer it just built, and buildOffer leaves the
+      // give coin reserved by the recipe. p3b and the cancel cycles both revert
+      // first for exactly this reason, and revert releases the reservation
+      // without invalidating the already-serialized bytes.
+      //
+      // Measured symptom without it: the settle timed out rather than failing
+      // fast, which is a slower and less obvious signal than it deserves.
+      await selfMaker.run(async () => {
+        await (selfMaker.wr.wallet as any).revert(built.finalized).catch(() => {});
+      });
       // The maker balances its OWN offer — it holds both colors.
       await settleAndAssert(db, selfMaker, rec, built.blob, "maker self-fill");
       await check("maker self-fill counts as a trade, not a cancel", async () => {

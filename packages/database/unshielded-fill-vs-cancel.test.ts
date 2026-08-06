@@ -39,6 +39,9 @@ const MAKER = "m".repeat(64);  // the maker's unshielded address
 // (a tx that really did pay both makers settled both offers) but makes the
 // fixture prove less than it claims.
 const TX = (n: number, suffix = "") => `tx-${n}${suffix}`;
+// These fixtures seed rows relative to NOW(), so their window starts 24 h
+// before wall clock. Production derives it from the chain tip instead.
+const DAY_AGO = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const hashOf = (n: number) => n.toString(16).padStart(64, "0");
 
 /** An archived unshielded offer: gives 10 GIVE, wants 20 WANT. */
@@ -154,7 +157,7 @@ test("only the genuine fill reaches trade history", async () => {
 });
 
 test("cancels contribute no volume and do not move last_price", async () => {
-  const s = (await getPairStats24h.run({ base: GIVE, quote: WANT }, client))[0]!;
+  const s = (await getPairStats24h.run({ base: GIVE, quote: WANT, cutoff: DAY_AGO }, client))[0]!;
   expect(s.fills_24h).toBe(1);
   expect(Number(s.volume_base_24h)).toBe(10);  // one fill, not six
   expect(Number(s.volume_quote_24h)).toBe(20);

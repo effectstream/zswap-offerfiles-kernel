@@ -20,6 +20,9 @@ const { realStats, realHistory } = await import("../node/trade-data.ts");
 
 import { afterAll, expect, test } from "bun:test";
 
+// Fixtures seed rows relative to NOW(), so their window starts 24 h before
+// wall clock. Production derives it from the chain tip instead (trade-data.ts).
+const DAY_AGO = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const PORT = 54399;
 const handle = await startPglite(PORT);
 const client = new pg.Client({ host: "127.0.0.1", port: PORT, user: "postgres", database: "postgres" });
@@ -84,7 +87,7 @@ console.log("What /v1/chart/* reports, pair by pair:");
 let vol: Record<string, number> = {};
 let tradeRows = 0;
 for (const [base, quote] of [[A, C], [A, D], [B, C], [B, D], [A, B], [C, D]] as [string, string][]) {
-  const s = (await getPairStats24h.run({ base, quote }, client))[0]!;
+  const s = (await getPairStats24h.run({ base, quote, cutoff: DAY_AGO }, client))[0]!;
   const h = await getTradeHistory.run({ base, quote }, client);
   if (!s.last_price && h.length === 0) continue;
   tradeRows += h.length;
@@ -132,7 +135,7 @@ console.log("   ^ 4 markets, 4 trade_counts, from 1 settled + 1 open offer");
 // The assertion, stated on the unarguable part.
 const prices = new Set<string>();
 for (const [base, quote] of [[A, C], [A, D], [B, C], [B, D]] as [string, string][]) {
-  const s2 = (await getPairStats24h.run({ base, quote }, client))[0]!;
+  const s2 = (await getPairStats24h.run({ base, quote, cutoff: DAY_AGO }, client))[0]!;
   if (s2.last_price != null) prices.add(Number(s2.last_price).toFixed(6));
 }
 // Accepted and tracked — but invisible to every market surface.

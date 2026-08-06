@@ -13,6 +13,7 @@ import dropAuthNoteSql from "./migrations/010-drop-auth-and-note.sql" with { typ
 import rootFirstSeenSql from "./migrations/011-root-first-seen.sql" with { type: "text" };
 import firstSeenAtSql from "./migrations/012-first-seen-at.sql" with { type: "text" };
 import commitmentsSql from "./migrations/013-commitments.sql" with { type: "text" };
+import unshieldedClassificationSql from "./migrations/014-unshielded-classification.sql" with { type: "text" };
 import localMigrationSql from "./migrations/local-migration.sql" with { type: "text" };
 export const migrationTable: DBMigrations[] = [
   {
@@ -70,6 +71,10 @@ export const migrationTable: DBMigrations[] = [
   {
     name: "013-commitments.sql",
     sql: commitmentsSql,
+  },
+  {
+    name: "014-unshielded-classification.sql",
+    sql: unshieldedClassificationSql,
   },
   {
     name: "local-migration.sql",

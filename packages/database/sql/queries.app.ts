@@ -81,7 +81,7 @@ function prepared<P, R>(statement: string): PreparedQuery<P, R> {
 // before migration 013, or offers whose wants are unshielded-only): those
 // keep the branch-1/2 heuristic. NULL tx_hash on any spend row also falls
 // back — never classify on absent evidence.
-const cancelledPredicate = (idExpr: string) => `(
+const shieldedCancelledPredicate = (idExpr: string) => `(
   EXISTS (SELECT 1 FROM offer_file_nullifiers_history cnx
           LEFT JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
           WHERE cnx.offer_file_id = ${idExpr} AND cnn.nullifier IS NULL)
@@ -109,6 +109,79 @@ const cancelledPredicate = (idExpr: string) => `(
                               WHERE cnx2.offer_file_id = ${idExpr})))
   )
 )`;
+
+// ── The same three branches, on the UNSHIELDED layer ────────────────────────
+//
+// Until migration 014 this layer had NO evidence at all: nothing recorded which
+// transaction spent an unshielded UTXO, so branches 1-3 above could not fire —
+// not merely misclassify, but never fire — and every consumption of an
+// unshielded-only offer read `consumed`. A maker spending their own UTXO on
+// themselves was recorded as a completed sale.
+//
+// The evidence was always available; the state machine discarded it. The
+// primitives deliver `txHash`, `value` and `tokenType` on both the spend and
+// create events, so the shielded argument ports over intact:
+//
+//   1. PARTIAL SPEND — an offer spend ref with no matching row in
+//      unshielded_spends. Settlement is atomic, so this cannot have been a fill.
+//   2. SPLIT SPEND — the offer's spends span more than one tx. Same argument.
+//   3. MISSING FILL MARKERS — all spends in ONE tx, but that tx did not create
+//      every unshielded output the offer declared. Matched on
+//      (owner, token_type, value): the settling intent's hash and output index
+//      are unknowable to the maker at publication, but the amounts are exact.
+//
+// Vacuous, as on the shielded side, when the offer declares no unshielded
+// outputs — a `uu` offer always does, so in practice branch 3 applies wherever
+// it matters. NULL tx_hash falls back rather than classifying on absent
+// evidence.
+const unshieldedCancelledPredicate = (idExpr: string) => `(
+  EXISTS (SELECT 1 FROM offer_file_unshielded_spends_history uxh
+          LEFT JOIN unshielded_spends us
+            ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
+           AND us.output_no = uxh.output_no
+          WHERE uxh.offer_file_id = ${idExpr} AND us.owner IS NULL)
+  OR (SELECT COUNT(DISTINCT us.tx_hash)
+      FROM offer_file_unshielded_spends_history uxh
+      JOIN unshielded_spends us
+        ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
+       AND us.output_no = uxh.output_no
+      WHERE uxh.offer_file_id = ${idExpr}) > 1
+  OR (
+    (SELECT COUNT(DISTINCT us.tx_hash)
+     FROM offer_file_unshielded_spends_history uxh
+     JOIN unshielded_spends us
+       ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
+      AND us.output_no = uxh.output_no
+     WHERE uxh.offer_file_id = ${idExpr} AND us.tx_hash IS NOT NULL) = 1
+    AND NOT EXISTS (SELECT 1 FROM offer_file_unshielded_spends_history uxh
+                    JOIN unshielded_spends us
+                      ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
+                     AND us.output_no = uxh.output_no
+                    WHERE uxh.offer_file_id = ${idExpr} AND us.tx_hash IS NULL)
+    AND EXISTS (
+      SELECT 1 FROM offer_file_unshielded_outputs_history uo
+      WHERE uo.offer_file_id = ${idExpr}
+        AND NOT EXISTS (
+          SELECT 1 FROM unshielded_creates uc
+          WHERE uc.owner = uo.owner AND uc.token_type = uo.token_type
+            AND uc.value = uo.value
+            AND uc.tx_hash = (SELECT MIN(us2.tx_hash)
+                              FROM offer_file_unshielded_spends_history uxh2
+                              JOIN unshielded_spends us2
+                                ON us2.owner = uxh2.owner
+                               AND us2.intent_hash = uxh2.intent_hash
+                               AND us2.output_no = uxh2.output_no
+                              WHERE uxh2.offer_file_id = ${idExpr})))
+  )
+)`;
+
+// Either layer's evidence is enough to prove a cancel, and each predicate is
+// INERT on the other layer: a pure shielded offer has no unshielded spend rows,
+// so every unshielded branch is false, and vice versa. A cross-layer offer
+// would be judged by both — correctly, since it must satisfy both to be a fill
+// — though §2.4 rejects that shape at ingestion anyway.
+const cancelledPredicate = (idExpr: string) =>
+  `(${shieldedCancelledPredicate(idExpr)} OR ${unshieldedCancelledPredicate(idExpr)})`;
 
 // Status of an archived row: expired (TTL) / cancelled / consumed.
 const archivedStatusCase = (tableIdExpr: string) => `
@@ -179,6 +252,15 @@ archived_commitments AS (
     INSERT INTO offer_file_commitments_history (offer_file_id, commitment)
     SELECT offer_file_id, commitment
     FROM offer_file_commitments
+    WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
+),
+-- The unshielded fill markers must survive archival for exactly the reason the
+-- commitments do: classification is READ-time, so evidence left behind in the
+-- live tables is evidence that no longer exists when the question is asked.
+archived_unshielded_outputs AS (
+    INSERT INTO offer_file_unshielded_outputs_history (offer_file_id, owner, token_type, value)
+    SELECT offer_file_id, owner, token_type, value
+    FROM offer_file_unshielded_outputs
     WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
 )
 DELETE FROM offer_file
@@ -694,6 +776,59 @@ export interface IInsertOfferFileCommitmentParams {
 export const insertOfferFileCommitment = prepared<IInsertOfferFileCommitmentParams, never>(
       `INSERT INTO offer_file_commitments (offer_file_id, commitment)
        VALUES (:offer_file_id!, :commitment!)
+       ON CONFLICT DO NOTHING`,
+);
+
+// ── Unshielded classification (migration 014) ───────────────────────────────
+// The three inserts that give the unshielded layer the same evidence the
+// shielded layer has had since 013. Each mirrors its shielded counterpart
+// exactly, including first-seen-wins on replay.
+
+// Chain-side spend record. Distinct from deleteCreatedUnshielded, which mutates
+// the LIVE set: this is the permanent "what was consumed, and by which tx"
+// record that read-time classification consults, the analogue of `nullifiers`.
+export interface IInsertUnshieldedSpendParams {
+  owner: string;
+  intent_hash: string;
+  output_no: number;
+  tx_hash: string | null;
+  height: number;
+}
+export const insertUnshieldedSpend = prepared<IInsertUnshieldedSpendParams, never>(
+      `INSERT INTO unshielded_spends (owner, intent_hash, output_no, tx_hash, height)
+       VALUES (:owner!, :intent_hash!, :output_no!, :tx_hash!, :height!)
+       ON CONFLICT (owner, intent_hash, output_no) DO NOTHING`,
+);
+
+// Chain-side create record — the analogue of `commitments`. Permanent on
+// purpose: created_unshielded deletes on spend, which would retroactively erase
+// the proof that a settlement happened and silently reclassify a historical
+// fill as a cancel.
+export interface IInsertUnshieldedCreateParams {
+  owner: string;
+  intent_hash: string;
+  output_no: number;
+  tx_hash: string | null;
+  token_type: string;
+  value: string;
+  height: number;
+}
+export const insertUnshieldedCreate = prepared<IInsertUnshieldedCreateParams, never>(
+      `INSERT INTO unshielded_creates (owner, intent_hash, output_no, tx_hash, token_type, value, height)
+       VALUES (:owner!, :intent_hash!, :output_no!, :tx_hash!, :token_type!, :value!, :height!)
+       ON CONFLICT (owner, intent_hash, output_no) DO NOTHING`,
+);
+
+// The offer's own declared unshielded outputs — its fill markers on that layer.
+export interface IInsertOfferFileUnshieldedOutputParams {
+  offer_file_id: number;
+  owner: string;
+  token_type: string;
+  value: string;
+}
+export const insertOfferFileUnshieldedOutput = prepared<IInsertOfferFileUnshieldedOutputParams, never>(
+      `INSERT INTO offer_file_unshielded_outputs (offer_file_id, owner, token_type, value)
+       VALUES (:offer_file_id!, :owner!, :token_type!, :value!)
        ON CONFLICT DO NOTHING`,
 );
 

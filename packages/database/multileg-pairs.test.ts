@@ -63,12 +63,20 @@ await upsertPairStatsByOfferId.run({ offer_id: 1 }, client);
 
 // KNOWN RED — PR-F (PRODUCTION-READINESS.md §2.5).
 //
-// The volume double-count is arguable: per pair each figure is defensible, and
-// it only doubles if you sum across pairs. The PRICE is not arguable. One
-// transaction has ONE exchange rate; the query reports four, each manufactured
-// by pretending the other legs do not exist. A basket rate cannot be split per
-// pair without an allocation the transaction never specifies.
-test.failing("one settlement produces ONE price, not one per give x want pair", async () => {
+// RULING: a basket offer (A+B for C+D) is ACCEPTED and tracked through its full
+// lifecycle — live, then filled or cancelled — but it is NOT a price
+// observation. It contributes nothing to chart history, chart stats, pair_stats
+// or open_count.
+//
+// The reason it cannot be fixed at read time: merging is lossy at the segment
+// level. probe-segments.ts shows two zswaps merged into one transaction land in
+// segment 0 TOGETHER, netted, with nothing left to say which +N pairs with
+// which -M. So the constituent sealed balances cannot be recovered from the
+// bytes, and no query-side reconstruction is possible. Excluding baskets from
+// market data is the honest option, since a basket genuinely has no per-pair
+// price: nobody agreed that 1317 A is worth 1983 C, only that A+B together are
+// worth C+D together.
+test.failing("a basket offer contributes NOTHING to price discovery", async () => {
 console.log("ONE settled offer:  gives A=1317 B=1424   wants C=1983 D=1826");
 console.log("ONE open offer with the same legs.\n");
 
@@ -127,8 +135,12 @@ for (const [base, quote] of [[A, C], [A, D], [B, C], [B, D]] as [string, string]
   const s2 = (await getPairStats24h.run({ base, quote }, client))[0]!;
   if (s2.last_price != null) prices.add(Number(s2.last_price).toFixed(6));
 }
-expect(tradeRows).toBe(1);          // one settlement, one trade
-expect(prices.size).toBe(1);        // one settlement, one rate
+// Accepted and tracked — but invisible to every market surface.
+expect(tradeRows).toBe(0);          // no prints
+expect(prices.size).toBe(0);        // no prices
+const openOnPairs = (await getPairs.run(undefined, client))
+  .reduce((n: number, p: any) => n + Number(p.open_count), 0);
+expect(openOnPairs).toBe(0);        // no un-executable quotes on the book
 
 
 

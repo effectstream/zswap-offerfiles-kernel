@@ -141,29 +141,29 @@ test("no fills at all falls back to open-book mid (unchanged behaviour)", async 
   expect(s.volume_base).toBe(0);
 });
 
-// ── KNOWN RED — PR-D (PRODUCTION-READINESS.md §2.3) ─────────────────────────
+// ── §2.3, FIXED in PR-D. Kept as a permanent regression guard ───────────────
 //
-// getPairStats24h bounds its window with `NOW() - INTERVAL '24 hours'` while
-// comparing against `h.archived_at`, which since the chain-time fix is the L2
-// BLOCK timestamp. Two clocks, one comparison — the same defect class that fix
-// closed one layer down, and closing it is what made this one reachable.
+// getPairStats24h USED TO bound its window with `NOW() - INTERVAL '24 hours'`
+// while comparing against `h.archived_at`, which since the chain-time fix is
+// the L2 BLOCK timestamp. Two clocks, one comparison — the same defect class
+// that fix closed one layer down, and closing it is what made this reachable.
 //
-// Any node whose chain clock is not wall clock (a replica catching up, a
+// Any node whose chain clock was not wall clock (a replica catching up, a
 // replay, a devnet anchored in the past, an NTP anchor pinned by
-// GRAND_NTP_START_TIME) reports zero volume and a collapsed high/low while
-// /v1/chart/history still lists every fill. The API contradicts itself.
+// GRAND_NTP_START_TIME) reported zero volume and a collapsed high/low while
+// /v1/chart/history still listed every fill. The API contradicting itself.
 //
-// The fix parameterises the cutoff from `effectstream_blocks.ms_timestamp` at
-// the tip — the same value api.ts already fetches for the root-window gate.
-// This test seeds that tip, so it goes green the moment the cutoff follows it.
+// The cutoff now comes from `effectstream_blocks.ms_timestamp` at the tip — the
+// same value api.ts uses for the root-window gate. This test seeds that tip.
 //
-// `test.failing` is the unit-level equivalent of the suite's KNOWN_RED
-// registry: it keeps CI honest today and FAILS the moment the fix lands
-// without this marker being removed.
-// Verified to fail for the RIGHT reason: `last` reads 2.5 (the fill is present
-// and priced correctly) while volume_base reads 0 — the window, and only the
-// window, drops it.
-test.failing("24h window follows the CHAIN clock, not the wall clock", async () => {
+// Note the tests ABOVE run before this one and have no effectstream_blocks
+// table at all: they exercise the documented fallback to wall clock, which is
+// correct for an empty chain with no fills to window.
+//
+// Was verified to fail for the RIGHT reason before the fix: `last` read 2.5
+// (the fill present and correctly priced) while volume_base read 0 — the
+// window, and only the window, dropped it.
+test("24h window follows the CHAIN clock, not the wall clock", async () => {
   // This node is 48 h behind wall clock, and its tip block says so.
   await client.query(`CREATE SCHEMA IF NOT EXISTS effectstream`);
   await client.query(`CREATE TABLE IF NOT EXISTS effectstream.effectstream_blocks (

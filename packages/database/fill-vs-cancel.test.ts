@@ -46,6 +46,9 @@ const BASE = "b".repeat(64);
 const QUOTE = "q".repeat(64);
 const BASE2 = "c".repeat(64);
 const QUOTE2 = "d".repeat(64);
+// These fixtures seed rows relative to NOW(), so their window starts 24 h
+// before wall clock. Production derives it from the chain tip instead.
+const DAY_AGO = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const hashOf = (n: number) => n.toString(16).padStart(64, "0");
 const TX_A = "aa11";
 const TX_B = "bb22";
@@ -222,7 +225,7 @@ test("detail endpoint query agrees with the status query", async () => {
 test("chart stats count only genuine fills — cancels contribute nothing", async () => {
   // Offers 1, 4, 5 are consumed (10 BASE each); 2 and 3 are cancels at the
   // same price and would inflate volume by 20 BASE if counted.
-  const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE }, client))[0];
+  const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE, cutoff: DAY_AGO }, client))[0];
   expect(Number(s.volume_base_24h)).toBe(30);
   expect(s.fills_24h).toBe(3);
 });
@@ -322,6 +325,6 @@ test("pair_stats.last_price is quote-per-base in BOTH trade directions", async (
 
   // And the authoritative SQL aggregate must agree with the stored column —
   // the cross-route disagreement users actually see.
-  const stats = (await getPairStats24h.run({ base: LO, quote: HI }, client))[0];
+  const stats = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0];
   expect(Number(stats!.last_price)).toBeCloseTo(Number(reverse.rows[0].p), 9);
 });

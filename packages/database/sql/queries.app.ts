@@ -379,6 +379,20 @@ export const getLastOffer = prepared<void, IGetLastOfferResult>(
 export interface IGetPairStats24hParams {
   base: string;
   quote: string;
+  /**
+   * Start of the 24 h window, derived from the CHAIN clock — see trade-data.ts.
+   *
+   * This used to be `NOW() - INTERVAL '24 hours'`, wall clock, compared against
+   * `h.archived_at`, which is the L2 block timestamp. Two clocks in one
+   * comparison. Any node whose chain time is not wall time — a replica catching
+   * up, a replay, a devnet anchored in the past — reported zero volume and a
+   * collapsed high/low while /v1/chart/history still listed every fill: the API
+   * contradicting itself about whether trades exist.
+   *
+   * Same defect class as the archived_at fix, one layer up; closing that one is
+   * what made this reachable.
+   */
+  cutoff: DateOrString;
 }
 export interface IGetPairStats24hResult {
   last_price: string | null;
@@ -419,21 +433,21 @@ export const getPairStats24h = prepared<IGetPairStats24hParams, IGetPairStats24h
        SELECT
          (SELECT price FROM fills ORDER BY archived_at DESC LIMIT 1)::text AS last_price,
          (SELECT price FROM fills
-           WHERE archived_at <= NOW() - INTERVAL '24 hours'
+           WHERE archived_at <= :cutoff!
            ORDER BY archived_at DESC LIMIT 1)::text AS ref_before_24h,
          (SELECT price FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours'
+           WHERE archived_at > :cutoff!
            ORDER BY archived_at ASC LIMIT 1)::text AS oldest_in_24h,
          (SELECT COUNT(*)::int FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours') AS fills_24h,
+           WHERE archived_at > :cutoff!) AS fills_24h,
          (SELECT MAX(price) FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS high_24h,
+           WHERE archived_at > :cutoff!)::text AS high_24h,
          (SELECT MIN(price) FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS low_24h,
+           WHERE archived_at > :cutoff!)::text AS low_24h,
          (SELECT SUM(base_amt) FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS volume_base_24h,
+           WHERE archived_at > :cutoff!)::text AS volume_base_24h,
          (SELECT SUM(quote_amt) FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS volume_quote_24h`,
+           WHERE archived_at > :cutoff!)::text AS volume_quote_24h`,
 );
 
 // ── Trade history ──────────────────────────────────────────────────────────

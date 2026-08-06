@@ -19,6 +19,9 @@ const {
   getPairStats24h,
 } = await import("@zswap-da/database");
 
+// Fixtures seed rows relative to NOW(), so their window starts 24 h before
+// wall clock. Production derives it from the chain tip instead (trade-data.ts).
+const DAY_AGO = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const PORT = 54345;
 let handle: { close: () => Promise<void> };
 let client: InstanceType<typeof pg.Client>;
@@ -105,7 +108,7 @@ test("market queries count a dual-kind leg ONCE, summed by color (join-duplicati
        (500, '${BASE}', '5',  'GIVING', 'UNSHIELDED', NOW() - INTERVAL '10 minutes'),
        (500, '${QUOTE}', '30', 'WANTING', 'SHIELDED', NOW() - INTERVAL '10 minutes')`,
   );
-  const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE }, client))[0];
+  const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE, cutoff: DAY_AGO }, client))[0];
   expect(s.fills_24h).toBe(1);
   expect(Number(s.volume_base_24h)).toBe(15);
   expect(Number(s.volume_quote_24h)).toBe(30);

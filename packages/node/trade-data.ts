@@ -7,7 +7,12 @@
 // Prices are quoted as quote-per-base. An offer GIVING base / WANTING quote is a
 // SELL of base (ask); GIVING quote / WANTING base is a BUY of base (bid).
 
-import { getTradeHistory, getOpenLegs, getPairStats24h } from "@zswap-da/database";
+import {
+  getTradeHistory,
+  getOpenLegs,
+  getPairStats24h,
+  getLatestEffectstreamBlock,
+} from "@zswap-da/database";
 
 export interface HistoryRow { price: number; amt: number; up: boolean; at: string }
 export interface Stats {
@@ -58,13 +63,33 @@ async function currentMid(dbConn: any, base: string, quote: string): Promise<num
   return bestAsk || bestBid || 0;
 }
 
+/**
+ * Start of the 24 h window, on the SAME clock that stamps the data.
+ *
+ * `archived_at` is the L2 block timestamp of the settlement, so the window has
+ * to be measured against the chain's own notion of now — the latest processed
+ * block — not against the wall clock. The two agree on a node at the tip and
+ * diverge on every other one: a replica catching up, a replay, a devnet
+ * anchored in the past. Measured before this fix: with the chain 48 h behind,
+ * `last` read correctly while volume read 0.
+ *
+ * Falls back to wall clock only when there is no processed block at all, which
+ * means an empty chain with no fills to window anyway.
+ */
+async function chainWindowStart(dbConn: any): Promise<Date> {
+  const tip = await getLatestEffectstreamBlock.run(undefined, dbConn).catch(() => []);
+  const ms = tip[0]?.ms_timestamp != null ? Number(tip[0].ms_timestamp) : Date.now();
+  return new Date(ms - 24 * 60 * 60 * 1000);
+}
+
 export async function realStats(dbConn: any, base: string, quote: string): Promise<Stats> {
   // Stats come from getPairStats24h — a SQL aggregate over EVERY fill in the
   // 24 h window. They must never be derived from realHistory: that query is
   // display-capped at 120 rows, and inheriting the cap silently understated
   // volume, truncated high/low, and baselined change24 on the 120th-newest
   // trade for any pair with >120 fills a day.
-  const rows = await getPairStats24h.run({ base, quote }, dbConn);
+  const cutoff = await chainWindowStart(dbConn);
+  const rows = await getPairStats24h.run({ base, quote, cutoff }, dbConn);
   const s = rows[0];
   const last = s?.last_price != null ? Number(s.last_price) : null;
 

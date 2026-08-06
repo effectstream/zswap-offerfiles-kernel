@@ -114,8 +114,8 @@ unanswered question.
 | PR | Contents | Product code touched |
 |---|---|---|
 | **A** | **Base test suite.** Every test in §3, the `KNOWN_RED` registry, the new helpers, the new `p8-served` phase. Ends with a full run whose scorecard lists each defect as a recorded red. | **none** |
-| **B** | Unshielded fill-vs-cancel (§2.1) | validator, STM, schema, `cancelledPredicate` |
-| **C** | `pair_stats.last_price` inversion (§2.2) | `upsertPairStatsByOfferId` |
+| **B** | Unshielded fill-vs-cancel (§2.1) — **DONE**, verified 205/0 | validator, STM, schema, `cancelledPredicate` |
+| **C** | `pair_stats.last_price` inversion (§2.2) — **DONE** | `upsertPairStatsByOfferId` |
 | **D** | 24 h stats window clock (§2.3) | `getPairStats24h`, `trade-data.ts` |
 | **E** | Cross-layer rule (§2.4) — **ruled: REJECT** | validator ladder, new `CROSS_LAYER` code |
 | **F** | Basket offers (§2.5) — **ruled: ACCEPT, exclude from market data** | the four market queries only; ingestion unchanged |
@@ -258,7 +258,7 @@ discards them. So the shielded rule ports over exactly.
 
 **Red in PR-A:** T-C1, T-C2, T-F1, and the `uu` arms of T-E1/T-E2.
 
-### 2.2 `pair_stats.last_price` is inverted for half of all trades → **PR-C**
+### 2.2 `pair_stats.last_price` is inverted for half of all trades → **PR-C — FIXED**
 
 *(found while writing T-D3 — not previously reported)*
 

@@ -547,7 +547,23 @@ export const upsertPairStatsByOfferId = prepared<IUpsertPairStatsByOfferIdParams
            LEAST(g.token_color, w.token_color),
            GREATEST(g.token_color, w.token_color),
            1,
-           w.amount::numeric / NULLIF(g.amount::numeric, 0),
+           -- Quote per base, in BOTH trade directions.
+           --
+           -- base_color/quote_color above are assigned by LEAST/GREATEST of the
+           -- hex COLOUR, which has nothing to do with which side the maker took.
+           -- This used to be a bare w.amount / g.amount — want divided by give
+           -- — with no reference to which of them became base, so the recorded
+           -- price was quote-per-base only when the maker happened to give the
+           -- lexically-lesser colour, and 1/p otherwise. /v1/pairs' price column
+           -- therefore flipped meaning with the direction of the most recent
+           -- trade and disagreed with /v1/chart/stats by a factor of p^2.
+           --
+           -- Every other price path already normalises explicitly:
+           -- getPairStats24h does this same CASE, and trade-data.ts's toFill()
+           -- does it in JS. Only this one did not.
+           CASE WHEN g.token_color = LEAST(g.token_color, w.token_color)
+                THEN w.amount::numeric / NULLIF(g.amount::numeric, 0)
+                ELSE g.amount::numeric / NULLIF(w.amount::numeric, 0) END,
            h.archived_at
        FROM (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
              FROM offer_file_tokens_history

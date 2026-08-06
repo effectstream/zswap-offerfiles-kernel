@@ -164,6 +164,63 @@ test("cancels contribute no volume and do not move last_price", async () => {
   expect(Number(s.last_price)).toBe(2);
 });
 
+test("a PRE-014 offer (no marker rows) is NOT reclassified", async () => {
+  // unshielded_spends starts empty on upgrade while
+  // offer_file_unshielded_spends_history is already populated, so branch 1
+  // would flip every historical offer to `cancelled` — erasing genuine past
+  // fills from chart history and volume while pair_stats, a persisted
+  // write-side projection, keeps counting them. The marker gate makes the whole
+  // predicate inert for rows that predate the migration, exactly as 013 did.
+  await seedOffer(80, [{ outputNo: 0 }], { markers: false });
+  // No unshielded_spends row for it either — the post-upgrade state exactly.
+  expect(await statusOf(80)).toBe("consumed");
+});
+
+test("N identical wanted outputs require N payouts, not one", async () => {
+  // Existence-only matching let a maker declare N identical outputs (legs NET,
+  // so wants = N x value) and satisfy the check with a SINGLE self-paid output —
+  // a fabricated fill at N times its real size, for 1/N the cost.
+  const id = 81;
+  await client.query(
+    `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash,
+       created_at, first_seen_at, ttl_seconds, archive_reason, archived_at)
+     VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour',
+             3600, 'CONSUMED', NOW() - INTERVAL '30 minutes')`,
+    [id, 500, `blob-${id}`, hashOf(id)],
+  );
+  await client.query(
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+     VALUES ($1, $2, '10', 'GIVING', 'UNSHIELDED', NOW() - INTERVAL '30 minutes'),
+            ($1, $3, '60', 'WANTING', 'UNSHIELDED', NOW() - INTERVAL '30 minutes')`,
+    [id, GIVE, WANT],
+  );
+  await client.query(
+    `INSERT INTO offer_file_unshielded_spends_history (offer_file_id, owner, intent_hash, output_no, archived_at)
+     VALUES ($1, $2, $3, 0, NOW() - INTERVAL '30 minutes')`,
+    [id, MAKER, `intent-${id}`],
+  );
+  // The offer declares THREE outputs of 20 — recorded as one row with count 3.
+  await client.query(
+    `INSERT INTO offer_file_unshielded_outputs_history (offer_file_id, owner, token_type, value, count)
+     VALUES ($1, $2, $3, '20', 3)`,
+    [id, MAKER, WANT],
+  );
+  await spent(id, 0, TX(id));
+  // The spending tx creates only ONE 20 — the underpayment.
+  await created(`settle-${id}`, TX(id), "20");
+  expect(await statusOf(id)).toBe("cancelled");
+
+  // Paying all three settles it.
+  for (const n of [2, 3]) {
+    await client.query(
+      `INSERT INTO unshielded_creates (owner, intent_hash, output_no, tx_hash, token_type, value, height)
+       VALUES ($1, $2, $3, $4, $5, '20', 1)`,
+      [MAKER, `settle-${id}`, n, TX(id), WANT],
+    );
+  }
+  expect(await statusOf(id)).toBe("consumed");
+});
+
 test("the shielded path is unaffected — each predicate is inert on the other layer", async () => {
   // A shielded-only offer has no unshielded spend rows, so every unshielded
   // branch must evaluate false rather than accidentally proving a cancel.

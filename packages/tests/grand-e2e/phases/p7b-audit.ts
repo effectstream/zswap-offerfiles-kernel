@@ -13,6 +13,7 @@ import {
   collectOutputCommitments,
   collectNullifiers,
   collectUnshieldedSpends,
+  collectUnshieldedOutputs,
 } from "@zswap-da/validator";
 import {
   DEEP_AUDIT,
@@ -219,6 +220,28 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
       // has no stored commitments, so a marker-copy regression silently
       // downgrades exact fill-vs-cancel classification back to the old
       // all-in-one-tx heuristic without failing a single existing check.
+      // Unshielded markers get the same treatment, and for the same reason the
+      // comment above gives: without them branch 3 of the unshielded predicate
+      // is vacuous and a self-transfer reads as a sale. This table had no audit
+      // coverage at all until an independent review pointed out the asymmetry.
+      const expectedUnshielded = collectUnshieldedOutputs(v.tx!);
+      if (expectedUnshielded.length > 0) {
+        const uTable = row.live
+          ? "offer_file_unshielded_outputs"
+          : "offer_file_unshielded_outputs_history";
+        // COUNT summed, not rows: N identical outputs collapse to one row with
+        // count N, and it is the total that must match what the tx declares.
+        const uStored = Number(
+          (await db.query(
+            `SELECT COALESCE(SUM(count), 0)::int AS n FROM ${uTable} WHERE offer_file_id = $1`,
+            [row.id],
+          )).rows[0].n,
+        );
+        if (uStored !== expectedUnshielded.length) {
+          markerMissing.push(`${short}: unshielded stored=${uStored} expected=${expectedUnshielded.length}`);
+        }
+      }
+
       const expectedMarkers = collectOutputCommitments(v.tx!);
       if (expectedMarkers.length > 0) {
         const cTable = row.live ? "offer_file_commitments" : "offer_file_commitments_history";
@@ -248,7 +271,7 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
       spendMismatch.slice(0, 3).join("; "),
     );
     await check(
-      "fill markers stored for every offer that has shielded outputs",
+      "fill markers stored for every offer that declares outputs (both layers)",
       async () => markerMissing.length === 0,
       markerMissing.slice(0, 3).join("; "),
     );

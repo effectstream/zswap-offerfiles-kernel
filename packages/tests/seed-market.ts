@@ -100,8 +100,8 @@ async function seedHistory(p: (typeof PAIRS)[number]) {
     const { give, want } = legsFor(side, p.base.color, p.quote.color, baseAmt, price);
     const id = histId++;
     await q(
-      `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
-       VALUES ($1, $2, $3, $4, $5, 3600, 'CONSUMED', $5)`,
+      `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at, first_seen_at, ttl_seconds, archive_reason, archived_at)
+       VALUES ($1, $2, $3, $4, $5, $5, 3600, 'CONSUMED', $5)`,
       [id, 1000 + id, `seed-hist-${id}`, seedHash(`seed-hist-${id}`), at],
     );
     await q(
@@ -121,8 +121,8 @@ async function seedBook(p: (typeof PAIRS)[number], mid: number) {
     const { give, want } = legsFor(side, p.base.color, p.quote.color, baseAmt, price);
     const id = bookId++;
     await q(
-      `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds)
-       VALUES ($1, $2, $3, $4, $5, 3600)`,
+      `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, created_at, first_seen_at, ttl_seconds)
+       VALUES ($1, $2, $3, $4, $5, $5, 3600)`,
       [id, 2000 + id, `seed-book-${id}`, seedHash(`seed-book-${id}`), nowIso],
     );
     await q(

@@ -135,6 +135,26 @@ const shieldedCancelledPredicate = (idExpr: string) => `(
 // it matters. NULL tx_hash falls back rather than classifying on absent
 // evidence.
 const unshieldedCancelledPredicate = (idExpr: string) => `(
+  -- MARKER GATE, and it is what makes this migration safe to deploy.
+  --
+  -- unshielded_spends starts EMPTY, while offer_file_unshielded_spends_history
+  -- is populated in every pre-014 database. Without this gate, branch 1 sees no
+  -- matching spend row for any historical offer and flips every one of them to
+  -- cancelled — silently reclassifying genuine past fills, erasing them from
+  -- chart history and volume, while pair_stats (a persisted write-side
+  -- projection, incremented once at archive time) keeps counting them. The two
+  -- would then disagree permanently.
+  --
+  -- Migration 013 avoided this by construction: its branch is gated behind
+  -- EXISTS(offer_file_commitments_history), which is empty for pre-013 rows, so
+  -- the whole branch goes vacuous and the old classification stands. This is
+  -- that same gate. Pre-014 rows have no marker rows -> predicate inert. Offers
+  -- indexed after 014 always have them, since a uu offer structurally
+  -- declares outputs. Offers live AT the upgrade also go inert, which is the
+  -- honest answer: their marker evidence was never captured.
+  EXISTS (SELECT 1 FROM offer_file_unshielded_outputs_history
+          WHERE offer_file_id = ${idExpr})
+  AND (
   EXISTS (SELECT 1 FROM offer_file_unshielded_spends_history uxh
           LEFT JOIN unshielded_spends us
             ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
@@ -159,10 +179,12 @@ const unshieldedCancelledPredicate = (idExpr: string) => `(
                      AND us.output_no = uxh.output_no
                     WHERE uxh.offer_file_id = ${idExpr} AND us.tx_hash IS NULL)
     AND EXISTS (
+      -- COUNT, not EXISTS. An offer wanting N identical outputs must be paid N
+      -- of them; existence alone lets one payout satisfy any multiplicity.
       SELECT 1 FROM offer_file_unshielded_outputs_history uo
       WHERE uo.offer_file_id = ${idExpr}
-        AND NOT EXISTS (
-          SELECT 1 FROM unshielded_creates uc
+        AND uo.count > (
+          SELECT COUNT(*) FROM unshielded_creates uc
           WHERE uc.owner = uo.owner AND uc.token_type = uo.token_type
             AND uc.value = uo.value
             AND uc.tx_hash = (SELECT MIN(us2.tx_hash)
@@ -172,14 +194,18 @@ const unshieldedCancelledPredicate = (idExpr: string) => `(
                                AND us2.intent_hash = uxh2.intent_hash
                                AND us2.output_no = uxh2.output_no
                               WHERE uxh2.offer_file_id = ${idExpr})))
-  )
+  ))
 )`;
 
 // Either layer's evidence is enough to prove a cancel, and each predicate is
 // INERT on the other layer: a pure shielded offer has no unshielded spend rows,
-// so every unshielded branch is false, and vice versa. A cross-layer offer
-// would be judged by both — correctly, since it must satisfy both to be a fill
-// — though §2.4 rejects that shape at ingestion anyway.
+// so every unshielded branch is false, and vice versa.
+//
+// A cross-layer offer is judged by both, which is conservative but NOT a full
+// atomicity check: each layer counts distinct spending txs over its own inputs,
+// so shielded inputs in tx1 and unshielded inputs in tx2 fires neither branch 2.
+// §2.4 rules that shape out, but that ruling is NOT YET IMPLEMENTED — there is
+// no CROSS_LAYER code in OfferRejectCode — so do not read this as unreachable.
 const cancelledPredicate = (idExpr: string) =>
   `(${shieldedCancelledPredicate(idExpr)} OR ${unshieldedCancelledPredicate(idExpr)})`;
 
@@ -258,8 +284,8 @@ archived_commitments AS (
 -- commitments do: classification is READ-time, so evidence left behind in the
 -- live tables is evidence that no longer exists when the question is asked.
 archived_unshielded_outputs AS (
-    INSERT INTO offer_file_unshielded_outputs_history (offer_file_id, owner, token_type, value)
-    SELECT offer_file_id, owner, token_type, value
+    INSERT INTO offer_file_unshielded_outputs_history (offer_file_id, owner, token_type, value, count)
+    SELECT offer_file_id, owner, token_type, value, count
     FROM offer_file_unshielded_outputs
     WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
 )
@@ -870,9 +896,10 @@ export interface IInsertOfferFileUnshieldedOutputParams {
   value: string;
 }
 export const insertOfferFileUnshieldedOutput = prepared<IInsertOfferFileUnshieldedOutputParams, never>(
-      `INSERT INTO offer_file_unshielded_outputs (offer_file_id, owner, token_type, value)
-       VALUES (:offer_file_id!, :owner!, :token_type!, :value!)
-       ON CONFLICT DO NOTHING`,
+      `INSERT INTO offer_file_unshielded_outputs (offer_file_id, owner, token_type, value, count)
+       VALUES (:offer_file_id!, :owner!, :token_type!, :value!, 1)
+       ON CONFLICT (offer_file_id, owner, token_type, value)
+       DO UPDATE SET count = offer_file_unshielded_outputs.count + 1`,
 );
 
 // Batched nullifiers for a page of offers — computed.inputNullifiers in the

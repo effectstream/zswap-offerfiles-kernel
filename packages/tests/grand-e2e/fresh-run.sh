@@ -32,7 +32,17 @@ say() { echo "[$(date +%H:%M:%S)] $*"; }
 # 10001); those are not ours to signal and must not be touched.
 reap_orphans() {
   local pat pid
-  for pat in 'packages/batcher/[b]atcher.ts' '[p]rovision-batcher-dust.ts' '[i]ndexer-standalone'; do
+  # main.grand-b.ts is the one that hurts most and was missing: p7a spawns a
+  # SECOND full node replaying the chain from height 1, and it is by far the
+  # heaviest thing this suite runs (measured: load average 17 on a 16-core box
+  # while it replays). A run killed during p7a — which a session teardown does —
+  # leaves that replica running indefinitely, quietly loading every subsequent
+  # run: deeper STM catch-up, slower settlement, inflated latency metrics, and
+  # no visible cause. main.dev.ts is here for the same reason; the orchestrator
+  # shutdown above handles it on a clean exit, but not on a hard kill.
+  for pat in 'packages/batcher/[b]atcher.ts' '[p]rovision-batcher-dust.ts' \
+             '[i]ndexer-standalone' 'packages/node/main[.]grand-b[.]ts' \
+             'packages/node/main[.]dev[.]ts'; do
     for pid in $(pgrep -u "$(id -u)" -f "$pat" 2>/dev/null); do
       say "reaping orphan $pid ($pat)"; kill "$pid" 2>/dev/null
     done

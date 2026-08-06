@@ -7,7 +7,13 @@ import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
-import { getBlankRefState, validateZswapOfferBytes, verifyOfferCrypto, collectOutputCommitments } from "@zswap-da/validator";
+import {
+  getBlankRefState,
+  validateZswapOfferBytes,
+  verifyOfferCrypto,
+  collectOutputCommitments,
+  collectUnshieldedOutputs,
+} from "@zswap-da/validator";
 import { latin1ToBytes, offerBytesToBech32, offerHashFromBytes } from "@zswap-da/offer-guard";
 import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 
@@ -21,6 +27,9 @@ import {
   insertOfferFileCommitment,
   insertOfferFileUnshieldedSpend,
   insertOfferFileTokenWithKind,
+  insertOfferFileUnshieldedOutput,
+  insertUnshieldedSpend,
+  insertUnshieldedCreate,
   archiveOfferByNullifierWithHash,
   archiveOfferByUnshieldedSpendWithHash,
   archiveOfferByIdTtlWithHash,
@@ -44,13 +53,15 @@ import {
 // unshielded UTXO refs of its inputs. Two limits are intentional:
 //
 //   1. Fill vs cancel is classified at READ time (cancelledPredicate in the
-//      database package). Split/partial nullifier spends are definitive
-//      cancels (settlement is atomic); and for offers with stored fill
-//      markers (their output commitments, captured at ingestion) the
-//      converse is exact too: the single spending tx must have created
-//      those commitments, else it was a cancel — single-input included.
-//      Only marker-less offers (pre-migration rows, unshielded-only wants)
-//      keep the all-in-one-tx heuristic.
+//      database package), and is now exact on BOTH value layers. Split or
+//      partial spends are definitive cancels (settlement is atomic); and for
+//      offers with stored fill markers the converse is exact too — the single
+//      spending tx must have created them, else it was a cancel, single-input
+//      included. Shielded markers are the offer's output commitments;
+//      unshielded markers are its declared outputs, matched on
+//      (owner, token_type, value) because the settling intent's hash cannot be
+//      known at publication. Only genuinely marker-less rows keep the old
+//      all-in-one-tx heuristic.
 //
 //   2. Archival is destructive (rows are DELETEd into history). If a
 //      consuming Midnight/Celestia block is later reorged out, the offer
@@ -247,7 +258,24 @@ addTransition("midnight-unshielded-spend", function* (data) {
     return;
   }
 
+  // The SPENDING transaction — the fill-vs-cancel discriminator, and the whole
+  // reason the unshielded layer could not classify. The primitive has always
+  // delivered it (grammar: owner, intentHash, outputIndex, value, tokenType,
+  // txHash); this transition simply threw it away.
+  const txHash = payload?.txHash ? bytesOrStringToHex(payload.txHash) : null;
+
   try {
+    // Permanent record, mirroring `nullifiers`. Written BEFORE the live-set
+    // delete below: the delete destroys the only trace this UTXO existed, and
+    // classification needs to know it was consumed and by whom, long after.
+    yield* World.resolve(insertUnshieldedSpend, {
+      owner,
+      intent_hash: intentHash,
+      output_no: outputNo,
+      tx_hash: txHash,
+      height: data.blockHeight,
+    });
+
     // Delete from created_unshielded — the row's absence is the "spent" signal.
     // If no offer is currently indexed for this UTXO, the delete is still
     // correct: a later Celestia offer will see no row and be rejected.
@@ -314,6 +342,21 @@ addTransition("midnight-unshielded-create", function* (data) {
       owner,
       intent_hash: intentHash,
       output_no: outputNo,
+      height: data.blockHeight,
+    });
+    // Permanent create record, mirroring `commitments`. created_unshielded
+    // above is a live-set that deletes on spend, so it cannot answer "did tx T
+    // pay the maker what the offer asked for" once the payout is itself spent.
+    // value + tokenType are what make the fill-marker match possible: the
+    // settling intent's hash and output index are unknowable to the maker at
+    // publication time, but the amounts are exact.
+    yield* World.resolve(insertUnshieldedCreate, {
+      owner,
+      intent_hash: intentHash,
+      output_no: outputNo,
+      tx_hash: payload?.txHash ? bytesOrStringToHex(payload.txHash) : null,
+      token_type: bytesOrStringToHex(payload?.tokenType),
+      value: String(payload?.value ?? "0"),
       height: data.blockHeight,
     });
   } catch (e) {
@@ -618,6 +661,18 @@ addTransition("celestia-zswap", function* (data) {
       yield* World.resolve(insertOfferFileCommitment, {
         offer_file_id: offerFileId,
         commitment,
+      });
+    }
+    // The same markers on the unshielded layer: the outputs the offer says the
+    // maker is owed. A settling tx creates every one of them; a maker walking
+    // away creates none. Without these, branch 3 of the unshielded predicate is
+    // vacuous and a self-transfer reads as a sale.
+    for (const out of collectUnshieldedOutputs(result.tx!)) {
+      yield* World.resolve(insertOfferFileUnshieldedOutput, {
+        offer_file_id: offerFileId,
+        owner: out.owner,
+        token_type: out.tokenType,
+        value: out.value,
       });
     }
 

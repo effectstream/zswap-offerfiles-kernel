@@ -165,9 +165,10 @@ class Ledger {
       //
       // Shielded cancels are correctly excluded by fill markers, so counting
       // them here would break the pairs that currently agree.
-      const countsAsFill = settledOnly
-        ? o.fate === "settled"
-        : o.fate === "settled" || (o.fate === "cancelled" && o.layer === "uu");
+      // Both layers, one rule, since PR-B gave the unshielded path the same
+      // evidence the shielded path had. `settledOnly` is retained only so the
+      // two call sites keep their distinct names while they converge.
+      const countsAsFill = o.fate === "settled";
       if (!countsAsFill) continue;
       const give = this.colors[o.giveToken]!;
       const want = this.colors[o.wantToken]!;

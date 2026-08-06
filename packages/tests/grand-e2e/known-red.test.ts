@@ -3,8 +3,10 @@
 // mishandled — either masking a real failure or blocking the merge for a
 // defect we deliberately chose not to fix yet.
 //
-// So test the mechanism itself, against REAL registry entries (not a fixture
-// registry): a key that drifts out of known-red.ts must break this test too.
+// So test the mechanism itself, with a synthetic entry — the registry is meant
+// to empty out as defects get fixed, and a mechanism test that only works while
+// bugs are outstanding stops working exactly when someone next needs it. The
+// well-formedness check still runs over whatever real entries exist.
 
 import { describe, expect, test } from "bun:test";
 import { KNOWN_RED } from "./known-red.ts";
@@ -16,11 +18,16 @@ function splitKey(key: string): { phase: string; name: string } {
   return { phase: key.slice(0, i), name: key.slice(i + 3) };
 }
 
-const REGISTERED = Object.keys(KNOWN_RED);
+// Test the MECHANISM with a synthetic entry rather than borrowing a real one.
+// The registry is meant to empty out as defects are fixed — it is empty right
+// now — and a mechanism test that only works while bugs are outstanding stops
+// working exactly when someone next needs to trust it.
+const PROBE_KEY = "p-mechanism ▸ synthetic probe";
+KNOWN_RED[PROBE_KEY] = { id: "RED-PROBE", pr: "PR-Z", why: "synthetic entry for the mechanism test" };
+const REGISTERED = [PROBE_KEY];
 
 describe("KNOWN_RED expected-failure mechanism", () => {
-  test("the registry is non-empty and every entry names its fix PR", () => {
-    expect(REGISTERED.length).toBeGreaterThan(0);
+  test("every registered entry is well-formed and names its fix PR", () => {
     for (const [key, red] of Object.entries(KNOWN_RED)) {
       expect(key, `${key} must be a "phase ▸ name" key`).toContain(" ▸ ");
       expect(red.pr, `${red.id} must name the PR that deletes it`).toMatch(/^PR-[A-Z]$/);
@@ -93,10 +100,11 @@ describe("KNOWN_RED expected-failure mechanism", () => {
   });
 
   test("registry keys that never ran are reported as stale, not silently dropped", () => {
-    // Only REGISTERED[0] has been exercised above, so everything else is stale
-    // from this test file's point of view — proving the accounting works.
+    // The probe key HAS run (above); anything else in the registry has not, so
+    // it must be reported. That accounting is what stops a renamed check from
+    // leaving a dead entry that reads as work in flight.
     const stale = staleReds().map((r) => r.id);
-    expect(stale).not.toContain(KNOWN_RED[REGISTERED[0]!]!.id);
-    expect(stale.length).toBe(REGISTERED.length - 1);
+    expect(stale).not.toContain("RED-PROBE");
+    expect(stale.length).toBe(Object.keys(KNOWN_RED).length - 1);
   });
 });

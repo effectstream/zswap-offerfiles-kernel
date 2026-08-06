@@ -8,7 +8,7 @@ argued:
 | a | Bad data cannot get into the history | **partial** — the ladder is unit-tested, but 6 of its 14 reject codes never fire against a real gate, and history has no integrity audit at all |
 | b | Bad transactions don't reach users | **weak** — nothing re-validates what the API actually serves, and `expiresAt` is already in the past at ingestion on a quiet chain (§2.6) |
 | c | All data is correctly logged as real sales | **broken on the unshielded path** — and the suite currently asserts the break as correct behaviour |
-| d | History and pricing is correct | **broken** — `/v1/pairs.last_price` is inverted for half of all trades; the 24 h window still mixes clocks |
+| d | History and pricing is correct | **broken** — `/v1/pairs.last_price` is inverted for half of all trades; the 24 h window still mixes clocks; baskets fabricate prints on pairs nobody traded (§2.5) |
 | e | Duplicate zswaps allowed, accepting one disables the others | **partial** — only the N=2, single-input, same-door case |
 | f | Works for shielded *and* unshielded | **no** — cancels, chaos, TTL sweep and the liveness gate are shielded-only |
 
@@ -54,7 +54,7 @@ what did not:
 | T-A1 Celestia door asserted by code | ✅ `p4` + `celestiaFixtures()`, incl. crypto-tamper and aged-root families |
 | T-A2 `NOT_A_SWAP` at both doors | ✅ `buildOneSidedOffer()`; skips with a loud note if the SDK stops dropping the leg |
 | T-A2 `NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` / `ROOT_UNREADABLE` | ⛔ not built — see §1.0.1 |
-| T-A3 cross-layer | ⚠️ **gap CONFIRMED reachable** by `probe-cross-layer.ts`; e2e fixture still to build (§2.4) |
+| T-A3 cross-layer | ⚠️ **gap CONFIRMED reachable** by `probe-cross-layer.ts`; ruled REJECT; e2e fixture still to build (§2.4) |
 | T-A4 history referential integrity | ✅ `p7b`, 5 SQL assertions |
 | T-A5 every stored blob re-validates (proofs included) | ✅ `p7b` deep pass, `GRAND_DEEP_AUDIT` |
 | T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass |
@@ -67,7 +67,7 @@ what did not:
 | T-D2 price orientation + inversion | ✅ `p2`, anchored to a known fill |
 | T-D3 `/v1/pairs` vs `/v1/chart/stats` | ✅ `p7b` (unregistered — see §1.2) + **red** in `fill-vs-cancel.test.ts` |
 | T-D4 `trade_count` + chain ordering | ✅ `p7b` |
-| T-D5 multi-leg | ✅ **red** `multileg-pairs.test.ts` — one settlement, four prices (§2.5) |
+| T-D5 basket offers | ✅ **red** `multileg-pairs.test.ts` — asserts a basket contributes NOTHING to price discovery (§2.5) |
 | T-E1 N-way competition | ✅ `p3b`, 3 competitors per layer |
 | T-E2 partial overlap between live offers | ⛔ deferred — needs denomination-controlled funding |
 | T-E3 cross-door competition | ✅ `p3b`, one competitor via `blob.Submit` |
@@ -117,8 +117,8 @@ unanswered question.
 | **B** | Unshielded fill-vs-cancel (§2.1) | validator, STM, schema, `cancelledPredicate` |
 | **C** | `pair_stats.last_price` inversion (§2.2) | `upsertPairStatsByOfferId` |
 | **D** | 24 h stats window clock (§2.3) | `getPairStats24h`, `trade-data.ts` |
-| **E** | Cross-layer rule (§2.4) | validator ladder, new reject code |
-| **F** | Multi-leg offers (§2.5) | validator ladder **or** the market queries — needs a ruling |
+| **E** | Cross-layer rule (§2.4) — **ruled: REJECT** | validator ladder, new `CROSS_LAYER` code |
+| **F** | Basket offers (§2.5) — **ruled: ACCEPT, exclude from market data** | the four market queries only; ingestion unchanged |
 | **G** | `expiresAt` already-expired on a quiet chain (§2.6) | `state-machine.ts` expiry derivation |
 | **H** | Sweep: reds that turn out to be unreachable-code findings; delete `KNOWN_RED` | docs |
 
@@ -321,7 +321,7 @@ data — `effectstream_blocks.ms_timestamp` at the tip, the value
 
 **Red in PR-A:** T-D1 (unit).
 
-### 2.4 Cross-layer offers are unenforced → **PR-E** — **CONFIRMED REACHABLE**
+### 2.4 Cross-layer offers are unenforced → **PR-E** — **CONFIRMED REACHABLE · RULING: REJECT**
 
 **No longer speculative.** `probe-cross-layer.ts` merges a real shielded offer
 with a real unshielded one from a completed run via the ledger's own
@@ -342,6 +342,23 @@ A maker holding two fresh halves publishes this and it is indexed.
 The wallet was never the obstacle: balancing is itself a merge, so the mechanism
 is ordinary and available to anyone.
 
+**RULING (2026-08-05): cross-layer offers are disallowed — there is no support
+for these operations.** PR-E adds `CROSS_LAYER` to `OfferRejectCode` and a check
+in the structural step of `validate.ts`, immediately after `isTwoSided`:
+
+```ts
+const layers = new Set([...gives, ...wants].map((l) => l.kind));
+if (layers.size > 1) return { ok: false, code: "CROSS_LAYER", reason: …, ...derived };
+```
+
+One rule covers all three doors — the STM, the API submit gate and the batcher's
+pre-fee gate all call the same validator ([celestia.ts:82](../../batcher/celestia.ts)).
+No separate batcher change.
+
+Note this is a SHAPE rule, orthogonal to §2.5: a cross-layer offer is a single
+sealed swap with a perfectly well-defined price, so the market-data filter below
+neither catches it nor should.
+
 Recorded in [ISSUES.md](ISSUES.md) §3 and still open: nothing in the ladder
 requires a give and a want to share a value layer. `NOT_A_SWAP` fires today only
 because `wallet-sdk-facade` silently drops a leg — an accident, not a rule. A
@@ -358,7 +375,7 @@ transactions"* holds: add `CROSS_LAYER` to `OfferRejectCode` and a check in
 
 **Red in PR-A:** T-A3.
 
-### 2.5 Multi-leg offers are mis-priced → **PR-F** — **CONFIRMED, and it compounds with §2.4**
+### 2.5 Basket offers pollute price discovery → **PR-F** — **RULING: ACCEPT, but exclude from market data**
 
 **Measured on the same merged transaction.** Two gives × two wants = **four**
 pair combinations, every one of which the market queries match and price
@@ -401,6 +418,49 @@ is not arguable.** One transaction has one exchange rate; the API reports four,
 each manufactured by ignoring the other legs. On the open side the same fan-out
 advertises four executable-looking quotes, none of which a taker can execute: A/C
 at 1.5057 also requires supplying D and receiving B.
+
+**RULING (2026-08-05): split the concerns.** A basket offer (A+B for C+D) is a
+valid offer and is ACCEPTED — indexed, live, settleable, classified filled or
+cancelled like any other. It is simply **not a price observation**, so it
+contributes nothing to `/v1/chart/history`, `/v1/chart/stats`, `pair_stats` or
+`open_count`. Baskets are discouraged in the UI and intended only for fulfilling
+or pre-agreed swaps; there is no good place to surface them as a market.
+
+*Why it cannot be fixed at read time instead.* The natural proposal — treat each
+constituent zswap as its own sealed balance (−N +M) and account per zswap rather
+than per transaction — is the right MODEL, and unrecoverable from the bytes.
+`probe-segments.ts` measures it:
+
+```
+shielded offer alone     segment 0: shielded:3b2bc2ea=+1424  shielded:3dc32e7e=-1826
+unshielded offer alone   segment 0: unshielded:1454bec2=+1317  unshielded:c7dfbc08=-1983
+MERGED                   segment 0: unshielded:1454bec2=+1317  unshielded:c7dfbc08=-1983
+                                    shielded:3b2bc2ea=+1424  shielded:3dc32e7e=-1826
+```
+
+Both sealed balances land in segment 0 and net together. Nothing remains to say
+which `+N` pairs with which `−M`; in this example the layers happen to
+disambiguate, but merge two shielded offers and you get four `shielded:` entries
+with no grouping at all. The accounting unit exists only at ingestion, which is
+why the decision has to be made there.
+
+*Implementation.* One predicate on the four market queries — `getTradeHistory`,
+`getPairStats24h`, `upsertPairStatsByOfferId`, and `getPairs`' live subquery:
+
+```sql
+AND (SELECT COUNT(DISTINCT token_color) FROM offer_file_tokens_history
+     WHERE offer_file_id = h.id AND direction = 'GIVING')  <= 1
+AND (SELECT COUNT(DISTINCT token_color) FROM offer_file_tokens_history
+     WHERE offer_file_id = h.id AND direction = 'WANTING') <= 1
+```
+
+`DISTINCT token_color` is load-bearing: `leg-kind.test.ts` establishes that the
+same colour on both layers is ONE leg for market purposes, so a row count would
+wrongly exclude those.
+
+*Consequence, accepted deliberately.* A basket is live but appears in no pair's
+book, so a taker can only find it through `/v1/offers` with token filters —
+effectively OTC. That is the intent, not a side effect.
 
 The fixture is also no longer blocked. `mintShielded(deployed, sepByte, …)`
 parameterizes the color by domain separator on the ALREADY-DEPLOYED contract, so

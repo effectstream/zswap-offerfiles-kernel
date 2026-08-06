@@ -385,6 +385,12 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
   // a genuine settlement is a sale. They diverge exactly by the unshielded
   // classification gap (§2.1), which is why they are registered as reds.
   {
+    // Single-swap offers only: a basket (>1 give colour or >1 want colour) is a
+    // valid, tracked offer but NOT a price observation (§2.5 ruling), so it
+    // contributes nothing to chart volume and must not be expected to. Every
+    // offer this suite builds is single-swap, so the filter is currently a
+    // no-op — it states the contract so a future basket fixture does not make
+    // this assertion silently wrong.
     const truth = ledger.settledLedger();
     const volumeDiffs: string[] = [];
     const countDiffs: string[] = [];

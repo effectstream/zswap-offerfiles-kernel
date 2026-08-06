@@ -131,6 +131,20 @@ class Ledger {
     return this.aggregate(true);
   }
 
+  /**
+   * Whether an offer is a single sealed swap — one give colour, one want
+   * colour — and therefore a price observation at all.
+   *
+   * A basket (A+B for C+D) is accepted and tracked, but contributes nothing to
+   * charts, stats, pair_stats or open_count (§2.5). It has no per-pair price to
+   * contribute: nobody agreed that A alone is worth C alone. Every offer this
+   * suite builds is single-swap, so this is a contract statement rather than a
+   * live filter — until a basket fixture exists.
+   */
+  isSingleSwap(o: OfferRecord): boolean {
+    return o.giveToken !== undefined && o.wantToken !== undefined;
+  }
+
   private aggregate(settledOnly: boolean): Map<string, { count: number; byColor: Record<string, bigint> }> {
     const m = new Map<string, { count: number; byColor: Record<string, bigint> }>();
     for (const o of this.offers) {

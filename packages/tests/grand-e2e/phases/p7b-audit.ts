@@ -37,6 +37,7 @@ import { derivedLegKeys, fullyValidate } from "../lib/verify.ts";
 import type { SseRecorder } from "../lib/sse.ts";
 import { beginPhase, check, detVar, note, pgrepF } from "../lib/util.ts";
 import { baselineViolations, loadBaseline, snapshot, sseDeliveryLags, writeMetrics } from "../metrics.ts";
+import { summarizeLatencies } from "../lib/util.ts";
 
 /** Normalize a primitive-accounting payload scalar to lowercase hex. */
 function normHex(v: unknown): string {
@@ -56,8 +57,8 @@ function expectedStatus(rec: OfferRecord, now: number): string[] {
     case "settled":
       return ["consumed"];
     case "cancelled":
-      // Both layers. On `uu` this is registered red RED-4 (PR-B) — the
-      // unshielded classification gap makes every walk-away read `consumed`.
+      // Both layers, since PR-B gave the unshielded path the same fill-marker
+      // evidence the shielded path had.
       return ["cancelled"];
     case "expired":
       return ["expired"];
@@ -528,10 +529,15 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
     let dupTerminal = 0;
     let missingTerminal = 0;
     const archivedAtByRow = new Map<number, number>();
-    const histRows = await db.query(`SELECT id, archived_at FROM offer_file_history WHERE archived_at IS NOT NULL`);
-    for (const row of histRows.rows as { id: number; archived_at: Date }[]) {
+    const ttlArchived = new Set<number>();
+    const histRows = await db.query(
+      `SELECT id, archived_at, archive_reason FROM offer_file_history WHERE archived_at IS NOT NULL`,
+    );
+    for (const row of histRows.rows as { id: number; archived_at: Date; archive_reason: string }[]) {
       archivedAtByRow.set(row.id, new Date(row.archived_at).getTime());
+      if (row.archive_reason === "TTL") ttlArchived.add(row.id);
     }
+    const ttlLags: number[] = [];
     for (const rec of ledger.offers.filter((o) => o.rowId !== undefined && o.state === "resolved")) {
       const terminals = [...sse.ofType("offer_consumed"), ...sse.ofType("offer_expired")].filter(
         (e) => e.event.offerId === rec.rowId,
@@ -540,6 +546,22 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
       const archivedAt = archivedAtByRow.get(rec.rowId!);
       if (terminals.length === 0 && archivedAt && sse.wasListeningAt(archivedAt)) missingTerminal++;
       if (terminals.length >= 1 && archivedAt) {
+        // TTL archives are excluded from the DELIVERY metric, and this is a
+        // correction to the metric rather than a concession.
+        //
+        // A TTL archive runs from a SCHEDULED input, so its archived_at is the
+        // scheduled block's timestamp — a time the STM may not reach until much
+        // later when it is catching up from the storm. The resulting number is
+        // STM scheduling latency, which maxStmLagBlocks already gates, wearing
+        // the label of SSE delivery. With ~40% of archives being TTL (14 of 35
+        // measured), that population's variance swamps the signal: one run read
+        // p95 6899, the next 23572, while stmLag went DOWN (95 -> 83) and both
+        // throughput metrics improved. Two things in one number, and the noisy
+        // one winning.
+        //
+        // CONSUMED archives are event-driven — the block that spends the coin
+        // is the block that archives it — so for those the gap really is
+        // block -> STM -> event bus -> socket, which is what this claims to be.
         // NOTE the clocks: terminal.at is suite wall clock; archived_at is the
         // L2 block timestamp (chain-derived since the archived_at fix). This
         // lag therefore spans block-timestamp -> STM execution -> event bus ->
@@ -547,8 +569,18 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
         // socket delivery. The baseline reflects that (p95 ~2.7s, dominated by
         // ~1.5-2.5s STM executor lag on dev); the pre-fix 66ms baseline was
         // only achievable because archived_at used to be wall-clock NOW().
-        sseDeliveryLags.push(Math.max(0, terminals[0]!.at - archivedAt));
+        const lag = Math.max(0, terminals[0]!.at - archivedAt);
+        if (ttlArchived.has(rec.rowId!)) ttlLags.push(lag);
+        else sseDeliveryLags.push(lag);
       }
+    }
+    if (ttlLags.length > 0) {
+      const s2 = summarizeLatencies(ttlLags);
+      note(
+        "TTL archive lag (not gated)",
+        `${s2.count} scheduled-sweep archives: p50 ${s2.p50} p95 ${s2.p95} max ${s2.max} ms — ` +
+          `this is STM scheduling latency under storm catch-up, covered by maxStmLagBlocks`,
+      );
     }
     await check("SSE: exactly one terminal event per archived offer (while listening)", async () =>
       dupTerminal === 0 && missingTerminal === 0, `missing=${missingTerminal} dup=${dupTerminal}`);

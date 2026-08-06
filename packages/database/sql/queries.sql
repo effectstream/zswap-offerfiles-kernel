@@ -208,22 +208,13 @@ SELECT 1 AS present FROM known_tokens WHERE name = :name! LIMIT 1;
 /* @name GetTokenByColor */
 SELECT name FROM known_tokens WHERE token_color = :token_color! LIMIT 1;
 
-/* @name UpsertPairStatsByOfferId */
-INSERT INTO pair_stats (pair_key, base_color, quote_color, trade_count, last_price, last_traded_at)
-SELECT
-    LEAST(g.token_color, w.token_color) || '|' || GREATEST(g.token_color, w.token_color),
-    LEAST(g.token_color, w.token_color),
-    GREATEST(g.token_color, w.token_color),
-    1,
-    w.amount::numeric / NULLIF(g.amount::numeric, 0),
-    NOW()
-FROM offer_file_tokens_history g
-JOIN offer_file_tokens_history w ON w.offer_file_id = g.offer_file_id AND w.direction = 'WANTING'
-WHERE g.direction = 'GIVING' AND g.offer_file_id = :offer_id!
-ON CONFLICT (pair_key) DO UPDATE SET
-    trade_count    = pair_stats.trade_count + 1,
-    last_price     = EXCLUDED.last_price,
-    last_traded_at = EXCLUDED.last_traded_at;
+/* UpsertPairStatsByOfferId was removed from this file. queries.app.ts is
+   authoritative for it, and this copy still held BOTH defects its hand-written
+   version has since fixed: `w.amount / g.amount` with no base normalisation
+   (§2.2, inverted for half of all trades) and `NOW()` for last_traded_at (the
+   wall-clock stamp that broke replica determinism). Inert today — nothing
+   imports it — but it is the INPUT to `bun run pgtyped:update`, so regenerating
+   would resurrect both under the same exported name. */
 
 /* @name GetPairs */
 SELECT

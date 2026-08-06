@@ -23,10 +23,21 @@
 // TEST, not just the fix: a check that goes green the moment the defect is
 // removed, and was red before, has demonstrated it measures the defect.
 //
-// Masking risk is real and bounded: keys are exact full names, so a DIFFERENT
-// failure in the same phase still fails the run normally. Nothing here may be
-// added for a flake — an entry means "this asserts the truth and the product
-// is currently wrong", never "this is unreliable".
+// Masking risk, stated honestly. Keys are exact full names, so a different
+// CHECK in the same phase still fails normally — but that was never the real
+// exposure. The real one is a different CAUSE inside the SAME check, which the
+// key cannot distinguish. Two bounds on it:
+//
+//   • a THROWN exception is never demoted (see check() in lib/util.ts). The
+//     product being wrong is signalled by the assertion returning false, so a
+//     crash inside a registered check is unrelated breakage and fails the run.
+//   • an entry must name the defect in `why`, so a reviewer can tell whether a
+//     red's observed detail — which the scorecard prints — matches it.
+//
+// A residual gap remains: a check that returns false for a NEW reason, while
+// its registered defect also still exists, reads as the expected red. Nothing
+// here may be added for a flake — an entry means "this asserts the truth and
+// the product is currently wrong", never "this is unreliable".
 //
 // Rationale for each defect lives in PRODUCTION-READINESS.md §2.
 
@@ -56,23 +67,20 @@ export const KNOWN_RED: Record<string, KnownRed> = {
     id: "RED-8", pr: "PR-G", why: "expiresAt uses raw last_seen_ms, no MAX(height) escape (§2.6)",
   },
 
-  // NOT REGISTERED YET, and both for the same reason — the FIXTURE does not
-  // exist, so registering the check would produce a permanently-stale entry
-  // that reads as work-in-flight when nothing is in flight:
+  // §2.4 (cross-layer) and §2.5 (basket offers) are NOT registered — but no
+  // longer for the reason this block used to give.
   //
-  // §2.4 cross-layer (PR-E). Needs a GENUINE cross-layer transaction, which
-  //   wallet-sdk-facade cannot build — it silently drops the mismatched leg
-  //   (ISSUES.md §3), which is what p4's one-sided NOT_A_SWAP fixture exploits.
-  //   Constructing one means merging a shielded give-only tx with an unshielded
-  //   want-only tx via the ledger's Transaction.merge, and whether the ledger
-  //   permits that combination is itself unknown. Until then the rule is
-  //   unenforced AND untested — recorded in PRODUCTION-READINESS.md §2.4.
+  // It said the fixtures could not be built because wallet-sdk-facade drops the
+  // mismatched leg. probe-cross-layer.ts refuted that: a wallet is not the only
+  // way to make a transaction — balancing IS a merge, and the ledger exposes
+  // Transaction.merge() directly. Both gaps are now CONFIRMED REACHABLE and
+  // both have rulings (§2.4 REJECT, §2.5 ACCEPT-but-exclude-from-market-data).
   //
-  // §2.5 multi-leg (PR-F). A same-layer 3-leg offer needs THREE colors on one
-  //   layer; the suite mints two per layer (TA/TB, UA/UB), and a cross-layer
-  //   third leg is unbuildable for the reason above. Adding a third shielded
-  //   color to setupActors is the prerequisite, and the ruling on what the
-  //   behaviour should even be is still open.
+  // What is still missing is the e2e FIXTURE, not the knowledge. Registering a
+  // check that does not exist yet would produce a permanently-stale entry that
+  // reads as work in flight. Their deterministic reds already live at unit
+  // level: packages/database/multileg-pairs.test.ts for §2.5, and
+  // probe-cross-layer.ts reproduces §2.4 in seconds with no stack.
 };
 
 /** Registered ids that never appeared in a run — a stale registry hides work. */

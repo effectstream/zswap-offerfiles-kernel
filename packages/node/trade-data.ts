@@ -77,7 +77,12 @@ async function currentMid(dbConn: any, base: string, quote: string): Promise<num
  * means an empty chain with no fills to window anyway.
  */
 async function chainWindowStart(dbConn: any): Promise<Date> {
-  const tip = await getLatestEffectstreamBlock.run(undefined, dbConn).catch(() => []);
+  // No .catch() here. The ternary below already covers the documented
+  // empty-chain case, so a catch would only swallow GENUINE faults — a dropped
+  // connection, a missing relation — and silently revert this to the wall clock,
+  // which is the exact bug this function exists to fix. api.ts:639 does the same
+  // lookup uncaught for the root-window gate; match it.
+  const tip = await getLatestEffectstreamBlock.run(undefined, dbConn);
   const ms = tip[0]?.ms_timestamp != null ? Number(tip[0].ms_timestamp) : Date.now();
   return new Date(ms - 24 * 60 * 60 * 1000);
 }

@@ -441,18 +441,15 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
     // them. They can disagree indefinitely, serving two different last prices
     // depending on which route the client calls.
     //
-    // §2.2: they DO disagree today. upsertPairStatsByOfferId assigns base/quote
-    // by LEAST/GREATEST of the hex color but computes last_price as want÷give
-    // with no reference to which became base, so the value is quote-per-base
-    // only when the maker gave the lexically-lesser color and 1/p otherwise.
+    // §2.2 is FIXED (PR-C), so this now gates on FULL agreement.
     //
-    // That defect is NOT asserted here, because whether it manifests depends on
-    // the direction of each pair's most recent fill — data-dependent, so a
-    // registered red would be a coin flip. Its deterministic red lives in
-    // packages/database/fill-vs-cancel.test.ts, which chooses the color
-    // ordering. What IS asserted here is the part that does not depend on luck:
-    // the two routes must not disagree in any way OTHER than that inversion.
-    // After PR-C there should be no disagreement at all.
+    // It used to tolerate `a * b ≈ 1` disagreements as an expected note, because
+    // the inversion's deterministic red lives in fill-vs-cancel.test.ts (whether
+    // it manifests e2e depends on the direction of each pair's most recent fill,
+    // so a registered red here would be a coin flip). That tolerance was correct
+    // while the defect existed and is a hole now: it would let a regression of
+    // exactly the fixed bug pass unnoticed. Inversions are counted separately
+    // only so a failure says WHICH kind of disagreement it found.
     const inverted: string[] = [];
     const unexplained: string[] = [];
     for (const p of pairRows as any[]) {
@@ -465,17 +462,13 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
       if (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a * b - 1) < 1e-6) inverted.push(line);
       else unexplained.push(line);
     }
-    if (inverted.length > 0) {
-      note(
-        "last_price inversion (§2.2, PR-C)",
-        `${inverted.length} pair(s) where the two routes multiply to 1 — the known ` +
-          `want÷give vs quote-per-base defect: ${inverted.slice(0, 3).join("; ")}`,
-      );
-    }
     await check(
-      "/v1/pairs and /v1/chart/stats disagree only by the known inversion",
-      async () => unexplained.length === 0,
-      unexplained.slice(0, 4).join("; "),
+      "/v1/pairs last_price agrees with /v1/chart/stats",
+      async () => inverted.length === 0 && unexplained.length === 0,
+      [
+        inverted.length ? `INVERTED (§2.2 regression): ${inverted.slice(0, 3).join("; ")}` : "",
+        unexplained.length ? `other: ${unexplained.slice(0, 3).join("; ")}` : "",
+      ].filter(Boolean).join(" | "),
     );
 
     // Ordering is only meaningful now that last_traded_at is chain time.

@@ -16,11 +16,23 @@ and commit messages use them.
 **Nothing below has been executed.** Each item carries its plan, its red, its
 fix and its verification.
 
-Two revisions are folded in: an independent review that found five blocking gaps
-(all five verified against the tree, all five held, two worse than reported),
-and the decision that **breaking changes are free — nothing is deployed, and no
-retro-compatible change is wanted anywhere.** That second ruling closed one item
-outright and reshaped three others.
+Three revisions are folded in: an independent review that found five blocking
+gaps (all verified, all held, two worse than reported); the ruling that
+**breaking changes are free — nothing is deployed, and no retro-compatible
+change is wanted anywhere**; and a **second independent review of this file**,
+whose four blocking findings all held on verification. That second review is
+worth summarising, because three of its findings were fixes that would not have
+worked:
+
+- the proposed pgtyped CI guard **passes in exactly the case it exists to catch**
+  (#16);
+- PR-I's attribution rule **cancels a legitimate settlement** (#5, t4);
+- PR-G still let advertised expiry and actual deletion disagree, just inverted
+  (#4);
+- and T-E5's "two wallets" plan **would not have been concurrent at all** (#12).
+
+It also closed #17 outright by finding the grammar file, and corrected a batcher
+capacity number I had been reasoning from (#3).
 
 ---
 
@@ -41,10 +53,10 @@ outright and reshaped three others.
 | 11 | T-A2 unreachable reject codes | ruling | doc |
 | 12 | T-E2 / T-E5 deferred coverage | coverage | suite-only |
 | 13 | Reorg recovery — **all derived state** | production decision | needs ruling |
-| 14 | Runner not host-isolated | scope question | **needs your call** |
+| 14 | Runner not host-isolated | **disputed premise** | **needs your call** |
 | 15 | The closing sweep | closeout | PR-J |
-| 16 | **pgtyped regeneration can silently break again** | new — no guard | small |
-| 17 | **`outputIndex ?? outputNo` shim unconfirmed** | new — flagged, untouched | needs grammar |
+| 16 | pgtyped regeneration can silently break again | new — no guard | small |
+| 17 | ~~`outputIndex ?? outputNo` shim~~ | **RESOLVED** — grammar confirmed, shim removed | §17 |
 
 ### Execution order
 
@@ -199,9 +211,20 @@ has shipped and #2 confirms it.
 **How to fix.** By cause only. Stale processes → already fixed, close. A new
 index on the write path → drop it (the history `first_seen_at` index is already
 marked droppable in the schema comment). Box contention → rerun quiet. Suite
-outgrew the dev batcher (one wallet, `maxSlotsPerWallet=1`, ~25 s/tx, ~14 new
-on-chain offers) → **provisioning decision**. The standing rule is absolute: do
-NOT widen the 3-minute index-wait to make it pass.
+outgrew the dev batcher (~25 s/tx, ~14 new on-chain offers) → **provisioning
+decision**. The standing rule is absolute: do NOT widen the 3-minute index-wait
+to make it pass.
+
+**Correction on batcher capacity — do not reason from either configured value.**
+Earlier notes said `maxSlotsPerWallet=1`; that is the code DEFAULT
+([config.ts:86](../../batcher/config.ts:86)), while
+[start-stack.sh:28](start-stack.sh:28) exports **7**. Neither is the real
+concurrency: [config.ts:14](../../batcher/config.ts:14) computes
+`min(floor(dustUtxoCount / costPerTx), maxSlotsPerWallet)`, so **available dust
+bounds it** and the effective number can be anything from 1 to 7 run to run.
+Record the batcher's startup `worker slots: N` line as a run artefact and reason
+from that. (Note `wallets.ts` still describes "the single worker" in a comment —
+written against the default, and now misleading.)
 
 **How to verify.** Two consecutive runs inside the historical band. One proves
 nothing — the failure was intermittent.
@@ -244,17 +267,27 @@ TTL wins, nothing regresses.
   minimum. Explicitly *not* `MIN(last_seen_ms)` plus a separate is-current flag:
   that lets a current root's freshness extend a superseded root's window. Per
   root: `isCurrent ? max(last_seen_ms, blockTimestamp) : last_seen_ms`, `+
-  ROOT_WINDOW_SECONDS`; then `min(...)`.
-- **Scheduling (~line 742).** `future_ms_timestamp = min(derived expiresAt,
-  blockTimestamp + OFFER_TTL_SECONDS)`. The policy TTL stays an upper bound; the
-  derived expiry can only pull cleanup earlier.
+  ROOT_WINDOW_SECONDS`; then `min(...)` → call it `layerDeadline`.
+- **ONE value, used twice.** Applying the policy minimum only to the scheduler
+  reopens the defect from the other side: if the policy TTL is SHORTER than the
+  derived deadline, the API advertises an expiry later than the actual deletion
+  — still a lie, just inverted. So compute
+
+      effectiveExpiresAt = min(layerDeadline, blockTimestamp + OFFER_TTL_SECONDS)
+
+  store *that* in `metadata_expires_at`, and schedule cleanup (~line 742) at the
+  *same* value. The advertised expiry and the actual deletion are then the same
+  fact by construction, not by two calculations that happen to agree.
 
 Preserve both existing properties: the value stays a **conservative floor**, and
 stays **deterministic on replay** — every input is a chain fact.
 
-**How to verify.** Unit red→green on all five, asserting expiry *and* schedule;
-full run with p8's expiry check green, `KNOWN_RED` **empty**, p7a identical.
-Land as two commits: red first, then fix + RED-8 deletion.
+**How to verify.** Unit red→green on all five cases, each asserting **equality
+between the stored `metadata_expires_at` and the scheduled cleanup timestamp** —
+that equality is the invariant, and testing the two independently is what let
+them drift in the first place. Then a full run with p8's expiry check green,
+`KNOWN_RED` **empty**, p7a identical. Land as two commits: red first, then fix +
+RED-8 deletion.
 
 ---
 
@@ -299,10 +332,13 @@ the first ones landed `test.failing` (this repo's unit-red mechanism, cf.
   payout → **exactly one** `consumed`. This is requirement (e). Today both.
 - **t3 honest batch (must stay green):** X, Y disjoint, one tx paying 20 twice →
   both `consumed`.
-- **t4 unequal alternatives:** same spend-set but *different* marker counts or
-  partially overlapping marker tuples — "dedupe by spend-set" alone does not say
-  which demand represents the group. Define it: the group's demand is that of
-  the offer winning attribution.
+- **t4 unequal alternatives — the counterexample that kills naive ordering:**
+  same spend-set, earlier alternative declares TWO identical 20-UB markers,
+  later alternative declares ONE, and the settlement supplies ONE. Ordering by
+  `(celestia_height, offer_hash)` picks the earlier offer, sees demand 2 vs
+  supply 1, and reports a false shortfall — cancelling a transaction that
+  legitimately settled the later alternative. Assert the later one reads
+  `consumed`.
 - **t5 projection consistency:** drive X and Y's spends as two separate
   transitions and assert `pair_stats` after both, not just final status. Must
   fail on today's emit-per-transition ordering.
@@ -314,9 +350,20 @@ the first ones landed `test.failing` (this repo's unit-red mechanism, cf.
 ([queries.app.ts](../../database/sql/queries.app.ts)), per settling tx and
 `(owner, token_type, value)`: supply = matching `unshielded_creates` rows for
 that tx; demand = Σ `count` over attributing offers, **deduped by spend-set**;
-shortfall ⇒ all `cancelled`. Among same-spend-set duplicates, attribution is
-deterministic and keyed on **`(celestia_height, offer_hash)`** — the same tuple
-#1 adopts, and for the same reason.
+shortfall ⇒ all `cancelled`.
+
+**Attribution is a feasibility problem, not a sort.** Choosing the
+same-spend-set winner by `(celestia_height, offer_hash)` up front is wrong — t4
+shows it manufacturing a shortfall against a settlement that really did fill one
+of the alternatives. The rule must be:
+
+1. Find a **globally feasible assignment** of at most one alternative per
+   spend-set whose combined demand fits the transaction's output multiset.
+2. Only if several assignments are feasible does `(celestia_height, offer_hash)`
+   break the tie — deterministically, so replicas agree.
+3. Shortfall means **no** feasible assignment exists. That is what makes the
+   "honest settlements cannot underpay" argument sound: it licenses cancelling
+   everything only when nothing could have been legitimately settled.
 
 For the race, one of three, in preference order:
 
@@ -324,9 +371,12 @@ For the race, one of three, in preference order:
    tx-complete signal the per-output primitive does not obviously provide.
    **Unresolved: confirm whether any such signal exists before committing to
    this.**
-2. **Make pair-stat updates idempotently recompute** from final classified
-   history rather than incrementing per event — self-healing, and it subsumes
-   #10 entirely.
+2. **Recompute `pair_stats` from final classified history.** Note "idempotent
+   upsert" is NOT sufficient and the earlier wording was too loose: an upsert
+   that increments cannot retract a stale increment already written by an
+   earlier transition. This has to be an **atomic replacement** of the affected
+   `pair_stats` rows — delete-and-rebuild for the touched pair keys inside one
+   transaction — or the divergence survives the fix.
 3. **Persist final attribution before emitting** market-data events.
 
 Heavier SQL than the current per-offer correlate; a read-time CTE over "offers
@@ -435,11 +485,12 @@ query never promised, and its failure is not necessarily intermittent — the ti
 theory was built on a misreading. There is also no final deterministic
 tiebreaker, so full ties order arbitrarily.
 
-**How to test.** #2's run records the current result, but do not chase it —
-first **decide the contract**: most-liquid-first (current behaviour) or
-most-recently-traded-first (the assertion's claim). Then align query, assertion
-and docs, and add a unit test seeding identical `open_count` *and* identical
-`last_traded_at` to prove the tiebreaker.
+**How to test.** #2's run records the current *behaviour*, but it cannot settle
+this — **a run measures what the query does, not what the API should promise.**
+This needs an explicit ruling before query, docs and assertion change:
+most-liquid-first (current behaviour) or most-recently-traded-first (the
+assertion's claim). Once ruled, add a unit test seeding identical `open_count`
+*and* identical `last_traded_at` to prove the tiebreaker.
 
 **How to fix.** Recommended: keep `open_count DESC` — a market UI usually wants
 liquidity first with recency secondary, which is what the SQL already does. Fix
@@ -464,11 +515,14 @@ but is **not proven** to explain the historical spikes — that run was calmer.
 **How to test.** Harvest CONSUMED-only p50/p95 from 2–3 clean runs (#2 is sample
 one). Samples from any run failing the `maxLagBlocks` gate are void.
 
-**How to fix.** Store the **observed** p50 and p95 as-is, with no baked-in
-headroom: [metrics.ts:137](metrics.ts:137) already enforces `baseline × 1.2`, so
-adding a further ~1.5× would compound to 1.8× and gate almost nothing. Record
-the source run IDs in the existing `_note` field, which already carries this
-kind of provenance.
+**How to fix.** No baked-in headroom: [metrics.ts:137](metrics.ts:137) already
+enforces `baseline × 1.2`, so a further ~1.5× would compound to 1.8× and gate
+almost nothing. "Observed as-is" was underspecified for a multi-run sample —
+state the rule: **take the MAXIMUM per-run p50 and the maximum per-run p95
+across all valid clean runs**, and let the existing 1.2 supply the tolerance.
+Max, not mean: the baseline must not go red on the noisiest run we already
+consider healthy. Record the source run IDs in the existing `_note` field, which
+already carries this kind of provenance.
 
 **How to verify.** The next run gates on the new keys and passes; the scorecard
 shows measured values within `baseline × 1.2`.
@@ -536,12 +590,26 @@ never spent), **cannot settle**, and produces **no print**.
 
 **T-E5, two takers one coin.** Settlements cannot go through the Celestia door —
 that door carries offer blobs; settlements go through the Midnight
-batcher/chain. Use **two independently funded taker wallets** and submit both
-finalized transactions concurrently (the dev batcher's single-wallet
-serialisation is exactly what two wallets sidestep). Assert: exactly one lands;
-the loser fails cleanly with the **batcher/chain double-spend error** — *not*
-`UTXO_NOT_LIVE`, which is an offer-ingestion API code and would be the wrong
-assertion; the offer archives `CONSUMED` exactly once; exactly one print.
+batcher/chain. Assert: exactly one lands; the loser fails cleanly with the
+**batcher/chain double-spend error** — *not* `UTXO_NOT_LIVE`, which is an
+offer-ingestion API code and would be the wrong assertion; the offer archives
+`CONSUMED` exactly once; exactly one print.
+
+**Two wallets are NOT enough to make it concurrent, and the earlier plan was
+wrong to assume so.** Every `/send-input` is chained through one module-level
+`balancerChain` in
+[wallets.ts:216](actors/wallets.ts:216) — a *client-side* serialisation whose own
+comment says concurrent POSTs can sit unanswered past any sane fetch timeout —
+and `settleOffer` submits through exactly that path
+([wallets.ts:798](actors/wallets.ts:798)). Two funded wallets still queue behind
+each other. The test therefore needs:
+
+- a deliberate **concurrent submission helper that bypasses `balancerChain`**,
+  used only by this fixture;
+- proof the batcher really has ≥2 worker slots (see #3 — read the startup
+  `worker slots: N` line, do not assume);
+- proof **both requests were in flight before the first receipt**, otherwise the
+  test passes while having proved nothing about the race.
 
 **How to fix.** Nothing, unless they find something.
 
@@ -561,10 +629,13 @@ resync. Two corrections from the review, both material:
   `commitments`, `unshielded_creates`/`unshielded_spends`, `known_roots` and
   Celestia offer insertions are all permanent-by-design records written from
   chain events. Buffering only destructive archives leaves every one corrupted.
-- **The obvious tripwire is too weak.** Global STM height monotonicity cannot
-  detect a **same-height source-block replacement** — the most common reorg
-  shape. Validate **parent/hash continuity in the sync layer**, where block
-  identity is still available.
+- **The obvious tripwire is too weak, and so was the first correction to it.**
+  Global STM height monotonicity cannot detect a same-height replacement — but
+  neither will the indexer ever *see* one: the fetch loop is sequential and
+  resumes at `lastHeight + 1`, so a replaced height is simply never re-requested.
+  The observable signature is **discontinuity**: block `h+1` whose parent is not
+  the hash we stored for `h`. Validate **parent/hash continuity in the sync
+  layer**, where block identity still exists.
 
 **How to test.** Fact-find first: can the effectstream feed, as this indexer
 consumes it, deliver a reorg — a height seen twice, a height going backwards, or
@@ -586,7 +657,16 @@ our STM input.
   buffer proves insufficient, since it reopens the history schema.
 
 **How to verify.** Finalized-only: invariant documented, continuity check
-unit-tested (feed a same-height different-hash block, assert the halt).
+unit-tested against the shape the fetch loop can actually produce — store block
+`(h, hashA)`, then feed `h+1` whose parent is **not** `hashA`, and assert the
+halt; plus a broken-continuity case *inside* a single fetched batch.
+
+**Known gap in that coverage, and it needs an upstream change:** Midnight
+exposes parent hashes, but effectstream's current Celestia output discards
+parent identity, so a continuity check can only cover one of the two sources
+today. Covering Celestia means an upstream sync change — size that before
+promising the check is complete.
+
 Buffered: boundary tests plus a full run confirming TTL scheduling and
 index-wait budgets survive N. Either way §6's row becomes "decided: <what>".
 
@@ -596,8 +676,20 @@ index-wait budgets survive N. Either way §6's row becomes "decided: <what>".
 
 ## 14. Runner host isolation — needs your call
 
-**Plan.** Raised by the review; **not adopted into the critical path**, because
-no isolation model was requested. The facts are true: `fresh-run.sh` binds fixed
+**Plan.** **Disputed premise — needs Edward to settle it.** Two independent
+reviews state that Docker Compose was explicitly requested "where practical, to
+avoid host-port collisions", and that a host-bound `fresh-run.sh` should
+therefore not be the default. I cannot corroborate that: there is no such
+request in this conversation, no `CLAUDE.md`/`AGENTS.md` in the repo, no
+`docker-compose*`/`compose.y*ml` anywhere in the tree, and nothing in project
+memory. It may well come from a session or instruction I do not have — which is
+exactly why this should not be silently adopted *or* silently dismissed.
+
+**If the request is real, this is not a "scope question" but a standing
+requirement, and #2 should not run host-bound until a Compose wrapper exists or
+it is documented why it cannot.** If it is not, the recommendation below stands.
+
+The underlying facts are true either way: `fresh-run.sh` binds fixed
 host ports (PGlite on 5432, the stack's service ports) and reaps by `pkill`
 pattern, so a concurrent run or an unrelated host process sharing a name
 collides. That is how the system-PostgreSQL collision and the `pkill` self-kill
@@ -635,9 +727,14 @@ updated, this queue emptied or archived.
 
 **How to verify.**
 
-    grep -rn "test\.failing" packages/ | wc -l   # → 0
+    rg -n 'test\.failing\s*\(' packages --glob '*.test.ts'   # no output, exit 1
 
-plus `KNOWN_RED` entry count 0, and one final full run: ~205+ checks, 0
+Scoped to test files and to actual *calls* on purpose: a bare
+`grep -rn "test\.failing" packages/` also matches this plan, the review notes and
+the commit messages that discuss the mechanism, so it can never reach zero and
+would make the sweep unfalsifiable. (Measured: 4 non-test-file matches today.)
+
+Plus `KNOWN_RED` entry count 0, and one final full run: ~205+ checks, 0
 failures, 0 expected reds, determinism identical.
 
 ---
@@ -654,48 +751,59 @@ stops it recurring** — the same silent-success path is still there.
 **How to test.** The guard is the test: regenerate in CI and fail if the output
 differs from what is committed.
 
-**How to fix.** A CI step, cheapest first:
+**How to fix.** **The obvious guard does not work, and it fails in exactly the
+way this item is about.** Naively:
 
     bun run build:pgtypes
-    git diff --exit-code packages/database/sql/queries.queries.ts
+    git diff --exit-code packages/database/sql/queries.queries.ts   # WRONG
 
-This catches both failure modes at once — a skipped regeneration (output stale
-vs. `queries.sql`) and an un-committed regeneration. If the generator's DB
-bootstrap is too heavy for the unit job, the weaker fallback is to grep
-`build:pgtypes` output for "Skipped" and fail on it; prefer the diff.
+When parsing fails, pgtyped leaves the existing generated file **untouched**, so
+the diff is empty and the step passes — the same silent success, one layer up.
+Grepping for "Skipped" is also unsafe: an unchanged *successful* generation
+legitimately reports it.
+
+Make the absence of output the failure. Either:
+
+- **Delete first, require recreation (preferred, no upstream change):**
+
+      rm packages/database/sql/queries.queries.ts
+      bun run build:pgtypes
+      git diff --exit-code packages/database/sql/queries.queries.ts
+
+  A skipped generation now leaves the file missing, so the diff fails loudly.
+
+- **Or make it fatal at the source:** have the generator wrapper propagate
+  pgtyped's `Error processing …` as a non-zero exit. Better for local runs too,
+  but it is an upstream change.
 
 **How to verify.** Deliberately break it — reintroduce a top-level `--` comment
-in `queries.sql`, confirm CI goes red, revert.
+in `queries.sql`, confirm CI goes red, revert. A guard that does not go red
+under that exact test is the guard we already had.
 
 ---
 
-## 17. NEW — confirm the `outputIndex ?? outputNo` payload shim
+## 17. RESOLVED — the `outputIndex ?? outputNo` shim is gone
 
-**Plan.** [state-machine.ts:248 and :330](../../node/state-machine.ts:248) read
-`payload?.outputIndex ?? payload?.outputNo`. It looks like a two-shape
-compatibility shim and was flagged during the retrocompat sweep, but it was
-**deliberately left in place**: `outputNo` is the ledger's own field name (see
-[derive.ts:79](../../validator/derive.ts:79)), so this may bridge two genuinely
-different sources rather than two versions of one.
+Left open only because the grammar package was not found in the worktree's
+`node_modules`. It is in the bun install cache, and it settles the question:
 
-Removing the wrong half fails **silently**: the `Number.isFinite` guard rejects
-the payload, logs "Skipping malformed unshielded-spend payload", and unshielded
-spends simply stop being recorded — taking fill-vs-cancel classification with
-them, which is the whole of §2.1.
+    @effectstream/sm@0.103.1/primitives/src/midnight-unshielded-spend/…-grammar.ts:12
+    @effectstream/sm@0.103.1/primitives/src/midnight-unshielded-create/…-grammar.ts:12
+        outputIndex: Type.Number()
 
-**How to test.** Read the `midnight-unshielded-{spend,create}` grammars and
-confirm which field the primitive emits. The package is **not installed in this
-tree** — that is why this is open rather than done. Failing that, assert on a
-live run: log which branch of the `??` fires across a full suite and see whether
-the second ever does.
+**Required, and `outputNo` appears in neither grammar.** It is the LEDGER's field
+name ([derive.ts:79](../../validator/derive.ts:79)), which is how the two came to
+be conflated in a transition reading STM payloads. Under the no-retrocompat
+ruling the alias is simply dead, so both sites now read `payload?.outputIndex`.
 
-**How to fix.** If the grammar emits only `outputIndex`, drop the `?? outputNo`
-and keep the guard. If both appear, keep the shim and **replace the comment
-with the reason**, so the next sweep does not re-flag it.
+The `Number(...)` coercion went with it, which matters more than the alias: a
+malformed payload must reach the `Number.isFinite` guard and be **rejected**, not
+be coerced toward `0` and silently attributed to the wrong UTXO. Same principle
+as the NOT NULL columns — do not fabricate evidence for a required field.
 
-**How to verify.** Whichever branch is taken: unshielded spend rows still land
-during a full run (p7b's audit already asserts stored spend refs equal the
-transaction's own UTXO triples, so a regression here fails loudly there).
+Verified: 182 tests pass, `run.ts` builds. p7b's deep audit is the standing
+regression guard, since it asserts stored spend refs equal the transaction's own
+UTXO triples.
 
 ---
 

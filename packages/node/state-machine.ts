@@ -245,10 +245,13 @@ addTransition("midnight-unshielded-spend", function* (data) {
   const { payload } = data.parsedInput;
   const owner = unshieldedOwnerToCanonicalHex(payload?.owner);
   const intentHash = bytesOrStringToHex(payload?.intentHash);
-  const outputNoRaw = payload?.outputIndex ?? payload?.outputNo;
-  const outputNo = typeof outputNoRaw === "number"
-    ? outputNoRaw
-    : Number(outputNoRaw);
+  // midnight-unshielded-{spend,create}-grammar.ts declare outputIndex as a
+  // REQUIRED Type.Number(); `outputNo` appears nowhere on the wire — it is the
+  // LEDGER's field name (see validator/derive.ts), which is why the two were
+  // once conflated here. No coercion either: a non-number is a malformed
+  // payload for the guard below to reject, and coercing would silently
+  // attribute the spend to output 0 — the wrong UTXO.
+  const outputNo = payload?.outputIndex;
 
   if (!owner || !intentHash || !Number.isFinite(outputNo)) {
     console.warn(
@@ -327,10 +330,13 @@ addTransition("midnight-unshielded-create", function* (data) {
   const { payload } = data.parsedInput;
   const owner = unshieldedOwnerToCanonicalHex(payload?.owner);
   const intentHash = bytesOrStringToHex(payload?.intentHash);
-  const outputNoRaw = payload?.outputIndex ?? payload?.outputNo;
-  const outputNo = typeof outputNoRaw === "number"
-    ? outputNoRaw
-    : Number(outputNoRaw);
+  // midnight-unshielded-{spend,create}-grammar.ts declare outputIndex as a
+  // REQUIRED Type.Number(); `outputNo` appears nowhere on the wire — it is the
+  // LEDGER's field name (see validator/derive.ts), which is why the two were
+  // once conflated here. No coercion either: a non-number is a malformed
+  // payload for the guard below to reject, and coercing would silently
+  // attribute the spend to output 0 — the wrong UTXO.
+  const outputNo = payload?.outputIndex;
 
   if (!owner || !intentHash || !Number.isFinite(outputNo)) {
     console.warn("[MIDNIGHT] Skipping malformed unshielded-create payload", payload);

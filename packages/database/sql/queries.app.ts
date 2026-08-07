@@ -183,7 +183,7 @@ archived_commitments AS (
 )
 DELETE FROM offer_file
 WHERE id IN (SELECT offer_file_id FROM matched)
-RETURNING id`;
+RETURNING id, offer_hash`;
 
 
 // ── Sync health — effectstream framework schema ────────────────────────────
@@ -790,7 +790,7 @@ export const resolveOfferCursor = prepared<IResolveOfferCursorParams, IResolveOf
        LIMIT 1`,
 );
 
-export interface IArchiveOfferResult { id: number }
+export interface IArchiveOfferResult { id: number; offer_hash: string | null }
 
 export interface IArchiveOfferByNullifierWithHashParams { nullifier: string; archived_at: DateOrString }
 export const archiveOfferByNullifierWithHash = prepared<IArchiveOfferByNullifierWithHashParams, IArchiveOfferResult>(

@@ -153,6 +153,7 @@
         "@zswap-da/contract-offer-files": "workspace:*",
         "@zswap-da/database": "workspace:*",
         "@zswap-da/offer-guard": "workspace:*",
+        "@zswap-da/solver-core": "workspace:*",
         "@zswap-da/validator": "workspace:*",
         "effection": "^3.5.0",
         "rxjs": "^7.8.2",
@@ -173,6 +174,33 @@
         "@scure/base": "^2.0.0",
       },
     },
+    "packages/solver": {
+      "name": "@zswap-da/solver",
+      "version": "0.1.0",
+      "dependencies": {
+        "@effectstream/midnight-contracts": "0.103.1",
+        "@effectstream/mip-zswap-offer": "0.3.0",
+        "@effectstream/utils": "0.103.1",
+        "@midnight-ntwrk/ledger-v8": "8.1.0",
+        "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+        "@zswap-da/solver-core": "workspace:*",
+        "rxjs": "^7.8.2",
+      },
+    },
+    "packages/solver-core": {
+      "name": "@zswap-da/solver-core",
+      "version": "0.1.0",
+      "dependencies": {
+        "@effectstream/midnight-contracts": "0.103.1",
+        "@effectstream/mip-zswap-offer": "0.3.0",
+        "@midnight-ntwrk/compact-js": "2.5.1",
+        "@midnight-ntwrk/ledger-v8": "8.1.0",
+        "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
+        "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
+        "@zswap-da/contract-offer-files": "workspace:*",
+        "rxjs": "^7.8.2",
+      },
+    },
     "packages/tests": {
       "name": "@zswap-da/tests",
       "version": "0.1.0",
@@ -190,6 +218,7 @@
         "@scure/base": "^2.0.0",
         "@zswap-da/contract-offer-files": "workspace:*",
         "@zswap-da/offer-guard": "workspace:*",
+        "@zswap-da/solver-core": "workspace:*",
         "@zswap-da/validator": "workspace:*",
         "effection": "^3.5.0",
         "pg": "^8.14.0",
@@ -1130,6 +1159,10 @@
     "@zswap-da/node": ["@zswap-da/node@workspace:packages/node"],
 
     "@zswap-da/offer-guard": ["@zswap-da/offer-guard@workspace:packages/offer-guard"],
+
+    "@zswap-da/solver": ["@zswap-da/solver@workspace:packages/solver"],
+
+    "@zswap-da/solver-core": ["@zswap-da/solver-core@workspace:packages/solver-core"],
 
     "@zswap-da/tests": ["@zswap-da/tests@workspace:packages/tests"],
 
@@ -2485,6 +2518,8 @@
 
     "@zswap-da/node/@midnight-ntwrk/compact-js": ["@midnight-ntwrk/compact-js@2.5.1", "", { "dependencies": { "@effect/platform": "^0.95.0", "@midnight-ntwrk/compact-runtime": "0.16.0", "@midnight-ntwrk/ledger-v8": "^8.0.3", "@midnight-ntwrk/platform-js": "^2.2.4", "effect": "^3.20.0", "tslib": "^2.8.1" } }, "sha512-UO0+tDiRadYFO2kaUu9PIhAOISvDKvmiyh9vSOyKEZLj3AUAY1qmmHm/oQrzPqrkiWHO0Rnln/j/zZ5dvc5vxg=="],
 
+    "@zswap-da/solver-core/@midnight-ntwrk/compact-js": ["@midnight-ntwrk/compact-js@2.5.1", "", { "dependencies": { "@effect/platform": "^0.95.0", "@midnight-ntwrk/compact-runtime": "0.16.0", "@midnight-ntwrk/ledger-v8": "^8.0.3", "@midnight-ntwrk/platform-js": "^2.2.4", "effect": "^3.20.0", "tslib": "^2.8.1" } }, "sha512-UO0+tDiRadYFO2kaUu9PIhAOISvDKvmiyh9vSOyKEZLj3AUAY1qmmHm/oQrzPqrkiWHO0Rnln/j/zZ5dvc5vxg=="],
+
     "@zswap-da/tests/@midnight-ntwrk/compact-js": ["@midnight-ntwrk/compact-js@2.5.1", "", { "dependencies": { "@effect/platform": "^0.95.0", "@midnight-ntwrk/compact-runtime": "0.16.0", "@midnight-ntwrk/ledger-v8": "^8.0.3", "@midnight-ntwrk/platform-js": "^2.2.4", "effect": "^3.20.0", "tslib": "^2.8.1" } }, "sha512-UO0+tDiRadYFO2kaUu9PIhAOISvDKvmiyh9vSOyKEZLj3AUAY1qmmHm/oQrzPqrkiWHO0Rnln/j/zZ5dvc5vxg=="],
 
     "algosdk/js-sha3": ["js-sha3@0.8.0", "", {}, "sha512-gF1cRrHhIzNfToc802P800N8PpXS+evLLXfsVpowqmAFR9uwbi89WvXg2QspOmXL8QL86J4T1EpFu+yUkwJY3Q=="],
@@ -2708,6 +2743,8 @@
     "@zswap-da/docs-playground/@midnight-ntwrk/compact-js/@midnight-ntwrk/compact-runtime": ["@midnight-ntwrk/compact-runtime@0.16.0", "", { "dependencies": { "@midnight-ntwrk/onchain-runtime-v3": "^3.0.0", "@types/object-inspect": "^1.8.1", "object-inspect": "^1.12.3" } }, "sha512-UR8+MI5zol+gkne17ZZru8xmZNf11xMgQJkiLT9KWsF+QD8Wuz1WONaqQLL0RAZ2aN2XlRsBFd0ViKDVh8prFw=="],
 
     "@zswap-da/node/@midnight-ntwrk/compact-js/@midnight-ntwrk/compact-runtime": ["@midnight-ntwrk/compact-runtime@0.16.0", "", { "dependencies": { "@midnight-ntwrk/onchain-runtime-v3": "^3.0.0", "@types/object-inspect": "^1.8.1", "object-inspect": "^1.12.3" } }, "sha512-UR8+MI5zol+gkne17ZZru8xmZNf11xMgQJkiLT9KWsF+QD8Wuz1WONaqQLL0RAZ2aN2XlRsBFd0ViKDVh8prFw=="],
+
+    "@zswap-da/solver-core/@midnight-ntwrk/compact-js/@midnight-ntwrk/compact-runtime": ["@midnight-ntwrk/compact-runtime@0.16.0", "", { "dependencies": { "@midnight-ntwrk/onchain-runtime-v3": "^3.0.0", "@types/object-inspect": "^1.8.1", "object-inspect": "^1.12.3" } }, "sha512-UR8+MI5zol+gkne17ZZru8xmZNf11xMgQJkiLT9KWsF+QD8Wuz1WONaqQLL0RAZ2aN2XlRsBFd0ViKDVh8prFw=="],
 
     "@zswap-da/tests/@midnight-ntwrk/compact-js/@midnight-ntwrk/compact-runtime": ["@midnight-ntwrk/compact-runtime@0.16.0", "", { "dependencies": { "@midnight-ntwrk/onchain-runtime-v3": "^3.0.0", "@types/object-inspect": "^1.8.1", "object-inspect": "^1.12.3" } }, "sha512-UR8+MI5zol+gkne17ZZru8xmZNf11xMgQJkiLT9KWsF+QD8Wuz1WONaqQLL0RAZ2aN2XlRsBFd0ViKDVh8prFw=="],
 

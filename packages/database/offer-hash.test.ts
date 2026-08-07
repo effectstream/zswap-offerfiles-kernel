@@ -141,6 +141,10 @@ test("archiveOfferByNullifierWithHash carries offer_hash into history", async ()
     client,
   );
   expect(archived.length).toBe(1);
+  // The archive result is what the state machine turns into an `offer_consumed`
+  // event; without offer_hash a consumer has only the local row id and cannot
+  // correlate the event with anything the REST API exposes.
+  expect(archived[0].offer_hash).toBe(HASH_B);
 
   const hist = await client.query(
     "SELECT offer_hash, archive_reason, archived_at FROM offer_file_history WHERE id = $1",

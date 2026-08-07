@@ -1,0 +1,48 @@
+{
+  "tokens": {
+    "TESTA": "ea536508097b4d5c33e444c0e15f2b0b50e3d6277b6a5535ad877b7595098b64",
+    "TESTB": "b3ca74538249b3d8c57cb464968f14735fda823d9a3a16ea13d881fab964a803"
+  },
+  "refPricesUsd": {
+    "TESTA": 1,
+    "TESTB": 1
+  },
+  "pairs": [
+    {
+      "tokenIn": "TESTA",
+      "tokenOut": "TESTB",
+      "levels": [
+        {
+          "input": "1000",
+          "output": "1000"
+        },
+        {
+          "input": "100000",
+          "output": "99000"
+        },
+        {
+          "input": "1000000",
+          "output": "970000"
+        }
+      ]
+    },
+    {
+      "tokenIn": "TESTB",
+      "tokenOut": "TESTA",
+      "levels": [
+        {
+          "input": "1000",
+          "output": "1000"
+        },
+        {
+          "input": "100000",
+          "output": "99000"
+        },
+        {
+          "input": "1000000",
+          "output": "970000"
+        }
+      ]
+    }
+  ]
+}

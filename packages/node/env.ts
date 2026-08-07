@@ -104,6 +104,24 @@ export const OFFER_MAX_BYTES = parseInt(
   getEnv("OFFER_MAX_BYTES") ?? String(1024 * 1024),
 );
 
+// Per-IP request budget for the /v1 API, and IPs exempt from it. A co-located
+// automated client (a solver mirroring the book) bursts well past the shared
+// default during an initial page-through plus a settlement's status polls, so
+// its host is allowlisted rather than the global budget being raised for
+// everyone. Empty allowlist by default — an operator opts in per deployment.
+//
+// Read per call, not once at import, so a caller that sets the vars before
+// building a router gets them — the same reason isTokenRegistryEnabled below
+// is a function.
+export const apiRateLimitMax = (): number =>
+  parseInt(getEnv("API_RATE_LIMIT_MAX") ?? "60");
+
+export const apiRateLimitAllowList = (): string[] =>
+  (getEnv("API_RATE_LIMIT_ALLOWLIST") ?? "")
+    .split(",")
+    .map((ip) => ip.trim())
+    .filter((ip) => ip.length > 0);
+
 // Demo token registry (POST /api/known-tokens). known_tokens is a manually
 // curated convenience table: the Midnight token-metadata standard is not live,
 // so any name written here is unverified and any operator can claim any name

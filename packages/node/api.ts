@@ -23,7 +23,7 @@ import {
   resolveOfferCursor,
 } from "@zswap-da/database";
 
-import { isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WINDOW_SECONDS, midnightContract } from "./env.ts";
+import { apiRateLimitAllowList, apiRateLimitMax, isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WINDOW_SECONDS, midnightContract } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
@@ -34,6 +34,12 @@ import { getSyncStatus } from "./sync-health.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
+import {
+  MAX_PAIRS_PER_PUSH,
+  solverLevels,
+  validatePair,
+  type SolverPriceLevels,
+} from "./solver-levels.ts";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
 
@@ -45,7 +51,8 @@ export const apiRouter: StartConfigApiRouter = async function (
   server: any,
   dbConn: any,
 ): Promise<void> {
-  // 60 requests/min per IP — applied to every route in this router.
+  // Per-IP request budget (default 60/min) — applied to every route in this
+  // router.
   //
   // `statusCode` is load-bearing, not decoration: @fastify/rate-limit THROWS
   // whatever this builder returns (`throw params.errorResponseBuilder(...)`),
@@ -55,7 +62,8 @@ export const apiRouter: StartConfigApiRouter = async function (
   // clients "server fault" instead of "back off", so no caller could throttle
   // itself. Verified: 90 requests gave {200:56, 500:34}.
   await server.register(rateLimit, {
-    max: 60,
+    max: apiRateLimitMax(),
+    allowList: apiRateLimitAllowList(),
     timeWindow: "1 minute",
     errorResponseBuilder: () => ({
       statusCode: 429,
@@ -358,11 +366,72 @@ export const apiRouter: StartConfigApiRouter = async function (
     const fromAmount = BigInt(digits((q as any).from_amount) || "0");
     const toRaw = digits((q as any).to_amount);
     const toAmount = toRaw.length ? BigInt(toRaw) : undefined;
+
+    // A solver's posted ladder is a price someone will actually honour, so it
+    // outranks both the token_prices table and the demo fallback below it.
+    const posted = solverLevels.quote(fromToken, toToken, fromAmount, Date.now());
+    if (posted !== null && fromAmount > 0n) {
+      const rate = Number(posted) / Number(fromAmount);
+      return {
+        from_token: fromToken,
+        to_token: toToken,
+        from_amount: fromAmount.toString(),
+        market_rate: rate,
+        suggested_to_amount: posted.toString(),
+        to_amount: (toAmount ?? posted).toString(),
+        implied_rate: toAmount === undefined ? rate : Number(toAmount) / Number(fromAmount),
+        discount: toAmount === undefined ? 0 : Number(posted - toAmount) / Number(posted),
+        sponsored: toAmount !== undefined && toAmount < posted,
+        source: "solver-levels",
+      };
+    }
+
     const priceFor = (color: string) =>
       unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
     const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
-    return quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount);
+    return {
+      ...quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount),
+      source: unknownTokens.length > 0 ? "demo-fallback" : "token-prices",
+    };
   });
+
+  // POST /v1/solver/levels — a solver publishes its price ladders.
+  //
+  // Unauthenticated: any caller can post prices the quote endpoint will serve.
+  // Acceptable on a dev stack where the solver is co-located; NOT acceptable on
+  // any deployment whose quotes anyone trusts.
+  // TODO(solver-auth): require a shared secret or signature before deploying.
+  server.post("/v1/solver/levels", async (request: any, reply: any) => {
+    const body = request?.body ?? {};
+    const solverId = String(body.solverId ?? "").trim();
+    if (!solverId || solverId.length > 128) {
+      return reply.code(400).send({ error: "VALIDATION", reason: "solverId is required" });
+    }
+    const pairs = body.pairs;
+    if (!Array.isArray(pairs) || pairs.length === 0 || pairs.length > MAX_PAIRS_PER_PUSH) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: `pairs must be a non-empty array of at most ${MAX_PAIRS_PER_PUSH} entries`,
+      });
+    }
+    // All-or-nothing: a partially applied push would leave the registry
+    // describing a price curve no solver ever published.
+    const invalid = pairs.findIndex((pair: unknown) => !validatePair(pair));
+    if (invalid !== -1) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason:
+          `pairs[${invalid}] is malformed — need distinct 64-hex tokenIn/tokenOut and ` +
+          `levels strictly ascending in input, as decimal-integer strings`,
+      });
+    }
+
+    solverLevels.publish(solverId, pairs as SolverPriceLevels[], Date.now());
+    return { accepted: pairs.length };
+  });
+
+  // GET /v1/solver/levels — every ladder currently fresh enough to quote from.
+  server.get("/v1/solver/levels", async () => ({ levels: solverLevels.all(Date.now()) }));
 
   // GET /v1/chart/{stats,history} — REAL per-pair market data derived from the
   // indexer DB: history = consumed offers (offer_file_history), stats = last/24h/

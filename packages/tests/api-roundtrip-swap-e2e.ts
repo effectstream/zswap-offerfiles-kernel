@@ -149,15 +149,15 @@ try {
   const merged = mergeFinalized(reconstructed);
   console.log(`${TAG} merged (from API data) imbalances: ${describeImbalances(merged)}`);
   check("merged tx from API data is token-balanced", nonDustImbalances(merged).length === 0);
-  const spentBefore = await count("spent_nullifiers");
+  const spentBefore = await count("nullifiers");
   const settle = await settleViaBatcher(merged);
   check("batcher settled tx reconstructed from API/Celestia data", settle.ok, `status=${settle.status}`);
 
-  const spentOk = await waitFor("spent_nullifiers += 2", async () => (await count("spent_nullifiers")) >= spentBefore + 2, 36);
-  check("spent_nullifiers grew by 2 (both offers consumed)", spentOk, `before=${spentBefore} now=${await count("spent_nullifiers")}`);
+  const spentOk = await waitFor("spent_nullifiers += 2", async () => (await count("nullifiers")) >= spentBefore + 2, 36);
+  check("spent_nullifiers grew by 2 (both offers consumed)", spentOk, `before=${spentBefore} now=${await count("nullifiers")}`);
   const archivedOk = await waitFor("offers archived", async () => {
-    const ids = apiOffers.map((o) => o.id).join(",");
-    return (await db(`SELECT id FROM offer_file WHERE id IN (${ids})`)).length === 0;
+    const hashes = apiOffers.map((o) => `'${o.offerId}'`).join(",");
+    return (await db(`SELECT id FROM offer_file WHERE offer_hash IN (${hashes})`)).length === 0;
   }, 36);
   check("both offers archived after settlement", archivedOk);
   check("P0 received T1", (await waitForShielded(p0, T1, AMT, 24)) >= AMT);
@@ -172,11 +172,16 @@ try {
   await sleep(8000); // give any erroneous Celestia post time to index (it must not)
   check("corrupted offer NEVER reached Celestia (not indexed)", (await count("offer_file")) === beforeBad1, `before=${beforeBad1} now=${await count("offer_file")}`);
 
-  // ── NEGATIVE 2: re-submitting a now-CONSUMED offer must be rejected (NULLIFIER_SPENT) ──
+  // ── NEGATIVE 2: re-submitting a now-CONSUMED offer must be rejected ──
+  // The content-hash duplicate gate resolves archived offers, so identical
+  // bytes are refused there and never reach the nullifier-liveness check
+  // below it. NULLIFIER_SPENT stays reachable for a DIFFERENT offer spending
+  // an already-spent coin — bytes that hash to something new.
   console.log(`${TAG} NEGATIVE: re-submitting the already-settled P0 offer…`);
   const beforeBad2 = await count("offer_file");
   const badRes2 = await submitOffer(blob0);
-  check("spent-offer re-submit rejected (NULLIFIER_SPENT)", badRes2.status === 400 && badRes2.body?.error === "NULLIFIER_SPENT", `status=${badRes2.status} error=${badRes2.body?.error}`);
+  check("spent-offer re-submit rejected as a duplicate", badRes2.status === 409 && badRes2.body?.error === "DUPLICATE_OFFER", `status=${badRes2.status} error=${badRes2.body?.error}`);
+  check("duplicate rejection reports the settled status", badRes2.body?.status === "consumed", `status=${badRes2.body?.status}`);
   await sleep(8000);
   check("spent-offer re-submit NEVER reached Celestia (not indexed)", (await count("offer_file")) === beforeBad2, `before=${beforeBad2} now=${await count("offer_file")}`);
 } finally {

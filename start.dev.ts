@@ -107,7 +107,9 @@ export default {
       args: ["run", "packages/node/main.dev.ts"],
       waitToExit: false,
       type: "system-dependency",
-      env: { PGLITE: "true" },
+      // Local clients (the solver's book mirror, e2e scripts) burst past the
+      // shared per-IP budget during a page-through plus settlement polls.
+      env: { PGLITE: "true", API_RATE_LIMIT_ALLOWLIST: "127.0.0.1,::1" },
       dependsOn: [
         DbNames.PGLITE_WAIT,
         CelestiaNames.FUND,
@@ -125,6 +127,16 @@ export default {
       link: "http://localhost:3334",
       stopProcessAtPort: [3334],
       dependsOn: [...midnightDeps],
+    },
+
+    {
+      name: "solver",
+      description: "ZSwap-DA posted-price solver (matches crossings, fills from inventory)",
+      args: ["run", "packages/solver/solver.dev.ts"],
+      waitToExit: false,
+      // Deliberately not a system-dependency: the stack is fully usable without
+      // a solver, and a solver fault must never tear the stack down.
+      dependsOn: [...midnightDeps, "sync"],
     },
 
     // The frontend lives in paima-engine/templates/zswap-da — run it separately

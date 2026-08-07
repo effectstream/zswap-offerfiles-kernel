@@ -52,7 +52,7 @@ async function submitOffer(blob: string): Promise<{ status: number; body: any }>
 const before = {
   known_roots: await count("known_roots"),
   created_unshielded: await count("created_unshielded"),
-  spent_nullifiers: await count("spent_nullifiers"),
+  spent_nullifiers: await count("nullifiers"),
   spent_unshielded: await count("spent_unshielded"),
   offers: await count("offer_file"),
 };
@@ -118,8 +118,8 @@ try {
 
   // ── 6. Nullifier consumed → spent_nullifiers + offer archived ──
   const spentOk = await waitFor("spent_nullifiers > before", async () =>
-    (await count("spent_nullifiers")) > before.spent_nullifiers, 36);
-  check("spent_nullifiers populated (Nullifier primitive live)", spentOk, `now=${await count("spent_nullifiers")}`);
+    (await count("nullifiers")) > before.spent_nullifiers, 36);
+  check("spent_nullifiers populated (Nullifier primitive live)", spentOk, `now=${await count("nullifiers")}`);
 
   const archivedOk = await waitFor("offer archived", async () => {
     const active = await db(`SELECT id FROM offer_file WHERE id = ${offerRow.id}`);
@@ -181,7 +181,7 @@ try {
   const after = {
     known_roots: await count("known_roots"),
     created_unshielded: await count("created_unshielded"),
-    spent_nullifiers: await count("spent_nullifiers"),
+    spent_nullifiers: await count("nullifiers"),
     spent_unshielded: await count("spent_unshielded"),
   };
   console.log("[lifecycle] after:", JSON.stringify(after));

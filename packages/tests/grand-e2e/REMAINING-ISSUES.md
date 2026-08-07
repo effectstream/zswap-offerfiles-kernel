@@ -1,20 +1,97 @@
-# Remaining issues — plan, test, fix, verify
+# The road to merging #35 — what stabilizes it, what ships after
+
+**GOAL: get [#35](https://github.com/effectstream/zswap-offerfiles-kernel/pull/35)
+merged.** Not to finish production readiness — to bank the verified work and
+convert everything else into tracked, documented follow-ups.
 
 State as of 2026-08-07. Companion to
 [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) (original plan, per-defect
 measurements) and [FINDINGS.md](FINDINGS.md) (how we got here).
 
-All work now lands on **one PR:
-[#35](https://github.com/effectstream/zswap-offerfiles-kernel/pull/35)**,
-`feat/production-readiness`, 26 commits off main. PRs #30–#34 are closed and
+`feat/production-readiness`, 27 commits off main. PRs #30–#34 are closed and
 superseded; their commits survive intact in #35's history, so the five review
 verdicts at `/home/eddie/zswap-offerfiles-kernel-x/PR-3{0,1,2,3,4}-REVIEW.md`
-still apply to the same commits. Items below land as **commits on #35**, not as
-separate PRs — the PR-letter names are kept only because the review documents
-and commit messages use them.
+still apply to the same commits.
 
-Items #1, #2, #3, #10 and #17 are **done**; the rest carry their plan, their red,
-their fix and their verification, and have not been executed.
+## Why merging is safe, stated precisely
+
+**#35 fixes four defects and introduces none. Every defect it leaves open
+already exists in main today.** Merging therefore strictly reduces risk — it is
+not a decision to accept the open items, it is a decision to stop carrying 27
+verified commits on a branch.
+
+What it banks, all verified by the 2026-08-07 run (205 checks, 1 failure,
+`maxLagBlocks` 113):
+
+| fixed | was |
+|---|---|
+| §2.1 unshielded fill-vs-cancel | a maker's self-transfer recorded as a completed sale — 9 trades vs 4 real, volume 13009 vs 5009 |
+| §2.2 `last_price` inverted | wrong for half of all trades |
+| §2.3 24 h window | bounded on `NOW()` against chain-derived `archived_at` |
+| pagination on wall clock | replicas served different page orders, invisible to the determinism diff by construction |
+
+Plus the schema collapse, 25 dead queries removed, un-broken pgtyped codegen, and
+a test suite that grew 143 → 205 checks with a determinism replay that passes.
+
+**What merging does NOT mean.** It does not mean production-ready. Four product
+defects remain open (§B below), three of them market-data integrity. The
+`KNOWN_RED` registry carries RED-8 so the suite keeps failing honestly on §2.6,
+and [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) §2 remains the register of
+what is still broken. Do not read a green scorecard as a shipping verdict.
+
+---
+
+## A. Before merge — stabilization only
+
+Three items, all small, none touching product behaviour. "Mostly as-is" is the
+constraint: nothing here changes what the indexer does.
+
+| | item | why it blocks merge | size |
+|---|---|---|---|
+| **A1** | **#18** — the `bookReadP95Ms` gate cannot fail honestly at count=10 | it is the only failure in the run; merging with it leaves a red scorecard that hides the *next* real failure | test-only |
+| **A2** | **Register the cross-offer marker bypass as a red** (#5's t1/t2) | it is the one known defect with NO red. Undocumented-and-unenforced is the state this project's discipline exists to prevent | test-only |
+| **A3** | **Reconcile the docs to the merged state** — PRODUCTION-READINESS.md §1.0/§2, ISSUES.md, FINDINGS.md closing note | so the register of open defects is true in main, not just in a branch | docs |
+
+**A2 is a judgment call you can drop.** It adds a failing test for a defect we
+are knowingly shipping. The argument for it: §2.1 was invisible for exactly this
+reason — the suite asserted the broken behaviour as correct. A registered red
+makes the hole visible to whoever runs the suite next; a paragraph in a markdown
+file does not.
+
+**Merge gate.** All of: unit suite green; a full run at 205/0 with RED-8 (and
+A2's entry) the only expected reds; p7a determinism passing; §B below written
+down in-tree.
+
+---
+
+## B. After merge — documented, not blocking
+
+Everything in the numbered queue below that is not A1–A3. Each carries its plan,
+its red, its fix and its verification, so any of them can be picked up cold.
+Grouped by what they are:
+
+**Product defects still open** (all pre-existing in main): #4 §2.6 expiry, #5
+cross-offer marker bypass + projection race, #6 §2.4 cross-layer, #7 §2.5
+baskets.
+
+**Missing test coverage:** #12 T-E2 partial overlap and T-E5 two-takers-one-coin;
+#6 and #7's e2e fixtures; #11's three reject codes unreachable through any real
+wallet.
+
+**Decisions needing a human:** #8 `/v1/pairs` ordering contract, #11 dead-code vs
+fail-closed-defence ruling, #13 reorg recovery, #14 host isolation.
+
+**Infrastructure:** #16 pgtyped regeneration guard, #9 SSE baseline keys.
+
+Items #1, #2, #3, #10 and #17 are **done**.
+
+---
+
+## How this document got here
+
+Kept because several entries below are *corrections* — the reasoning matters more
+than the conclusion, and a future reader should know which claims were tested and
+which were merely plausible.
 
 Three revisions are folded in: an independent review that found five blocking
 gaps (all verified, all held, two worse than reported); the ruling that
@@ -49,38 +126,39 @@ correctly and XPASS was 0, so nothing shipped without its paperwork. Items #1 an
 
 ## 0. The queue at a glance
 
-| # | Issue | Kind | State |
+`A` = must land before merge. `B` = documented follow-up. `—` = done.
+
+| # | Issue | Kind | A/B |
 |---|---|---|---|
-| ~~1~~ | ~~Cursor key not failover-safe~~ | **RESOLVED** — key moved, guard proven | §1 |
-| ~~2~~ | ~~Clean full run~~ | **DONE** — 205 checks, 1 fail, lag 113 | §2 |
-| ~~3~~ | ~~`maxLagBlocks: 1403`~~ | **DIAGNOSED + MITIGATED** — external contention; CPU reservation holds | §3 |
-| **4** | §2.6 `expiresAt` past at ingestion **+ cleanup on policy TTL** | **product defect — next** | PR-G |
-| 5 | Cross-offer marker bypass **+ projection race** | product defect | PR-I |
-| 6 | §2.4 cross-layer offers unenforced | product defect | PR-E |
-| 7 | §2.5 baskets — **five** market surfaces | product defect | PR-F |
-| 8 | `/v1/pairs` ordering — contract undefined | product decision | with #7 |
-| 9 | SSE baseline keys absent | measurement | **sample 1 of 2–3 captured** |
-| 10 | ~~`pair_stats` backfill~~ | **RESOLVED** — no-retrocompat ruling | §10 |
-| 11 | T-A2 unreachable reject codes | ruling | doc |
-| 12 | T-E2 / T-E5 deferred coverage | coverage | suite-only |
-| 13 | Reorg recovery — **all derived state** | production decision | needs ruling |
-| 14 | Runner not host-isolated | **disputed premise** | **needs your call** |
-| 15 | The closing sweep | closeout | PR-J |
-| 16 | pgtyped regeneration can silently break again | new — no guard | small |
-| 17 | ~~`outputIndex ?? outputNo` shim~~ | **RESOLVED** — grammar confirmed, shim removed | §17 |
-| **18** | **`bookReadP95Ms` gate is unfalsifiable at count=10** | new — the run's only failure | small |
+| ~~1~~ | ~~Cursor key not failover-safe~~ | **RESOLVED** — key moved, guard proven | — |
+| ~~2~~ | ~~Clean full run~~ | **DONE** — 205 checks, 1 fail, lag 113 | — |
+| ~~3~~ | ~~`maxLagBlocks: 1403`~~ | **DIAGNOSED + MITIGATED** — external contention; CPU reservation holds | — |
+| **4** | §2.6 `expiresAt` past at ingestion **+ cleanup on policy TTL** | **product defect — next** | B |
+| 5 | Cross-offer marker bypass **+ projection race** | product defect | B |
+| 6 | §2.4 cross-layer offers unenforced | product defect | B |
+| 7 | §2.5 baskets — **five** market surfaces | product defect | B |
+| 8 | `/v1/pairs` ordering — contract undefined | product decision | B |
+| 9 | SSE baseline keys absent | measurement | B |
+| 10 | ~~`pair_stats` backfill~~ | **RESOLVED** — no-retrocompat ruling | — |
+| 11 | T-A2 unreachable reject codes | ruling | B |
+| 12 | T-E2 / T-E5 deferred coverage | coverage | B |
+| 13 | Reorg recovery — **all derived state** | production decision | B |
+| 14 | Runner not host-isolated | **disputed premise** | B |
+| 15 | The closing sweep | closeout | B |
+| 16 | pgtyped regeneration can silently break again | new — no guard | B |
+| 17 | ~~`outputIndex ?? outputNo` shim~~ | **RESOLVED** — grammar confirmed, shim removed | — |
+| **18** | **`bookReadP95Ms` gate is unfalsifiable at count=10** | new — the run's only failure | **A1** |
 
-### Execution order
+### Order of work
 
-1. ~~#1 cursor key~~ — done, and verified by p7a.
-2. ~~#2 the run~~ — done: 205 checks, 1 failure, lag 113.
-3. **#4 → #5 → #6 → #7/#8** — #4 is smallest and its red is sitting in the
-   current scorecard; #5 is PR-B's own integrity; #6 and #7 need fixtures built.
-4. **#18** first if a green scorecard before touching product code is worth it —
-   it is the only thing between here and 205/0, and it is a test-only change.
-5. **#16** alongside any of the above (small, independent).
-6. **#12 coverage**, then **#15 the sweep** last — its precondition is an empty
-   defect list.
+**To merge:** A1 (#18) → A2 (register the marker-bypass red) → A3 (docs) → one
+full run at 205/0 → merge.
+
+**After merge**, by value: #4 (§2.6, smallest, red already in the scorecard) →
+#5 (PR-B's own integrity, and A2 will already have written its red) → #6 §2.4 →
+#7/#8 §2.5 + the pairs contract. #16 is small and independent, pick it up any
+time. #12's coverage, then #15's sweep last — its precondition is an empty
+defect list.
 
 **Off the critical path:** #11, #13, #14 and #17 need a ruling or an external
 fact, not code. They can be settled while runs execute.

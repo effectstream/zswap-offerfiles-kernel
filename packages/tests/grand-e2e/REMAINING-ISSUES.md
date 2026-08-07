@@ -190,15 +190,46 @@ chain, which no unit test reaches). Record in passing: `/v1/pairs` ordering
 
 ---
 
-## 3. `maxLagBlocks: 1403` — the unexplained 15× regression
+## 3. DIAGNOSED — the lag is external box contention, caught in the act
 
-**Plan.** The last run's 15 failures were one throughput failure counted fifteen
-times (FINDINGS §3): the STM fell ~1403 blocks (~23 min) behind, against a 53–95
-band. Best hypothesis (FINDINGS §4): **stale processes from hard-killed runs** —
-both high-lag runs followed a session kill, and the reaper then covered only the
-batcher, dust provisioner and indexer. It now also reaps `main.grand-b.ts`
-(load 17 while replaying), `main.dev.ts` and `start-pglite`. If right, the fix
-has shipped and #2 confirms it.
+**Cause established 2026-08-07, by direct observation during an aborted run.**
+Candidate 1 of the three ("box contention from something outside the suite") is
+correct. The stale-process hypothesis was wrong — the process table was verified
+clean before this run started.
+
+What was measured, live:
+
+| t | load (1m) | state |
+|---|---|---|
+| pre-run | 4.38 | quiet |
+| +5m | 6.96 | healthy, 15 checks |
+| +10m | 15.77 | healthy, 64 checks |
+| +15m | 75.23 | ~12 `rustc` processes appear; progress drops to +3 checks |
+| +20m | 104.45 | `rustc` gone, replaced by a Node crash-test suite at 207% CPU |
+
+The culprit was never ours: a **Codex sandbox** (`codex-linux-sandbox
+--sandbox-policy-cwd /home/eddie/umbradb-fork`) running a cargo build, then that
+project's crash-integration tests, on the same 16-core box. Our own processes
+stayed modest throughout (proof-server 132%, run.ts 10.9%, batcher 10.1%).
+
+**The decisive symptom, and the one to check first in future:** the Celestia
+chain tip stopped advancing — 1565 for over five minutes, against a ~6 s block
+time. That is not the indexer lagging; the local chain node itself was starved of
+CPU. Once that happens no index-wait budget can be met and every downstream check
+fails for the same non-reason, which is precisely the fifteen-failure cascade of
+2026-08-06.
+
+This explains both properties that made it so hard to pin down: it is
+**intermittent** because it depends on what other sessions happen to be doing,
+and it **never reproduced under analysis** because the competing work had
+finished by the time anyone looked.
+
+**Consequence for #2:** a run needs a quiet box, and "quiet" must be *verified*,
+not assumed. Before starting, check the load average AND that the chain tip is
+advancing; during the run, treat a stalled tip as an immediate abort rather than
+letting it burn an hour producing a scorecard that reads like a product failure.
+See #14 — this is now a strong argument for isolating the suite rather than a
+theoretical one.
 
 **How to test.** #2's run, with the process table verified clean first.
 
@@ -688,6 +719,20 @@ exactly why this should not be silently adopted *or* silently dismissed.
 **If the request is real, this is not a "scope question" but a standing
 requirement, and #2 should not run host-bound until a Compose wrapper exists or
 it is documented why it cannot.** If it is not, the recommendation below stands.
+
+**Evidence has since arrived, and it favours the reviewers.** The 2026-08-07 run
+was destroyed by a foreign workload on the same box — a Codex sandbox building
+and testing `umbradb-fork` — which starved the local chain node until it stopped
+producing blocks (see #3). Whatever was or was not requested earlier, this box
+demonstrably hosts concurrent agent sessions, and the suite has now lost two runs
+to that. Port collisions were only the visible half of the problem; **CPU
+contention is the half that actually voids results**, and a Compose wrapper with
+its own network does not fix that on its own — it needs a CPU reservation, or a
+dedicated box, or a preflight that refuses to start on a loaded machine.
+
+Cheapest thing that would have saved both runs: **a preflight gate** that
+refuses to start when the 1-minute load average is above a threshold, plus the
+in-run stalled-tip abort from #3. Neither requires Compose.
 
 The underlying facts are true either way: `fresh-run.sh` binds fixed
 host ports (PGlite on 5432, the stack's service ports) and reaps by `pkill`

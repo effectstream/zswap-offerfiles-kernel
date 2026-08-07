@@ -8,7 +8,7 @@ State as of 2026-08-07. Companion to
 [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) (original plan, per-defect
 measurements) and [FINDINGS.md](FINDINGS.md) (how we got here).
 
-`feat/production-readiness`, 27 commits off main. PRs #30–#34 are closed and
+`feat/production-readiness`, 32 commits off main. PRs #30–#34 are closed and
 superseded; their commits survive intact in #35's history, so the five review
 verdicts at `/home/eddie/zswap-offerfiles-kernel-x/PR-3{0,1,2,3,4}-REVIEW.md`
 still apply to the same commits.
@@ -17,7 +17,7 @@ still apply to the same commits.
 
 **#35 fixes four defects and introduces none. Every defect it leaves open
 already exists in main today.** Merging therefore strictly reduces risk — it is
-not a decision to accept the open items, it is a decision to stop carrying 27
+not a decision to accept the open items, it is a decision to stop carrying 32
 verified commits on a branch.
 
 What it banks, all verified by the 2026-08-07 run (205 checks, 1 failure,

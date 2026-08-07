@@ -72,8 +72,8 @@ async function seedOffer(
   if (opts.markers !== false) {
     // What the offer says the maker is owed: 20 WANT to the maker's address.
     await client.query(
-      `INSERT INTO offer_file_unshielded_outputs_history (offer_file_id, owner, token_type, value)
-       VALUES ($1, $2, $3, '20')`,
+      `INSERT INTO offer_file_unshielded_outputs_history (offer_file_id, owner, token_type, value, count)
+       VALUES ($1, $2, $3, '20', 1)`,
       [id, MAKER, WANT],
     );
   }

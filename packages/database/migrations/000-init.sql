@@ -71,7 +71,12 @@ CREATE TABLE offer_file (
     --   otherwise → the Celestia block timestamp (when it appeared on the DA
     --               layer; equals the NTP block time)
     -- Never wall-clock: two nodes replaying the same blocks must agree.
-    first_seen_at TIMESTAMPTZ,
+    -- NOT NULL because the keyset cursor depends on it and the failure mode of
+    -- a NULL is silent: Postgres sorts NULLs FIRST under DESC, and the keyset
+    -- comparison (NULL, id) < (x, y) evaluates to NULL — so such a row would
+    -- sit at the top of page one and never paginate past, with no error
+    -- anywhere. Same reasoning as archived_at.
+    first_seen_at TIMESTAMPTZ NOT NULL,
     -- TTL in seconds for how long this offer should remain active.
     -- Default = 1 hour (matches the Midnight reference Merkle-root window
     -- on the shielded path; see packages/node/env.ts for the full rationale).
@@ -95,6 +100,15 @@ CREATE UNIQUE INDEX idx_offer_file_offer_hash ON offer_file (offer_hash);
 -- key and seeks with a row-value comparison. `id` is the tie-break; it never
 -- leaves the node, since the cursor is the offer_hash, resolved server-side.
 CREATE INDEX idx_offer_file_created_at_id ON offer_file (created_at DESC, id DESC);
+
+-- The cursor orders on first_seen_at, NOT created_at: created_at is DEFAULT
+-- NOW(), so page order was a property of when THIS node inserted each row, and
+-- two replicas served the same book in different orders. It was invisible to
+-- the determinism replay by construction, since created_at is in
+-- DIFF_EXCLUDED_COLUMNS. The index must exist before the query switches:
+-- cursor-pagination.test.ts asserts the page plans without a Sort node.
+CREATE INDEX idx_offer_file_first_seen_at_id
+    ON offer_file (first_seen_at DESC, id DESC);
 
 -- ── Offer legs ────────────────────────────────────────────────────────────
 --
@@ -177,7 +191,9 @@ CREATE TABLE offer_file_history (
     offer_hash TEXT NOT NULL,
     metadata_created_at TIMESTAMPTZ,
     metadata_expires_at TIMESTAMPTZ,
-    first_seen_at TIMESTAMPTZ,
+    -- Copied on archive, so the cursor stays valid when an offer moves tables
+    -- mid-pagination. NOT NULL for the same reason as on the live table.
+    first_seen_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ,
     -- Copy of the TTL (in seconds) that was active for the original offer.
     ttl_seconds BIGINT,
@@ -205,6 +221,13 @@ CREATE INDEX idx_offer_file_history_reason_archived_at
 
 CREATE INDEX idx_offer_file_history_offer_hash
     ON offer_file_history (offer_hash);
+
+-- NOT used by resolveOfferCursor, which probes history by offer_hash and never
+-- orders it. Kept for the archived-offer queries that do order by
+-- first_seen_at, and so the two tables stay symmetric; drop it if that never
+-- materialises.
+CREATE INDEX idx_offer_file_history_first_seen_at_id
+    ON offer_file_history (first_seen_at DESC, id DESC);
 
 CREATE TABLE offer_file_tokens_history (
     id SERIAL PRIMARY KEY,
@@ -290,6 +313,97 @@ CREATE TABLE commitments (
 );
 -- Classification looks up "commitments created by tx T".
 CREATE INDEX idx_commitments_tx_hash ON commitments (tx_hash);
+
+-- Every unshielded spend observed on chain, kept FOREVER for the same reason
+-- `nullifiers` is: a spend never becomes un-spent, and this is the record
+-- read-time classification consults. Distinct from `created_unshielded`, which
+-- is a LIVE-set that deletes on spend and answers a different question ("can
+-- this offer still settle"). Classification needs the opposite — what was
+-- consumed, and by which transaction.
+--
+-- Before this table existed, every consumption of an unshielded-only offer
+-- classified `consumed`, because nothing recorded WHICH transaction spent an
+-- unshielded UTXO. All three branches of cancelledPredicate were dead on that
+-- layer — not merely inaccurate, unable to fire at all. A maker who spent
+-- their own UTXO on themselves was recorded as a completed sale, moving chart
+-- history, volume, last_price and trade_count for the cost of a self-transfer.
+--
+-- No new capability was needed: the midnight-unshielded-{spend,create}
+-- primitives already deliver txHash, value and tokenType; the state machine was
+-- discarding them.
+CREATE TABLE unshielded_spends (
+    owner       TEXT    NOT NULL,
+    intent_hash TEXT    NOT NULL,
+    output_no   INTEGER NOT NULL,
+    tx_hash     TEXT,                -- the SPENDING transaction — the discriminator
+    height      BIGINT  NOT NULL,
+    PRIMARY KEY (owner, intent_hash, output_no)
+);
+-- No secondary index on tx_hash: no query looks spends up that way (the
+-- predicate always joins on the PK triple), and this is one of the highest-
+-- volume insert paths in the system. Same argument as `nullifiers`.
+
+-- Every unshielded UTXO created on chain, kept forever — the unshielded
+-- analogue of `commitments`. `created_unshielded` cannot serve this purpose: it
+-- deletes the row when the UTXO is later spent, which would retroactively erase
+-- the evidence that a settlement happened and silently reclassify a historical
+-- fill as a cancel.
+CREATE TABLE unshielded_creates (
+    owner       TEXT    NOT NULL,
+    intent_hash TEXT    NOT NULL,
+    output_no   INTEGER NOT NULL,
+    tx_hash     TEXT,                -- the CREATING transaction
+    token_type  TEXT    NOT NULL,    -- hex serialized token type
+    value       TEXT    NOT NULL,    -- u128 as decimal string
+    height      BIGINT  NOT NULL,
+    PRIMARY KEY (owner, intent_hash, output_no)
+);
+-- The fill-marker match is "did tx T create a UTXO paying <owner, type, value>".
+CREATE INDEX idx_unshielded_creates_marker
+    ON unshielded_creates (tx_hash, owner, token_type, value);
+
+-- The offer's OWN declared unshielded outputs — its fill markers, the
+-- unshielded counterpart of offer_file_commitments. A settling transaction must
+-- create every one of them; a maker walking away creates none.
+--
+-- Matched on (owner, token_type, value) rather than on the intent hash and
+-- output index, because those belong to the SETTLING intent and the maker
+-- cannot know them when publishing. Amounts are exact: the offer fixes what the
+-- maker is owed, and merging preserves outputs verbatim.
+--
+-- `count` is load-bearing, not bookkeeping. Without it, N identical outputs
+-- collapse into one row and the marker check degrades to existence: an offer
+-- declaring 5 x 20-UB records wants=100 (deriveTokenLegs NETS the imbalance)
+-- but stores a single marker (owner, UB, "20"), so a maker self-spend creating
+-- ONE 20-UB output satisfies it and the offer classifies `consumed` — a
+-- fabricated fill at 5x its real size, for 1/5 the cost. That is a full bypass
+-- of the very check these tables exist to add, and it is attacker-chosen.
+-- No DEFAULT: insertOfferFileUnshieldedOutput writes 1 explicitly and
+-- increments on conflict, and the archive copies the value.
+CREATE TABLE offer_file_unshielded_outputs (
+    offer_file_id INTEGER NOT NULL REFERENCES offer_file(id) ON DELETE CASCADE,
+    owner         TEXT    NOT NULL,
+    token_type    TEXT    NOT NULL,
+    value         TEXT    NOT NULL,
+    count         INTEGER NOT NULL,
+    PRIMARY KEY (offer_file_id, owner, token_type, value)
+);
+
+CREATE TABLE offer_file_unshielded_outputs_history (
+    offer_file_id INTEGER NOT NULL,
+    owner         TEXT    NOT NULL,
+    token_type    TEXT    NOT NULL,
+    value         TEXT    NOT NULL,
+    count         INTEGER NOT NULL,
+    PRIMARY KEY (offer_file_id, owner, token_type, value)
+);
+
+-- cancelledPredicate correlates on offer_file_id five times per candidate row,
+-- and these history tables otherwise carry only a SERIAL primary key.
+CREATE INDEX idx_offer_file_unshielded_spends_history_offer
+    ON offer_file_unshielded_spends_history (offer_file_id, owner, intent_hash, output_no);
+CREATE INDEX idx_offer_file_nullifiers_history_offer
+    ON offer_file_nullifiers_history (offer_file_id, nullifier);
 
 -- ── Chain observations: liveness sets ─────────────────────────────────────
 --

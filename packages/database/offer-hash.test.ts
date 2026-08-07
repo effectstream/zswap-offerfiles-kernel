@@ -179,18 +179,24 @@ test("unique index rejects a second open offer with the same hash", async () => 
   await expect(insertOffer(HASH_A, "swapoffer1testblob-a2")).rejects.toThrow();
 });
 
-test("page query uses the created_at index path, not a join scan (EXISTS plan)", async () => {
+test("page query uses the cursor index path, not a join scan (EXISTS plan)", async () => {
   // Regression guard for the EXISTS rewrite: the unfiltered page must be a
-  // plain index scan on idx_offer_file_created_at with no join/unique node
-  // (the old DISTINCT + LEFT JOIN shape was ~12× slower and got worse with
-  // book size).
+  // plain index scan with no join/unique node (the old DISTINCT + LEFT JOIN
+  // shape was ~12× slower and got worse with book size).
+  //
+  // Ordered on the production cursor key (celestia_height, offer_hash). This
+  // previously read `ORDER BY o.created_at` and asserted
+  // idx_offer_file_created_at — which kept passing only because
+  // `toContain` also matched the later idx_offer_file_created_at_id. Two sort
+  // keys had moved on underneath it by then; that is the drift this guard is
+  // supposed to catch, not exhibit.
   const r = await client.query(`EXPLAIN
     SELECT o.id FROM offer_file o
     WHERE ('' = '' OR EXISTS (
       SELECT 1 FROM offer_file_tokens oft
       WHERE oft.offer_file_id = o.id AND oft.token_color = ''))
-    ORDER BY o.created_at DESC LIMIT 100`);
+    ORDER BY o.celestia_height DESC, o.offer_hash DESC LIMIT 100`);
   const plan = r.rows.map((row: any) => row["QUERY PLAN"]).join("\n");
-  expect(plan).toContain("idx_offer_file_created_at");
+  expect(plan).toContain("idx_offer_file_height_hash");
   expect(plan).not.toContain("Unique");
 });

@@ -672,7 +672,7 @@ export interface IInsertOfferFileWithHashParams {
   metadata_expires_at: DateOrString | null;
   /**
    * NOT nullable — the column is NOT NULL (migration 015) because keyset
-   * pagination orders on it. The SQL already required it (`:first_seen_at!`);
+   * every writer sets it. The SQL already required it (`:first_seen_at!`);
    * the type said otherwise, so a caller could pass null and only find out at
    * runtime. Chain-derived: state-machine.ts computes it from the earliest
    * proof-root first-seen, or the Celestia block time.
@@ -947,8 +947,10 @@ export interface IGetOpenOffersPageParams {
   token: string;
   direction: string;
   limit: number;
-  after_created_at: DateOrString | null;
-  after_id: number | null;
+  // Keyset anchor: the PUBLICATION tuple, both parts chain/content-derived.
+  // NOT (first_seen_at, id) — see the ORDER BY note below.
+  after_height: NumberOrString | null;
+  after_hash: string | null;
 }
 export interface IGetOpenOffersPageResult {
   id: number;
@@ -961,6 +963,30 @@ export interface IGetOpenOffersPageResult {
   ttl_seconds: NumberOrString | null;
   created_at: DateOrString | null;
 }
+// Keyset pagination on (celestia_height, offer_hash) — the PUBLICATION tuple.
+//
+// Two earlier keys were wrong for the same underlying reason, that the sort key
+// must be a fact every replica agrees on:
+//
+//   created_at  — DEFAULT NOW(), node-local wall clock. Page order was decided
+//     by when THIS node inserted each row, so two replicas served the same book
+//     in different orders. Invisible to the determinism replay BY CONSTRUCTION,
+//     since created_at is in DIFF_EXCLUDED_COLUMNS.
+//
+//   first_seen_at — chain-derived, but for a SHIELDED offer it comes from
+//     known_roots.first_seen_ms: the block in which THIS NODE first observed
+//     the proof root. A replica started at a later MIDNIGHT_START_BLOCK records
+//     a later value and orders the book differently. The determinism suite
+//     cannot see this either — main.grand-b.ts uses startBlockHeight 1 on every
+//     primitive, so both instances agree by construction, not by guarantee.
+//     It is also proof-root age, not publication time, so "newest first" did
+//     not mean what the API says it means.
+//
+// celestia_height is the DA height the offer was published at, and offer_hash
+// is the sha256 of its canonical bytes (the MIP-0006 offerId). Neither depends
+// on sync start, insertion order or SERIAL assignment, both are NOT NULL, and
+// ties break identically on every node — so `id` is no longer needed as the
+// tiebreaker. This tuple is what "newest first" should have meant all along.
 export const getOpenOffersPage = prepared<IGetOpenOffersPageParams, IGetOpenOffersPageResult>(
       `SELECT o.id, o.celestia_height, o.offer_hash,
               LENGTH(o.transaction_hex)::int AS blob_chars,
@@ -973,29 +999,25 @@ export const getOpenOffersPage = prepared<IGetOpenOffersPageParams, IGetOpenOffe
            WHERE oft.offer_file_id = o.id
              AND oft.token_color = :token!
              AND (:direction! = 'ANY' OR oft.direction = :direction!)))
-         AND (:after_id!::int IS NULL
-              OR (o.first_seen_at, o.id) < (:after_created_at!::timestamptz, :after_id!::int))
-       ORDER BY o.first_seen_at DESC, o.id DESC
+         AND (:after_hash!::text IS NULL
+              OR (o.celestia_height, o.offer_hash) < (:after_height!::bigint, :after_hash!::text))
+       ORDER BY o.celestia_height DESC, o.offer_hash DESC
        LIMIT :limit!`,
 );
 
-// Resolve an `after_hash` cursor to its keyset anchor. Checks history too:
-// if the anchor offer was consumed/expired mid-pagination its row moved
-// tables, but (first_seen_at, id) is copied on archive, so the cursor stays
+// Resolve an `after_hash` cursor to its keyset anchor. Checks history too: if
+// the anchor offer was consumed/expired mid-pagination its row moved tables,
+// but (celestia_height, offer_hash) is copied on archive, so the cursor stays
 // valid and the reader continues exactly where they left off.
-//
-// Ordered on first_seen_at rather than created_at because the latter is
-// `DEFAULT NOW()` — node-local wall clock — which made page order differ
-// between replicas serving the same book. See migration 015.
 export interface IResolveOfferCursorParams { offer_hash: string }
 export interface IResolveOfferCursorResult {
-  id: number;
-  created_at: DateOrString | null;
+  celestia_height: string;
+  offer_hash: string;
 }
 export const resolveOfferCursor = prepared<IResolveOfferCursorParams, IResolveOfferCursorResult>(
-      `SELECT id, first_seen_at AS created_at FROM offer_file WHERE offer_hash = :offer_hash!
+      `SELECT celestia_height, offer_hash FROM offer_file WHERE offer_hash = :offer_hash!
        UNION ALL
-       SELECT id, first_seen_at AS created_at FROM offer_file_history WHERE offer_hash = :offer_hash!
+       SELECT celestia_height, offer_hash FROM offer_file_history WHERE offer_hash = :offer_hash!
        LIMIT 1`,
 );
 

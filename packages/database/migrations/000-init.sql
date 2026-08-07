@@ -71,11 +71,12 @@ CREATE TABLE offer_file (
     --   otherwise → the Celestia block timestamp (when it appeared on the DA
     --               layer; equals the NTP block time)
     -- Never wall-clock: two nodes replaying the same blocks must agree.
-    -- NOT NULL because the keyset cursor depends on it and the failure mode of
-    -- a NULL is silent: Postgres sorts NULLs FIRST under DESC, and the keyset
-    -- comparison (NULL, id) < (x, y) evaluates to NULL — so such a row would
-    -- sit at the top of page one and never paginate past, with no error
-    -- anywhere. Same reasoning as archived_at.
+    -- Served as computed.firstSeenAt and nothing more — it is NOT the cursor
+    -- key. It was, briefly, and that was a bug: for a shielded offer this
+    -- derives from when THIS NODE first saw the proof root, so replicas with
+    -- different sync starts disagree. A fine display value, a bad sort key.
+    -- NOT NULL because every writer sets it and a missing chain-derived
+    -- timestamp should fail loudly, not serve null to a client.
     first_seen_at TIMESTAMPTZ NOT NULL,
     -- TTL in seconds for how long this offer should remain active.
     -- Default = 1 hour (matches the Midnight reference Merkle-root window
@@ -99,16 +100,24 @@ CREATE UNIQUE INDEX idx_offer_file_offer_hash ON offer_file (offer_hash);
 -- The API instead resolves an opaque `after_hash` cursor to the anchor row's
 -- key and seeks with a row-value comparison. `id` is the tie-break; it never
 -- leaves the node, since the cursor is the offer_hash, resolved server-side.
-CREATE INDEX idx_offer_file_created_at_id ON offer_file (created_at DESC, id DESC);
-
--- The cursor orders on first_seen_at, NOT created_at: created_at is DEFAULT
--- NOW(), so page order was a property of when THIS node inserted each row, and
--- two replicas served the same book in different orders. It was invisible to
--- the determinism replay by construction, since created_at is in
--- DIFF_EXCLUDED_COLUMNS. The index must exist before the query switches:
--- cursor-pagination.test.ts asserts the page plans without a Sort node.
-CREATE INDEX idx_offer_file_first_seen_at_id
-    ON offer_file (first_seen_at DESC, id DESC);
+-- Keyset pagination on the PUBLICATION tuple. Both parts are facts every
+-- replica agrees on: celestia_height is the DA height the offer was published
+-- at, offer_hash is the sha256 of its canonical bytes. Neither depends on sync
+-- start, insertion order or SERIAL assignment.
+--
+-- Two earlier keys were wrong. `created_at` is DEFAULT NOW(), so page order was
+-- decided by when THIS node inserted each row — and it is in
+-- DIFF_EXCLUDED_COLUMNS, so the determinism replay could never catch it.
+-- `first_seen_at` is chain-derived but, for a shielded offer, derives from when
+-- THIS NODE first saw the proof root, so a replica with a different
+-- MIDNIGHT_START_BLOCK orders differently; the determinism suite misses that
+-- too, because both instances start at height 1 by construction.
+--
+-- The index must exist before the query switches: cursor-pagination.test.ts
+-- asserts the page plans without a Sort node, so a missing index is a test
+-- failure rather than a silent slow scan.
+CREATE INDEX idx_offer_file_height_hash
+    ON offer_file (celestia_height DESC, offer_hash DESC);
 
 -- ── Offer legs ────────────────────────────────────────────────────────────
 --
@@ -191,8 +200,9 @@ CREATE TABLE offer_file_history (
     offer_hash TEXT NOT NULL,
     metadata_created_at TIMESTAMPTZ,
     metadata_expires_at TIMESTAMPTZ,
-    -- Copied on archive, so the cursor stays valid when an offer moves tables
-    -- mid-pagination. NOT NULL for the same reason as on the live table.
+    -- Copied on archive so an archived offer still serves its firstSeenAt.
+    -- (What keeps the CURSOR valid across archival is celestia_height +
+    -- offer_hash, both also copied.) NOT NULL as on the live table.
     first_seen_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ,
     -- Copy of the TTL (in seconds) that was active for the original offer.
@@ -221,13 +231,6 @@ CREATE INDEX idx_offer_file_history_reason_archived_at
 
 CREATE INDEX idx_offer_file_history_offer_hash
     ON offer_file_history (offer_hash);
-
--- NOT used by resolveOfferCursor, which probes history by offer_hash and never
--- orders it. Kept for the archived-offer queries that do order by
--- first_seen_at, and so the two tables stay symmetric; drop it if that never
--- materialises.
-CREATE INDEX idx_offer_file_history_first_seen_at_id
-    ON offer_file_history (first_seen_at DESC, id DESC);
 
 CREATE TABLE offer_file_tokens_history (
     id SERIAL PRIMARY KEY,

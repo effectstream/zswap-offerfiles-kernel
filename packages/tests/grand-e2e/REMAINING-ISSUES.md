@@ -13,8 +13,8 @@ still apply to the same commits. Items below land as **commits on #35**, not as
 separate PRs — the PR-letter names are kept only because the review documents
 and commit messages use them.
 
-**Nothing below has been executed.** Each item carries its plan, its red, its
-fix and its verification.
+Items #1, #2, #3, #10 and #17 are **done**; the rest carry their plan, their red,
+their fix and their verification, and have not been executed.
 
 Three revisions are folded in: an independent review that found five blocking
 gaps (all verified, all held, two worse than reported); the ruling that
@@ -34,21 +34,32 @@ worked:
 It also closed #17 outright by finding the grammar file, and corrected a batcher
 capacity number I had been reasoning from (#3).
 
+**Fourth revision — THE CLEAN RUN LANDED.** 2026-08-07, 205 checks, **1 failure**,
+72.7 min, `maxLagBlocks` **113** (under the 150 threshold, so this is a verdict
+rather than a void run). Both determinism checks passed: a second node replayed
+~4400 blocks from height 1 and produced byte-identical state. That verifies the
+collapsed schema, the four NOT NULL tightenings, the deleted 015 backfill and
+the new cursor key across replicas — none of which a unit test can establish.
+
+The single failure is a metric artefact, not a defect (new item #18). RED-8 fired
+correctly and XPASS was 0, so nothing shipped without its paperwork. Items #1 and
+#2 are closed; #3's fix is proven in the field.
+
 ---
 
 ## 0. The queue at a glance
 
 | # | Issue | Kind | State |
 |---|---|---|---|
-| **1** | **Cursor key not failover-safe; its guard tests the OLD key** | **blocking, product** | half already closed |
-| 2 | Clean full run — nothing verified e2e since PR-B | verification debt | next after #1 |
-| 3 | `maxLagBlocks: 1403` unexplained | diagnosis | measure in #2 |
-| 4 | §2.6 `expiresAt` past at ingestion **+ cleanup on policy TTL** | product defect | PR-G |
+| ~~1~~ | ~~Cursor key not failover-safe~~ | **RESOLVED** — key moved, guard proven | §1 |
+| ~~2~~ | ~~Clean full run~~ | **DONE** — 205 checks, 1 fail, lag 113 | §2 |
+| ~~3~~ | ~~`maxLagBlocks: 1403`~~ | **DIAGNOSED + MITIGATED** — external contention; CPU reservation holds | §3 |
+| **4** | §2.6 `expiresAt` past at ingestion **+ cleanup on policy TTL** | **product defect — next** | PR-G |
 | 5 | Cross-offer marker bypass **+ projection race** | product defect | PR-I |
 | 6 | §2.4 cross-layer offers unenforced | product defect | PR-E |
 | 7 | §2.5 baskets — **five** market surfaces | product defect | PR-F |
 | 8 | `/v1/pairs` ordering — contract undefined | product decision | with #7 |
-| 9 | SSE baseline keys absent | measurement | rides in runs |
+| 9 | SSE baseline keys absent | measurement | **sample 1 of 2–3 captured** |
 | 10 | ~~`pair_stats` backfill~~ | **RESOLVED** — no-retrocompat ruling | §10 |
 | 11 | T-A2 unreachable reject codes | ruling | doc |
 | 12 | T-E2 / T-E5 deferred coverage | coverage | suite-only |
@@ -57,16 +68,18 @@ capacity number I had been reasoning from (#3).
 | 15 | The closing sweep | closeout | PR-J |
 | 16 | pgtyped regeneration can silently break again | new — no guard | small |
 | 17 | ~~`outputIndex ?? outputNo` shim~~ | **RESOLVED** — grammar confirmed, shim removed | §17 |
+| **18** | **`bookReadP95Ms` gate is unfalsifiable at count=10** | new — the run's only failure | small |
 
 ### Execution order
 
-1. **#1 cursor key** — the only blocking item; a product defect already on #35.
-2. **#2 the run** — first honest verdict since PR-B; also resolves #3, measures
-   #9, and answers #8.
-3. **#4 → #5 → #6 → #7/#8** — #4 is smallest and its red already records; #5 is
-   PR-B's own integrity; #6 and #7 need fixtures built.
-4. **#16** alongside any of the above (small, independent).
-5. **#12 coverage**, then **#15 the sweep** last — its precondition is an empty
+1. ~~#1 cursor key~~ — done, and verified by p7a.
+2. ~~#2 the run~~ — done: 205 checks, 1 failure, lag 113.
+3. **#4 → #5 → #6 → #7/#8** — #4 is smallest and its red is sitting in the
+   current scorecard; #5 is PR-B's own integrity; #6 and #7 need fixtures built.
+4. **#18** first if a green scorecard before touching product code is worth it —
+   it is the only thing between here and 205/0, and it is a test-only change.
+5. **#16** alongside any of the above (small, independent).
+6. **#12 coverage**, then **#15 the sweep** last — its precondition is an empty
    defect list.
 
 **Off the critical path:** #11, #13, #14 and #17 need a ruling or an external
@@ -101,7 +114,26 @@ Also disposed of, so nobody re-investigates: `api.test.ts` logs
 
 ---
 
-## 1. BLOCKING — the cursor key and its stale regression test
+## 1. RESOLVED — the cursor key and its stale regression test
+
+**Done 2026-08-07** (commit `4af3fe6`). The key is `(celestia_height,
+offer_hash)`; `getOpenOffersPage`, `resolveOfferCursor`, the api.ts plumbing and
+the index all moved together, and `idx_offer_file_created_at_id` plus both
+`first_seen_at` indexes were dropped — `first_seen_at` is now written and served,
+never ordered or filtered.
+
+**The guard was proven, not asserted.** With the index the page plans as an index
+scan at cost 1.16; with it dropped, cost 1e10 and a Sort node appears — so both
+assertions fail. That is what the previous guard could not do, and it is why the
+schema comment about a missing index being a test failure is now true.
+
+**Verified end to end:** p7a passed both determinism checks on the 2026-08-07 run
+(`replayed state identical`, `offer_hash sets identical`), so the new key
+reproduces across replicas. The new failover unit test — mirrored SERIAL ids, a
+9-day-later `first_seen_at` — covers the case p7a structurally cannot.
+
+<details>
+<summary>Original analysis, kept for the record</summary>
 
 **Plan.** Two defects. One is already half-closed by the consolidation.
 
@@ -160,9 +192,39 @@ so mid-pagination archival still resolves.
 index is dropped**; failover test green; full run with p7a determinism
 identical; p8's cursor walk unchanged.
 
+</details>
+
 ---
 
-## 2. The clean full run
+## 2. DONE — the clean full run
+
+**2026-08-07: 205 checks, 1 failure, 72.7 min, `maxLagBlocks` 113.** Under the
+150 threshold, so this is a verdict rather than a void run.
+
+| result | |
+|---|---|
+| **p7a determinism** | **both checks PASS** — replayed state identical, offer_hash sets identical |
+| RED-8 | fired correctly (§2.6, PR-G) |
+| XPASS | **0** — nothing shipped without deleting its paperwork |
+| unshielded cancel shapes | all green — PR-B's marker gate + count against a live chain |
+| `queue depth >= 4` | passed (it FAILED in the compromised run — corroborates that starvation, not the batcher, was the cause) |
+| submit p95 | 6823 vs 6654 x 1.2 — ok |
+| publishToIndexed p95 | 22458 vs 23983 x 1.2 — ok |
+| SSE (CONSUMED-only) | p50 1830, p95 2308, count 21 — see #9 |
+| the one failure | `bookRead p95 42 > 24` — a metric artefact, see #18 |
+
+**What this closes:** PR-C, PR-D and PR-H are e2e-verified for the first time, as
+are PR-B's two review fixes. The determinism pass is what actually validates the
+collapsed schema, the four NOT NULL tightenings, the deleted 015 backfill and the
+new cursor key — all across replicas, which no unit test reaches.
+
+**Two caveats worth keeping visible.** `maxLagBlocks` 113 is above the old 53–95
+band, explained by the slow genesis funding phase and a competing workload during
+the first ~20 minutes. And the SSE sample was taken on that same partly-contended
+box, so treat it as soft (#9).
+
+<details>
+<summary>Original plan for this item</summary>
 
 **Plan.** One `fresh-run.sh` at #35's head, after #1 lands. PR-C's price checks
 passed once on 2026-08-06, but PR-D and PR-H have **never** been e2e-verified,
@@ -187,6 +249,8 @@ the reaper covers both), and a reboot re-enabling system PostgreSQL on 5432
 unshielded cancel shapes green (PR-B's marker gate and count against a live
 chain, which no unit test reaches). Record in passing: `/v1/pairs` ordering
 (#8), and CONSUMED-only SSE p50/p95 (#9, sample 1 of 2–3).
+
+</details>
 
 ---
 
@@ -228,8 +292,38 @@ finished by the time anyone looked.
 not assumed. Before starting, check the load average AND that the chain tip is
 advancing; during the run, treat a stalled tip as an immediate abort rather than
 letting it burn an hour producing a scorecard that reads like a product failure.
-See #14 — this is now a strong argument for isolating the suite rather than a
-theoretical one.
+
+### MITIGATED — the CPU reservation works
+
+The 2026-08-07 rerun was launched inside a user-slice cgroup:
+
+    systemd-run --user --scope --unit=grand-e2e-run2 \
+      -p CPUWeight=500 -p CPUQuota=1200% ./packages/tests/grand-e2e/fresh-run.sh
+
+Two knobs doing opposite jobs. **CPUWeight=500** (default 100) is the protective
+half — it only matters under contention, giving the stack 5x the share of a
+default-weight neighbour, which is what should keep the chain node producing
+blocks. **CPUQuota=1200%** is the polite half: a ceiling at 12 of 16 cores, so at
+least 4 are always left for everything else and we are never the neighbour that
+ruins someone else's run.
+
+Verified at the kernel, not merely requested: `cpu.weight 500`, `cpu.max 1200000
+100000`, 26 processes inside the scope. Cost measured mid-run: **0.159% of CPU
+time throttled** (3.0s of 1890s), so the ceiling is correctly sized and raising
+it would buy nothing. Result: `maxLagBlocks` 113, load never above ~8.5 even
+during the p7a replay.
+
+**Honest limits.** This is a *share* guarantee, not isolation — if something
+saturates the box badly enough, 5x of very little is still very little. It should
+convert "chain stops producing blocks" into "run is somewhat slower". It is not a
+substitute for a quiet box, and it does not cover the Midnight proof-server,
+which is a long-lived devnet process outside the scope.
+
+Incidental finding: `nice_usec` was 1732s of 1752s of user time — essentially the
+whole stack runs niced. Between cgroups `cpu.weight` overrides that, so the
+reservation stands; but it does mean that *before* this change, under contention,
+our processes were voluntarily yielding to every non-niced neighbour. That is
+part of why the chain node was so easy to starve.
 
 **How to test.** #2's run, with the process table verified clean first.
 
@@ -543,8 +637,15 @@ scheduled block time the STM may reach late during catch-up), so the number must
 be re-derived. Honesty note from FINDINGS §4 stands: the split is good hygiene
 but is **not proven** to explain the historical spikes — that run was calmer.
 
-**How to test.** Harvest CONSUMED-only p50/p95 from 2–3 clean runs (#2 is sample
-one). Samples from any run failing the `maxLagBlocks` gate are void.
+**Sample 1 of 2–3, captured 2026-08-07:** `p50 1830, p95 2308, max 2785,
+count 21` (CONSUMED-only, as redefined). **Treat as soft.** The run passed the
+`maxLagBlocks` gate at 113, so it is not void — but a competing workload had the
+box for its first ~20 minutes and `maxLagBlocks` came in above the historical
+53–95 band. Do not populate the keys from this sample alone.
+
+**How to test.** Harvest CONSUMED-only p50/p95 from 2–3 clean runs. Samples from
+any run failing the `maxLagBlocks` gate are void; samples from a run with known
+contention are usable but should not be the only input.
 
 **How to fix.** No baked-in headroom: [metrics.ts:137](metrics.ts:137) already
 enforces `baseline × 1.2`, so a further ~1.5× would compound to 1.8× and gate
@@ -747,7 +848,18 @@ independently in FINDINGS §5); parameterize every port via env; or a full
 Compose wrapper with its own network.
 
 **Recommendation:** preflight check now, defer Compose unless you want
-concurrent runs. **Do not** let this block #2 — the box is dedicated.
+concurrent runs.
+
+**PARTIALLY ADDRESSED 2026-08-07.** A CPU reservation is now in use (see §3):
+`systemd-run --user --scope -p CPUWeight=500 -p CPUQuota=1200%`, verified at the
+kernel and costing 0.16% throttling. The run that followed passed with
+`maxLagBlocks` 113. That covers the CPU half of the problem — which is the half
+that voids results — but **not** the port half, and not the proof-server, which
+lives outside the scope as a long-lived devnet process.
+
+Still open, and still your call: whether to add the preflight port/load gate,
+parameterize the fixed ports, or wrap in Compose. The cheapest remaining item is
+the preflight gate; the reservation has already removed the urgency.
 
 ---
 
@@ -849,6 +961,51 @@ as the NOT NULL columns — do not fabricate evidence for a required field.
 Verified: 182 tests pass, `run.ts` builds. p7b's deep audit is the standing
 regression guard, since it asserts stored spend refs equal the transaction's own
 UTXO triples.
+
+---
+
+## 18. NEW — the `bookReadP95Ms` gate cannot fail honestly at count=10
+
+**Plan.** The 2026-08-07 run's single failure:
+
+    [FAIL] p7b-audit ▸ metrics within baseline × 1.2
+           (book read p95 ms: 42 > baseline 20 × 1.2 = 24)
+
+    bookReadMs: {count: 10, p50: 7, p95: 42, max: 42}
+
+**Not a regression.** The median is 7 ms, historically 7–8 ms — unmoved. With ten
+samples the "p95" IS the max, so any single slow read defines it and trips the
+gate. `baseline.json`'s own note already diagnoses this exact failure and states
+the test: *"A real regression moves the median."*
+
+This mattered because the cursor change (#1) replaced a `(timestamptz, int)`
+comparison with `(bigint, text)` over a 64-char hash, which was the obvious
+suspect. The median says the suspicion was wrong.
+
+**This is the metric's second offence.** The note records that the baseline was
+already raised 10 → 20 for the same reason — one 19 ms read with the median
+unmoved. Raising it again to 42 would be the third round of the same move, and it
+is exactly the "widen the threshold until it passes" antipattern this project
+refuses for index-wait timeouts. A gate that has to be relaxed every time it fires
+is not measuring anything.
+
+**How to test.** Feed the checker a synthetic snapshot: `count=10, p50=7, p95=42`
+must PASS (outlier, median healthy) while `count=10, p50=30, p95=45` must FAIL
+(median genuinely moved). Today the first fails and the second also fails, for the
+same reason — which is the point: the gate cannot distinguish them.
+
+**How to fix.** In `metrics.ts`, gate book reads on the **median**, not p95, with
+a baseline near the observed 7–8 ms and the existing ×1.2 tolerance. Options if
+tail latency is genuinely wanted too: keep a p95 gate but only apply it when
+`count >= 50` (below that, report it as a note like the TTL SSE population), or
+raise the sample count so p95 stops being the max. Report the outlier either way —
+it should be visible, just not a failure.
+
+Note this is the same class as the SSE metric split (#9): a number that mixed two
+populations and had to be redefined rather than re-baselined. Same lesson.
+
+**How to verify.** The synthetic cases above, plus a full run reaching **205/0**
+with RED-8 the only expected red. Test-only change; no product code.
 
 ---
 

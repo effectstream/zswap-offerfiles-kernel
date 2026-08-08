@@ -549,46 +549,75 @@ the first ones landed `test.failing` (this repo's unit-red mechanism, cf.
   declared commitment — does one settlement mark both `consumed`? If yes this
   grows a shielded half; if no, record why the shape is immune.
 
-**How to fix.** In `unshieldedCancelledPredicate`
-([queries.app.ts](../../database/sql/queries.app.ts)), per settling tx and
-`(owner, token_type, value)`: supply = matching `unshielded_creates` rows for
-that tx; demand = Σ `count` over attributing offers, **deduped by spend-set**;
-shortfall ⇒ all `cancelled`.
+**How to fix — REWRITTEN 2026-08-07 after a decisive experiment.** Edward's
+challenge: shielded classification is exact because we look at the offer's own
+commitments; unshielded outputs are fully transparent, so it should be simpler,
+not weaker. He is right, and the experiment proves it.
 
-**Attribution is a feasibility problem, not a sort.** Choosing the
-same-spend-set winner by `(celestia_height, offer_hash)` up front is wrong — t4
-shows it manufacturing a shortfall against a settlement that really did fill one
-of the alternatives. The rule must be:
+**The premise under the whole shape-matching design is false.** The schema and
+[derive.ts:128](../../validator/derive.ts:128) both claim markers cannot use
+intent hash / output index because "those belong to the SETTLING intent, which
+the maker cannot know when publishing." Tested against the completed run's
+database (offer #3, settled by tx `f2516323…`):
 
-1. Find a **globally feasible assignment** of at most one alternative per
-   spend-set whose combined demand fits the transaction's output multiset.
-2. Only if several assignments are feasible does `(celestia_height, offer_hash)`
-   break the tie — deterministically, so replicas agree.
-3. Shortfall means **no** feasible assignment exists. That is what makes the
-   "honest settlements cannot underpay" argument sound: it licenses cancelling
-   everything only when nothing could have been legitimately settled.
+    on-chain creates in the settling tx:
+      intent 4352e3ac04bf -> taker's outputs        (2 rows)
+      intent a5de78c39d90 -> MAKER PAYOUTS          (2 rows)
+    published blob carries 1 intent:
+      intentHash(0) = a5de78c39d90   <== MATCHES ON-CHAIN
 
-For the race, one of three, in preference order:
+Two facts, both contrary to the comment: **per-party intents survive the merge
+verbatim** (every two-party settle in the run shows 2 intents / 2 owners), and
+**the payout's creating-intent hash is `intentHash(0)` of the offer's own
+intent** — computable from the blob at ingestion, before any settlement exists.
+(`intentHash` is segment-parameterised and the published intent sat at segment
+1, yet identity uses `0` — UTXO identity is segment-layout-independent, which is
+exactly what makes it knowable in advance.)
 
-1. **Attribute after the full spending tx is known** — cleanest, but needs a
-   tx-complete signal the per-output primitive does not obviously provide.
-   **Unresolved: confirm whether any such signal exists before committing to
-   this.**
-2. **Recompute `pair_stats` from final classified history.** Note "idempotent
-   upsert" is NOT sufficient and the earlier wording was too loose: an upsert
-   that increments cannot retract a stale increment already written by an
-   earlier transition. This has to be an **atomic replacement** of the affected
-   `pair_stats` rows — delete-and-rebuild for the touched pair keys inside one
-   transaction — or the divergence survives the fix.
-3. **Persist final attribution before emitting** market-data events.
+**So the fix is exact-identity markers — the true unshielded analogue of
+commitments:**
 
-Heavier SQL than the current per-offer correlate; a read-time CTE over "offers
-sharing this settling tx" is acceptable — classification is already read-time.
+1. At ingestion, for each intent in the offer and each unshielded output at
+   index `i`: expected UTXO identity = `(owner, intentHash(0), i)`. Store THOSE
+   in `offer_file_unshielded_outputs` (keep type/value for display/audit).
+2. Branch 3 of `unshieldedCancelledPredicate` becomes: cancelled unless every
+   declared identity exists in `unshielded_creates`. Identity is globally
+   unique, so the settling tx correlation is corroboration, not the key.
+3. Correct the refuted comments in derive.ts and the schema.
 
-**How to verify.** t1/t2/t4/t5 flip `.failing` → `test`; t3 and the existing
-nine unshielded cases untouched; t6 resolved either way, in writing. Full run:
-unshielded shapes green, determinism holds, and `pair_stats` identical across A
-and B — which is what actually proves the race closed.
+What this dissolves — the entire apparatus the review and I designed for the
+fungible-shape world:
+
+- **The bypass dies by construction.** A different offer has a different intent,
+  hence different identities; forging X's payout identity requires executing X's
+  intent, and executing it IS paying — atomically, inputs and outputs together.
+- **No demand/supply counting, no spend-set dedup, no feasibility assignment,
+  no tiebreaker.** Attribution stops being a choice. (Edward's point (A) lands
+  here too: `celestia_height` had no business in a Midnight settlement question
+  — and with exact identities, nothing orders anything.)
+- **Requirement (e) resolves itself.** Two offers sharing an input via two
+  DIFFERENT intents: settlement executes one intent, so exactly one offer's
+  identities appear on chain → it reads consumed, the other cancelled. No rule
+  needed.
+- **The projection race narrows to nothing structural.** Classification no
+  longer depends on other offers' state — only on chain rows from the settling
+  block, which commit in one DB transaction (the 008 argument). t5 stays as the
+  proof, not as the driver of a design.
+
+Residual, honestly stated: two byte-different wrappers embedding the LITERALLY
+same intent share identities and would both read consumed off one settlement.
+They are the same atomic swap listed twice; if that matters, dedupe by intent
+hash at ingestion. Record as a note in the fix, not a blocker.
+
+**How to verify.** t1/t2/t5 flip `.failing` → `test` (t4's unequal-alternatives
+counterexample dissolves with the counting design — keep it as a green test that
+the executed alternative reads consumed); t3 and the existing nine unshielded
+cases untouched; t6 re-checked (shielded side is already identity-exact, which
+is now the symmetric design, not a divergence). One more probe before building:
+repeat the intentHash(0) match on 2–3 more settled offers including a fallible-
+section output, so `0` is established as identity semantics rather than an
+artifact of one guaranteed-section offer. Full run: unshielded shapes green,
+determinism holds, `pair_stats` identical across A and B.
 
 ---
 

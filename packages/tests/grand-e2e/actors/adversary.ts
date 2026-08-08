@@ -143,16 +143,68 @@ export type CelestiaGarbageKind =
   | "random-bytes"
   | "truncated-tx"
   | "bech32-string-as-utf8"
-  | "replayed-real-blob";
+  | "replayed-real-blob"
+  | "crypto-tamper"
+  | "root-unknown";
 
-/** Garbage families safe to publish against the CURRENT node. `replayed-real-blob`
- *  carries a real transaction's 0x00 bytes and so trips the NUL crash below;
- *  it returns only once that is fixed (or with the repro flag set). */
+/**
+ * The Celestia door, family by family, with the rejection code each must earn.
+ *
+ * This door is the real gate — `/v1/offers` can be bypassed entirely by anyone
+ * willing to pay a blob fee, which is why celestia-zswap calls itself so. Yet
+ * until now every fixture published here died at step 3 (deserialize), so the
+ * STM's own dedup, liveness, root and crypto gates were exercised only through
+ * the API. The last two families reach past deserialization:
+ *
+ *   crypto-tamper — structurally intact, proof material flipped. Its bytes
+ *     differ from the live offer's so dedup cannot match, and it shares that
+ *     offer's (unspent) inputs and (live) roots, so nothing before the crypto
+ *     step has grounds to refuse it.
+ *   root-unknown  — the Lace fixture, whose root has aged out of the window.
+ *
+ * NULLIFIER_SPENT / UTXO_NOT_LIVE are deliberately absent: proving liveness is
+ * what rejected something requires a DIFFERENT offer over an already-spent
+ * coin, which only p3b can produce (see its post-settlement republish).
+ */
+export interface CelestiaFixture {
+  kind: CelestiaGarbageKind;
+  /** Codes offer_rejections may record — any one of them is correct. */
+  expectedCodes: string[];
+}
+
+export function celestiaFixtures(): CelestiaFixture[] {
+  return [
+    // `replayed-real-blob` carries a real transaction's 0x00 bytes, which used
+    // to crash the node on the rejection path. With the scrub fixed (it no
+    // longer matches the body as text) a NUL-bearing body is just another
+    // rejection, so the dedup path is exercised again.
+    { kind: "random-bytes", expectedCodes: ["BAD_DESERIALIZE"] },
+    { kind: "truncated-tx", expectedCodes: ["BAD_DESERIALIZE"] },
+    { kind: "bech32-string-as-utf8", expectedCodes: ["BAD_DESERIALIZE"] },
+    { kind: "replayed-real-blob", expectedCodes: ["DUPLICATE_OFFER"] },
+    { kind: "crypto-tamper", expectedCodes: ["PROOF_INVALID", "SIGNATURE_INVALID"] },
+    { kind: "root-unknown", expectedCodes: ["ROOT_UNKNOWN"] },
+  ];
+}
+
+/** All fixture kinds (p4 uses the full ladder). */
 export function celestiaGarbageKinds(): CelestiaGarbageKind[] {
-  // All four are safe again: `replayed-real-blob` carries a real transaction's
-  // 0x00 bytes, which used to crash the node on the rejection path. With the
-  // scrub fixed (it no longer matches the body as text) a NUL-bearing body is
-  // just another rejection, so the dedup path is exercised again.
+  return celestiaFixtures().map((f) => f.kind);
+}
+
+/**
+ * Families the 5a storm cycles through — deliberately NOT the full set.
+ *
+ * `crypto-tamper` reaches the last step of the ladder, so at storm scale it
+ * would make the node run hundreds of `wellFormed` verifications: minutes of
+ * proof work that would dominate the phase and invalidate every latency
+ * baseline calibrated against it. Whether that constitutes a proof-verification
+ * DoS is a real question, but it is a DIFFERENT experiment from "does the node
+ * survive a flood of junk", and it deserves its own budget rather than being
+ * smuggled into this one. `root-unknown` is excluded for a duller reason: one
+ * fixture blob, replayed, is a dedup test after the first copy.
+ */
+export function stormGarbageKinds(): CelestiaGarbageKind[] {
   return ["random-bytes", "truncated-tx", "bech32-string-as-utf8", "replayed-real-blob"];
 }
 
@@ -241,10 +293,25 @@ export async function publishCelestiaGarbage(
     case "replayed-real-blob": {
       // A byte-identical replay — it must stay verbatim to test dedup at all,
       // and a real transaction is full of 0x00. Its DUPLICATE rejection runs
-      // the same scrub, so this fixture crashes the node until the NUL bug is
-      // fixed; celestiaGarbageKinds() drops it by default. Celestia-side
-      // dedup is still covered by p4's byte-identical API replay (409).
+      // the same scrub, which is why this fixture used to crash the node.
       bytes = OfferFiles.decode(realBlobBech32);
+      hash = offerHashFromBytes(bytes);
+      break;
+    }
+    case "crypto-tamper": {
+      // Structurally intact, proof material flipped. Different bytes → a
+      // different content hash → dedup cannot match, and it shares the source
+      // offer's unspent inputs and live roots, so the ONLY gate with grounds
+      // to refuse it is the crypto step at the very end of the ladder.
+      bytes = OfferFiles.decode(cryptoTamperBlob(realBlobBech32));
+      hash = offerHashFromBytes(bytes);
+      break;
+    }
+    case "root-unknown": {
+      // Parses and verifies; its proof root has simply left the window. See
+      // foreignRootBlob() for why "foreign" is a property of TIME, not of the
+      // blob, and what that means for a fast run.
+      bytes = OfferFiles.decode(foreignRootBlob());
       hash = offerHashFromBytes(bytes);
       break;
     }

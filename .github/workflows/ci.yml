@@ -33,6 +33,7 @@ jobs:
           packages/node
           packages/offer-guard
           packages/batcher
+          packages/tests/grand-e2e
 
   typecheck-playground:
     name: Typecheck docs playground (tsc)

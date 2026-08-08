@@ -139,4 +139,13 @@ export const DIFF_EXCLUDED_COLUMNS = new Set([
   "recorded_at", // when this node recorded the liveness-set entry — local observation
 ]);
 
+// Re-running the full validator (proofs included) over every stored blob is
+// the audit's strongest assertion and also its most expensive: wellFormed
+// dominates the whole pipeline. Exhaustive by default at suite scale; set
+// GRAND_DEEP_AUDIT=0 to sample instead when running with GRAND_OFFERS in the
+// hundreds. The sample is deterministic (detVar), never random — a flaky audit
+// surface would be worse than a cheaper one.
+export const DEEP_AUDIT = process.env["GRAND_DEEP_AUDIT"] !== "0";
+export const DEEP_AUDIT_SAMPLE = 25;
+
 export const OUT_DIR = new URL("./out/", import.meta.url).pathname;

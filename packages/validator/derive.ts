@@ -115,6 +115,45 @@ export function collectOutputCommitments(tx: UnprovenTransaction): string[] {
 }
 
 /**
+ * The offer's own UNSHIELDED outputs — its fill markers on that layer, the
+ * counterpart of `collectOutputCommitments`.
+ *
+ * A settling transaction pays the maker exactly what the offer asked for, and
+ * merging preserves outputs verbatim, so a genuine settlement creates all of
+ * these on chain while a maker walking away creates none. That is the same
+ * proof the shielded path gets from output commitments — and until now the
+ * unshielded path had no equivalent, which is why every unshielded
+ * consumption classified `consumed`.
+ *
+ * Identified by (owner, tokenType, value) and NOT by intent hash or output
+ * index — on the belief that those belong to the SETTLING intent, unknowable at
+ * publish time. REFUTED by experiment (2026-08-07, grand-e2e
+ * REMAINING-ISSUES.md #5): per-party intents survive Transaction.merge, and the
+ * payout's creating-intent hash is intentHash(0) of the offer's own intent —
+ * computable RIGHT HERE, from `tx`, at ingestion. When #5 lands this function
+ * returns exact (owner, intentHash(0), outputNo) identities instead of shapes;
+ * shape matching is interim and forgeable across same-shape offers.
+ */
+export function collectUnshieldedOutputs(
+  tx: UnprovenTransaction,
+): { owner: string; tokenType: string; value: string }[] {
+  const outputs: { owner: string; tokenType: string; value: string }[] = [];
+  const intents = (tx as any).intents;
+  if (!intents || typeof intents.values !== "function") return outputs;
+  for (const intent of intents.values() as Iterable<any>) {
+    for (const offer of [intent.guaranteedUnshieldedOffer, intent.fallibleUnshieldedOffer].filter(Boolean)) {
+      for (const out of offer.outputs ?? []) {
+        const owner = bytesOrStringToHex(out.owner ?? out.address);
+        const tokenType = bytesOrStringToHex(out.type ?? out.tokenType);
+        const value = String(out.value ?? out.amount ?? "");
+        if (owner && tokenType && value) outputs.push({ owner, tokenType, value });
+      }
+    }
+  }
+  return outputs;
+}
+
+/**
  * Layer-tagged gives/wants, verbatim from MIP-0006 `deriveTokenLegs`.
  *
  * The codec already nets per (color, layer) and keeps layers separate — the

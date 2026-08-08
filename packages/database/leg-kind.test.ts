@@ -19,6 +19,9 @@ const {
   getPairStats24h,
 } = await import("@zswap-da/database");
 
+// Fixtures seed rows relative to NOW(), so their window starts 24 h before
+// wall clock. Production derives it from the chain tip instead (trade-data.ts).
+const DAY_AGO = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const PORT = 54345;
 let handle: { close: () => Promise<void> };
 let client: InstanceType<typeof pg.Client>;
@@ -53,6 +56,7 @@ test("same color on both layers of the same side coexists (widened unique tuple)
       transaction_hex: "blob-dual",
       offer_hash: "d".repeat(64),
       metadata_created_at: null,
+      first_seen_at: new Date().toISOString(),
       metadata_expires_at: null,
       ttl_seconds: 3600,
     },
@@ -96,8 +100,8 @@ test("market queries count a dual-kind leg ONCE, summed by color (join-duplicati
   // fills 2); the aggregated queries must report one fill of 15 @ price 2.
   await client.query(
     `INSERT INTO offer_file_history
-       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
-     VALUES (500, 1, 'blob-500', '${"e".repeat(64)}', NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '10 minutes')`,
+       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+     VALUES (500, 1, 'blob-500', '${"e".repeat(64)}', NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '10 minutes', NOW())`,
   );
   await client.query(
     `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at) VALUES
@@ -105,7 +109,7 @@ test("market queries count a dual-kind leg ONCE, summed by color (join-duplicati
        (500, '${BASE}', '5',  'GIVING', 'UNSHIELDED', NOW() - INTERVAL '10 minutes'),
        (500, '${QUOTE}', '30', 'WANTING', 'SHIELDED', NOW() - INTERVAL '10 minutes')`,
   );
-  const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE }, client))[0];
+  const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE, cutoff: DAY_AGO }, client))[0];
   expect(s.fills_24h).toBe(1);
   expect(Number(s.volume_base_24h)).toBe(15);
   expect(Number(s.volume_quote_24h)).toBe(30);

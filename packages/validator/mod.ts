@@ -13,6 +13,7 @@ export {
   collectNullifiers,
   collectUnshieldedSpends,
   collectOutputCommitments,
+  collectUnshieldedOutputs,
   deriveLegs,
   UnknownTokenTagError,
 } from "./derive.ts";

@@ -1,0 +1,152 @@
+// What do the market queries actually report for ONE multi-leg offer?
+//
+// Not an argument — a measurement. Seeds a single CONSUMED offer that gives
+// A=1317 + B=1424 and wants C=1983 + D=1826 (the shape produced by merging a
+// shielded and an unshielded offer), then runs the REAL queries the API serves
+// from and prints what a client would see.
+//
+//   bun test packages/database/multileg-pairs.test.ts
+
+process.env["DB_USER"] ??= "postgres";
+process.env["DB_NAME"] ??= "postgres";
+process.env["PGLITE_DATA_DIR"] ??= "memory://";
+
+const { startPglite } = await import("@effectstream/db/start-pglite");
+const pg = (await import("pg")).default;
+const { migrationTable, getPairStats24h, getTradeHistory, getPairs, upsertPairStatsByOfferId } =
+  await import("@zswap-da/database");
+// The exact functions api.ts calls for /v1/chart/stats and /v1/chart/history.
+const { realStats, realHistory } = await import("../node/trade-data.ts");
+
+import { afterAll, expect, test } from "bun:test";
+
+// Fixtures seed rows relative to NOW(), so their window starts 24 h before
+// wall clock. Production derives it from the chain tip instead (trade-data.ts).
+const DAY_AGO = new Date(Date.now() - 24 * 60 * 60 * 1000);
+const PORT = 54399;
+const handle = await startPglite(PORT);
+const client = new pg.Client({ host: "127.0.0.1", port: PORT, user: "postgres", database: "postgres" });
+await client.connect();
+for (const m of migrationTable) await client.query(m.sql);
+
+const A = "a".repeat(64), B = "b".repeat(64), C = "c".repeat(64), D = "d".repeat(64);
+const NAME: Record<string, string> = { [A]: "A", [B]: "B", [C]: "C", [D]: "D" };
+const legs: [string, string, string][] = [
+  [A, "1317", "GIVING"], [B, "1424", "GIVING"],
+  [C, "1983", "WANTING"], [D, "1826", "WANTING"],
+];
+
+await client.query(
+  `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at,
+     ttl_seconds, archive_reason, archived_at, first_seen_at)
+   VALUES (1, 1, 'blob', $1, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '10 minutes', NOW())`,
+  ["e".repeat(64)],
+);
+for (const [color, amt, dir] of legs) {
+  await client.query(
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+     VALUES (1, $1, $2, $3, 'SHIELDED', NOW() - INTERVAL '10 minutes')`,
+    [color, amt, dir],
+  );
+}
+// The same offer, still open, to show the book side.
+await client.query(
+  `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, metadata_created_at, ttl_seconds, first_seen_at)
+   VALUES (2, 1, 'blob2', $1, NOW(), 3600, NOW())`,
+  ["f".repeat(64)],
+);
+for (const [color, amt, dir] of legs) {
+  await client.query(
+    `INSERT INTO offer_file_tokens (offer_file_id, token_color, amount, direction, kind)
+     VALUES (2, $1, $2, $3, 'SHIELDED')`,
+    [color, amt, dir],
+  );
+}
+await upsertPairStatsByOfferId.run({ offer_id: 1 }, client);
+
+// KNOWN RED — PR-F (PRODUCTION-READINESS.md §2.5).
+//
+// RULING: a basket offer (A+B for C+D) is ACCEPTED and tracked through its full
+// lifecycle — live, then filled or cancelled — but it is NOT a price
+// observation. It contributes nothing to chart history, chart stats, pair_stats
+// or open_count.
+//
+// The reason it cannot be fixed at read time: merging is lossy at the segment
+// level. probe-segments.ts shows two zswaps merged into one transaction land in
+// segment 0 TOGETHER, netted, with nothing left to say which +N pairs with
+// which -M. So the constituent sealed balances cannot be recovered from the
+// bytes, and no query-side reconstruction is possible. Excluding baskets from
+// market data is the honest option, since a basket genuinely has no per-pair
+// price: nobody agreed that 1317 A is worth 1983 C, only that A+B together are
+// worth C+D together.
+test.failing("a basket offer contributes NOTHING to price discovery", async () => {
+console.log("ONE settled offer:  gives A=1317 B=1424   wants C=1983 D=1826");
+console.log("ONE open offer with the same legs.\n");
+
+console.log("What /v1/chart/* reports, pair by pair:");
+let vol: Record<string, number> = {};
+let tradeRows = 0;
+for (const [base, quote] of [[A, C], [A, D], [B, C], [B, D], [A, B], [C, D]] as [string, string][]) {
+  const s = (await getPairStats24h.run({ base, quote, cutoff: DAY_AGO }, client))[0]!;
+  const h = await getTradeHistory.run({ base, quote }, client);
+  if (!s.last_price && h.length === 0) continue;
+  tradeRows += h.length;
+  vol[NAME[base]!] = (vol[NAME[base]!] ?? 0) + Number(s.volume_base_24h ?? 0);
+  vol[NAME[quote]!] = (vol[NAME[quote]!] ?? 0) + Number(s.volume_quote_24h ?? 0);
+  console.log(
+    `  ${NAME[base]}/${NAME[quote]}: fills=${s.fills_24h} price=${Number(s.last_price).toFixed(4)} ` +
+      `vol_base=${s.volume_base_24h} vol_quote=${s.volume_quote_24h} historyRows=${h.length}`,
+  );
+}
+
+console.log(`\n  trade-history rows across all pairs: ${tradeRows}   (the offer settled ONCE)`);
+console.log("  volume attributed per colour vs what actually changed hands:");
+for (const [k, actual] of [["A", 1317], ["B", 1424], ["C", 1983], ["D", 1826]] as [string, number][]) {
+  const got = vol[k] ?? 0;
+  console.log(`    ${k}: reported ${got}, actually moved ${actual}${got !== actual ? `  <-- x${(got / actual).toFixed(0)}` : ""}`);
+}
+
+// ── The actual HTTP responses a client receives ──────────────────────────
+const short = (o: any) => JSON.stringify(o, (k, v) =>
+  typeof v === "string" && /^[0-9a-f]{64}$/.test(v) ? NAME[v] ?? v.slice(0, 6) : v);
+
+console.log("\n──────── GET /v1/chart/stats?base=A&quote=C ────────");
+console.log(short(await realStats(client, A, C)));
+console.log("\n──────── GET /v1/chart/stats?base=A&quote=D ────────");
+console.log(short(await realStats(client, A, D)));
+console.log("   ^ same 1317 units of A, two different last prices\n");
+
+console.log("──────── GET /v1/chart/history?base=A&quote=C ────────");
+console.log(short(await realHistory(client, A, C)));
+console.log("──────── GET /v1/chart/history?base=A&quote=D ────────");
+console.log(short(await realHistory(client, A, D)));
+console.log("   ^ the SAME settlement, same timestamp, same size, two prices\n");
+
+console.log("──────── GET /v1/pairs ────────");
+const pairs = await getPairs.run(undefined, client);
+console.log(short(pairs.map((p: any) => ({
+  pairKey: `${NAME[p.base_color]}|${NAME[p.quote_color]}`,
+  tradeCount: p.trade_count,
+  lastPrice: p.last_price ? Number(p.last_price).toFixed(4) : null,
+  openCount: p.open_count,
+}))));
+console.log("   ^ 4 markets, 4 trade_counts, from 1 settled + 1 open offer");
+
+// The assertion, stated on the unarguable part.
+const prices = new Set<string>();
+for (const [base, quote] of [[A, C], [A, D], [B, C], [B, D]] as [string, string][]) {
+  const s2 = (await getPairStats24h.run({ base, quote, cutoff: DAY_AGO }, client))[0]!;
+  if (s2.last_price != null) prices.add(Number(s2.last_price).toFixed(6));
+}
+// Accepted and tracked — but invisible to every market surface.
+expect(tradeRows).toBe(0);          // no prints
+expect(prices.size).toBe(0);        // no prices
+const openOnPairs = (await getPairs.run(undefined, client))
+  .reduce((n: number, p: any) => n + Number(p.open_count), 0);
+expect(openOnPairs).toBe(0);        // no un-executable quotes on the book
+
+
+
+});
+
+afterAll(async () => { await handle.close().catch(() => {}); });

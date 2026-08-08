@@ -46,6 +46,58 @@ export async function rejectionRows(
   return r.rows as any;
 }
 
+/**
+ * Rejections summed per code, across all heights.
+ *
+ * Heights cannot be matched: `offer_rejections.celestia_height` holds an
+ * EffectstreamBlockNumber, not the height blob.Submit reported (see ISSUES.md).
+ * But the per-code totals diff cleanly, which is what lets a fixture assert
+ * WHICH rejection it earned instead of merely that the count went up — the
+ * difference between "the ladder rejected it" and "the ladder rejected it for
+ * the reason we are testing".
+ */
+export async function rejectionTotalsByCode(db: Client): Promise<Record<string, number>> {
+  const r = await db.query(
+    `SELECT code, SUM(count)::int AS n FROM offer_rejections GROUP BY code`,
+  );
+  return Object.fromEntries(
+    (r.rows as { code: string; n: number }[]).map((x) => [x.code, Number(x.n)]),
+  );
+}
+
+/** Legs as stored, in the same canonical form lib/verify.ts derives them. */
+export async function legsFor(db: Client, offerFileId: number, live: boolean): Promise<string[]> {
+  const table = live ? "offer_file_tokens" : "offer_file_tokens_history";
+  const r = await db.query(
+    `SELECT token_color, amount, direction, kind FROM ${table} WHERE offer_file_id = $1`,
+    [offerFileId],
+  );
+  return (r.rows as { token_color: string; amount: string; direction: string; kind: string }[])
+    .map((x) => `${x.direction === "GIVING" ? "G" : "W"}|${x.token_color.toLowerCase()}|${x.amount}|${x.kind}`)
+    .sort();
+}
+
+export interface StoredBlobRow {
+  id: number;
+  offer_hash: string;
+  transaction_hex: string;
+  live: boolean;
+  /** L2 block time of ingestion — the ONLY correct tblock for re-validating
+   *  this blob (see lib/verify.ts). */
+  metadata_created_at: Date;
+}
+
+/** Every blob this node holds, live and archived — the audit's full surface. */
+export async function storedBlobs(db: Client): Promise<StoredBlobRow[]> {
+  const r = await db.query(
+    `SELECT id, offer_hash, transaction_hex, metadata_created_at, TRUE  AS live FROM offer_file
+     UNION ALL
+     SELECT id, offer_hash, transaction_hex, metadata_created_at, FALSE AS live FROM offer_file_history
+     ORDER BY id`,
+  );
+  return r.rows as StoredBlobRow[];
+}
+
 export async function primitiveCount(db: Client, primitiveName: string, where = ""): Promise<number> {
   const r = await db.query(
     `SELECT count(*)::int AS n FROM effectstream.primitive_accounting WHERE primitive_name = $1 ${where}`,

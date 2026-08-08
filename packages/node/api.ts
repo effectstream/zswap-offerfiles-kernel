@@ -139,8 +139,8 @@ export const apiRouter: StartConfigApiRouter = async function (
     // Resolve the opaque cursor to its keyset anchor. Anything that does not
     // resolve is a caller error — a fabricated cursor would otherwise
     // silently return page one and the caller would loop forever.
-    let afterCreatedAt: unknown = null;
-    let afterId: number | null = null;
+    let afterHeight: string | null = null;
+    let afterAnchorHash: string | null = null;
     const afterHash = String((query as any).after_hash ?? "").toLowerCase();
     if (afterHash) {
       if (!/^[0-9a-f]{64}$/.test(afterHash)) {
@@ -159,8 +159,8 @@ export const apiRouter: StartConfigApiRouter = async function (
           reason: "unknown cursor — restart pagination from the first page",
         });
       }
-      afterCreatedAt = anchor[0].created_at;
-      afterId = anchor[0].id;
+      afterHeight = String(anchor[0].celestia_height);
+      afterAnchorHash = anchor[0].offer_hash;
     }
 
     const offers = await getOpenOffersPage.run(
@@ -168,8 +168,8 @@ export const apiRouter: StartConfigApiRouter = async function (
         token: token ?? "",
         direction: direction ?? "ANY",
         limit,
-        after_created_at: afterCreatedAt as any,
-        after_id: afterId,
+        after_height: afterHeight,
+        after_hash: afterAnchorHash,
       },
       dbConn,
     );

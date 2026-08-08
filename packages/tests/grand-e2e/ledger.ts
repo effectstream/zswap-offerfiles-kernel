@@ -113,14 +113,50 @@ class Ledger {
    * the two directions combined).
    */
   fillLedger(): Map<string, { count: number; byColor: Record<string, bigint> }> {
+    return this.aggregate(false);
+  }
+
+  /**
+   * The same aggregation with the unshielded gap REMOVED — only genuine
+   * settlements count. This is what the numbers should be; `fillLedger()` is
+   * what they currently are.
+   *
+   * Both exist on purpose. `fillLedger()` asserts CURRENT behaviour per-pair so
+   * the suite stays a working gate; this one asserts the TRUTH in aggregate and
+   * is registered as a known red (RED-5) until PR-B lands tx-grouping for
+   * unshielded spends. When they agree, the gap is closed and this method
+   * replaces the other.
+   */
+  settledLedger(): Map<string, { count: number; byColor: Record<string, bigint> }> {
+    return this.aggregate(true);
+  }
+
+  /**
+   * Whether an offer is a single sealed swap — one give colour, one want
+   * colour — and therefore a price observation at all.
+   *
+   * A basket (A+B for C+D) is accepted and tracked, but contributes nothing to
+   * charts, stats, pair_stats or open_count (§2.5). It has no per-pair price to
+   * contribute: nobody agreed that A alone is worth C alone. Every offer this
+   * suite builds is single-swap, so this is a contract statement rather than a
+   * live filter — until a basket fixture exists.
+   */
+  isSingleSwap(o: OfferRecord): boolean {
+    return o.giveToken !== undefined && o.wantToken !== undefined;
+  }
+
+  private aggregate(settledOnly: boolean): Map<string, { count: number; byColor: Record<string, bigint> }> {
     const m = new Map<string, { count: number; byColor: Record<string, bigint> }>();
     for (const o of this.offers) {
       if (o.state !== "resolved") continue;
       // Settled offers are fills. So — on the UNSHIELDED layer only — are
-      // CANCELLED ones, and that is the documented gap (HANDOFF §1), not an
-      // oracle fudge: unshielded spends are not tx-grouped, so a cancel is
-      // indistinguishable from a fill, reads `consumed`, and lands in
-      // chart/volume data. p3b asserts exactly this as current behaviour.
+      // CANCELLED ones, and that is the §2.1 defect, not an oracle fudge:
+      // unshielded spends are not tx-grouped, so a cancel is indistinguishable
+      // from a fill, reads `consumed`, and lands in chart/volume data.
+      //
+      // Modelled HERE so the per-pair chart checks keep asserting current
+      // behaviour precisely; settledLedger() below asserts the truth. PR-B
+      // deletes this branch and the two collapse into one.
       //
       // Measured on pair UA|UB: api reported 6 rows against 4 settled offers,
       // and the two extras were the run's two unshielded cancels — base short
@@ -129,7 +165,10 @@ class Ledger {
       //
       // Shielded cancels are correctly excluded by fill markers, so counting
       // them here would break the pairs that currently agree.
-      const countsAsFill = o.fate === "settled" || (o.fate === "cancelled" && o.layer === "uu");
+      // Both layers, one rule, since PR-B gave the unshielded path the same
+      // evidence the shielded path had. `settledOnly` is retained only so the
+      // two call sites keep their distinct names while they converge.
+      const countsAsFill = o.fate === "settled";
       if (!countsAsFill) continue;
       const give = this.colors[o.giveToken]!;
       const want = this.colors[o.wantToken]!;

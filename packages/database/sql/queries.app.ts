@@ -1229,14 +1229,32 @@ export const isKnownRootLive = prepared<IIsKnownRootLiveParams, IIsKnownRootLive
 //
 // MIN across the offer's roots either way: the offer dies when the FIRST of
 // its roots leaves the window.
-export interface IGetEarliestRootFirstSeenParams { roots: string[] }
-export interface IGetEarliestRootFirstSeenResult {
+//
+// THE CURRENT-ROOT ESCAPE, and why it is inside the CASE rather than applied
+// to the aggregate. `last_seen_ms` only advances when our midnight-zswap-root
+// primitive observes a root ADVANCE, but the ledger re-inserts the CURRENT root
+// every block regardless. So on a quiet chain the newest root's stored
+// last_seen_ms goes stale while the chain still accepts proofs against it —
+// which is how an offer got served `status: live` with an expiry eleven minutes
+// in its own past (§2.6). isKnownRootLive already carries this escape for the
+// read gate; this is the same rule for the derivation.
+//
+// The escape is evaluated PER ROW, before MIN. Taking MIN(last_seen_ms) first
+// and then deciding "is any of them current?" would let a fresh current root
+// lift a SUPERSEDED root's window, extending an offer past the point its oldest
+// root actually dies. Per-root anchor, then minimum — never the reverse.
+export interface IGetOfferRootTimingParams { roots: string[]; block_ms: NumberOrString }
+export interface IGetOfferRootTimingResult {
   first_seen_ms: NumberOrString | null;
-  last_seen_ms: NumberOrString | null;
+  /** MIN over per-root window anchors; + ROOT_WINDOW_SECONDS is the deadline. */
+  window_anchor_ms: NumberOrString | null;
 }
-export const getEarliestRootFirstSeen = prepared<IGetEarliestRootFirstSeenParams, IGetEarliestRootFirstSeenResult>(
+export const getOfferRootTiming = prepared<IGetOfferRootTimingParams, IGetOfferRootTimingResult>(
       `SELECT MIN(first_seen_ms) AS first_seen_ms,
-              MIN(last_seen_ms)  AS last_seen_ms
+              MIN(CASE WHEN height >= (SELECT MAX(height) FROM known_roots)
+                       THEN GREATEST(last_seen_ms, :block_ms!)
+                       ELSE last_seen_ms
+                  END) AS window_anchor_ms
        FROM known_roots WHERE root = ANY(:roots!)`,
 );
 

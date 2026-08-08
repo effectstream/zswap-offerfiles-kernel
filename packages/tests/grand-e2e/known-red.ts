@@ -56,16 +56,16 @@ export const KNOWN_RED: Record<string, KnownRed> = {
   // the XPASS guard failed the run until this block was removed, and that
   // removal is the proof in the diff.
 
-  // ── PR-G — expiresAt derived without the MAX(height) escape (§2.6) ─────────
-  // The ledger's past_roots re-inserts the CURRENT root every block; our
-  // midnight-zswap-root primitive fires only when the root ADVANCES. The
-  // ingestion gate compensates (isKnownRootLive's MAX(height) escape); the
-  // expiresAt derivation does not — it reads raw last_seen_ms. On a chain with
-  // no shielded activity a freshly indexed offer is served an expiry that has
-  // ALREADY PASSED. Measured: ingested 18:34:20, expiresAt 18:23:36.
-  "p8-served ▸ served expiresAt is in the future for offers reported live": {
-    id: "RED-8", pr: "PR-G", why: "expiresAt uses raw last_seen_ms, no MAX(height) escape (§2.6)",
-  },
+  // RED-8 (PR-G, §2.6) was removed here when the fix landed. Its removal IS the
+  // proof, same as the §2.1 block above: the derivation now carries the
+  // current-root escape isKnownRootLive already had, and — the half that was
+  // missing from the original plan — the SCHEDULED CLEANUP uses that same
+  // value. Advertising an expiry and sweeping at a different time is what let
+  // an offer sit in the live book long past the deadline the API itself
+  // reported. One value now, stored and scheduled.
+  //
+  // The registry is EMPTY. Keep it that way by deleting entries in the commit
+  // that fixes them; the XPASS guard will fail the run if you forget.
 
   // §2.4 (cross-layer) and §2.5 (basket offers) are NOT registered — but no
   // longer for the reason this block used to give.

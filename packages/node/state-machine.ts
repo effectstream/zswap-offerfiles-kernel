@@ -41,7 +41,7 @@ import {
   deleteCreatedUnshielded,
   isUnshieldedCreated,
   upsertKnownRootWithFirstSeen,
-  getEarliestRootFirstSeen,
+  getOfferRootTiming,
   isKnownRootLive,
   pruneKnownRoots,
 } from "@zswap-da/database";
@@ -601,31 +601,51 @@ addTransition("celestia-zswap", function* (data) {
   // root window is fixed in the zswap crate (parameterized from node 2.x),
   // while `global_ttl` is an on-chain LedgerParameters field changeable by
   // governance. Moving one does not move the other.
-  let expiresAt: string | null = null;
+  // ONE deadline, used for BOTH the advertised expiry and the scheduled
+  // cleanup. They were computed separately before, which meant they could
+  // disagree in either direction: a stale root window advertised an expiry in
+  // the offer's own past while cleanup sat an hour out (§2.6), and a short
+  // policy TTL would delete an offer while the API still advertised a later
+  // expiry. Two calculations that happen to agree is not the same fact.
+  let layerDeadlineMs: number | null = null;
   // firstSeenAt (MIP-0006): shielded → the moment the offer became provable
   // on this chain (earliest proof-root first-seen); otherwise the Celestia
   // block time. Deterministic on replay — never wall-clock.
   let firstSeenAt = new Date(data.blockTimestamp).toISOString();
   const inputRoots = result.inputRoots ?? [];
   if (inputRoots.length > 0) {
-    const fs = yield* World.resolve(getEarliestRootFirstSeen, { roots: inputRoots });
+    const fs = yield* World.resolve(getOfferRootTiming, {
+      roots: inputRoots,
+      block_ms: data.blockTimestamp,
+    });
     const firstSeenMs = fs[0]?.first_seen_ms;
-    const lastSeenMs = fs[0]?.last_seen_ms;
+    const anchorMs = fs[0]?.window_anchor_ms;
     // firstSeenAt: the offer cannot predate its own proof root.
     if (firstSeenMs != null) {
       firstSeenAt = new Date(Number(firstSeenMs)).toISOString();
     }
-    // expiresAt: from LAST-seen — the refresh semantics above.
-    if (lastSeenMs != null) {
-      expiresAt = new Date(Number(lastSeenMs) + ROOT_WINDOW_SECONDS * 1000).toISOString();
+    // The anchor is already the MIN over per-root anchors, with the
+    // current-root escape applied per row — see getOfferRootTiming.
+    if (anchorMs != null) {
+      layerDeadlineMs = Number(anchorMs) + ROOT_WINDOW_SECONDS * 1000;
     }
   }
-  if (expiresAt == null) {
+  if (layerDeadlineMs == null) {
+    // UNSHIELDED: the earliest intent TTL. Structurally always present for a
+    // well-formed unshielded offer; the block-time fallback is defensive.
     const intentTtl = P2pAtomicSwaps.earliestIntentTtl(result.tx!);
-    expiresAt = intentTtl
-      ? new Date(intentTtl).toISOString()
-      : new Date(data.blockTimestamp + OFFER_TTL_SECONDS * 1000).toISOString();
+    layerDeadlineMs = intentTtl
+      ? Number(new Date(intentTtl))
+      : data.blockTimestamp + OFFER_TTL_SECONDS * 1000;
   }
+  // The indexer's retention policy is a CEILING, never an extension: an offer
+  // whose layer deadline falls sooner dies sooner, and one that would outlive
+  // the policy is still swept at the policy horizon.
+  const effectiveExpiryMs = Math.min(
+    layerDeadlineMs,
+    data.blockTimestamp + OFFER_TTL_SECONDS * 1000,
+  );
+  const expiresAt = new Date(effectiveExpiryMs).toISOString();
 
   try {
     // ── Insert offer ──
@@ -741,11 +761,17 @@ addTransition("celestia-zswap", function* (data) {
       return;
     }
 
-    // Schedule a follow-up STM input to run after the TTL expires.
+    // Sweep at EXACTLY the advertised expiry — the same effectiveExpiryMs
+    // stored in metadata_expires_at, not a second computation that happens to
+    // agree. Recomputing `blockTimestamp + OFFER_TTL_SECONDS` here is what let
+    // the two drift: an offer whose root window closed sooner stayed in the
+    // live book, served as `live`, long past the expiry the API itself
+    // reported. If the deadline is already behind us the scheduler fires at
+    // once, which is correct — the offer was never fillable.
     yield* World.resolve(newScheduledTimestampData, {
       from_address: "0x0",
       from_address_type: AddressType.NONE,
-      future_ms_timestamp: new Date(data.blockTimestamp + OFFER_TTL_SECONDS * 1000),
+      future_ms_timestamp: new Date(effectiveExpiryMs),
       input_data: JSON.stringify(["zswap-ttl-cleanup", offerFileId]),
     });
 

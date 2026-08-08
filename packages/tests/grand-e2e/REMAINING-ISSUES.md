@@ -37,23 +37,27 @@ plainly rather than quietly reclassifying:**
   table is the first thing a newcomer reads, and it currently understates the
   system by four fixed defects. Now item #19.
 
-**Still not production-ready.** Four product defects remain, three of them
-market-data integrity, plus an undecided reorg policy. RED-8 stays registered so
-the suite keeps failing honestly on §2.6.
+**Still not production-ready.** Three product defects remain (#5, #6, #7), all
+market-data integrity, plus an undecided reorg policy (#13). §2.6 is fixed in
+PR #37, which deleted RED-8 — the `KNOWN_RED` registry is now EMPTY, so any red
+in a future run is a plain failure.
 
 ---
 
 ## What to do next, in order
 
-1. **#4 (PR-G, §2.6 expiry)** — smallest, its red is already registered, clean
-   red→green, and it empties `KNOWN_RED`. Good first move on the new main.
-2. **#5 (exact-identity markers)** — the highest-value item. It is the only
-   *fabrication* defect (one payment → two recorded sales, attacker-chosen), and
-   the design now **deletes** machinery rather than adding it. Confirmed on real
-   data 2026-08-08: **7 of 7 payouts across 4 settled offers matched
-   `(owner, intentHash(0), output_no)` exactly, with zero counterexamples.**
-   Remaining unknown: every sampled offer used `guaranteed` sections, so the
-   fallible-section case is still untested — cover it in the fixture.
+1. ~~**#4 (PR-G, §2.6 expiry)**~~ — **done**, PR #37. Fixed both halves (the
+   per-root current-root escape AND the sweep, which was a second calculation),
+   and deleted RED-8. Awaiting e2e.
+2. **#5 (exact-identity markers)** — the highest-value item, and the one with
+   the most design left. It is the only *fabrication* defect (one payment → two
+   recorded sales, attacker-chosen). Probed on real data 2026-08-08: 7 of 7
+   payouts across 4 settled offers matched `(owner, intentHash(0), output_no)` —
+   but **that rule is only correct for GUARANTEED outputs**; fallible outputs use
+   `intentHash(physicalSegmentId)` (ledger 8.1.0), and all 9 sampled offers were
+   guaranteed-only. It also does NOT dissolve literal-intent duplicates or the
+   pre-commit publication race, both of which an earlier revision wrongly wrote
+   off. See §5.
 3. **#6 (§2.4 cross-layer)** then **#7/#8 (§2.5 baskets + the pairs contract)** —
    both need fixtures built, not just code.
 4. **#19 (finish A3)** — cheap, and the stale table actively misleads.
@@ -136,7 +140,7 @@ Ordering is in "What to do next" above. `—` = done.
 | 11 | T-A2 unreachable reject codes | ruling | open |
 | 12 | T-E2 / T-E5 deferred coverage | coverage | open |
 | 13 | Reorg recovery — **all derived state** | production decision | open |
-| 14 | Runner not host-isolated | **disputed premise** | open |
+| 14 | Runner not host-isolated — **Compose is a settled constraint** | execution constraint | open |
 | 15 | The closing sweep | closeout | open |
 | 16 | pgtyped regeneration can silently break again | new — no guard | open |
 | 17 | ~~`outputIndex ?? outputNo` shim~~ | **RESOLVED** — grammar confirmed, shim removed | — |
@@ -145,17 +149,8 @@ Ordering is in "What to do next" above. `—` = done.
 
 ### Order of work
 
-**To merge:** A1 (#18) → A2 (register the marker-bypass red) → A3 (docs) → one
-full run at 205/0 → merge.
-
-**After merge**, by value: #4 (§2.6, smallest, red already in the scorecard) →
-#5 (PR-B's own integrity, and A2 will already have written its red) → #6 §2.4 →
-#7/#8 §2.5 + the pairs contract. #16 is small and independent, pick it up any
-time. #12's coverage, then #15's sweep last — its precondition is an empty
-defect list.
-
-**Off the critical path:** #11, #13, #14 and #17 need a ruling or an external
-fact, not code. They can be settled while runs execute.
+See "What to do next, in order" at the top — this heading used to repeat a
+pre-merge A1/A2/A3 gate that no longer exists.
 
 ---
 
@@ -568,14 +563,37 @@ intent** — computable from the blob at ingestion, before any settlement exists
 exactly what makes it knowable in advance.)
 
 **So the fix is exact-identity markers — the true unshielded analogue of
-commitments:**
+commitments. The segment rule is NOT uniform, and getting it wrong cancels
+valid trades:**
 
-1. At ingestion, for each intent in the offer and each unshielded output at
-   index `i`: expected UTXO identity = `(owner, intentHash(0), i)`. Store THOSE
-   in `offer_file_unshielded_outputs` (keep type/value for display/audit).
+`UtxoState::apply_offer` stamps every output with `parent.intent_hash(segment_id)`
+(ledger 8.1.0 `semantics.rs:1645-1679`), and the two call sites pass different
+things:
+
+| offer section | segment passed | identity |
+|---|---|---|
+| **guaranteed** | literal `0` — the loop iterates `for (phys_seg, intent)` but passes `segment`, which is 0 in that branch (`semantics.rs:940-974`) | `intentHash(0)` |
+| **fallible** | the intent's **physical segment id** (`semantics.rs:1079-1095`) | `intentHash(physSeg)` |
+
+The earlier revision of this item generalised `intentHash(0)` to both and called
+fallible "the last untested unknown". It was not unknown — the pinned ledger
+answers it, and implementing the generalisation literally would store a marker
+that **can never match the on-chain create, classifying every valid fallible
+settlement as cancelled**. `Transaction::merge` preserves intent-map keys and
+rejects collisions rather than renumbering (`structure.rs:1383-1437`), so the
+physical key is stable and knowable from the published blob.
+
+1. At ingestion, per intent and per unshielded output index `i`:
+   identity = `(owner, intentHash(SEG), i)` where `SEG` is `0` for a
+   guaranteed-section output and the intent's **physical map key** for a
+   fallible-section one. Store those in `offer_file_unshielded_outputs` (keep
+   type/value for display/audit).
+   **`collectUnshieldedOutputs` currently iterates `intents.values()`
+   ([derive.ts:137](../../validator/derive.ts:137)), which discards the key it
+   now needs — it must iterate entries.**
 2. Branch 3 of `unshieldedCancelledPredicate` becomes: cancelled unless every
    declared identity exists in `unshielded_creates`. Identity is globally
-   unique, so the settling tx correlation is corroboration, not the key.
+   unique, so the settling-tx correlation is corroboration, not the key.
 3. Correct the refuted comments in derive.ts and the schema.
 
 What this dissolves — the entire apparatus the review and I designed for the
@@ -592,15 +610,56 @@ fungible-shape world:
   DIFFERENT intents: settlement executes one intent, so exactly one offer's
   identities appear on chain → it reads consumed, the other cancelled. No rule
   needed.
-- **The projection race narrows to nothing structural.** Classification no
-  longer depends on other offers' state — only on chain rows from the settling
-  block, which commit in one DB transaction (the 008 argument). t5 stays as the
-  proof, not as the driver of a design.
+**Two things it does NOT dissolve. Both were wrongly written off in the previous
+revision, and both are required parts of this item:**
 
-Residual, honestly stated: two byte-different wrappers embedding the LITERALLY
-same intent share identities and would both read consumed off one settlement.
-They are the same atomic swap listed twice; if that matters, dedupe by intent
-hash at ingestion. Record as a note in the fix, not a blocker.
+**(i) Literal-intent duplicates still turn one payment into two prints.** Two
+byte-different wrappers embedding the LITERALLY same intent share every exact
+identity. The earlier note called this "the same swap listed twice… not a
+blocker". It is the original integrity defect in a narrower shape:
+
+1. both rows share the spent input and archive on the one settlement;
+2. both find the same exact markers and classify `consumed`;
+3. the archive loop emits `offer_consumed` **once per row**
+   ([state-machine.ts:303](../../node/state-machine.ts:303));
+4. `upsertPairStatsByOfferId` increments `trade_count` per offer id.
+
+One payment, two market prints — and it directly contradicts requirement (e),
+whose own test demands exactly one `consumed` duplicate. So a **red for two
+byte-different wrappers carrying the literal same intent is required**, and
+canonical-execution dedup (or deterministic exactly-one attribution) is part of
+the fix. "Dedupe by intent hash" is not yet a rule: it must say what happens for
+multi-intent wrappers, where two offers may overlap on some intents and not
+others.
+
+**(ii) The pre-commit projection/SSE race is REAL and exact markers do not touch
+it.** The previous revision claimed it had "nothing structural" left because the
+chain rows commit in one DB transaction. The rows are transactional; **the
+events are not post-commit**:
+
+- the unshielded-spend transition calls `emitAppEvent` while the runtime's block
+  transaction is still open ([state-machine.ts:303](../../node/state-machine.ts:303));
+- `emitAppEvent` is a synchronous local `EventEmitter.emit`
+  ([event-bus.ts:24](../../node/event-bus.ts:24));
+- the API listener immediately runs `upsertPairStatsByOfferId` **on a separate
+  pool** ([api.ts:97](../../node/api.ts:97)) — and its comment claims the event
+  "fires after the archive transaction commits", which is simply false;
+- effectstream commits only after every primitive has run, and
+  `Midnight-UnshieldedSpend` is configured BEFORE `Midnight-UnshieldedCreate`
+  ([config.dev.ts:149,158](../../node/config.dev.ts:149)), so the spend's archive
+  and emit precede the same block's create rows;
+- the SSE route forwards the same local event immediately.
+
+On PostgreSQL the pair-stats update can therefore run before the archive and
+same-block creates are visible, write nothing, and never retry — and SSE can
+announce a lifecycle state that is later rolled back. PGlite's scheduling may
+hide it, so **t5 as described is not proof of safety**.
+
+The fix needs transaction-aware publication: a durable outbox, a runtime-level
+post-commit buffer, or performing the projection inside the block transaction
+after the required primitives have run. Verification must be a controlled
+PostgreSQL test that holds the block transaction open and proves neither pair
+stats nor SSE publish before commit, plus the rollback path.
 
 **CONFIRMATION PROBE — RUN 2026-08-08, design holds.** Every settled unshielded
 offer in the clean run's database (9 of them) checked, not one sample:
@@ -622,11 +681,18 @@ to identify" as failure. The data was always clean.)
 `guaranteed` sections only. **The fallible-section case is still untested**, so
 the fixture must cover it — that is now the only unknown in this design.
 
-**How to verify.** t1/t2/t5 flip `.failing` → `test` (t4's unequal-alternatives
-counterexample dissolves with the counting design — keep it as a green test that
-the executed alternative reads consumed); t3 and the existing nine unshielded
-cases untouched; t6 re-checked (shielded side is already identity-exact, which
-is now the symmetric design, not a divergence). Full run: unshielded shapes
+**How to verify.** t1/t2/t5 and the new literal-duplicate red flip `.failing` →
+`test`; t4 lands green (under exact identities only the executed intent's
+identities appear, so the executed alternative reads consumed by construction);
+t3 and the existing nine unshielded cases untouched; t6 re-checked (the shielded
+side is already identity-exact — now the symmetric design, not a divergence).
+
+**A FALLIBLE-SECTION FIXTURE IS MANDATORY, not a nice-to-have:** it must assert
+both the precomputed marker (`intentHash(physSeg)`, not `intentHash(0)`) and the
+final `consumed` classification. Without it the segment rule is untested in
+exactly the direction that silently cancels valid trades.
+
+Plus the PostgreSQL publication test from (ii), and a full run: unshielded shapes
 green, determinism holds, `pair_stats` identical across A and B.
 
 ---
@@ -791,9 +857,9 @@ DBs are wiped by `fresh-run.sh`. The two traps a rebuild would have had to dodge
 historical prices until wiped. Record that in ISSUES.md; do not build a
 migration for it.
 
-Note #5's fix option 2 (idempotent recompute from classified history) would make
-any future repair free as a side effect. That is a reason to prefer option 2, not
-a reason to reopen this.
+Note #5's publication fix (post-commit projection, see #5(ii)) would make any
+future repair free as a side effect, since the projection becomes rebuildable
+from classified history. A reason to sequence #5 first, not to reopen this.
 
 ---
 
@@ -923,34 +989,20 @@ index-wait budgets survive N. Either way §6's row becomes "decided: <what>".
 
 ---
 
-## 14. Runner host isolation — needs your call
+## 14. Runner host isolation — Compose is a settled constraint
 
-**Plan.** **Disputed premise — needs Edward to settle it.** Two independent
-reviews state that Docker Compose was explicitly requested "where practical, to
-avoid host-port collisions", and that a host-bound `fresh-run.sh` should
-therefore not be the default. I cannot corroborate that: there is no such
-request in this conversation, no `CLAUDE.md`/`AGENTS.md` in the repo, no
-`docker-compose*`/`compose.y*ml` anywhere in the tree, and nothing in project
-memory. It may well come from a session or instruction I do not have — which is
-exactly why this should not be silently adopted *or* silently dismissed.
+**Plan.** **SETTLED: use Docker Compose where practical.** Three independent
+reviews have now stated this was an explicit standing instruction for running
+tests — host ports must not collide. I could not corroborate it from this
+repo, conversation or memory, and said so twice; that is recorded in the
+revision history rather than re-litigated here. Treat it as a constraint:
+isolate via Compose where practical, and **document any component that cannot
+be** (the Midnight proof-server is a long-lived devnet process outside any
+scope we create).
 
-**If the request is real, this is not a "scope question" but a standing
-requirement, and #2 should not run host-bound until a Compose wrapper exists or
-it is documented why it cannot.** If it is not, the recommendation below stands.
-
-**Evidence has since arrived, and it favours the reviewers.** The 2026-08-07 run
-was destroyed by a foreign workload on the same box — a Codex sandbox building
-and testing `umbradb-fork` — which starved the local chain node until it stopped
-producing blocks (see #3). Whatever was or was not requested earlier, this box
-demonstrably hosts concurrent agent sessions, and the suite has now lost two runs
-to that. Port collisions were only the visible half of the problem; **CPU
-contention is the half that actually voids results**, and a Compose wrapper with
-its own network does not fix that on its own — it needs a CPU reservation, or a
-dedicated box, or a preflight that refuses to start on a loaded machine.
-
-Cheapest thing that would have saved both runs: **a preflight gate** that
-refuses to start when the 1-minute load average is above a threshold, plus the
-in-run stalled-tip abort from #3. Neither requires Compose.
+The CPU reservation (§3) and a load preflight are **complementary**, not
+substitutes: they address contention, which voids results, while Compose
+addresses port/network collision, which prevents runs from starting.
 
 The underlying facts are true either way: `fresh-run.sh` binds fixed
 host ports (PGlite on 5432, the stack's service ports) and reaps by `pkill`
@@ -1081,48 +1133,20 @@ UTXO triples.
 
 ---
 
-## 18. NEW — the `bookReadP95Ms` gate cannot fail honestly at count=10
+## 18. DONE — the `bookReadP95Ms` gate now measures the median
 
-**Plan.** The 2026-08-07 run's single failure:
+Fixed and merged (`a83965b`). At count=10 the p95 IS the max, so one slow read
+defined the gate and it had already been raised 10 → 20 once for the same
+reason. The median now carries it (`bookReadP50Ms`), the tail is enforced only
+at >= 50 samples (`MIN_TAIL_SAMPLES`) and reported as a note below that, and the
+same rule covers `sseDeliveryLagP95Ms`. `metrics.test.ts` pins the distinction
+the old gate could not make: `{count:10, p50:7, p95:42}` passes,
+`{count:10, p50:30, p95:45}` fails.
 
-    [FAIL] p7b-audit ▸ metrics within baseline × 1.2
-           (book read p95 ms: 42 > baseline 20 × 1.2 = 24)
-
-    bookReadMs: {count: 10, p50: 7, p95: 42, max: 42}
-
-**Not a regression.** The median is 7 ms, historically 7–8 ms — unmoved. With ten
-samples the "p95" IS the max, so any single slow read defines it and trips the
-gate. `baseline.json`'s own note already diagnoses this exact failure and states
-the test: *"A real regression moves the median."*
-
-This mattered because the cursor change (#1) replaced a `(timestamptz, int)`
-comparison with `(bigint, text)` over a 64-char hash, which was the obvious
-suspect. The median says the suspicion was wrong.
-
-**This is the metric's second offence.** The note records that the baseline was
-already raised 10 → 20 for the same reason — one 19 ms read with the median
-unmoved. Raising it again to 42 would be the third round of the same move, and it
-is exactly the "widen the threshold until it passes" antipattern this project
-refuses for index-wait timeouts. A gate that has to be relaxed every time it fires
-is not measuring anything.
-
-**How to test.** Feed the checker a synthetic snapshot: `count=10, p50=7, p95=42`
-must PASS (outlier, median healthy) while `count=10, p50=30, p95=45` must FAIL
-(median genuinely moved). Today the first fails and the second also fails, for the
-same reason — which is the point: the gate cannot distinguish them.
-
-**How to fix.** In `metrics.ts`, gate book reads on the **median**, not p95, with
-a baseline near the observed 7–8 ms and the existing ×1.2 tolerance. Options if
-tail latency is genuinely wanted too: keep a p95 gate but only apply it when
-`count >= 50` (below that, report it as a note like the TTL SSE population), or
-raise the sample count so p95 stops being the max. Report the outlier either way —
-it should be visible, just not a failure.
-
-Note this is the same class as the SSE metric split (#9): a number that mixed two
-populations and had to be redefined rather than re-baselined. Same lesson.
-
-**How to verify.** The synthetic cases above, plus a full run reaching **205/0**
-with RED-8 the only expected red. Test-only change; no product code.
+Still open from that work: `submitP95Ms` (~29 samples) and
+`publishToIndexedP95Ms` (~33) share the low-count property and remain gated on
+p95 alone. They pass today; they should gain p50 baselines at the next
+recalibration.
 
 ---
 

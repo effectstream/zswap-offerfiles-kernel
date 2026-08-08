@@ -699,7 +699,8 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
   if (!base) {
     note("baseline", "no calibrated baseline.json — this run records calibration values (commit them to enforce)");
   } else {
-    const violations = baselineViolations(snap, base);
+    const { violations, notes } = baselineViolations(snap, base);
+    for (const n of notes) note("baseline", n);
     await check("metrics within baseline × 1.2", async () => violations.length === 0, violations.join("; "));
   }
 }

@@ -122,6 +122,18 @@ The single failure is a metric artefact, not a defect (new item #18). RED-8 fire
 correctly and XPASS was 0, so nothing shipped without its paperwork. Items #1 and
 #2 are closed; #3's fix is proven in the field.
 
+**Fifth revision — the marker-bypass premise fell to an experiment.** Edward
+challenged #5's design: settlement is Midnight-only (so `celestia_height` had no
+business in it), and unshielded outputs are MORE visible than shielded ones, so
+classification should be simpler, not weaker. Both points held. Probing the
+clean run's database showed per-party intents survive `Transaction.merge` and
+the maker payout's creating intent equals **`intentHash(0)` of the offer's own
+published intent** — refuting the "unknowable at publish" claim in the schema
+and derive.ts (both now annotated in-code). #5's fix collapsed from a
+feasibility-assignment design to **exact UTXO-identity markers**, the direct
+analogue of shielded commitments; the counting, dedup and tiebreaker apparatus
+was deleted rather than repaired. FINDINGS.md §0(4) records the experiment.
+
 ---
 
 ## 0. The queue at a glance
@@ -134,7 +146,7 @@ correctly and XPASS was 0, so nothing shipped without its paperwork. Items #1 an
 | ~~2~~ | ~~Clean full run~~ | **DONE** — 205 checks, 1 fail, lag 113 | — |
 | ~~3~~ | ~~`maxLagBlocks: 1403`~~ | **DIAGNOSED + MITIGATED** — external contention; CPU reservation holds | — |
 | **4** | §2.6 `expiresAt` past at ingestion **+ cleanup on policy TTL** | **product defect — next** | B |
-| 5 | Cross-offer marker bypass **+ projection race** | product defect | B |
+| 5 | Cross-offer marker bypass — **fix known: exact-identity markers** | product defect | B |
 | 6 | §2.4 cross-layer offers unenforced | product defect | B |
 | 7 | §2.5 baskets — **five** market surfaces | product defect | B |
 | 8 | `/v1/pairs` ordering — contract undefined | product decision | B |
@@ -535,13 +547,12 @@ the first ones landed `test.failing` (this repo's unit-red mechanism, cf.
   payout → **exactly one** `consumed`. This is requirement (e). Today both.
 - **t3 honest batch (must stay green):** X, Y disjoint, one tx paying 20 twice →
   both `consumed`.
-- **t4 unequal alternatives — the counterexample that kills naive ordering:**
-  same spend-set, earlier alternative declares TWO identical 20-UB markers,
-  later alternative declares ONE, and the settlement supplies ONE. Ordering by
-  `(celestia_height, offer_hash)` picks the earlier offer, sees demand 2 vs
-  supply 1, and reports a false shortfall — cancelling a transaction that
-  legitimately settled the later alternative. Assert the later one reads
-  `consumed`.
+- **t4 unequal alternatives:** same spend-set, earlier alternative declares TWO
+  identical 20-UB markers, later declares ONE, settlement supplies ONE — assert
+  the later one reads `consumed`. (Historically this was the counterexample
+  that killed the naive-ordering design; under exact-identity markers it is
+  simply true by construction — only the executed intent's identities appear —
+  so it lands as a green regression test, not a red.)
 - **t5 projection consistency:** drive X and Y's spends as two separate
   transitions and assert `pair_stats` after both, not just final status. Must
   fail on today's emit-per-transition ordering.

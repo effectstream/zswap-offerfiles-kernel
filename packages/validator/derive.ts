@@ -126,8 +126,13 @@ export function collectOutputCommitments(tx: UnprovenTransaction): string[] {
  * consumption classified `consumed`.
  *
  * Identified by (owner, tokenType, value) and NOT by intent hash or output
- * index: those belong to the SETTLING intent, which the maker cannot know when
- * publishing. The value is exact — the offer fixes what the maker is owed.
+ * index — on the belief that those belong to the SETTLING intent, unknowable at
+ * publish time. REFUTED by experiment (2026-08-07, grand-e2e
+ * REMAINING-ISSUES.md #5): per-party intents survive Transaction.merge, and the
+ * payout's creating-intent hash is intentHash(0) of the offer's own intent —
+ * computable RIGHT HERE, from `tx`, at ingestion. When #5 lands this function
+ * returns exact (owner, intentHash(0), outputNo) identities instead of shapes;
+ * shape matching is interim and forgeable across same-shape offers.
  */
 export function collectUnshieldedOutputs(
   tx: UnprovenTransaction,

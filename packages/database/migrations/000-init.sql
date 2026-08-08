@@ -370,9 +370,18 @@ CREATE INDEX idx_unshielded_creates_marker
 -- create every one of them; a maker walking away creates none.
 --
 -- Matched on (owner, token_type, value) rather than on the intent hash and
--- output index, because those belong to the SETTLING intent and the maker
--- cannot know them when publishing. Amounts are exact: the offer fixes what the
--- maker is owed, and merging preserves outputs verbatim.
+-- output index — on the belief that those belong to the SETTLING intent and the
+-- maker cannot know them when publishing.
+--
+-- THAT BELIEF IS REFUTED BY EXPERIMENT (2026-08-07, REMAINING-ISSUES.md #5).
+-- Per-party intents survive Transaction.merge verbatim, and the payout's
+-- creating-intent hash equals intentHash(0) of the offer's OWN intent —
+-- computable from the blob at ingestion. So the true marker is the exact UTXO
+-- identity (owner, intentHash(0), output_no): the direct unshielded analogue of
+-- a commitment, and it closes the cross-offer bypass by construction. This
+-- table moves to exact identities when #5 lands; until then, shape matching
+-- plus `count` below is the interim, and it is KNOWN to be forgeable across
+-- offers (one payout can satisfy two same-shape offers).
 --
 -- `count` is load-bearing, not bookkeeping. Without it, N identical outputs
 -- collapse into one row and the marker check degrades to existence: an offer

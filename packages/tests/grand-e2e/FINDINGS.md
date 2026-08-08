@@ -1,7 +1,62 @@
 # Findings & resume point — production-readiness work
 
-State as of 2026-08-06. Read with [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md),
-which holds the full plan and the per-defect detail.
+State as of 2026-08-06, **plus the 2026-08-07 addendum directly below**, which
+supersedes §1, §3 and item 3 of §6. Read with
+[PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) (full plan, per-defect
+detail) and [REMAINING-ISSUES.md](REMAINING-ISSUES.md) (the live work queue —
+now targeted at merging #35).
+
+---
+
+## 0. Addendum, 2026-08-07 — four findings that change the picture
+
+**(1) The stack is one PR.** #30–#34 are closed;
+[#35](https://github.com/effectstream/zswap-offerfiles-kernel/pull/35)
+(`feat/production-readiness`) carries every commit. The restack §1 worries about
+became unnecessary: the review fixes sat on the wrong branches, and one atomic
+PR cannot land PR-B without its marker gate. Also folded in: migrations 001–015
+collapsed into `000-init.sql`, 25 dead generated queries removed, and
+`bun run build:pgtypes` un-broken (it had been failing on a parse error and
+exiting 0, which is why `queries.queries.ts` had drifted).
+
+**(2) The clean run landed.** 205 checks, **1 failure**, 72.7 min,
+`maxLagBlocks` **113** — a valid verdict, unlike 2026-08-06. Both p7a
+determinism checks passed: a second node replayed ~4400 blocks from height 1
+into byte-identical public tables, which verifies the collapsed schema, the
+NOT NULL tightenings, the new cursor key and PR-B/C/D/H across replicas. RED-8
+fired correctly; XPASS 0. The one failure is a metric artefact (bookRead p95 at
+count=10 IS the max; median unmoved at 7 ms) — fixed as A1: the median now
+carries the gate, tails below 50 samples are reported as notes.
+
+**(3) §3's mystery is solved, and the recorded hypothesis was wrong.** The
+`maxLagBlocks: 1403` cause was NOT stale processes — the table was verified
+clean before the 2026-08-07 morning run, which then degraded live under
+observation: load 4 → 104 as a Codex sandbox (different project,
+`umbradb-fork`) ran a cargo build then a crash-test suite on the same box. The
+decisive symptom: **the Celestia tip stopped advancing** — the chain node
+itself was starved, after which every index-wait fails for the same non-reason.
+That run was aborted; the rerun under a CPU reservation
+(`systemd-run --user --scope -p CPUWeight=500 -p CPUQuota=1200%`, verified at
+the kernel, 0.16% throttling cost) is the clean run above. Rule for future
+runs: watch the tip, not just the load — a stalled tip voids the run
+immediately.
+
+**(4) The unshielded marker premise is false — experiment, not argument.** The
+schema and `derive.ts` claimed payout intent hash / output index "belong to the
+SETTLING intent, which the maker cannot know when publishing", which is why
+markers match fungible shapes `(owner, token_type, value)` — the root of the
+cross-offer bypass (one payout satisfying two same-shape offers). Tested
+against this run's database, offer #3 / settling tx `f2516323…`: per-party
+intents **survive `Transaction.merge` verbatim** (2 intents / 2 owners in every
+two-party settle), and the maker payouts' creating intent equals
+**`intentHash(0)` of the offer's own published intent** — computable from the
+blob at ingestion. So exact UTXO-identity markers `(owner, intentHash(0),
+output_no)` — the true unshielded analogue of shielded commitments — are
+possible, and the bypass dies by construction: forging an offer's payout
+identity means executing its intent, and executing it is paying. The
+feasibility-assignment design this replaces is deleted from
+[REMAINING-ISSUES.md](REMAINING-ISSUES.md) #5. Confirm `intentHash(0)` on 2–3
+more settles (including a fallible-section output) before building.
 
 ---
 

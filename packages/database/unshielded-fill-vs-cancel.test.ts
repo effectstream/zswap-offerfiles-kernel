@@ -13,9 +13,13 @@
 //   spends across two txs       → cancelled (settlement is atomic)
 //   only some spends landed     → cancelled (same argument)
 //
-// Markers are matched on (owner, token_type, value), never on intent hash or
-// output index: those belong to the SETTLING intent, which the maker cannot
-// know when publishing.
+// Markers are matched on (owner, token_type, value) — the interim scheme. The
+// original rationale ("intent hash and output index belong to the SETTLING
+// intent, unknowable at publish") was REFUTED by experiment on 2026-08-07: the
+// payout's creating intent IS the offer's own intent, hash computable from the
+// blob (REMAINING-ISSUES.md #5). Shape matching is forgeable across same-shape
+// offers; these tests move to exact (owner, intentHash(0), outputNo) identities
+// when #5 lands.
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";

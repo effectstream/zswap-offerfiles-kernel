@@ -1,27 +1,17 @@
-# The road to merging #35 — what stabilizes it, what ships after
+# Remaining work — the four open defects, and what production still needs
 
-**GOAL: get [#35](https://github.com/effectstream/zswap-offerfiles-kernel/pull/35)
-merged.** Not to finish production readiness — to bank the verified work and
-convert everything else into tracked, documented follow-ups.
+**#35 IS MERGED** (2026-08-08, `f298123`). The merge goal is met; this document
+is now the register of what is left.
 
-State as of 2026-08-07. Companion to
+State as of 2026-08-08. Companion to
 [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) (original plan, per-defect
-measurements) and [FINDINGS.md](FINDINGS.md) (how we got here).
+measurements) and [FINDINGS.md](FINDINGS.md) (how we got here — §0 is the
+current addendum).
 
-`feat/production-readiness`, 32 commits off main. PRs #30–#34 are closed and
-superseded; their commits survive intact in #35's history, so the five review
-verdicts at `/home/eddie/zswap-offerfiles-kernel-x/PR-3{0,1,2,3,4}-REVIEW.md`
-still apply to the same commits.
+## What shipped, and what the merge gate did not wait for
 
-## Why merging is safe, stated precisely
-
-**#35 fixes four defects and introduces none. Every defect it leaves open
-already exists in main today.** Merging therefore strictly reduces risk — it is
-not a decision to accept the open items, it is a decision to stop carrying 32
-verified commits on a branch.
-
-What it banks, all verified by the 2026-08-07 run (205 checks, 1 failure,
-`maxLagBlocks` 113):
+Banked, verified by the 2026-08-07 run (205 checks, 1 failure, `maxLagBlocks`
+113, determinism identical across replicas):
 
 | fixed | was |
 |---|---|
@@ -30,60 +20,51 @@ What it banks, all verified by the 2026-08-07 run (205 checks, 1 failure,
 | §2.3 24 h window | bounded on `NOW()` against chain-derived `archived_at` |
 | pagination on wall clock | replicas served different page orders, invisible to the determinism diff by construction |
 
-Plus the schema collapse, 25 dead queries removed, un-broken pgtyped codegen, and
-a test suite that grew 143 → 205 checks with a determinism replay that passes.
+Plus the schema collapse, 25 dead queries removed, un-broken pgtyped codegen, a
+suite grown 143 → 205 checks, and **A1** (the `bookReadP95Ms` gate now measures
+the median, so it can fail honestly).
 
-**What merging does NOT mean.** It does not mean production-ready. Four product
-defects remain open (§B below), three of them market-data integrity. The
-`KNOWN_RED` registry carries RED-8 so the suite keeps failing honestly on §2.6,
-and [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) §2 remains the register of
-what is still broken. Do not read a green scorecard as a shipping verdict.
+**Two of the three pre-merge items did not land, and that is worth stating
+plainly rather than quietly reclassifying:**
 
----
+- **A2 — the cross-offer marker bypass was never registered as a red.** It is
+  still a defect described only in markdown. It is now folded into #5, which has
+  a designed fix, so it lands as that item's red rather than as standalone
+  paperwork.
+- **A3 — doc reconciliation is partial.** The refuted-premise sweep landed
+  (`9b71b8c`), but **PRODUCTION-READINESS.md's (a)–(f) status table still
+  describes the pre-work state** and §2.1/§2.3 headers do not say FIXED. That
+  table is the first thing a newcomer reads, and it currently understates the
+  system by four fixed defects. Now item #19.
 
-## A. Before merge — stabilization only
-
-Three items, all small, none touching product behaviour. "Mostly as-is" is the
-constraint: nothing here changes what the indexer does.
-
-| | item | why it blocks merge | size |
-|---|---|---|---|
-| **A1** | **#18** — the `bookReadP95Ms` gate cannot fail honestly at count=10 | it is the only failure in the run; merging with it leaves a red scorecard that hides the *next* real failure | test-only |
-| **A2** | **Register the cross-offer marker bypass as a red** (#5's t1/t2) | it is the one known defect with NO red. Undocumented-and-unenforced is the state this project's discipline exists to prevent | test-only |
-| **A3** | **Reconcile the docs to the merged state** — PRODUCTION-READINESS.md §1.0/§2, ISSUES.md, FINDINGS.md closing note | so the register of open defects is true in main, not just in a branch | docs |
-
-**A2 is a judgment call you can drop.** It adds a failing test for a defect we
-are knowingly shipping. The argument for it: §2.1 was invisible for exactly this
-reason — the suite asserted the broken behaviour as correct. A registered red
-makes the hole visible to whoever runs the suite next; a paragraph in a markdown
-file does not.
-
-**Merge gate.** All of: unit suite green; a full run at 205/0 with RED-8 (and
-A2's entry) the only expected reds; p7a determinism passing; §B below written
-down in-tree.
+**Still not production-ready.** Four product defects remain, three of them
+market-data integrity, plus an undecided reorg policy. RED-8 stays registered so
+the suite keeps failing honestly on §2.6.
 
 ---
 
-## B. After merge — documented, not blocking
+## What to do next, in order
 
-Everything in the numbered queue below that is not A1–A3. Each carries its plan,
-its red, its fix and its verification, so any of them can be picked up cold.
-Grouped by what they are:
+1. **#4 (PR-G, §2.6 expiry)** — smallest, its red is already registered, clean
+   red→green, and it empties `KNOWN_RED`. Good first move on the new main.
+2. **#5 (exact-identity markers)** — the highest-value item. It is the only
+   *fabrication* defect (one payment → two recorded sales, attacker-chosen), and
+   the design now **deletes** machinery rather than adding it. Confirmed on real
+   data 2026-08-08: **7 of 7 payouts across 4 settled offers matched
+   `(owner, intentHash(0), output_no)` exactly, with zero counterexamples.**
+   Remaining unknown: every sampled offer used `guaranteed` sections, so the
+   fallible-section case is still untested — cover it in the fixture.
+3. **#6 (§2.4 cross-layer)** then **#7/#8 (§2.5 baskets + the pairs contract)** —
+   both need fixtures built, not just code.
+4. **#19 (finish A3)** — cheap, and the stale table actively misleads.
+5. **#13 (reorg)** — needs a ruling, and by §6's own terms it blocks production.
+6. **#16**, **#12**, then **#15 (the sweep)** last — its precondition is an empty
+   defect list.
 
-**Product defects still open** (all pre-existing in main): #4 §2.6 expiry, #5
-cross-offer marker bypass + projection race, #6 §2.4 cross-layer, #7 §2.5
-baskets.
+**Off the critical path, needing a human not code:** #8's ordering contract,
+#11's dead-code-vs-defence ruling, #13, #14.
 
-**Missing test coverage:** #12 T-E2 partial overlap and T-E5 two-takers-one-coin;
-#6 and #7's e2e fixtures; #11's three reject codes unreachable through any real
-wallet.
-
-**Decisions needing a human:** #8 `/v1/pairs` ordering contract, #11 dead-code vs
-fail-closed-defence ruling, #13 reorg recovery, #14 host isolation.
-
-**Infrastructure:** #16 pgtyped regeneration guard, #9 SSE baseline keys.
-
-Items #1, #2, #3, #10 and #17 are **done**.
+Items #1, #2, #3, #10, #17 and #18 are **done**.
 
 ---
 
@@ -138,28 +119,29 @@ was deleted rather than repaired. FINDINGS.md §0(4) records the experiment.
 
 ## 0. The queue at a glance
 
-`A` = must land before merge. `B` = documented follow-up. `—` = done.
+Ordering is in "What to do next" above. `—` = done.
 
-| # | Issue | Kind | A/B |
+| # | Issue | Kind | State |
 |---|---|---|---|
 | ~~1~~ | ~~Cursor key not failover-safe~~ | **RESOLVED** — key moved, guard proven | — |
 | ~~2~~ | ~~Clean full run~~ | **DONE** — 205 checks, 1 fail, lag 113 | — |
 | ~~3~~ | ~~`maxLagBlocks: 1403`~~ | **DIAGNOSED + MITIGATED** — external contention; CPU reservation holds | — |
-| **4** | §2.6 `expiresAt` past at ingestion **+ cleanup on policy TTL** | **product defect — next** | B |
-| 5 | Cross-offer marker bypass — **fix known: exact-identity markers** | product defect | B |
-| 6 | §2.4 cross-layer offers unenforced | product defect | B |
-| 7 | §2.5 baskets — **five** market surfaces | product defect | B |
-| 8 | `/v1/pairs` ordering — contract undefined | product decision | B |
-| 9 | SSE baseline keys absent | measurement | B |
+| **4** | §2.6 `expiresAt` past at ingestion **+ cleanup on policy TTL** | **product defect — next** | open |
+| 5 | Cross-offer marker bypass — **fix known: exact-identity markers** | product defect | open |
+| 6 | §2.4 cross-layer offers unenforced | product defect | open |
+| 7 | §2.5 baskets — **five** market surfaces | product defect | open |
+| 8 | `/v1/pairs` ordering — contract undefined | product decision | open |
+| 9 | SSE baseline keys absent | measurement | open |
 | 10 | ~~`pair_stats` backfill~~ | **RESOLVED** — no-retrocompat ruling | — |
-| 11 | T-A2 unreachable reject codes | ruling | B |
-| 12 | T-E2 / T-E5 deferred coverage | coverage | B |
-| 13 | Reorg recovery — **all derived state** | production decision | B |
-| 14 | Runner not host-isolated | **disputed premise** | B |
-| 15 | The closing sweep | closeout | B |
-| 16 | pgtyped regeneration can silently break again | new — no guard | B |
+| 11 | T-A2 unreachable reject codes | ruling | open |
+| 12 | T-E2 / T-E5 deferred coverage | coverage | open |
+| 13 | Reorg recovery — **all derived state** | production decision | open |
+| 14 | Runner not host-isolated | **disputed premise** | open |
+| 15 | The closing sweep | closeout | open |
+| 16 | pgtyped regeneration can silently break again | new — no guard | open |
 | 17 | ~~`outputIndex ?? outputNo` shim~~ | **RESOLVED** — grammar confirmed, shim removed | — |
-| **18** | **`bookReadP95Ms` gate is unfalsifiable at count=10** | new — the run's only failure | **A1** |
+| ~~18~~ | ~~`bookReadP95Ms` gate unfalsifiable at count=10~~ | **DONE** — median now carries the gate | — |
+| **19** | **PRODUCTION-READINESS (a)–(f) table still describes the pre-work state** | stale docs (ex-A3) | open |
 
 ### Order of work
 
@@ -620,15 +602,32 @@ same intent share identities and would both read consumed off one settlement.
 They are the same atomic swap listed twice; if that matters, dedupe by intent
 hash at ingestion. Record as a note in the fix, not a blocker.
 
+**CONFIRMATION PROBE — RUN 2026-08-08, design holds.** Every settled unshielded
+offer in the clean run's database (9 of them) checked, not one sample:
+
+| | offers | payouts | identity matched |
+|---|---|---|---|
+| had payouts | 4 | 7 | **7 / 7** |
+| walk-aways | 5 | 0 | n/a — nothing to match |
+
+**Zero counterexamples**: no case where a payout existed and its identity failed
+to match `(owner, intentHash(0), output_no)`. The five zero-payout offers have no
+create matching their markers ANYWHERE in the database, not merely in the
+settling tx — they are genuine walk-aways, i.e. the cancels this predicate
+exists to catch. (The probe's own verdict line initially called those five
+"mismatches"; that was a bug in the probe — `payouts > 0 && …` treated "nothing
+to identify" as failure. The data was always clean.)
+
+**The one gap that survives:** all 9 sampled offers declared outputs in
+`guaranteed` sections only. **The fallible-section case is still untested**, so
+the fixture must cover it — that is now the only unknown in this design.
+
 **How to verify.** t1/t2/t5 flip `.failing` → `test` (t4's unequal-alternatives
 counterexample dissolves with the counting design — keep it as a green test that
 the executed alternative reads consumed); t3 and the existing nine unshielded
 cases untouched; t6 re-checked (shielded side is already identity-exact, which
-is now the symmetric design, not a divergence). One more probe before building:
-repeat the intentHash(0) match on 2–3 more settled offers including a fallible-
-section output, so `0` is established as identity semantics rather than an
-artifact of one guaranteed-section offer. Full run: unshielded shapes green,
-determinism holds, `pair_stats` identical across A and B.
+is now the symmetric design, not a divergence). Full run: unshielded shapes
+green, determinism holds, `pair_stats` identical across A and B.
 
 ---
 
@@ -1124,6 +1123,40 @@ populations and had to be redefined rather than re-baselined. Same lesson.
 
 **How to verify.** The synthetic cases above, plus a full run reaching **205/0**
 with RED-8 the only expected red. Test-only change; no product code.
+
+---
+
+## 19. NEW — PRODUCTION-READINESS's headline table still describes the old world
+
+**Plan.** The (a)–(f) "Status today" table at the top of
+[PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) is what anyone reads first,
+and every row still describes the state before this work:
+
+    c | All data is correctly logged as real sales
+      | **broken on the unshielded path** — and the suite currently asserts
+      | the break as correct behaviour
+
+That has been fixed, verified, and merged. Same for (d)'s inverted `last_price`
+and mixed-clock window, and (b)'s "nothing re-validates what the API serves"
+(p8-served does). §2.1 and §2.3's headers also lack the **FIXED** marker that
+§2.2 carries. This is the leftover half of the merge item A3.
+
+The risk is not cosmetic: a stale register **understates the system by four
+fixed defects**, so the next reader either redoes finished work or distrusts the
+document entirely — and this document is the only place the *open* defects are
+described in enough detail to act on.
+
+**How to test.** No test; it is prose. The check is that every claim in the
+table is either true today or carries a fix reference.
+
+**How to fix.** Rewrite the (a)–(f) rows to the post-merge state, mark §2.1 and
+§2.3 **FIXED** like §2.2, and update §1.0's implementation table where the run
+has since proven entries. Cross-link the four remaining defects to their items
+here rather than restating them, so there is one register, not two that drift.
+
+**How to verify.** Each (a)–(f) row states what is true now and names the item
+covering the remainder; no defect appears as open in one document and fixed in
+the other.
 
 ---
 

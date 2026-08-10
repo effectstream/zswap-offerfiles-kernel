@@ -108,17 +108,22 @@ future red is a plain failure; the register of truth current on main.*
 *Achieves: properties (c) and (d) fully — nothing on the chart that did not
 happen, nothing missing that did. This is the remaining substance.*
 
-4. **#5 exact-identity markers** — the only *fabrication* defect (one payment →
-   two recorded sales, attacker-chosen). Now three connected parts, none
-   optional: segment-aware identities (`intentHash(0)` guaranteed /
-   `intentHash(physSeg)` fallible — the mandatory fallible fixture is the test
-   the probe could not give us), canonical-execution dedup for literal-intent
-   duplicates, and **post-commit publication** for `pair_stats`/SSE — the one
-   part that needs real design (outbox vs in-transaction projection).
-5. **#6 cross-layer REJECT** (§2.4) — reachable today via `Transaction.merge`;
+4. **#6 cross-layer REJECT** (§2.4) — reachable today via `Transaction.merge`;
    small validator change + fixture at both doors.
-6. **#7 baskets across five surfaces + #8 the `/v1/pairs` contract** (§2.5) —
+5. **#7 baskets across five surfaces + #8 the `/v1/pairs` contract** (§2.5) —
    one query set, one ruling, one fixture with a third colour.
+6. **#5 exact-identity markers — CARVED OUT as its own PR effort (2026-08-10)**,
+   not a queue step: it is the only *fabrication* defect but also the hardest,
+   and it decomposes into four phases that are each real work —
+   **(a) offer generation** (fallible-section and duplicate-intent shapes have
+   never been constructed; direct `ledger-v8` intent building),
+   **(b) validation** (the ladder and `collectUnshieldedOutputs` on those
+   shapes; segment-aware identities),
+   **(c) execution / merging / balancing** (settle them on the dev chain,
+   including the fallible-failure path), and
+   **(d) reading effects** (segment-correct markers, exact-identity
+   classification, literal-duplicate dedup, post-commit publication).
+   Runs in parallel with #6/#7 rather than blocking them. Detail in §5.
 
 ### GOAL 3 — the production go/no-go (decisions, not code)
 
@@ -559,6 +564,18 @@ RED-8 deletion.
 
 ## 5. PR-I — the cross-offer marker bypass, and the projection race
 
+**SPLIT 2026-08-10 — its own PR effort, in four phases.** Each phase has a
+deliverable that stands alone; (a) gates the rest and its outcome can reshape
+them, so do not build (b)–(d) speculatively.
+
+| phase | work | exit criterion |
+|---|---|---|
+| **(a) Generate** | A fixture-builder over `ledger-v8` (the `probe-cross-layer.ts` pattern — the ledger API, not a wallet) that constructs: a **fallible-section** unshielded offer, two byte-different wrappers embedding the **literal same intent**, a **multi-intent** wrapper, and the plain guaranteed shape as control. None but the control has ever been built here; if a shape is unconstructible, that is a FINDING to record, not a dead end. | blobs that decode, hash and round-trip |
+| **(b) Validate** | The ladder on those shapes: accept/reject correctly, `deriveTokenLegs` right, `collectUnshieldedOutputs` iterating **entries** and computing segment-aware identities (`intentHash(0)` guaranteed / `intentHash(physSeg)` fallible), markers stored exactly | unit tests incl. precomputed-identity equality against (a)'s blobs |
+| **(c) Execute** | Settle each shape on the dev chain: merge with a taker intent, balance, submit, observe the fallible section actually execute. Also characterise the **fallible-failure** path (segment rolls back — what does the offer look like then? inputs unspent → presumably still live; do not assert, measure) | settled tx hashes on chain per shape, failure path documented |
+| **(d) Read** | The indexer end: creates recorded with the physical-segment hash, classification on exact identities, the literal-duplicate dedup rule (stated precisely for multi-intent wrappers), and **post-commit publication** for `pair_stats`/SSE — outbox vs in-transaction projection, with the held-open-transaction PostgreSQL test | t1/t2/t4/t5 + the duplicate red green; e2e green; determinism holds |
+
+
 **Plan.** Found in PR-B's review, **still not registered as a red** — which
 violates our own discipline; the red comes first. Markers match
 `(owner, token_type, value)` correlated only through the settling tx, with no
@@ -866,6 +883,19 @@ survived — the basket must still archive `CONSUMED`, or the fix overreached.
 
 ## 8. `/v1/pairs` ordering — the contract is undefined
 
+**DECISION BRIEF — the options, for Edward:**
+
+| | contract | for | against |
+|---|---|---|---|
+| **A (recommended)** | liquidity-first: `open_count DESC, last_traded_at DESC, pair_key` | what the SQL already does; a market list wants actionable books first; zero product change — only the assertion and docs move | recency buried for deep books |
+| B | recency-first: `last_traded_at DESC NULLS LAST, open_count DESC, pair_key` | "what is moving" reading; matches the current (unkept) test claim | a pair with 50 open offers but no trade today sinks below a one-off print; changes served behaviour |
+| C | no ordering contract — stable `pair_key` order only, clients sort | cheapest; never wrong | weakest API; every client reimplements sorting |
+| D | `?sort=liquidity\|activity` param | serves both readings | most work; premature for one consumer |
+
+Whichever is chosen: `pair_key` as the final tiebreaker is **mandatory**, not
+stylistic — `last_traded_at` quantises to block time, so ties are common and an
+uncontracted tie order differs across replicas.
+
 **Plan.** **Correction to an earlier diagnosis.** A tie-breaking bug from
 chain-quantised `last_traded_at` was theorised; the SQL says otherwise:
 
@@ -949,6 +979,17 @@ from classified history. A reason to sequence #5 first, not to reopen this.
 
 ## 11. T-A2's unreachable reject codes — rule dead code or defence
 
+**DECISION BRIEF — the options, for Edward.** The deciding fact: the DA
+namespace is **permissionless**. The ladder's input is attacker-chosen bytes,
+not SDK output — "no SDK today can build it" bounds the reachable inputs of
+honest clients only.
+
+| | ruling | for | against |
+|---|---|---|---|
+| **A (recommended)** | keep all three, documented as fail-closed wire-format defence | cheap, unit-tested against doubles; exactly the branches a hostile hand-rolled client or a future SDK/wire change would hit; each has a distinct `offer_rejections` code, so if one EVER fires in production that is a labelled signal | carries "unreachable" code |
+| B | delete as dead code | smallest ladder | a future format change resurrects the input shape into a generic error path — or past the gate; repo holds no strict no-dead-code policy elsewhere |
+| C | collapse the three into one generic MALFORMED code | keeps the defence, sheds the taxonomy | destroys the ops diagnostic — `offer_rejections` aggregates by code, and "what is being rejected lately" becomes mush |
+
 **Plan.** `NO_SPENDABLE_INPUT`, `UNKNOWN_TOKEN`, `ROOT_UNREADABLE` never fire at
 a real gate: the SDK will not build an input-free swap, and every token tag it
 emits is `shielded`/`unshielded`/`dust`. All three stay covered at validator-unit
@@ -1018,6 +1059,23 @@ Suite-only, no product code.
 ---
 
 ## 13. Reorg recovery — wider than archives, and a better tripwire
+
+**DECISION BRIEF — the options, for Edward.** Three facts needed before ruling,
+none established yet: (1) does the Midnight node feed effectstream finalized
+blocks or head? (2) what is Celestia's inclusion-vs-finality gap in our
+deployment? (3) expected chain length at launch — the cost of "wipe and resync"
+grows with it.
+
+| | approach | for | against |
+|---|---|---|---|
+| **A (recommended now)** | finalized-only invariant + parent-hash continuity tripwire in the sync layer, halting loudly | small; a halted indexer is recoverable, a corrupted one is not | Celestia parent identity is discarded upstream — coverage is Midnight-only until an effectstream change lands (size it; document the gap) |
+| **D (pairs with A)** | accept + resync runbook: on any continuity alert, wipe and replay from genesis | p7a makes this CREDIBLE — replay is proven byte-identical, ~75 min at dev scale | cost scales with chain length; a runbook is not a mechanism |
+| B | N-block confirmation buffer on the COMPLETE source stream before STM application | covers a non-finalized feed properly | real design work — interacts with TTL scheduling, index-wait budgets, and book freshness (served state is N blocks stale); N must come from measured reorg depth, not a guess |
+| C | soft-archive / tombstones (reversible ingestion) | survives reorgs in place | heaviest; reopens the entire history schema; only warranted if reorgs are an expected operational event |
+
+Recommended sequence: fact-find (1)–(3), ship A+D regardless (the tripwire is
+wanted even on a finalized feed — it converts "impossible" into "loud"), and
+revisit B only if fact-finding says the feed can actually reorg.
 
 **Plan.** Named out of scope in §6 but it blocks the word "production": archival
 is destructive by design ([state-machine.ts:55](../../node/state-machine.ts)) —

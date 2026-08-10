@@ -3,6 +3,12 @@
 **#35 IS MERGED** (2026-08-08, `f298123`). The merge goal is met; this document
 is now the register of what is left.
 
+**WHICH COPY IS AUTHORITATIVE:** until PR #36 merges, the version on branch
+`docs/post-merge-plan` (this one) supersedes the copy on `main`, which still
+describes the pre-merge world. If you are executing this document, confirm you
+are on the newest version first — merging #36 is Goal 1 step 1 precisely so
+this note can stop mattering.
+
 State as of 2026-08-10. Companion to
 [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) (original plan, per-defect
 measurements) and [FINDINGS.md](FINDINGS.md) (how we got here — §0 is the
@@ -84,6 +90,10 @@ captured across several revisions and may have drifted.
 ACCEPT-but-exclude-from-market-data; #8 liquidity-first; #11 keep-as-defence;
 #13 reorg recovery is the engine's job (snapshot + resync). Any scope change to
 one of these goes to Edward; nothing else currently needs his ruling.
+
+**And MERGING: open PRs freely, but merging to `main` is Edward's action.**
+Every merge so far has been his. Where this document says "merge #36" or
+"merge #37" it means *ready for Edward to merge* — never run `gh pr merge`.
 
 ---
 

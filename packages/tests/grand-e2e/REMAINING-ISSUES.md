@@ -80,9 +80,10 @@ body=@file`. Bun uses isolated installs: a package imported by
 **References:** file+symbol names are authoritative; `:line` numbers were
 captured across several revisions and may have drifted.
 
-**Decisions an agent must NOT make alone** (bring to Edward): #8's ordering
-contract, #11's keep-vs-delete ruling, #13's reorg branch, and any scope
-change to a ruling already recorded (§2.4 REJECT, §2.5 ACCEPT-but-exclude).
+**Rulings already made — do not re-litigate, implement:** §2.4 REJECT; §2.5
+ACCEPT-but-exclude-from-market-data; #8 liquidity-first; #11 keep-as-defence;
+#13 reorg recovery is the engine's job (snapshot + resync). Any scope change to
+one of these goes to Edward; nothing else currently needs his ruling.
 
 ---
 
@@ -125,16 +126,15 @@ happen, nothing missing that did. This is the remaining substance.*
    classification, literal-duplicate dedup, post-commit publication).
    Runs in parallel with #6/#7 rather than blocking them. Detail in §5.
 
-### GOAL 3 — the production go/no-go (decisions, not code)
+### GOAL 3 — the production go/no-go — **ALL THREE DECISIONS RULED 2026-08-10**
 
-*Achieves: the right to say "production-ready" without an asterisk.*
+*Achieved: #8 liquidity-first (implement with #7); #11 keep-as-defence (doc
+paragraph folds into #19, spawns #20's adversarial-input coverage); #13 reorg
+recovery is the ENGINE's job — snapshot + resync, with p7a-proven replay making
+it safe on our side. Nothing to build here except:*
 
-7. **#13 reorg** — fact-find whether the feed is finalized-only, then parent-
-   hash continuity in the sync layer (Celestia's parent identity needs an
-   upstream change — size it). Blocks production by §6's own terms.
-8. **#14 Compose** — now a settled constraint: wrap the runner where practical,
-   document the proof-server as the exception.
-9. **#11 T-A2 ruling** — keep-as-defence vs delete; one paragraph.
+7. **#14 Compose** — the one execution constraint left: wrap the runner where
+   practical, document the proof-server as the exception.
 
 ### GOAL 4 — leave the suite trustworthy (closeout)
 
@@ -143,7 +143,8 @@ happen, nothing missing that did. This is the remaining substance.*
 10. **#19** — PRODUCTION-READINESS's (a)–(f) table still describes the pre-work
     world; rewrite to post-merge truth, one register not two.
 11. **#16 pgtyped CI guard** (delete-then-regenerate, diff), **#9 SSE keys**
-    (max of per-run p50/p95 across 2–3 clean runs), **#12 T-E2/T-E5 coverage**.
+    (max of per-run p50/p95 across 2–3 clean runs), **#12 T-E2/T-E5 coverage**,
+    **#20 adversarial wire inputs** (build alongside #5(a) — same tooling).
 12. **#15 the sweep** — zero `test.failing`, zero registry entries, one final
     205/0 run. The run that says done out loud.
 
@@ -213,18 +214,19 @@ Ordering is in "What to do next" above. `—` = done.
 | 5 | Cross-offer marker bypass — **fix known: exact-identity markers** | product defect | open |
 | 6 | §2.4 cross-layer offers unenforced | product defect | open |
 | 7 | §2.5 baskets — **five** market surfaces | product defect | open |
-| 8 | `/v1/pairs` ordering — contract undefined | product decision | open |
+| 8 | ~~`/v1/pairs` ordering~~ | **RULED: liquidity-first** — implement with #7 | ruled |
 | 9 | SSE baseline keys absent | measurement | open |
 | 10 | ~~`pair_stats` backfill~~ | **RESOLVED** — no-retrocompat ruling | — |
-| 11 | T-A2 unreachable reject codes | ruling | open |
+| 11 | ~~T-A2 unreachable reject codes~~ | **RULED: keep as defence** — spawns #20 | ruled |
 | 12 | T-E2 / T-E5 deferred coverage | coverage | open |
-| 13 | Reorg recovery — **all derived state** | production decision | open |
+| 13 | ~~Reorg recovery~~ | **RULED: engine responsibility** — snapshot + resync | ruled |
 | 14 | Runner not host-isolated — **Compose is a settled constraint** | execution constraint | open |
 | 15 | The closing sweep | closeout | open |
 | 16 | pgtyped regeneration can silently break again | new — no guard | open |
 | 17 | ~~`outputIndex ?? outputNo` shim~~ | **RESOLVED** — grammar confirmed, shim removed | — |
 | ~~18~~ | ~~`bookReadP95Ms` gate unfalsifiable at count=10~~ | **DONE** — median now carries the gate | — |
 | **19** | **PRODUCTION-READINESS (a)–(f) table still describes the pre-work state** | stale docs (ex-A3) | open |
+| **20** | **Adversarial wire inputs — actually HIT the T-A2 codes** | new — coverage, from #11's ruling | open |
 
 ### Order of work
 
@@ -881,7 +883,18 @@ survived — the basket must still archive `CONSUMED`, or the fix overreached.
 
 ---
 
-## 8. `/v1/pairs` ordering — the contract is undefined
+## 8. RULED — `/v1/pairs` is liquidity-first
+
+**Edward, 2026-08-10: "Liquidity first; we want to always show the major
+players — and make the users see by default the largest pools."**
+
+Contract: `ORDER BY open_count DESC, last_traded_at DESC NULLS LAST, pair_key`.
+The SQL already does the first two; implementation is: append the `pair_key`
+tiebreaker (mandatory — block-time quantisation makes ties common and replicas
+must agree), fix the e2e assertion which claims newest-first, state the contract
+in the API docs, and add the identical-`open_count`-and-`last_traded_at` unit
+test. Ships with #7, which already edits `getPairs`.
+
 
 **DECISION BRIEF — the options, for Edward:**
 
@@ -977,7 +990,18 @@ from classified history. A reason to sequence #5 first, not to reopen this.
 
 ---
 
-## 11. T-A2's unreachable reject codes — rule dead code or defence
+## 11. RULED — keep all three as fail-closed defence
+
+**Edward, 2026-08-10: keep [A]** — and go further: a future task should TRY TO
+HIT these codes with hand-crafted inputs, accepting that this requires complex
+manual generation. That task is **#20**.
+
+Implementation of the ruling itself: one paragraph per code in
+PRODUCTION-READINESS §1.0.1 stating the defence rationale (the DA namespace is
+permissionless; reachability is not bounded by the SDK), folded into #19's doc
+pass. The unit-double tests remain the floor until #20 replaces them with real
+wire bytes.
+
 
 **DECISION BRIEF — the options, for Edward.** The deciding fact: the DA
 namespace is **permissionless**. The ladder's input is attacker-chosen bytes,
@@ -1058,7 +1082,26 @@ Suite-only, no product code.
 
 ---
 
-## 13. Reorg recovery — wider than archives, and a better tripwire
+## 13. RULED — reorg recovery is the engine's job, not the indexer's
+
+**Edward, 2026-08-10: "We should not care too much about this. This is an
+engine-effectstream issue: if there is a rollback, the engine will stop, reload
+an older snapshot, and resync."**
+
+So the contract is: effectstream detects the rollback, halts, restores a
+pre-fork snapshot, and replays — and the indexer's job is only to make that
+replay SAFE, which is already proven: p7a shows replay-from-height-1 reproduces
+every public table byte-identically, and all STM inputs are chain facts. Nothing
+to build here.
+
+What this descopes, recorded so nobody re-litigates it: the parent-hash
+continuity tripwire, the N-block buffer, and tombstones — all parked as engine
+concerns. If operating experience ever shows the engine NOT catching a
+rollback, this item reopens with the analysis below already done.
+
+<details>
+<summary>The pre-ruling analysis, kept for that eventuality</summary>
+
 
 **DECISION BRIEF — the options, for Edward.** Three facts needed before ruling,
 none established yet: (1) does the Midnight node feed effectstream finalized
@@ -1128,6 +1171,8 @@ Buffered: boundary tests plus a full run confirming TTL scheduling and
 index-wait budgets survive N. Either way §6's row becomes "decided: <what>".
 
 **Needs a ruling once fact-finding lands.**
+
+</details>
 
 ---
 
@@ -1323,6 +1368,40 @@ here rather than restating them, so there is one register, not two that drift.
 **How to verify.** Each (a)–(f) row states what is true now and names the item
 covering the remainder; no defect appears as open in one document and fixed in
 the other.
+
+---
+
+## 20. NEW — adversarial wire inputs: actually hit the T-A2 codes
+
+**Plan.** Born from #11's ruling. `NO_SPENDABLE_INPUT`, `UNKNOWN_TOKEN` and
+`ROOT_UNREADABLE` are kept as fail-closed defence, currently proven only
+against hand-made TypeScript doubles. The stronger proof is REAL bytes through
+the REAL Celestia door that reach each code — demonstrating the defence fires
+where it claims to, at the gate it claims to guard.
+
+**How to test.** This IS the test. Three families of hand-crafted blobs:
+- **`NO_SPENDABLE_INPUT`** — a structurally valid MIP-0005 transaction whose
+  offer carries zero spendable inputs. The SDK refuses to build one; direct
+  `ledger-v8` intent construction (the #5(a) fixture-builder — same tooling,
+  build them together) or byte-level surgery on a valid blob.
+- **`UNKNOWN_TOKEN`** — a token tag outside shielded/unshielded/dust. Likely
+  requires byte-level mutation of a serialized transaction, then re-encoding
+  bech32m; the deserializer may reject it first — WHERE it is rejected is the
+  finding (our code vs the ledger parser), and "the parser structurally
+  precedes our gate" is an acceptable answer if measured.
+- **`ROOT_UNREADABLE`** — a blob whose declared proof root bytes do not parse.
+  Same surgery approach.
+
+Each lands as a p4 fixture family: submit at the Celestia door, assert the
+exact reject code in `offer_rejections`, assert nothing was indexed.
+
+**How to fix.** Nothing, unless a family reveals the code is unreachable even
+by surgery (parser rejects earlier) — then the ruling's documentation is
+updated with the measured reason, which is a better answer than the current
+assumption either way.
+
+**How to verify.** Three new p4 checks green; `offer_rejections` shows each
+code exactly once per run; the unit doubles stay as the fast-path floor.
 
 ---
 

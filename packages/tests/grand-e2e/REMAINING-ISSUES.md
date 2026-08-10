@@ -1,9 +1,9 @@
-# Remaining work — the four open defects, and what production still needs
+# Remaining work — four goals between here and production
 
 **#35 IS MERGED** (2026-08-08, `f298123`). The merge goal is met; this document
 is now the register of what is left.
 
-State as of 2026-08-08. Companion to
+State as of 2026-08-10. Companion to
 [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) (original plan, per-defect
 measurements) and [FINDINGS.md](FINDINGS.md) (how we got here — §0 is the
 current addendum).
@@ -44,31 +44,63 @@ in a future run is a plain failure.
 
 ---
 
-## What to do next, in order
+## The road ahead — four goals, in order
 
-1. ~~**#4 (PR-G, §2.6 expiry)**~~ — **done**, PR #37. Fixed both halves (the
-   per-root current-root escape AND the sweep, which was a second calculation),
-   and deleted RED-8. Awaiting e2e.
-2. **#5 (exact-identity markers)** — the highest-value item, and the one with
-   the most design left. It is the only *fabrication* defect (one payment → two
-   recorded sales, attacker-chosen). Probed on real data 2026-08-08: 7 of 7
-   payouts across 4 settled offers matched `(owner, intentHash(0), output_no)` —
-   but **that rule is only correct for GUARANTEED outputs**; fallible outputs use
-   `intentHash(physicalSegmentId)` (ledger 8.1.0), and all 9 sampled offers were
-   guaranteed-only. It also does NOT dissolve literal-intent duplicates or the
-   pre-commit publication race, both of which an earlier revision wrongly wrote
-   off. See §5.
-3. **#6 (§2.4 cross-layer)** then **#7/#8 (§2.5 baskets + the pairs contract)** —
-   both need fixtures built, not just code.
-4. **#19 (finish A3)** — cheap, and the stale table actively misleads.
-5. **#13 (reorg)** — needs a ruling, and by §6's own terms it blocks production.
-6. **#16**, **#12**, then **#15 (the sweep)** last — its precondition is an empty
-   defect list.
+State 2026-08-10: PRs **#36** (this plan + review corrections) and **#37**
+(PR-G) are open; main is at the #35 merge.
 
-**Off the critical path, needing a human not code:** #8's ordering contract,
-#11's dead-code-vs-defence ruling, #13, #14.
+### GOAL 1 — land what is built, verified (\< a day)
 
-Items #1, #2, #3, #10, #17 and #18 are **done**.
+*Achieves: §2.6 closed end-to-end; an empty-`KNOWN_RED` baseline where any
+future red is a plain failure; the register of truth current on main.*
+
+1. Merge **#36** (docs only — this file).
+2. **e2e run at #37's head** under the CPU reservation, tip watched. Pass =
+   p8's expiry check green with an EMPTY registry, 205/0, determinism holds.
+   This is the run that converts PR-G from "unit-verified" to done, and it
+   doubles as SSE sample 2 of 2–3 (#9).
+3. Merge **#37**.
+
+### GOAL 2 — no fabricated or polluted market data (the core of production)
+
+*Achieves: properties (c) and (d) fully — nothing on the chart that did not
+happen, nothing missing that did. This is the remaining substance.*
+
+4. **#5 exact-identity markers** — the only *fabrication* defect (one payment →
+   two recorded sales, attacker-chosen). Now three connected parts, none
+   optional: segment-aware identities (`intentHash(0)` guaranteed /
+   `intentHash(physSeg)` fallible — the mandatory fallible fixture is the test
+   the probe could not give us), canonical-execution dedup for literal-intent
+   duplicates, and **post-commit publication** for `pair_stats`/SSE — the one
+   part that needs real design (outbox vs in-transaction projection).
+5. **#6 cross-layer REJECT** (§2.4) — reachable today via `Transaction.merge`;
+   small validator change + fixture at both doors.
+6. **#7 baskets across five surfaces + #8 the `/v1/pairs` contract** (§2.5) —
+   one query set, one ruling, one fixture with a third colour.
+
+### GOAL 3 — the production go/no-go (decisions, not code)
+
+*Achieves: the right to say "production-ready" without an asterisk.*
+
+7. **#13 reorg** — fact-find whether the feed is finalized-only, then parent-
+   hash continuity in the sync layer (Celestia's parent identity needs an
+   upstream change — size it). Blocks production by §6's own terms.
+8. **#14 Compose** — now a settled constraint: wrap the runner where practical,
+   document the proof-server as the exception.
+9. **#11 T-A2 ruling** — keep-as-defence vs delete; one paragraph.
+
+### GOAL 4 — leave the suite trustworthy (closeout)
+
+*Achieves: guardrails that outlive this effort — the suite stays a usable gate.*
+
+10. **#19** — PRODUCTION-READINESS's (a)–(f) table still describes the pre-work
+    world; rewrite to post-merge truth, one register not two.
+11. **#16 pgtyped CI guard** (delete-then-regenerate, diff), **#9 SSE keys**
+    (max of per-run p50/p95 across 2–3 clean runs), **#12 T-E2/T-E5 coverage**.
+12. **#15 the sweep** — zero `test.failing`, zero registry entries, one final
+    205/0 run. The run that says done out loud.
+
+Items #1, #2, #3, #4, #10, #17 and #18 are **done**.
 
 ---
 

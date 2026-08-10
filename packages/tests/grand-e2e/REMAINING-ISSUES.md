@@ -44,6 +44,48 @@ in a future run is a plain failure.
 
 ---
 
+## How to execute this document, cold
+
+Written so ANY agent can pick an item up with no conversation context. The
+per-item sections carry the what/why; this block is the operational floor.
+
+**The verification loop, for every item:**
+
+    bun test packages/database packages/validator packages/node \
+             packages/offer-guard packages/batcher packages/tests/grand-e2e
+    bun build --target=bun packages/tests/grand-e2e/run.ts   # THE typecheck gate
+    ./packages/tests/grand-e2e/fresh-run.sh                   # full e2e, ~75 min
+
+There is **no tsconfig in this repo** — `bunx tsc` does not work; the `bun
+build` line above is the only compile gate. Run the e2e inside the CPU
+reservation from §3 (`systemd-run --user --scope -p CPUWeight=500 -p
+CPUQuota=1200%`), read **`maxLagBlocks` first** (>~150 = the run is VOID, not
+failed), and watch the chain tip during the run — a tip that stops advancing
+means the box is starved and the run is void; abort, do not debug downstream.
+
+**Required reading before touching anything:** [FINDINGS.md](FINDINGS.md) §0
+(current state) and §5 (environment gotchas — system PostgreSQL steals port
+5432 after a reboot; `pkill -f` matches its own command line, bracket the
+pattern; a backtick inside a SQL comment terminates the enclosing TS template
+literal in `queries.app.ts`). Discipline: [known-red.ts](known-red.ts) header —
+the registry is EMPTY, every fix deletes its own red, `test.failing` is the
+unit-level equivalent.
+
+**Tooling traps found the hard way:** `gh pr edit` fails in this repo on a
+deprecated Projects-classic GraphQL query and aborts the edit while looking
+like it worked — use `gh api repos/<org>/<repo>/pulls/<N> -X PATCH -F
+body=@file`. Bun uses isolated installs: a package imported by
+`packages/tests` code must be in `packages/tests/package.json`.
+
+**References:** file+symbol names are authoritative; `:line` numbers were
+captured across several revisions and may have drifted.
+
+**Decisions an agent must NOT make alone** (bring to Edward): #8's ordering
+contract, #11's keep-vs-delete ruling, #13's reorg branch, and any scope
+change to a ruling already recorded (§2.4 REJECT, §2.5 ACCEPT-but-exclude).
+
+---
+
 ## The road ahead — four goals, in order
 
 State 2026-08-10: PRs **#36** (this plan + review corrections) and **#37**
@@ -723,6 +765,16 @@ side is already identity-exact — now the symmetric design, not a divergence).
 both the precomputed marker (`intentHash(physSeg)`, not `intentHash(0)`) and the
 final `consumed` classification. Without it the segment rule is untested in
 exactly the direction that silently cancels valid trades.
+
+**Known unknown for whoever builds it: no fallible-section unshielded offer has
+ever been constructed in this suite.** All nine sampled offers were
+guaranteed-only, and whether the wallet SDK path can even emit one is
+unestablished. Expect to construct the intent directly via `ledger-v8` (the
+`probe-cross-layer.ts` pattern — the ledger API, not a wallet, is the reliable
+route to unusual shapes). Proving that construction route is the first task of
+this item, not a detail: if fallible outputs are genuinely unreachable from any
+real wallet, THAT is a finding to record, and the defence-in-depth still wants
+the segment-correct marker stored.
 
 Plus the PostgreSQL publication test from (ii), and a full run: unshielded shapes
 green, determinism holds, `pair_stats` identical across A and B.

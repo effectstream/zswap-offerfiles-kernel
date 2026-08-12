@@ -356,6 +356,25 @@ curl http://host:9999/v1/pairs
 | `last_price`, `last_traded_at` | From the most recent fill; **`null` until the pair has traded** |
 | `open_count` | Live open offers for this pair right now |
 
+**Ordering is part of the contract — liquidity first:**
+
+    open_count DESC, last_traded_at DESC NULLS LAST, pair_key
+
+The deepest books come first so a default market list shows the pairs a user
+can actually trade against; recency only breaks ties between equally-deep
+books, and `pair_key` breaks full ties. `last_traded_at` quantises to L2 block
+time, so full ties are common — the final `pair_key` key is what makes the
+response **identical across replicas**. Clients that want a different ordering
+should sort client-side; there is no `sort` parameter.
+
+**Basket offers are excluded.** An offer with more than one token color on a
+side (give A+B, want C+D) is a sealed pre-agreed settlement, not a price
+observation — nobody agreed what A alone is worth in C. Such offers are
+accepted, served on `GET /v1/offers`, and settle normally, but they contribute
+no `trade_count`, no `last_price`, and no `open_count` here, and no rows to
+`/v1/chart/history` or `/v1/chart/stats`. A pair that only ever appeared inside
+a basket does not appear as a market at all.
+
 ---
 
 #### `GET /v1/known-tokens`
@@ -524,6 +543,8 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 
 24-hour statistics for a pair derived from consumed (filled) offers. Falls back to the mid of current open offers when no fills exist yet.
 
+Basket offers are excluded from both the fills and the open-book fallback — see [`GET /v1/pairs`](#get-v1pairs). An offer that gives two colors for one has no per-pair price to report.
+
 ```bash
 curl "http://host:9999/v1/chart/stats?base=70ce...b569&quote=0000...0000"
 ```
@@ -545,7 +566,7 @@ curl "http://host:9999/v1/chart/stats?base=70ce...b569&quote=0000...0000"
 
 #### `GET /v1/chart/history?base=<A>&quote=<B>`
 
-Last 120 fills (consumed offers) for a pair, newest first.
+Last 120 fills (consumed offers) for a pair, newest first. Basket offers never print here — see [`GET /v1/pairs`](#get-v1pairs).
 
 ```json
 [

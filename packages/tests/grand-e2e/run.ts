@@ -35,6 +35,7 @@ import { p1Happy } from "./phases/p1-happy.ts";
 import { p2Api } from "./phases/p2-api.ts";
 import { p3Lifecycle } from "./phases/p3-lifecycle.ts";
 import { p3bCompeting } from "./phases/p3b-competing.ts";
+import { p3cBasket } from "./phases/p3c-basket.ts";
 import { p4Adversarial } from "./phases/p4-adversarial.ts";
 import { p5Load } from "./phases/p5-load.ts";
 import { spawnedProcesses } from "./phases/p6-chaos.ts";
@@ -295,6 +296,7 @@ async function main(): Promise<void> {
     await runPhase("p4-adversarial", () => p4Adversarial(db, art, actors!));
     await runPhase("p3-lifecycle", () => p3Lifecycle(db, actors!));
     await runPhase("p3b-competing", () => p3bCompeting(db, actors!));
+    await runPhase("p3c-basket", () => p3cBasket(db, actors!));
     await runPhase("p5-load", () => p5Load(db, actors!, art));
     // p8 before p7b: it needs a populated live book, and p7b's audit is the
     // wrap-up. Both must precede the determinism replay, which quiets the chain.

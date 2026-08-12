@@ -67,20 +67,26 @@ export const KNOWN_RED: Record<string, KnownRed> = {
   // The registry is EMPTY. Keep it that way by deleting entries in the commit
   // that fixes them; the XPASS guard will fail the run if you forget.
 
-  // §2.4 (cross-layer) and §2.5 (basket offers) are NOT registered — but no
-  // longer for the reason this block used to give.
+  // §2.5 (basket offers) is FIXED, and was never registered — deliberately.
+  // §2.4 (cross-layer) is handled on its own branch, same reasoning.
   //
-  // It said the fixtures could not be built because wallet-sdk-facade drops the
-  // mismatched leg. probe-cross-layer.ts refuted that: a wallet is not the only
-  // way to make a transaction — balancing IS a merge, and the ledger exposes
-  // Transaction.merge() directly. Both gaps are now CONFIRMED REACHABLE and
-  // both have rulings (§2.4 REJECT, §2.5 ACCEPT-but-exclude-from-market-data).
+  // An entry means "a check exists, asserts the truth, and the product is
+  // currently wrong". For §2.5 no e2e check existed: the fixture had to be
+  // BUILT (p3c-basket.ts, via a third shielded colour and Transaction.merge).
+  // Registering a check that does not exist yet produces a permanently-stale
+  // entry that reads as work in flight — the exact failure mode this file is
+  // supposed to prevent. So the fixture and the fix landed together, and the
+  // red was demonstrated where it could be: multileg-pairs.test.ts was run
+  // against the unfiltered queries and printed the four fabricated trades.
   //
-  // What is still missing is the e2e FIXTURE, not the knowledge. Registering a
-  // check that does not exist yet would produce a permanently-stale entry that
-  // reads as work in flight. Their deterministic reds already live at unit
-  // level: packages/database/multileg-pairs.test.ts for §2.5, and
-  // probe-cross-layer.ts reproduces §2.4 in seconds with no stack.
+  // One thing that pass taught, worth keeping. multileg-pairs.test.ts was a
+  // `test.failing`, and it was going green because realStats THREW on a table
+  // the fixture never created — NOT because the defect was present. bun counts
+  // a throw as the expected failure, so that red would have stayed green after
+  // the fix and signalled nothing; the XPASS guard could never have fired.
+  // `check()` above deliberately does not demote a throw. `test.failing` has no
+  // such guard, so treat it as the weaker tool: prefer an explicit
+  // before-and-after measurement over a self-declared red.
 };
 
 /** Registered ids that never appeared in a run — a stale registry hides work. */

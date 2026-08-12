@@ -254,9 +254,27 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
     const ok = await check("unshielded expiry-fated offer indexed", () => publishAndIndex(db, rec, built));
     if (ok) {
       const intentTtl = P2pAtomicSwaps.earliestIntentTtl(OfferFiles.fromBech32(built.blob) as any);
-      await check("unshielded expiresAt equals the offer's own intent TTL", async () => {
+      // PR-G: served expiry is min(intent TTL, ingestion + OFFER_TTL) — the
+      // indexer's retention policy is a CEILING, never an extension, and the
+      // sweep fires at this same value. The assertion this replaces demanded
+      // expiresAt === intentTtl VERBATIM, which pinned the pre-PR-G behaviour:
+      // a long-TTL offer ADVERTISED its full intent TTL while the sweep still
+      // deleted it at the policy horizon — the served-later-than-deleted half
+      // of §2.6. For an unshielded offer, computed.firstSeenAt IS the
+      // ingestion block time (state-machine.ts), so the expected value is
+      // computable from the served payload alone. OFFER_TTL_SECONDS default
+      // matches the node's (env.ts); override the env var for both processes
+      // together or not at all.
+      await check("unshielded expiresAt is min(intent TTL, ingestion + OFFER_TTL)", async () => {
         const d = await getOfferByHash(built.hash);
-        return !!intentTtl && d.body?.computed?.expiresAt === intentTtl;
+        const servedMs = Date.parse(d.body?.computed?.expiresAt ?? "");
+        const ttlMs = intentTtl ? Date.parse(String(intentTtl)) : NaN;
+        const ingestMs = Date.parse(d.body?.computed?.firstSeenAt ?? "");
+        if (!Number.isFinite(servedMs) || !Number.isFinite(ttlMs) || !Number.isFinite(ingestMs)) return false;
+        const policyMs = Number(process.env["OFFER_TTL_SECONDS"] ?? 3600) * 1000;
+        const expectedMs = Math.min(ttlMs, ingestMs + policyMs);
+        // Exact contract, 2s slack for ISO-string round-tripping.
+        return Math.abs(servedMs - expectedMs) < 2000;
       }, `intentTtl=${intentTtl}`);
 
       // state-machine.ts calls the OFFER_TTL_SECONDS branch "defensive only —

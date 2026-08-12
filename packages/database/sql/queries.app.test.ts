@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { processSQLQueryIR } from "@pgtyped/runtime";
 
-import { compileIR, insertCommitment, upsertKnownRootWithFirstSeen, getEarliestRootFirstSeen } from "./queries.app.ts";
+import { compileIR, insertCommitment, upsertKnownRootWithFirstSeen, getOfferRootTiming } from "./queries.app.ts";
 
 // The STM path never calls .run(): World.resolve yields [query.queryIR, input]
 // and the framework executes the IR itself. So every query the STM touches
@@ -50,7 +50,7 @@ describe("the framework execution path (processSQLQueryIR on our IRs)", () => {
     // so every zswap-event / zswap-root transition died with
     // "undefined is not an object (evaluating 'queryIR.params')" — silently,
     // because the runtime routes STF errors to log.remote only.
-    for (const q of [insertCommitment, upsertKnownRootWithFirstSeen, getEarliestRootFirstSeen]) {
+    for (const q of [insertCommitment, upsertKnownRootWithFirstSeen, getOfferRootTiming]) {
       expect((q as any).queryIR?.params).toBeDefined();
       expect((q as any).queryIR?.statement).toBeTypeOf("string");
     }
@@ -68,10 +68,16 @@ describe("the framework execution path (processSQLQueryIR on our IRs)", () => {
 
   test("array param via ANY() rides one scalar binding", () => {
     const { query, bindings } = processSQLQueryIR(
-      (getEarliestRootFirstSeen as any).queryIR,
-      { roots: ["r1", "r2"] } as any,
+      (getOfferRootTiming as any).queryIR,
+      { roots: ["r1", "r2"], block_ms: 900_000 } as any,
     );
-    expect(query).toContain("ANY($1)");
-    expect(bindings).toEqual([["r1", "r2"]]);
+    // The array is ONE binding, not two — that is the property under test.
+    // Position is deliberately not asserted: block_ms occurs first in the SQL
+    // text, so `roots` binds at $2, and pinning the number here would make this
+    // test fail on any reordering of the query rather than on a real change to
+    // how arrays are bound.
+    expect(bindings).toEqual([900_000, ["r1", "r2"]]);
+    expect(query).toMatch(/ANY\(\$\d\)/);
+    expect(query).not.toContain(":roots");
   });
 });

@@ -27,7 +27,7 @@ import { isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WIND
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
-import { eventBus, emitAppEvent, type AppEvent } from "./event-bus.ts";
+import { eventBus, emitAppEvent, markBlockCommitted, type AppEvent } from "./event-bus.ts";
 import { quoteWithPrices, priceOf } from "./market-mock.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
@@ -94,9 +94,28 @@ export const apiRouter: StartConfigApiRouter = async function (
   // GET /docs — interactive API playground (upload + accept/settle debugger).
   registerDocsRoutes(server);
 
-  // Update pair_stats after each CONSUMED archive. The state machine fires
-  // offer_consumed after the archive transaction commits; this listener keeps
-  // pair_stats in sync without needing access to dbConn inside the generator.
+  // Drive the event gate from THIS pool — the whole point is that it is not
+  // the connection running the block transaction. The runtime writes the block
+  // record inside that transaction, so a height visible here proves its COMMIT
+  // returned, which is what releases the events buffered for it (event-bus.ts).
+  // Without this poll nothing is ever published; with it, nothing is published
+  // early. 1 s against a ~1 s block time — a tick of latency, never a lost
+  // event, since the buffer holds until the height is seen.
+  const gatePoll = setInterval(() => {
+    void getLatestEffectstreamBlock
+      .run(undefined, dbConn)
+      .then((rows) => {
+        const h = rows[0]?.block_height;
+        if (h != null) markBlockCommitted(h as any);
+      })
+      .catch(() => { /* transient; the next tick retries and the buffer waits */ });
+  }, 1000);
+  (gatePoll as any).unref?.();
+  server.addHook("onClose", async () => clearInterval(gatePoll));
+
+  // Update pair_stats after each CONSUMED archive. The event is released only
+  // after its block commits (see the gate above), so this listener's SEPARATE
+  // pool is guaranteed to see the archive and the same-block create rows.
   const onAppEvent = async (event: AppEvent) => {
     if (event.type === "offer_consumed") {
       try {

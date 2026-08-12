@@ -414,8 +414,9 @@ addTransition("celestia-zswap", function* (data) {
   // the batcher can both be bypassed. It is ordered cheapest-first so that a
   // blob which was never going to be indexed costs as little as possible:
   //
-  //   HRP → length bound → bech32m → size → deserialize → two-sided → roots
-  //   → dedup (indexed) → liveness (indexed) → wellFormed (crypto, LAST)
+  //   HRP → length bound → bech32m → size → deserialize → two-sided
+  //   → same-layer → roots → dedup (indexed) → liveness (indexed)
+  //   → wellFormed (crypto, LAST)
   //
   // Crypto is deferred to the end deliberately: it is orders of magnitude more
   // expensive than every other step, so a replayed or stale blob must never

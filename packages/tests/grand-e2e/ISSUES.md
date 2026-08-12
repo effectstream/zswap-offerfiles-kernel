@@ -176,17 +176,22 @@ its outputs **silently discarded**, producing a one-sided transaction. The
 result is a confusing `NOT_A_SWAP` ("1 give, 0 wants") that points at the
 indexer rather than at the request.
 
-### The gap worth deciding on
+### The gap worth deciding on — DECIDED, and CLOSED (PR-#6)
 
-Nothing in the validator enforces "give and want share a layer". `NOT_A_SWAP`
-fires only because the SDK dropped a leg — an accident, not a rule. A
-correctly-built cross-layer offer from another wallet implementation would
-reach `isTwoSided()` with a legitimate give and want on different layers and,
-as far as the code shows, be **indexed**.
+The validator now enforces "give and want share a layer" as its own explicit
+check and code, `CROSS_LAYER`, immediately after `isTwoSided`. It is no longer
+left to an SDK quirk.
 
-If cross-layer offers must never be tradeable, that belongs in the ladder as
-its own explicit check and code — not left to an SDK quirk. Worth confirming
-against MIP-0006 before adding.
+The SDK behaviour described above is unchanged and is still why the happy path
+cannot build a cross-layer offer. That was mistaken for unreachability;
+[probe-cross-layer.ts](probe-cross-layer.ts) showed a wallet is not the only way
+to make a transaction — balancing IS a merge, and `Transaction.merge()` is
+public. The e2e fixture uses that same route.
+
+One consequence for readers of the section above: a cross-layer request no
+longer produces "a confusing `NOT_A_SWAP` that points at the indexer". The
+dropped-leg path still yields `NOT_A_SWAP` (it really is one-sided by then), but
+a properly-built cross-layer offer is now named for what it is.
 
 ### Suite state
 

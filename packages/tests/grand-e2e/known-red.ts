@@ -67,20 +67,25 @@ export const KNOWN_RED: Record<string, KnownRed> = {
   // The registry is EMPTY. Keep it that way by deleting entries in the commit
   // that fixes them; the XPASS guard will fail the run if you forget.
 
-  // §2.4 (cross-layer) and §2.5 (basket offers) are NOT registered — but no
-  // longer for the reason this block used to give.
+  // §2.4 (cross-layer) is FIXED and was never registered — deliberately, and
+  // the reasoning is worth keeping because it bounds what this registry is for.
   //
-  // It said the fixtures could not be built because wallet-sdk-facade drops the
-  // mismatched leg. probe-cross-layer.ts refuted that: a wallet is not the only
-  // way to make a transaction — balancing IS a merge, and the ledger exposes
-  // Transaction.merge() directly. Both gaps are now CONFIRMED REACHABLE and
-  // both have rulings (§2.4 REJECT, §2.5 ACCEPT-but-exclude-from-market-data).
+  // An entry means "a check exists, asserts the truth, and the product is
+  // currently wrong". For §2.4 no check existed: the fixture had to be BUILT
+  // (buildCrossLayerOffer, via Transaction.merge — the route
+  // probe-cross-layer.ts proved reachable after the earlier "no wallet can
+  // build one" claim turned out to be about wallets, not about the ledger).
+  // Registering a check that does not exist yet produces a permanently-stale
+  // entry that reads as work in flight, which is the failure mode this file is
+  // supposed to prevent. So the fixture and the fix landed together, and the
+  // red was demonstrated where it could actually be demonstrated: at unit
+  // level, by neutering the predicate and watching cross-layer.test.ts fail on
+  // exactly the cross-layer cases while the negative cases stayed green.
   //
-  // What is still missing is the e2e FIXTURE, not the knowledge. Registering a
-  // check that does not exist yet would produce a permanently-stale entry that
-  // reads as work in flight. Their deterministic reds already live at unit
-  // level: packages/database/multileg-pairs.test.ts for §2.5, and
-  // probe-cross-layer.ts reproduces §2.4 in seconds with no stack.
+  // §2.5 (basket offers) is NOT registered, same rule, still open: confirmed
+  // reachable and ruled (ACCEPT but exclude from market data), with its
+  // deterministic red at packages/database/multileg-pairs.test.ts and no e2e
+  // fixture yet.
 };
 
 /** Registered ids that never appeared in a run — a stale registry hides work. */

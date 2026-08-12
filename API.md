@@ -458,6 +458,7 @@ curl -X POST http://host:9999/v1/offers \
 | `TOO_LARGE` | Decoded transaction exceeds `OFFER_MAX_BYTES` |
 | `NO_SPENDABLE_INPUT` | The transaction spends nothing — nothing to swap |
 | `NOT_A_SWAP` | Not two-sided: needs ≥1 give **and** ≥1 want (MIP-0006) |
+| `CROSS_LAYER` | Gives and wants span both value layers. Nothing moves value between shielded and unshielded, so no taker could ever fill it |
 | `PROOF_INVALID` | ZK proof verification failed |
 | `SIGNATURE_INVALID` | Signature verification failed |
 | `NULLIFIER_SPENT` | A shielded input coin is already spent on Midnight |

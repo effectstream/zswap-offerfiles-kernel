@@ -169,7 +169,7 @@ and the content hash in `offerHash` — correlate via `offerHash`) ·
 Rate limit 60 req/min/IP → 429 (`{error:"RATE_LIMITED"}`).
 
 Rejection codes to assert (submit + STM): `BAD_ENCODING`, `BAD_DESERIALIZE`,
-`TOO_LARGE`, `NOT_A_SWAP`, `NO_SPENDABLE_INPUT`, `NULLIFIER_SPENT`,
+`TOO_LARGE`, `NOT_A_SWAP`, `CROSS_LAYER`, `NO_SPENDABLE_INPUT`, `NULLIFIER_SPENT`,
 `UTXO_NOT_LIVE` (API) / `UTXO_SPENT`+`UTXO_UNKNOWN` (validator codes),
 `ROOT_UNKNOWN` (with `hint` + `diagnostics`), `DUPLICATE_OFFER` (HTTP 409),
 `VALIDATION`, `INVALID_CURSOR`, `INVALID_HASH`, `NOT_FOUND`,

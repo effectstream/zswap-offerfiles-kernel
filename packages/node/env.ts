@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { getEnv } from "@effectstream/utils/runtime";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { readMidnightContract } from "@effectstream/midnight-contracts/read-contract";
@@ -141,7 +143,9 @@ export const isTokenRegistryEnabled = (): boolean =>
 export const midnightContract = (() => {
   try {
     return readMidnightContract("contract-offer-files", {
-      baseDir: new URL("../contracts-midnight/", import.meta.url).pathname,
+      // fileURLToPath, not URL.pathname: pathname percent-encodes, breaking
+      // checkouts under a directory with a space.
+      baseDir: fileURLToPath(new URL("../contracts-midnight/", import.meta.url)),
       networkId: midnightNetworkConfig.id,
     });
   } catch (error) {

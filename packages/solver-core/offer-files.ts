@@ -9,6 +9,7 @@
 
 import { dirname, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { CompiledContract } from "@midnight-ntwrk/compact-js";
 import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
@@ -17,9 +18,11 @@ import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/m
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
 import { OfferFilesContract, witnesses } from "@zswap-da/contract-offer-files";
 
-// packages/solver-core → packages/contracts-midnight
+// packages/solver-core → packages/contracts-midnight. fileURLToPath, not
+// URL.pathname: pathname percent-encodes, breaking checkouts under a
+// directory with a space.
 const CONTRACT_DIR = resolve(
-  dirname(new URL(import.meta.url).pathname),
+  dirname(fileURLToPath(import.meta.url)),
   "../contracts-midnight",
 );
 const ZK_CONFIG_PATH = resolve(CONTRACT_DIR, "contract-offer-files", "src", "managed");

@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { getEnv } from "@effectstream/utils/runtime";
 
 // Dev seed. Must avoid every other wallet on the dev stack — genesis, the
@@ -16,7 +18,9 @@ export const BATCHER_SUBMIT_URL = getEnv("BATCHER_SUBMIT_URL") ?? "http://127.0.
 
 export const SOLVER_LADDER_CONFIG =
   getEnv("SOLVER_LADDER_CONFIG") ??
-  new URL("./config/ladders.dev.json", import.meta.url).pathname;
+  // fileURLToPath, not URL.pathname: pathname percent-encodes, so a checkout
+  // under a directory with a space yields a path readFile cannot open.
+  fileURLToPath(new URL("./config/ladders.dev.json", import.meta.url));
 
 /** Longest crossing cycle the engine will enumerate. 2 is a straight A↔B
  *  cross; 3 adds a→b→c→a rings. */

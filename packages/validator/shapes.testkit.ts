@@ -151,14 +151,24 @@ export function structuralShapes(): Shape[] {
   // Two byte-different wrappers around the LITERAL SAME intent. `fromParts`
   // pins segment 1; `fromPartsRandomized` picks another. Same intent, same
   // spends, same payouts — different bytes, therefore a different offer_hash,
-  // therefore NOT caught by byte-identical dedup. Whether that should be one
-  // offer or two is a rule this repo has never had to state.
+  // therefore NOT related by byte-identical dedup.
+  //
+  // RULED 2026-08-12: that is fine, and no intent-level dedup will be built.
+  // The defence is economic — publishing costs a Celestia fee per blob, so
+  // re-wrapping one intent is an attack the attacker funds, and the copies all
+  // compete for the same inputs so only the first can ever settle. Full
+  // reasoning at the submit gate in packages/node/api.ts.
+  //
+  // The pair stays in the kit as the EVIDENCE for that ruling: it proves the
+  // shape is constructible and that dedup does not see it, so the decision
+  // rests on a measurement rather than on an assumption about what wallets
+  // emit. Phase (d) asserts the ruling rather than re-opening it.
   {
     const intent = makeIntent("guaranteed");
     const a = Transaction.fromParts("undeployed", undefined, undefined, intent);
     const b = Transaction.fromPartsRandomized("undeployed", undefined, undefined, intent);
     shapes.push(shape("same-intent-wrapper-a", "literal same intent as wrapper-b, different segment key → different bytes and hash", a));
-    shapes.push(shape("same-intent-wrapper-b", "the duplicate byte-identical dedup cannot see — same intent, different wrapper", b));
+    shapes.push(shape("same-intent-wrapper-b", "the duplicate byte-identical dedup cannot see — accepted as two offers by ruling, see api.ts", b));
   }
 
   // More than one intent in one transaction — what every real settlement looks
@@ -205,6 +215,12 @@ export function structuralShapes(): Shape[] {
  * be driven from the wire. The same argument covers UNKNOWN_TOKEN. Both keep
  * their unit-double coverage (#11's fail-closed floor); neither gets an e2e
  * fixture, because none can exist.
+ *
+ * RULED 2026-08-12: document and move on. The finding is recorded at both code
+ * paths themselves (extract-root.ts and derive.ts) so a future reader meets it
+ * where the check lives, not only here. If the SDK ever gains a way to emit
+ * offers with arbitrary section/token/encoding configurations, that is the
+ * route to driving these paths with real bytes — worth raising upstream then.
  *
  * NO_SPENDABLE_INPUT is different: unreachable by surgery, but trivially
  * CONSTRUCTIBLE, which is why it is the one hostile shape below.

@@ -302,6 +302,12 @@ export function validateZswapOfferBytes(
   }
 
   // ── 7. Dedup (optional) ──
+  // Caller-supplied and identity-based (nullifiers / tx identifiers). Note the
+  // ruling recorded at the submit gate in packages/node/api.ts: dedup is
+  // byte-identical by design. Two wrappers around the LITERAL same intent hash
+  // differently and are treated as two offers, because publication costs a
+  // Celestia fee per blob — re-wrapping is an attack the attacker pays for, and
+  // duplicates compete for the same inputs so only one can ever settle.
   if (opts.seen && opts.seen(nullifiers, identifiers)) {
     return { ok: false, code: "DUPLICATE", reason: "offer already seen", ...derived };
   }

@@ -19,6 +19,29 @@ import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
 // FAIL-CLOSED: any structural anomaly throws. A wrong extraction yields bytes
 // that match no known root, so the caller rejects the offer (ROOT_UNKNOWN) —
 // it never accepts a bad one.
+//
+// WHAT ROOT_UNREADABLE ACTUALLY DEFENDS — measured, 2026-08-12 (#5 phase (a)).
+//
+// It is NOT reachable from the wire. Flipping every one of the 15,479 bytes of
+// a real proven offer produced only BAD_DESERIALIZE (346 positions) and
+// NOT_A_SWAP (2); ROOT_UNREADABLE never fired once. The reason is structural:
+// the root sits inside the transaction's own SCALE stream, so any mutation
+// severe enough to make it unparseable also breaks decoding, and the ledger's
+// parser refuses the whole transaction before this function is ever called.
+// Corrupting the root's VALUE bytes — the one surgery that survives decoding —
+// yields a perfectly parseable root that is merely unknown, which is
+// ROOT_UNKNOWN's job, not this one's.
+//
+// So this error guards a FUTURE SERIALIZATION-FORMAT CHANGE — the pinned tag
+// and gap below going stale under a ledger upgrade — and not a hostile
+// publisher. That is the right thing for it to guard, and the fail-closed
+// behaviour is correct; it simply cannot be exercised by an attacker, so no
+// e2e fixture for it can exist. Its unit-double coverage is the whole story.
+//
+// Revisit if the SDK ever gains the ability to emit offers with arbitrary
+// section/encoding configurations — that would be the way to drive this path
+// with real bytes, and is worth raising upstream when the opportunity comes.
+// The census lives in packages/validator/shapes.test.ts.
 const ROOT_GAP_AFTER_NULLIFIER = 33;
 const PINNED_INPUT_TAG = "zswap-input[v2]";
 

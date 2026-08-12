@@ -3,6 +3,7 @@
 //   • Batcher restart with queued submissions (no double blob)
 //   • sync/STM process kill (orchestrator restart, else our own respawn)
 
+import { fileURLToPath } from "node:url";
 import type { Client } from "pg";
 import { resolve } from "node:path";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
@@ -14,7 +15,7 @@ import { tableCount } from "../lib/db2.ts";
 import { check, note, pgrepF, sleep, waitUntil } from "../lib/util.ts";
 import { refreshPids } from "../metrics.ts";
 
-const REPO_ROOT = resolve(new URL("../../../..", import.meta.url).pathname);
+const REPO_ROOT = resolve(fileURLToPath(new URL("../../../..", import.meta.url)));
 
 export const spawnedProcesses: ReturnType<typeof Bun.spawn>[] = [];
 

@@ -3,6 +3,7 @@
 // runs with the same config produce byte-identical chain writes (the basis of
 // the Phase-7 determinism check). NO Math.random anywhere in this suite.
 
+import { fileURLToPath } from "node:url";
 export const API = process.env["ZSWAP_API"] ?? "http://127.0.0.1:9999";
 export const BATCHER_URL = process.env["BATCHER_SUBMIT_URL"] ?? "http://127.0.0.1:3334";
 export const CELESTIA_RPC_URL = process.env["CELESTIA_RPC_URL"] ?? "http://127.0.0.1:26658";
@@ -139,4 +140,4 @@ export const DIFF_EXCLUDED_COLUMNS = new Set([
   "recorded_at", // when this node recorded the liveness-set entry — local observation
 ]);
 
-export const OUT_DIR = new URL("./out/", import.meta.url).pathname;
+export const OUT_DIR = fileURLToPath(new URL("./out/", import.meta.url));

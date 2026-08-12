@@ -16,10 +16,11 @@
 // deeper fix is to delete the duplication: export a `buildConfig(startTime)`
 // from config.dev.ts and have both entrypoints call it.
 
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
-const read = (f: string) => readFileSync(new URL(f, import.meta.url).pathname, "utf-8");
+const read = (f: string) => readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf-8");
 
 /**
  * The ConfigBuilder chain as a list of comparable chunks, one per declaration.

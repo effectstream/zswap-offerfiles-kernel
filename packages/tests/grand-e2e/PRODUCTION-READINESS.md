@@ -54,7 +54,7 @@ what did not:
 | T-A1 Celestia door asserted by code | ✅ `p4` + `celestiaFixtures()`, incl. crypto-tamper and aged-root families |
 | T-A2 `NOT_A_SWAP` at both doors | ✅ `buildOneSidedOffer()`; skips with a loud note if the SDK stops dropping the leg |
 | T-A2 `NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` / `ROOT_UNREADABLE` | ⛔ not built — see §1.0.1 |
-| T-A3 cross-layer | ⚠️ **gap CONFIRMED reachable** by `probe-cross-layer.ts`; ruled REJECT; e2e fixture still to build (§2.4) |
+| T-A3 cross-layer | ✅ `buildCrossLayerOffer()` merges a live ss+uu pair; asserts `CROSS_LAYER` at both doors and **specifically not** `NOT_A_SWAP`; skips with a loud note if the merge stops producing one (§2.4) |
 | T-A4 history referential integrity | ✅ `p7b`, 5 SQL assertions |
 | T-A5 every stored blob re-validates (proofs included) | ✅ `p7b` deep pass, `GRAND_DEEP_AUDIT` |
 | T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass |
@@ -88,10 +88,11 @@ ledger exposes `Transaction.merge()` directly. `probe-cross-layer.ts` settles
 both questions in seconds, with no stack, using real offers from a completed
 run. See §2.4 and §2.5 for the measurements.
 
-- **Cross-layer (T-A3).** The merge succeeds, the result is two-sided across
-  both layers, and our validator **accepts it through the full ladder including
-  `wellFormed`**. The gap is real and reachable; the e2e fixture is now a
-  matter of building it, not of discovering whether it can exist.
+- **Cross-layer (T-A3).** The merge succeeds and the result is two-sided across
+  both layers. The validator **accepted it through the full ladder including
+  `wellFormed`** — that was the finding, and PR-#6 closed it: the ladder now
+  answers `CROSS_LAYER`. The fixture (`buildCrossLayerOffer`) uses this exact
+  merge route, so the probe's construction is the one under test.
 - **Multi-leg (T-D5).** The same merged transaction has 2 gives × 2 wants and
   would register as **four** trades at four different prices. The fixture is
   also unblocked independently: `mintShielded(deployed, sepByte, …)`
@@ -359,21 +360,27 @@ Note this is a SHAPE rule, orthogonal to §2.5: a cross-layer offer is a single
 sealed swap with a perfectly well-defined price, so the market-data filter below
 neither catches it nor should.
 
-Recorded in [ISSUES.md](ISSUES.md) §3 and still open: nothing in the ladder
-requires a give and a want to share a value layer. `NOT_A_SWAP` fires today only
-because `wallet-sdk-facade` silently drops a leg — an accident, not a rule. A
-correctly-built cross-layer offer from another wallet reaches `isTwoSided()`
-with a legitimate give and want and, as far as the code shows, **is indexed**.
-The suite stopped building them (`Layer = "ss" | "uu"`), so this is now
-untested in both directions.
+**CLOSED (PR-#6).** `CROSS_LAYER` is in `OfferRejectCode` and the check sits in
+[validate.ts](../../validator/validate.ts) immediately after `isTwoSided`, as
+ruled. The old text here — "nothing in the ladder requires a give and a want to
+share a value layer", "as far as the code shows, **is indexed**" — described the
+pre-fix ladder and is no longer true.
 
-**Ruling needed.** Assuming the project rule *"we do not allow mixed types
-transactions"* holds: add `CROSS_LAYER` to `OfferRejectCode` and a check in
-[validate.ts](../../validator/validate.ts) immediately after `isTwoSided` —
-`gives.every(g => g.kind === k) && wants.every(w => w.kind === k)` for a single
-`k`. If the rule is meant to be the opposite, that also has to be a test.
+Two things about how it landed are worth keeping:
 
-**Red in PR-A:** T-A3.
+- **The predicate is typed on `OfferLeg`, not on a structural `{type: string}`.**
+  MIP-0006's own leg calls the layer `type`; `deriveLegs` renames it to `kind`.
+  A first cut written against `type` read `undefined` for every leg, collapsed
+  to a one-element set, and would have silently never fired — the same class of
+  defect as the event-gate poll reading the wrong column. The type is the guard.
+- **No `KNOWN_RED` entry.** No e2e check existed to register; the fixture had to
+  be built. The red was demonstrated at unit level instead, by neutering the
+  predicate and confirming `cross-layer.test.ts` fails on exactly the
+  cross-layer cases while the negatives stay green. See the note in
+  [known-red.ts](known-red.ts).
+
+**Test:** T-A3 (`buildCrossLayerOffer` → p4, both doors) plus
+[cross-layer.test.ts](../../validator/cross-layer.test.ts).
 
 ### 2.5 Basket offers pollute price discovery → **PR-F** — **RULING: ACCEPT, but exclude from market data**
 
@@ -626,7 +633,7 @@ the code path only by construction accident.**
 
 ---
 
-#### T-A3 · Cross-layer rejection *(red until PR-E)*
+#### T-A3 · Cross-layer rejection *(DONE — PR-#6)*
 
 → `actors/adversary.ts`, p4 · depends on §2.4
 

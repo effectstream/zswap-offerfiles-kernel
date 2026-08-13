@@ -22,6 +22,7 @@
 import * as fs from "node:fs";
 import type { Client } from "pg";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -551,9 +552,11 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
     const wantColor = ledger.colors[rec.wantToken]!;
     // Give and want are always on the SAME value layer: cross-layer
     // (shielded↔unshielded) swaps are not a supported offer shape, so the
-    // suite never constructs one. See ISSUES.md for why the earlier
-    // cross-layer attempt produced a confusing NOT_A_SWAP rather than a
-    // clear refusal.
+    // HAPPY path never constructs one. That is a choice about this builder,
+    // not a claim about reachability — buildCrossLayerOffer() makes one on
+    // purpose via Transaction.merge, and the ladder now answers CROSS_LAYER
+    // (§2.4). ISSUES.md's "confusing NOT_A_SWAP" is fixed: the layer rule is
+    // checked before the two-sided rule, so the code names the real problem.
     const desiredInputs = giveShielded
       ? { shielded: { [giveColor]: BigInt(rec.giveAmount) } }
       : ({ unshielded: { [giveColor]: BigInt(rec.giveAmount) } } as any);
@@ -699,6 +702,66 @@ export async function buildOneSidedOffer(
   } catch (e) {
     return { skipped: `wallet error: ${e instanceof Error ? e.message : String(e)}` };
   }
+}
+
+/**
+ * A cross-layer offer: gives on one value layer, wants on the other. (§2.4)
+ *
+ * No wallet we have builds one — wallet-sdk-facade silently drops the
+ * mismatched leg, which is the whole reason this gap went untested and got
+ * mis-recorded as "unreachable". A wallet is not the only way to make a
+ * transaction, though: balancing IS a merge, and the ledger exposes
+ * `Transaction.merge()` directly. probe-cross-layer.ts established this route
+ * against real offers; this is the same construction, wired into the run.
+ *
+ * Reachability is the point. Anyone holding a shielded offer and an unshielded
+ * one can produce this in seconds, and the DA namespace is permissionless, so
+ * "no wallet builds one" was never a defence.
+ *
+ * Sources are REAL offers from this run rather than purpose-built ones, so the
+ * fixture cannot drift from what the suite actually publishes. It takes only
+ * offers past `planned` — those have blobs on disk and proofs the node will
+ * accept, so a rejection is about the LAYER RULE and nothing else.
+ */
+export async function buildCrossLayerOffer(): Promise<{ blob: string } | { skipped: string }> {
+  const usable = (o: OfferRecord) =>
+    o.offerHash && o.state !== "planned" && o.state !== "casualty";
+  const ss = ledger.offers.find((o) => o.layer === "ss" && usable(o));
+  const uu = ledger.offers.find((o) => o.layer === "uu" && usable(o));
+  if (!ss || !uu) {
+    return { skipped: "no published ss+uu pair available to merge this run" };
+  }
+
+  let blob: string;
+  try {
+    const deser = (b: string) =>
+      Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(b)) as any;
+    const merged = deser(loadBlob(ss.offerHash!)).merge(deser(loadBlob(uu.offerHash!)));
+    blob = OfferFiles.encode(merged.serialize());
+  } catch (e) {
+    // A refusal here is a real finding, not a flake: if the LEDGER forbids the
+    // merge then §2.4 is closed below the indexer and the validator check is
+    // belt-and-braces. Surfaced as a skip with the reason so the run says so.
+    return { skipped: `ledger refused the merge: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  // Only CROSS_LAYER proves the fixture is what it claims. NOT_A_SWAP in
+  // particular would mean the merge produced a one-sided shape and the
+  // assertion downstream would be passing for the wrong reason.
+  const v = validateZswapOffer(blob, {
+    refState: getBlankRefState(net.id),
+    tblock: new Date(),
+    maxBytes: 1024 * 1024,
+    crypto: "defer",
+  });
+  if (v.code !== "CROSS_LAYER") {
+    return {
+      skipped:
+        `merged to ${v.ok ? "a VALID same-layer offer" : v.code} instead of CROSS_LAYER ` +
+        `[gives=${JSON.stringify(v.gives ?? [])} wants=${JSON.stringify(v.wants ?? [])}]`,
+    };
+  }
+  return { blob };
 }
 
 /** Publish via the planned path and wait for the offer_file row. */

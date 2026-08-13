@@ -8,6 +8,12 @@ export type OfferRejectCode =
   | "WRONG_TX_VARIANT"
   | "NO_SPENDABLE_INPUT"
   | "NOT_A_SWAP"
+  // Legs span both value layers. Unfillable by construction — nothing moves
+  // value between shielded and unshielded — and reachable via Transaction.merge
+  // even though no wallet builds one. Sits beside NOT_A_SWAP because it is the
+  // same kind of judgement: a pure verdict on the derived leg SHAPE, decided
+  // before any proof work. See §2.4.
+  | "CROSS_LAYER"
   | "UNKNOWN_TOKEN"
   | "PROOF_INVALID"
   | "SIGNATURE_INVALID"

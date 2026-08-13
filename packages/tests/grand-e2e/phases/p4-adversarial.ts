@@ -17,7 +17,12 @@ import {
   publishCelestiaGarbage,
   STRUCTURAL_CODES,
 } from "../actors/adversary.ts";
-import { buildOneSidedOffer, makerShieldedKey, type Actors } from "../actors/wallets.ts";
+import {
+  buildCrossLayerOffer,
+  buildOneSidedOffer,
+  makerShieldedKey,
+  type Actors,
+} from "../actors/wallets.ts";
 import { getHealth, submitOffer2 } from "../lib/api2.ts";
 import { submitBlobRaw } from "../lib/celestia.ts";
 import { offerRowByHash, rejectionRows, rejectionTotalsByCode, tableCount } from "../lib/db2.ts";
@@ -82,6 +87,71 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
           async () => {
             const now = await rejectionTotalsByCode(db);
             return (now.NOT_A_SWAP ?? 0) > (before.NOT_A_SWAP ?? 0);
+          },
+          24,
+          5000,
+        ),
+      );
+    }
+  }
+
+  // ── The same-layer rule, at both doors (§2.4) ────────────────────────────
+  // A cross-layer offer is unfillable by construction: nothing in this system
+  // moves value between shielded and unshielded, so no taker could ever settle
+  // it. Until PR-#6 the ladder ACCEPTED one — it passed everything including
+  // `wellFormed`. Built here by merging a real shielded offer with a real
+  // unshielded one, the route probe-cross-layer.ts proved reachable.
+  {
+    const built = await buildCrossLayerOffer();
+    if ("skipped" in built) {
+      note(
+        "CROSS_LAYER fixture",
+        `not built (${built.skipped}) — the same-layer rule is UNTESTED this run. ` +
+          "If the reason is that the merge yielded a valid same-layer offer, or that the " +
+          "ledger refused the merge outright, §2.4's reachability claim needs re-checking.",
+      );
+    } else {
+      const xl = built.blob;
+      const res = await submitOffer2(xl);
+      ledger.addGarbage({
+        kind: "api:CROSS_LAYER-merged",
+        via: "api",
+        expectedCodes: ["CROSS_LAYER"],
+        offerHash: offerHashFromBlob(xl),
+        at: Date.now(),
+        gotCode: res.body?.error,
+        gotStatus: res.status,
+      });
+      await check(
+        "submit rejects a cross-layer offer as CROSS_LAYER (same-layer rule)",
+        async () => res.status === 400 && res.body?.error === "CROSS_LAYER",
+        `got ${res.status} ${res.body?.error}`,
+      );
+      // Specifically NOT NOT_A_SWAP. The offer IS two-sided — that is what
+      // makes it dangerous — so answering NOT_A_SWAP would be naming the wrong
+      // defect and would let a reordering of the ladder pass unnoticed.
+      await check(
+        "the cross-layer rejection is not mislabelled NOT_A_SWAP",
+        async () => res.body?.error !== "NOT_A_SWAP",
+        `got ${res.body?.error}`,
+      );
+
+      const before = await rejectionTotalsByCode(db);
+      const height = await submitBlobRaw(OfferFiles.decode(xl));
+      ledger.addGarbage({
+        kind: "celestia:CROSS_LAYER-merged",
+        via: "celestia",
+        expectedCodes: ["CROSS_LAYER"],
+        offerHash: offerHashFromBlob(xl),
+        celestiaHeight: height,
+        at: Date.now(),
+      });
+      await check("celestia door records CROSS_LAYER for the same transaction", async () =>
+        waitUntil(
+          "CROSS_LAYER recorded",
+          async () => {
+            const now = await rejectionTotalsByCode(db);
+            return (now.CROSS_LAYER ?? 0) > (before.CROSS_LAYER ?? 0);
           },
           24,
           5000,

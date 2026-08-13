@@ -132,9 +132,22 @@ export async function p1Happy(db: Client, actors: Actors, sse: SseRecorder): Pro
     return s.body?.status === "consumed";
   });
 
+  // waitUntil, not a bare read. App events are published only AFTER their
+  // block commits (the post-commit gate, invariant I1), released by a ~1 s
+  // poll — so the event is not there the instant the archive is. This check
+  // used to read the recorder synchronously and passed only because events
+  // were once emitted inside the STM transition; it FAILED on the first full
+  // run against main for exactly that reason. Do not "fix" it by removing the
+  // gate: delivering an event before its block commits is the defect the gate
+  // exists to prevent.
   await check("offer_consumed SSE event fired for the settled offer", async () => {
     const rowId = recA.rowId;
-    return sse.ofType("offer_consumed").some((e) => e.event.offerId === rowId);
+    return waitUntil(
+      "offer_consumed delivered",
+      async () => sse.ofType("offer_consumed").some((e) => e.event.offerId === rowId),
+      20,
+      1000,
+    );
   });
 
   note("p1 artifacts", `live=${builtB.hash.slice(0, 12)}… consumed=${builtA.hash.slice(0, 12)}…`);

@@ -102,7 +102,11 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
   // `wellFormed`. Built here by merging a real shielded offer with a real
   // unshielded one, the route probe-cross-layer.ts proved reachable.
   {
-    const built = await buildCrossLayerOffer();
+    // A maker funded on BOTH layers (every maker is, by index parity). Not
+    // makerIdx 7 — that one just built the NOT_A_SWAP fixture above and its
+    // shielded coin is still settling back.
+    const xlMakerIdx = 6;
+    const built = await buildCrossLayerOffer(actors.makers[xlMakerIdx]!, xlMakerIdx);
     if ("skipped" in built) {
       note(
         "CROSS_LAYER fixture",

@@ -16,7 +16,7 @@ import {
   postKnownToken,
   postStatusByBlob,
 } from "../lib/api2.ts";
-import { beginPhase, check, note, sleep } from "../lib/util.ts";
+import { beginPhase, check, note, sleep, waitUntil } from "../lib/util.ts";
 
 const NIGHT = "0".repeat(64);
 
@@ -162,11 +162,23 @@ export async function p2Api(db: Client, art: P1Artifacts): Promise<void> {
   });
 
   // ── Pairs + charts (one fill exists from p1) ─────────────────────────────
-  await check("pairs endpoint reflects the p1 fill", async () => {
-    const r = await getPairs();
-    if (r.status !== 200 || !Array.isArray(r.body)) return false;
-    return r.body.some((p: any) => Number(p.trade_count) >= 1);
-  });
+  // waitUntil: pair_stats is written by the `offer_consumed` LISTENER, and
+  // that event is released only after its block commits (the post-commit gate).
+  // A single immediate GET races the gate and loses — which is exactly how this
+  // check failed on the first full run against main. The p1 fill is real by
+  // then; it just has not been projected yet.
+  await check("pairs endpoint reflects the p1 fill", async () =>
+    waitUntil(
+      "pair_stats projected",
+      async () => {
+        const r = await getPairs();
+        if (r.status !== 200 || !Array.isArray(r.body)) return false;
+        return r.body.some((p: any) => Number(p.trade_count) >= 1);
+      },
+      20,
+      1000,
+    ),
+  );
   await check("chart stats + history answer for the p1 pair", async () => {
     const s = await getChartStats(ta, tb);
     const h = await getChartHistory(ta, tb);

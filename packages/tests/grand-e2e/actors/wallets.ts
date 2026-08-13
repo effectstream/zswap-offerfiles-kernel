@@ -742,45 +742,99 @@ export async function buildOneSidedOffer(
  * offers past `planned` — those have blobs on disk and proofs the node will
  * accept, so a rejection is about the LAYER RULE and nothing else.
  */
-export async function buildCrossLayerOffer(): Promise<{ blob: string } | { skipped: string }> {
-  const usable = (o: OfferRecord) =>
-    o.offerHash && o.state !== "planned" && o.state !== "casualty";
-  const ss = ledger.offers.find((o) => o.layer === "ss" && usable(o));
-  const uu = ledger.offers.find((o) => o.layer === "uu" && usable(o));
-  if (!ss || !uu) {
-    return { skipped: "no published ss+uu pair available to merge this run" };
-  }
+export async function buildCrossLayerOffer(
+  pw: PoolWallet,
+  makerIdx: number,
+): Promise<{ blob: string } | { skipped: string }> {
+  // SELF-CONTAINED, and it has to be. The first version searched
+  // `ledger.offers` for one published `ss` and one published `uu` offer and
+  // merged those. Measured on the first full run against main: it NEVER built.
+  // p4-adversarial runs SECOND in run.ts — before p3-lifecycle publishes
+  // anything — and p1-happy publishes only `layer: "ss"` offers, so the `uu`
+  // lookup found nothing and the fixture skipped every time. The same-layer
+  // rule went untested while the run still reported green.
+  //
+  // Building both halves here removes the dependency on run state entirely, so
+  // reordering phases can never silently disarm this fixture again. It is the
+  // same construction buildBasketOffer uses, and that one DID build on the
+  // same run.
+  //
+  // The maker must be funded on BOTH layers, which every maker is:
+  // makerShieldedKey(i) and makerUnshieldedKey(i) by index parity. Pass the
+  // index so the colours come from those helpers rather than being guessed —
+  // asking a wallet to spend a colour it never held is an InsufficientFunds
+  // ~100 s deep inside the SDK.
+  const half = async (giveKey: TokenKey, wantKey: TokenKey, give: bigint, want: bigint) => {
+    const giveColor = ledger.colors[giveKey]!;
+    const wantColor = ledger.colors[wantKey]!;
+    const shielded = isShieldedKey(giveKey);
+    const recipe = await pw.wr.wallet.initSwap(
+      shielded
+        ? { shielded: { [giveColor]: give } }
+        : ({ unshielded: { [giveColor]: give } } as any),
+      [{
+        type: shielded ? "shielded" : "unshielded",
+        outputs: [{
+          type: wantColor,
+          amount: want,
+          receiverAddress: shielded ? pw.shieldedAddr : pw.unshieldedObj,
+        }],
+      } as any],
+      shieldedKeys(pw.wr),
+      { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
+    );
+    return withProveSlot(() => pw.wr.wallet.finalizeTransaction(recipe.transaction));
+  };
 
-  let blob: string;
   try {
-    const deser = (b: string) =>
-      Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(b)) as any;
-    const merged = deser(loadBlob(ss.offerHash!)).merge(deser(loadBlob(uu.offerHash!)));
-    blob = OfferFiles.encode(merged.serialize());
-  } catch (e) {
-    // A refusal here is a real finding, not a flake: if the LEDGER forbids the
-    // merge then §2.4 is closed below the indexer and the validator check is
-    // belt-and-braces. Surfaced as a skip with the reason so the run says so.
-    return { skipped: `ledger refused the merge: ${e instanceof Error ? e.message : String(e)}` };
-  }
+    return await pw.run(async () => {
+      const sKey = makerShieldedKey(makerIdx);
+      const uKey = makerUnshieldedKey(makerIdx);
+      // Amounts below GIVE_MIN (500), same reasoning as the basket: nothing an
+      // ordinary offer produces can be confused with this fixture.
+      const ss = await half(sKey, oppositeKey(sKey), CROSS_GIVE_SHIELDED, 389n);
+      const uu = await half(uKey, oppositeKey(uKey), CROSS_GIVE_UNSHIELDED, 402n);
 
-  // Only CROSS_LAYER proves the fixture is what it claims. NOT_A_SWAP in
-  // particular would mean the merge produced a one-sided shape and the
-  // assertion downstream would be passing for the wrong reason.
-  const v = validateZswapOffer(blob, {
-    refState: getBlankRefState(net.id),
-    tblock: new Date(),
-    maxBytes: 1024 * 1024,
-    crypto: "defer",
-  });
-  if (v.code !== "CROSS_LAYER") {
-    return {
-      skipped:
-        `merged to ${v.ok ? "a VALID same-layer offer" : v.code} instead of CROSS_LAYER ` +
-        `[gives=${JSON.stringify(v.gives ?? [])} wants=${JSON.stringify(v.wants ?? [])}]`,
-    };
+      let merged: any;
+      try {
+        merged = (ss as any).merge(uu as any);
+      } catch (e) {
+        // A refusal here is a real finding, not a flake: if the LEDGER forbids
+        // the merge then §2.4 is closed below the indexer and the validator
+        // check is belt-and-braces. Surfaced with the reason so the run says so.
+        await (pw.wr.wallet as any).revert(ss).catch(() => {});
+        await (pw.wr.wallet as any).revert(uu).catch(() => {});
+        return { skipped: `ledger refused the merge: ${e instanceof Error ? e.message : String(e)}` };
+      }
+      const blob = OfferFiles.encode(merged.serialize());
+
+      // Release both halves' coins: this offer is REJECTED at both doors, so
+      // nothing settles and holding the reservations would starve the maker
+      // for the rest of the run.
+      await (pw.wr.wallet as any).revert(ss).catch(() => {});
+      await (pw.wr.wallet as any).revert(uu).catch(() => {});
+
+      // Only CROSS_LAYER proves the fixture is what it claims. NOT_A_SWAP in
+      // particular would mean a leg got dropped and the assertion downstream
+      // would be passing for the wrong reason.
+      const v = validateZswapOffer(blob, {
+        refState: getBlankRefState(net.id),
+        tblock: new Date(),
+        maxBytes: 1024 * 1024,
+        crypto: "defer",
+      });
+      if (v.code !== "CROSS_LAYER") {
+        return {
+          skipped:
+            `merged to ${v.ok ? "a VALID same-layer offer" : v.code} instead of CROSS_LAYER ` +
+            `[gives=${JSON.stringify(v.gives ?? [])} wants=${JSON.stringify(v.wants ?? [])}]`,
+        };
+      }
+      return { blob };
+    });
+  } catch (e) {
+    return { skipped: `cross-layer build failed: ${e instanceof Error ? e.message : String(e)}` };
   }
-  return { blob };
 }
 
 /**
@@ -803,6 +857,9 @@ export async function buildCrossLayerOffer(): Promise<{ blob: string } | { skipp
  * Returns the blob and the legs, so the caller can assert against the exact
  * colours rather than re-deriving them.
  */
+/** Below GIVE_MIN, so no ordinary offer can be mistaken for these fixtures. */
+export const CROSS_GIVE_SHIELDED = 311n;
+export const CROSS_GIVE_UNSHIELDED = 289n;
 export const BASKET_GIVE_TA = 337n;
 export const BASKET_GIVE_TC = 293n;
 

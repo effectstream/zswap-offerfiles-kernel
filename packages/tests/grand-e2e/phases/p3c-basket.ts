@@ -50,14 +50,6 @@ function basketPairs(gives: string[], wants: string[]): [string, string][] {
   return out;
 }
 
-/** Sum of open_count over the basket's pairs, as /v1/pairs reports it. */
-function openOnPairs(rows: any[], pairs: [string, string][]): number {
-  const keys = new Set(pairs.map(([a, b]) => [a, b].sort().join("|")));
-  return rows
-    .filter((p) => keys.has(String(p.pair_key)))
-    .reduce((n, p) => n + Number(p.open_count ?? 0), 0);
-}
-
 export async function p3cBasket(db: Client, actors: Actors): Promise<void> {
   beginPhase("p3c-basket");
 
@@ -107,6 +99,20 @@ export async function p3cBasket(db: Client, actors: Actors): Promise<void> {
     hasFillMarkers: true, // the want leg (TB) is shielded
   });
 
+  // open_count per pair BEFORE the basket exists. The basket's pairs include
+  // TA|TB, a market this suite trades all run, so "no basket open_count" can
+  // only be measured as a DELTA — an absolute zero is unsatisfiable and is
+  // exactly how this check failed on the first full run against main.
+  const openBefore = new Map<string, number>();
+  {
+    const r0 = await getPairs();
+    if (r0.status === 200) {
+      for (const p of (r0.body as any[]) ?? []) {
+        openBefore.set(String(p.pair_key), Number(p.open_count ?? 0));
+      }
+    }
+  }
+
   // ── ACCEPT: it is a real offer, indexed like any other ────────────────────
   const res = await submitOffer2(blob);
   await check(
@@ -141,10 +147,15 @@ export async function p3cBasket(db: Client, actors: Actors): Promise<void> {
   );
 
   // ── EXCLUDE: invisible to market data while OPEN ──────────────────────────
-  await check("an open basket adds no open_count to /v1/pairs", async () => {
+  await check("an open basket raises no pair's open_count", async () => {
     const r = await getPairs();
-    return r.status === 200 && openOnPairs(r.body as any[], pairs) === 0;
-  });
+    if (r.status !== 200) return false;
+    for (const p of (r.body as any[]) ?? []) {
+      const key = String(p.pair_key);
+      if (Number(p.open_count ?? 0) > (openBefore.get(key) ?? 0)) return false;
+    }
+    return true;
+  }, `before=${JSON.stringify([...openBefore])}`);
 
   await check("an open basket manufactures no /v1/pairs markets", async () => {
     const r = await getPairs();

@@ -494,14 +494,34 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
       ].filter(Boolean).join(" | "),
     );
 
-    // Ordering is only meaningful now that last_traded_at is chain time.
-    await check("/v1/pairs is ordered by last_traded_at, newest first", async () => {
-      const stamped = (pairRows as any[]).filter((p) => p.last_traded_at != null);
-      for (let i = 1; i < stamped.length; i++) {
-        if (Date.parse(stamped[i - 1].last_traded_at) < Date.parse(stamped[i].last_traded_at)) return false;
+    // The ordering CONTRACT (§8, ruled 2026-08-10): liquidity first.
+    //
+    //   open_count DESC, last_traded_at DESC NULLS LAST, pair_key
+    //
+    // This assertion used to claim "ordered by last_traded_at, newest first" —
+    // a contract the query has never promised. `open_count` is the PRIMARY
+    // key, so any pair with a deeper book legitimately outranks a more recent
+    // trade, and the old check called that a failure. It was testing the
+    // wrong thing, not testing it flakily.
+    await check("/v1/pairs follows the liquidity-first ordering contract", async () => {
+      const rows = pairRows as any[];
+      const rank = (p: any): [number, number, string] => [
+        -Number(p.open_count ?? 0),
+        p.last_traded_at == null ? Infinity : -Date.parse(p.last_traded_at),
+        p.pair_key ?? "",
+      ];
+      for (let i = 1; i < rows.length; i++) {
+        const a = rank(rows[i - 1]), b = rank(rows[i]);
+        // Lexicographic on (−open_count, −last_traded, pair_key): each row must
+        // be <= the next. NULLS LAST is Infinity, which sorts after any stamp.
+        for (let k = 0; k < 3; k++) {
+          if (a[k]! < b[k]!) break;
+          if (a[k]! > b[k]!) return false;
+        }
       }
       return true;
-    });
+    }, `served order: ${(pairRows as any[]).slice(0, 5)
+      .map((p) => `${String(p.pair_key).slice(0, 6)}(open=${p.open_count})`).join(" ")}`);
   }
 
   // ── 5c. Expired offers are never trades ──────────────────────────────────

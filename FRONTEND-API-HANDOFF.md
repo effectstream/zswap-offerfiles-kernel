@@ -185,6 +185,14 @@ Errors — all bodies are `{ "error": CODE, "reason": "human text", …extras }`
 | 400 | `VALIDATION` | Malformed request body. |
 | 429 | `RATE_LIMITED` | Back off. |
 
+**Basket offers are accepted but carry no market data.** An offer with more than
+one token color on a side (give A+B, want C+D) is a sealed pre-agreed
+settlement, not a price: nobody agreed what A alone is worth in C. It is
+indexed, listed on `GET /v1/offers`, and settles normally — but it contributes
+nothing to `/v1/pairs` (no row, no `open_count`), `/v1/chart/history` or
+`/v1/chart/stats`. Don't build a market list expecting every open offer to
+appear as a pair.
+
 ### `GET /v1/offers/stream` — SSE
 
 `data:`-only frames (no `event:` field — dispatch on `data.type`), comment

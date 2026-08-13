@@ -52,10 +52,19 @@ export const CANCEL_DOUBLE_SEED = seed("c1");
 export const TAKER_SEEDS: string[] = ["b0", "b1", "b2", "b3", "b4", "b5"].map(seed);
 
 // ── Tokens ───────────────────────────────────────────────────────────────────
-// Two shielded + two unshielded colors minted by genesis at suite start.
+// Three shielded + two unshielded colors minted by genesis at suite start.
 // Domain separators are disjoint from the startup mint (0x70/0x63) and the
 // other e2e suites (0xa0/0xa1/0xd0/0xd1).
-export const TOKEN_SEPS = { TA: 0xe0, TB: 0xe1, UA: 0xe2, UB: 0xe3 } as const;
+//
+// TC exists ONLY for the §2.5 basket fixture, and a third shielded colour is
+// genuinely required for it: a basket needs two colours on one side, and
+// merging two offers drawn from {TA, TB} always nets back to one colour per
+// side (TA->TB merged with TB->TA cancels; TA->TB merged with TA->TB just
+// sums). TA->TB merged with TC->TB is the smallest real basket.
+//
+// No maker or taker is funded in TC — only the basket specialist is (see
+// setupActors) — so the funding plan's per-offer arithmetic is untouched.
+export const TOKEN_SEPS = { TA: 0xe0, TB: 0xe1, UA: 0xe2, UB: 0xe3, TC: 0xe4 } as const;
 export type TokenKey = keyof typeof TOKEN_SEPS;
 
 // Fixed reference prices per (give → want) direction, used to derive want
@@ -69,6 +78,8 @@ export const PAIR_PRICE: Record<string, number> = {
   "TB>UB": 0.5,
   "UA>TA": 0.5,
   "UB>TB": 2.0,
+  // Basket fixture only (§2.5): TC is never offered on its own.
+  "TC>TB": 1.1,
 };
 
 // Coin denominations created by the funding fan-out. Every offer gives less

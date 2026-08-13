@@ -41,6 +41,13 @@ export interface OfferRecord {
   hasFillMarkers?: boolean;
   state: "planned" | "published" | "indexed" | "resolved" | "casualty";
   casualtyReason?: string;
+  /**
+   * A basket: more than one colour on a side (§2.5). `giveToken`/`wantToken`
+   * name only one colour each — the record cannot express the rest — so this
+   * flag is what keeps the ledger from treating it as a normal single swap.
+   * Set by the p3c fixture; nothing else builds one.
+   */
+  basket?: boolean;
 }
 
 export interface GarbageRecord {
@@ -137,12 +144,16 @@ class Ledger {
    *
    * A basket (A+B for C+D) is accepted and tracked, but contributes nothing to
    * charts, stats, pair_stats or open_count (§2.5). It has no per-pair price to
-   * contribute: nobody agreed that A alone is worth C alone. Every offer this
-   * suite builds is single-swap, so this is a contract statement rather than a
-   * live filter — until a basket fixture exists.
+   * contribute: nobody agreed that A alone is worth C alone.
+   *
+   * This was a contract statement "until a basket fixture exists". It exists
+   * now (p3c-basket.ts), so this is a LIVE FILTER: `aggregate` skips baskets,
+   * because the ledger is the oracle the chart assertions compare against and
+   * an oracle that expects a per-pair price for a basket would demand exactly
+   * the fabricated trade §2.5 removed.
    */
   isSingleSwap(o: OfferRecord): boolean {
-    return o.giveToken !== undefined && o.wantToken !== undefined;
+    return !o.basket && o.giveToken !== undefined && o.wantToken !== undefined;
   }
 
   private aggregate(settledOnly: boolean): Map<string, { count: number; byColor: Record<string, bigint> }> {
@@ -170,6 +181,11 @@ class Ledger {
       // two call sites keep their distinct names while they converge.
       const countsAsFill = o.fate === "settled";
       if (!countsAsFill) continue;
+      // A basket settles, but it is not a price — see isSingleSwap. Its record
+      // names only ONE of its give colours (the shape cannot express more), so
+      // aggregating it would invent a single-colour trade that never happened
+      // AND that market data correctly refuses to report.
+      if (!this.isSingleSwap(o)) continue;
       const give = this.colors[o.giveToken]!;
       const want = this.colors[o.wantToken]!;
       const key = [give, want].sort().join("|");

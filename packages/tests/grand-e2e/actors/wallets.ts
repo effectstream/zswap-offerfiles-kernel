@@ -88,7 +88,7 @@ async function withProveSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-export const isShieldedKey = (k: TokenKey): boolean => k === "TA" || k === "TB";
+export const isShieldedKey = (k: TokenKey): boolean => k === "TA" || k === "TB" || k === "TC";
 
 export class PoolWallet {
   private queue: Promise<unknown> = Promise.resolve();
@@ -119,6 +119,8 @@ export interface Actors {
   competingShielded: PoolWallet;
   /** One unshielded UTXO, backing two mutually exclusive offers. */
   competingUnshielded: PoolWallet;
+  /** Holds TA + TC, the two give colours the §2.5 basket fixture merges. */
+  basketMaker: PoolWallet;
   takers: PoolWallet[];
 }
 
@@ -140,6 +142,12 @@ const CANCEL_DOUBLE_SEEDS = [CANCEL_DOUBLE_SEED, "c3".padStart(64, "0")];
 // coins would silently pick a different one and the offers would not compete.
 const COMPETING_SHIELDED_SEED = "e0".padStart(64, "0");
 const COMPETING_UNSHIELDED_SEED = "e1".padStart(64, "0");
+// Basket specialist (§2.5). Its own wallet for the same reason the competing
+// specialists have theirs: it must hold EXACTLY the coins the fixture merges,
+// so coin selection has no freedom to pick a colour the fixture did not mean.
+const BASKET_MAKER_SEED = "e2".padStart(64, "0");
+/** One coin of each give colour — the basket gives strictly less than one. */
+export const BASKET_COIN = 1200n;
 
 /**
  * Which colors maker `i` is actually funded with. Makers are NOT funded in all
@@ -397,16 +405,19 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
     unshieldedAddressObj(genesis),
   );
 
-  console.log(`${TAG} joining offer-files contract + minting 4 colors…`);
+  console.log(`${TAG} joining offer-files contract + minting 5 colors…`);
   const deployed = await joinOfferFiles(genesis);
   const nonce = BigInt(Date.now());
   ledger.colors.TA = await mintShielded(deployed, TOKEN_SEPS.TA, MINT_AMOUNT, nonce);
   ledger.colors.TB = await mintShielded(deployed, TOKEN_SEPS.TB, MINT_AMOUNT, nonce + 1n);
   ledger.colors.UA = await mintUnshielded(deployed, TOKEN_SEPS.UA, MINT_AMOUNT, genesis.unshieldedAddress);
   ledger.colors.UB = await mintUnshielded(deployed, TOKEN_SEPS.UB, MINT_AMOUNT, genesis.unshieldedAddress);
+  // TC funds the §2.5 basket specialist only — a much smaller mint than the
+  // trading colours, which the whole maker/taker fan-out draws on.
+  ledger.colors.TC = await mintShielded(deployed, TOKEN_SEPS.TC, MINT_AMOUNT, nonce + 2n);
   console.log(`${TAG} colors:`, JSON.stringify(ledger.colors));
 
-  for (const key of ["TA", "TB"] as const) {
+  for (const key of ["TA", "TB", "TC"] as const) {
     const got = await waitForShielded(genesis, ledger.colors[key]!, MINT_AMOUNT, 36);
     if (got < MINT_AMOUNT) throw new Error(`genesis missing shielded mint ${key}`);
   }
@@ -422,6 +433,7 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   const takers = await Promise.all(TAKER_SEEDS.map((s, i) => buildPoolWallet(`T${i}`, s)));
   const competingShielded = await buildPoolWallet("CMP-S", COMPETING_SHIELDED_SEED);
   const competingUnshielded = await buildPoolWallet("CMP-U", COMPETING_UNSHIELDED_SEED);
+  const basketMaker = await buildPoolWallet("BSK", BASKET_MAKER_SEED);
 
   const plan = defaultFundingPlan(totalOffers);
   // FUNDING: genesis emits the FINAL per-offer denominations directly.
@@ -454,7 +466,7 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
     }
   });
 
-  const outsByKey: Record<TokenKey, { receiverAddress: unknown; amount: bigint }[]> = { TA: [], TB: [], UA: [], UB: [] };
+  const outsByKey: Record<TokenKey, { receiverAddress: unknown; amount: bigint }[]> = { TA: [], TB: [], UA: [], UB: [], TC: [] };
   for (const g of grants) {
     const addr = isShieldedKey(g.key) ? g.pw.shieldedAddr : g.pw.unshieldedObj;
     for (let c = 0; c < g.coins; c++) {
@@ -473,6 +485,10 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   });
   outsByKey.TA.push({ receiverAddress: competingShielded.shieldedAddr, amount: COMPETING_COIN });
   outsByKey.UA.push({ receiverAddress: competingUnshielded.unshieldedObj, amount: COMPETING_COIN });
+  // Basket specialist: exactly one TA coin and one TC coin — the two halves
+  // the fixture merges into a single two-give offer.
+  outsByKey.TA.push({ receiverAddress: basketMaker.shieldedAddr, amount: BASKET_COIN });
+  outsByKey.TC.push({ receiverAddress: basketMaker.shieldedAddr, amount: BASKET_COIN });
 
   const totalOuts = Object.values(outsByKey).reduce((n, a) => n + a.length, 0);
   console.log(`${TAG} funding fan-out: ${totalOuts} coins direct from genesis (no batcher)…`);
@@ -480,6 +496,7 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   await genesisFanOut(genesis, true, ledger.colors.TB!, outsByKey.TB);
   await genesisFanOut(genesis, false, ledger.colors.UA!, outsByKey.UA);
   await genesisFanOut(genesis, false, ledger.colors.UB!, outsByKey.UB);
+  await genesisFanOut(genesis, true, ledger.colors.TC!, outsByKey.TC);
 
   // Confirm every wallet actually holds what it was granted before any offer
   // is built — a missing coin here surfaces as a confusing build failure later.
@@ -493,6 +510,8 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   cancelDoubles.forEach((c, i) => expect.push({ pw: c, key: cancelGiveToken("double", i), total: CANCEL_COIN * 2n }));
   expect.push({ pw: competingShielded, key: "TA", total: COMPETING_COIN });
   expect.push({ pw: competingUnshielded, key: "UA", total: COMPETING_COIN });
+  expect.push({ pw: basketMaker, key: "TA", total: BASKET_COIN });
+  expect.push({ pw: basketMaker, key: "TC", total: BASKET_COIN });
 
   const landed = await Promise.allSettled(
     expect.map(async (e) => {
@@ -508,7 +527,7 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
     throw new Error(`funding did not land for ${short.length} wallet/color pairs: ${short[0]!.reason}`);
   }
   console.log(`${TAG} funding complete (${totalOuts} coins, batcher untouched).`);
-  return { genesis, genesisPw, deployed, makers, cancelSingles, cancelDoubles, competingShielded, competingUnshielded, takers };
+  return { genesis, genesisPw, deployed, makers, cancelSingles, cancelDoubles, competingShielded, competingUnshielded, basketMaker, takers };
 }
 
 // ── Offer construction / publication ─────────────────────────────────────────
@@ -764,6 +783,86 @@ export async function buildCrossLayerOffer(): Promise<{ blob: string } | { skipp
   return { blob };
 }
 
+/**
+ * A BASKET offer: two give colours, one want colour. (§2.5)
+ *
+ * Two ordinary shielded swaps — TA -> TB and TC -> TB — built on the same
+ * wallet and combined with the ledger's own `Transaction.merge()`. The result
+ * gives TA + TC and wants TB: a single sealed settlement whose per-pair prices
+ * do not exist, because nobody agreed what TA alone is worth in TB.
+ *
+ * A third colour is not decoration. Merging any two offers drawn from
+ * {TA, TB} nets back to one colour per side — TA->TB with TB->TA cancels,
+ * TA->TB with TA->TB just sums — so TC is the smallest thing that makes a
+ * same-layer basket exist at all.
+ *
+ * Kept on ONE value layer deliberately. The cross-layer merge is a basket too,
+ * but §2.4 rejects it at ingestion, so it could never reach the market queries
+ * this fixture is here to test.
+ *
+ * Returns the blob and the legs, so the caller can assert against the exact
+ * colours rather than re-deriving them.
+ */
+export const BASKET_GIVE_TA = 337n;
+export const BASKET_GIVE_TC = 293n;
+
+export async function buildBasketOffer(
+  pw: PoolWallet,
+): Promise<{ blob: string; gives: string[]; wants: string[] } | { skipped: string }> {
+  const half = async (giveKey: TokenKey, wantKey: TokenKey, give: bigint, want: bigint) => {
+    const giveColor = ledger.colors[giveKey]!;
+    const wantColor = ledger.colors[wantKey]!;
+    const recipe = await pw.wr.wallet.initSwap(
+      { shielded: { [giveColor]: give } },
+      [{
+        type: "shielded",
+        outputs: [{ type: wantColor, amount: want, receiverAddress: pw.shieldedAddr }],
+      } as any],
+      shieldedKeys(pw.wr),
+      { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
+    );
+    return withProveSlot(() => pw.wr.wallet.finalizeTransaction(recipe.transaction));
+  };
+
+  try {
+    return await pw.run(async () => {
+      // Amounts chosen BELOW GIVE_MIN (500). Every ordinary offer in the run
+      // gives 500..1500, so a chart print sized 337 on TA/TB can only have come
+      // from this basket — which is what lets the phase assert "the basket left
+      // no print" on a pair the suite trades all run anyway. The two halves also
+      // price differently (1.249 vs 1.099), so a per-pair price, if one were
+      // ever invented, would be visibly wrong rather than coincidentally right.
+      const a = await half("TA", "TB", BASKET_GIVE_TA, 421n);
+      const c = await half("TC", "TB", BASKET_GIVE_TC, 322n);
+      const merged = (a as any).merge(c as any);
+      const blob = OfferFiles.encode(merged.serialize());
+
+      const v = validateZswapOffer(blob, {
+        refState: getBlankRefState(net.id),
+        tblock: new Date(),
+        maxBytes: 1024 * 1024,
+        crypto: "defer",
+      });
+      // Only a valid TWO-GIVE offer proves the fixture is what it claims. If
+      // the merge netted the legs back to one colour a side, every assertion
+      // downstream would pass for the wrong reason — the offer would be
+      // excluded from market data because it is ordinary, not because it is a
+      // basket.
+      if (!v.ok) {
+        return { skipped: `merged basket did not validate: ${v.code} — ${v.reason}` };
+      }
+      const gives = [...new Set((v.gives ?? []).map((l) => l.token))];
+      const wants = [...new Set((v.wants ?? []).map((l) => l.token))];
+      if (gives.length < 2) {
+        return { skipped: `merge produced ${gives.length} give colour(s), not a basket` };
+      }
+      return { blob, gives, wants };
+    });
+  } catch (e) {
+    return { skipped: `basket build failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 /** Publish via the planned path and wait for the offer_file row. */
 export async function publishAndIndex(
   db: Client,
@@ -936,7 +1035,7 @@ export function makeRefill(genesisPw: PoolWallet, target: PoolWallet, giveToken:
 }
 
 export async function stopActors(a: Actors): Promise<void> {
-  const all = [a.genesis, ...[...a.makers, ...a.cancelSingles, ...a.cancelDoubles, a.competingShielded, a.competingUnshielded, ...a.takers].map((p) => p.wr)];
+  const all = [a.genesis, ...[...a.makers, ...a.cancelSingles, ...a.cancelDoubles, a.competingShielded, a.competingUnshielded, a.basketMaker, ...a.takers].map((p) => p.wr)];
   for (const wr of all) await wr.wallet.stop().catch(() => {});
 }
 

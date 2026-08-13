@@ -201,13 +201,55 @@ const unshieldedCancelledPredicate = (idExpr: string) => `(
 // INERT on the other layer: a pure shielded offer has no unshielded spend rows,
 // so every unshielded branch is false, and vice versa.
 //
-// A cross-layer offer is judged by both, which is conservative but NOT a full
-// atomicity check: each layer counts distinct spending txs over its own inputs,
-// so shielded inputs in tx1 and unshielded inputs in tx2 fires neither branch 2.
-// §2.4 rules that shape out, but that ruling is NOT YET IMPLEMENTED — there is
-// no CROSS_LAYER code in OfferRejectCode — so do not read this as unreachable.
+// A cross-layer offer would be judged by both, which is conservative but NOT a
+// full atomicity check: each layer counts distinct spending txs over its own
+// inputs, so shielded inputs in tx1 and unshielded inputs in tx2 fires neither
+// branch 2. That gap is now CLOSED UPSTREAM rather than here: §2.4's ruling is
+// implemented — `CROSS_LAYER` is in OfferRejectCode and validate.ts rejects the
+// shape immediately after the two-sided rule, at both doors — so no cross-layer
+// offer is ever indexed and this predicate never sees one.
+//
+// Kept as a comment rather than deleted: it records WHY these predicates are
+// safe to leave layer-independent. If §2.4 were ever relaxed, this is the
+// weakness that would come back.
 const cancelledPredicate = (idExpr: string) =>
   `(${shieldedCancelledPredicate(idExpr)} OR ${unshieldedCancelledPredicate(idExpr)})`;
+
+// ── Baskets are not price observations (§2.5, ruled ACCEPT-but-exclude) ─────
+//
+// A basket is an offer with more than one colour on a side: give A+B, want C+D.
+// It is a legitimate, sealed, pre-agreed settlement — it lives, settles and
+// archives like any other offer, and NONE of that is affected here. What it is
+// not is a PRICE. Nobody agreed that 1317 A is worth 1983 C; they agreed that
+// A+B together are worth C+D together. Splitting that into per-pair prices
+// invents agreements that were never made.
+//
+// Measured, not argued: one 2x2 basket became FOUR trades at four different
+// prices on four pairs, with every leg's volume counted twice, and manufactured
+// four rows on /v1/pairs. See multileg-pairs.test.ts.
+//
+// Why this cannot be fixed by reconstructing the constituent swaps instead:
+// merging is lossy at the segment level. Two zswaps merged into one transaction
+// land in segment 0 TOGETHER, netted, with nothing left to say which +N pairs
+// with which -M (probe-segments.ts). The sealed sub-balances are not recoverable
+// from the bytes, so there is no honest query-side reconstruction — exclusion is
+// the only option that does not fabricate.
+//
+// Eligibility, stated positively: at most one give colour AND at most one want
+// colour. Expressed as "no direction has two colours" so a single grouped
+// subquery covers both sides.
+//
+// `tokensTable` selects the live (`offer_file_tokens`) or archived
+// (`offer_file_tokens_history`) side; they are separate tables, so the caller
+// must name the one matching `idExpr`'s table or the filter silently matches
+// nothing and every basket sails through.
+const notABasketPredicate = (idExpr: string, tokensTable: string) => `
+NOT EXISTS (
+  SELECT 1 FROM ${tokensTable} bt
+  WHERE bt.offer_file_id = ${idExpr}
+  GROUP BY bt.direction
+  HAVING COUNT(DISTINCT bt.token_color) > 1
+)`;
 
 // Status of an archived row: expired (TTL) / cancelled / consumed.
 const archivedStatusCase = (tableIdExpr: string) => `
@@ -457,6 +499,7 @@ export const getPairStats24h = prepared<IGetPairStats24hParams, IGetPairStats24h
                GROUP BY 1, 2) w ON w.offer_file_id = h.id
          WHERE h.archive_reason = 'CONSUMED'
            AND NOT ${cancelledPredicate("h.id")}
+           AND ${notABasketPredicate("h.id", "offer_file_tokens_history")}
            AND g.amount::numeric > 0
            AND w.amount::numeric > 0
            AND ((g.token_color = :base! AND w.token_color = :quote!)
@@ -513,6 +556,7 @@ export const getTradeHistory = prepared<IGetTradeHistoryParams, IGetTradeHistory
              GROUP BY 1, 2) w ON w.offer_file_id = h.id
        WHERE h.archive_reason = 'CONSUMED'
          AND NOT ${cancelledPredicate("h.id")}
+         AND ${notABasketPredicate("h.id", "offer_file_tokens_history")}
          AND ((g.token_color = :base! AND w.token_color = :quote!)
            OR (g.token_color = :quote! AND w.token_color = :base!))
        ORDER BY h.archived_at DESC
@@ -541,7 +585,8 @@ export const getOpenLegs = prepared<IGetOpenLegsParams, IGetOpenLegsResult>(
              FROM offer_file_tokens
              WHERE direction = 'WANTING' AND token_color IN (:base!, :quote!)
              GROUP BY 1, 2) w ON w.offer_file_id = o.id
-       WHERE ((g.token_color = :base! AND w.token_color = :quote!)
+       WHERE ${notABasketPredicate("o.id", "offer_file_tokens")}
+         AND ((g.token_color = :base! AND w.token_color = :quote!)
            OR (g.token_color = :quote! AND w.token_color = :base!))`,
 );
 
@@ -622,11 +667,33 @@ export const upsertPairStatsByOfferId = prepared<IUpsertPairStatsByOfferIdParams
        JOIN offer_file_history h ON h.id = g.offer_file_id
        WHERE g.offer_file_id = :offer_id!
          AND NOT ${cancelledPredicate("g.offer_file_id")}
+         AND ${notABasketPredicate("g.offer_file_id", "offer_file_tokens_history")}
        ON CONFLICT (pair_key) DO UPDATE SET
            trade_count    = pair_stats.trade_count + 1,
            last_price     = EXCLUDED.last_price,
            last_traded_at = EXCLUDED.last_traded_at`,
 );
+
+/**
+ * The `/v1/pairs` ordering CONTRACT (§8, ruled 2026-08-10).
+ *
+ * "Liquidity first; we want to always show the major players — and make the
+ * users see by default the largest pools." So `open_count` leads and recency
+ * only breaks its ties.
+ *
+ * `pair_key` last is MANDATORY, not tidiness: `last_traded_at` quantises to L2
+ * block time, so full ties on both keys are common, and without a deterministic
+ * final key two replicas can order the same pairs differently — which p7a's
+ * A-vs-B byte comparison would report as a phantom failure.
+ *
+ * Exported because the tiebreaker is not observable from data: `pair_key` is
+ * `pair_stats`' primary key, so an index scan already returns it sorted and a
+ * fixture cannot tell "ordered by pair_key" from "happened to come back
+ * sorted". A test asserting this string is the only honest way to pin it; the
+ * liquidity-first half IS data-observable and is asserted normally.
+ * Documented for clients in API.md.
+ */
+export const PAIRS_ORDER_BY = "open_count DESC, last_traded_at DESC NULLS LAST, pair_key";
 
 export interface IGetPairsResult {
   pair_key: string;
@@ -654,9 +721,10 @@ export const getPairs = prepared<void, IGetPairsResult>(
            FROM offer_file_tokens g
            JOIN offer_file_tokens w ON w.offer_file_id = g.offer_file_id AND w.direction = 'WANTING'
            WHERE g.direction = 'GIVING'
+             AND ${notABasketPredicate("g.offer_file_id", "offer_file_tokens")}
            GROUP BY 1
        ) live ON live.pair_key = ps.pair_key
-       ORDER BY open_count DESC, last_traded_at DESC NULLS LAST`,
+       ORDER BY ${PAIRS_ORDER_BY}`,
 );
 
 // ── Offer hash (content-addressed lookups, MIP-0006 offerId) ───────────────

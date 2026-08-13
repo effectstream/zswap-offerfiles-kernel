@@ -67,25 +67,37 @@ export const KNOWN_RED: Record<string, KnownRed> = {
   // The registry is EMPTY. Keep it that way by deleting entries in the commit
   // that fixes them; the XPASS guard will fail the run if you forget.
 
-  // §2.4 (cross-layer) is FIXED and was never registered — deliberately, and
-  // the reasoning is worth keeping because it bounds what this registry is for.
+  // §2.4 (cross-layer) and §2.5 (baskets) are both FIXED, and NEITHER was ever
+  // registered here. That was deliberate, and the reasoning bounds what this
+  // registry is for.
   //
-  // An entry means "a check exists, asserts the truth, and the product is
-  // currently wrong". For §2.4 no check existed: the fixture had to be BUILT
-  // (buildCrossLayerOffer, via Transaction.merge — the route
-  // probe-cross-layer.ts proved reachable after the earlier "no wallet can
-  // build one" claim turned out to be about wallets, not about the ledger).
+  // An entry means "a check EXISTS, asserts the truth, and the product is
+  // currently wrong". For both of these, no e2e check existed — the fixtures
+  // had to be BUILT:
+  //
+  //   §2.4 — buildCrossLayerOffer(), via Transaction.merge, the route
+  //          probe-cross-layer.ts proved reachable after the earlier "no wallet
+  //          can build one" claim turned out to be about wallets, not the
+  //          ledger.
+  //   §2.5 — p3c-basket.ts, via a third shielded colour and the same merge.
+  //
   // Registering a check that does not exist yet produces a permanently-stale
-  // entry that reads as work in flight, which is the failure mode this file is
-  // supposed to prevent. So the fixture and the fix landed together, and the
-  // red was demonstrated where it could actually be demonstrated: at unit
-  // level, by neutering the predicate and watching cross-layer.test.ts fail on
-  // exactly the cross-layer cases while the negative cases stayed green.
+  // entry that reads as work in flight — the exact failure mode this file is
+  // supposed to prevent. So in both cases the fixture and the fix landed
+  // together, and the red was demonstrated where it could actually be
+  // demonstrated: §2.4 by neutering the predicate and watching
+  // cross-layer.test.ts fail on exactly the cross-layer cases while the
+  // negatives stayed green; §2.5 by running multileg-pairs.test.ts against the
+  // unfiltered queries and printing the four fabricated trades.
   //
-  // §2.5 (basket offers) is NOT registered, same rule, still open: confirmed
-  // reachable and ruled (ACCEPT but exclude from market data), with its
-  // deterministic red at packages/database/multileg-pairs.test.ts and no e2e
-  // fixture yet.
+  // One thing §2.5 taught, worth keeping. multileg-pairs.test.ts was a
+  // `test.failing`, and it was going green because realStats THREW on a table
+  // the fixture never created — NOT because the defect was present. bun counts
+  // a throw as the expected failure, so that red would have stayed green after
+  // the fix and signalled nothing; the XPASS guard could never have fired.
+  // `check()` above deliberately does not demote a throw. `test.failing` has no
+  // such guard, so treat it as the weaker tool: prefer an explicit
+  // before-and-after measurement over a self-declared red.
 };
 
 /** Registered ids that never appeared in a run — a stale registry hides work. */

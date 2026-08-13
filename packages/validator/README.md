@@ -17,7 +17,10 @@ timestamp, and (optionally) liveness checks.
 1. `BAD_ENCODING` — bech32m `swapoffer1…` via MIP-0005 (`@effectstream/mip-zswap-offer/mip5`)
 2. `TOO_LARGE` — decoded size ≤ `maxBytes`
 3. `BAD_DESERIALIZE` — `Transaction.deserialize("signature","proof","binding")`
-4. structural — `NO_SPENDABLE_INPUT` / `NOT_A_SWAP` (MIP-0006 two-sided) / `UNKNOWN_TOKEN`
+4. structural — `NO_SPENDABLE_INPUT` / `CROSS_LAYER` (legs span both value
+   layers) / `NOT_A_SWAP` (MIP-0006 two-sided) / `UNKNOWN_TOKEN`. `CROSS_LAYER`
+   is checked BEFORE the two-sided rule: a cross-layer offer IS two-sided, so
+   the other order would name the wrong defect.
 5. **crypto** — `Transaction.wellFormed` (`enforceBalancing=false`; verifies the
    ZK proofs + signatures). Rejects forged/made-up coins. State-independent, so
    a blank `LedgerState` suffices (see `refstate.ts`).

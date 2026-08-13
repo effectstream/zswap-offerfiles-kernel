@@ -8,7 +8,7 @@ argued:
 | a | Bad data cannot get into the history | **partial** — the ladder is unit-tested, but 6 of its 14 reject codes never fire against a real gate, and history has no integrity audit at all |
 | b | Bad transactions don't reach users | **weak** — nothing re-validates what the API actually serves, and `expiresAt` is already in the past at ingestion on a quiet chain (§2.6) |
 | c | All data is correctly logged as real sales | **broken on the unshielded path** — and the suite currently asserts the break as correct behaviour |
-| d | History and pricing is correct | **broken** — `/v1/pairs.last_price` is inverted for half of all trades; the 24 h window still mixes clocks; baskets fabricate prints on pairs nobody traded (§2.5) |
+| d | History and pricing is correct | **broken** — `/v1/pairs.last_price` is inverted for half of all trades; the 24 h window still mixes clocks. Baskets no longer fabricate prints: §2.5 CLOSED by PR-#7 |
 | e | Duplicate zswaps allowed, accepting one disables the others | **partial** — only the N=2, single-input, same-door case |
 | f | Works for shielded *and* unshielded | **no** — cancels, chaos, TTL sweep and the liveness gate are shielded-only |
 
@@ -54,7 +54,7 @@ what did not:
 | T-A1 Celestia door asserted by code | ✅ `p4` + `celestiaFixtures()`, incl. crypto-tamper and aged-root families |
 | T-A2 `NOT_A_SWAP` at both doors | ✅ `buildOneSidedOffer()`; skips with a loud note if the SDK stops dropping the leg |
 | T-A2 `NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` / `ROOT_UNREADABLE` | ⛔ not built — see §1.0.1 |
-| T-A3 cross-layer | ⚠️ **gap CONFIRMED reachable** by `probe-cross-layer.ts`; ruled REJECT; e2e fixture still to build (§2.4) |
+| T-A3 cross-layer | ✅ `buildCrossLayerOffer()` merges a live ss+uu pair; asserts `CROSS_LAYER` at both doors and **specifically not** `NOT_A_SWAP`; skips with a loud note if the merge stops producing one (§2.4) |
 | T-A4 history referential integrity | ✅ `p7b`, 5 SQL assertions |
 | T-A5 every stored blob re-validates (proofs included) | ✅ `p7b` deep pass, `GRAND_DEEP_AUDIT` |
 | T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass |
@@ -67,7 +67,7 @@ what did not:
 | T-D2 price orientation + inversion | ✅ `p2`, anchored to a known fill |
 | T-D3 `/v1/pairs` vs `/v1/chart/stats` | ✅ `p7b` (unregistered — see §1.2) + **red** in `fill-vs-cancel.test.ts` |
 | T-D4 `trade_count` + chain ordering | ✅ `p7b` |
-| T-D5 basket offers | ✅ **red** `multileg-pairs.test.ts` — asserts a basket contributes NOTHING to price discovery (§2.5) |
+| T-D5 basket offers | ✅ `p3c-basket.ts` (both halves, running stack) + `multileg-pairs.test.ts` (all five surfaces, with a control) — §2.5 CLOSED |
 | T-E1 N-way competition | ✅ `p3b`, 3 competitors per layer |
 | T-E2 partial overlap between live offers | ⛔ deferred — needs denomination-controlled funding |
 | T-E3 cross-door competition | ✅ `p3b`, one competitor via `blob.Submit` |
@@ -88,12 +88,14 @@ ledger exposes `Transaction.merge()` directly. `probe-cross-layer.ts` settles
 both questions in seconds, with no stack, using real offers from a completed
 run. See §2.4 and §2.5 for the measurements.
 
-- **Cross-layer (T-A3).** The merge succeeds, the result is two-sided across
-  both layers, and our validator **accepts it through the full ladder including
-  `wellFormed`**. The gap is real and reachable; the e2e fixture is now a
-  matter of building it, not of discovering whether it can exist.
+- **Cross-layer (T-A3).** The merge succeeds and the result is two-sided across
+  both layers. The validator **accepted it through the full ladder including
+  `wellFormed`** — that was the finding, and PR-#6 closed it: the ladder now
+  answers `CROSS_LAYER`. The fixture (`buildCrossLayerOffer`) uses this exact
+  merge route, so the probe's construction is the one under test.
 - **Multi-leg (T-D5).** The same merged transaction has 2 gives × 2 wants and
-  would register as **four** trades at four different prices. The fixture is
+  would register as **four** trades at four different prices. CLOSED by PR-#7;
+  the fixture is
   also unblocked independently: `mintShielded(deployed, sepByte, …)`
   parameterizes the color by domain separator on the already-deployed contract,
   so a third shielded color is one `TOKEN_SEPS` entry plus a funding grant — no
@@ -359,21 +361,27 @@ Note this is a SHAPE rule, orthogonal to §2.5: a cross-layer offer is a single
 sealed swap with a perfectly well-defined price, so the market-data filter below
 neither catches it nor should.
 
-Recorded in [ISSUES.md](ISSUES.md) §3 and still open: nothing in the ladder
-requires a give and a want to share a value layer. `NOT_A_SWAP` fires today only
-because `wallet-sdk-facade` silently drops a leg — an accident, not a rule. A
-correctly-built cross-layer offer from another wallet reaches `isTwoSided()`
-with a legitimate give and want and, as far as the code shows, **is indexed**.
-The suite stopped building them (`Layer = "ss" | "uu"`), so this is now
-untested in both directions.
+**CLOSED (PR-#6).** `CROSS_LAYER` is in `OfferRejectCode` and the check sits in
+[validate.ts](../../validator/validate.ts) immediately after `isTwoSided`, as
+ruled. The old text here — "nothing in the ladder requires a give and a want to
+share a value layer", "as far as the code shows, **is indexed**" — described the
+pre-fix ladder and is no longer true.
 
-**Ruling needed.** Assuming the project rule *"we do not allow mixed types
-transactions"* holds: add `CROSS_LAYER` to `OfferRejectCode` and a check in
-[validate.ts](../../validator/validate.ts) immediately after `isTwoSided` —
-`gives.every(g => g.kind === k) && wants.every(w => w.kind === k)` for a single
-`k`. If the rule is meant to be the opposite, that also has to be a test.
+Two things about how it landed are worth keeping:
 
-**Red in PR-A:** T-A3.
+- **The predicate is typed on `OfferLeg`, not on a structural `{type: string}`.**
+  MIP-0006's own leg calls the layer `type`; `deriveLegs` renames it to `kind`.
+  A first cut written against `type` read `undefined` for every leg, collapsed
+  to a one-element set, and would have silently never fired — the same class of
+  defect as the event-gate poll reading the wrong column. The type is the guard.
+- **No `KNOWN_RED` entry.** No e2e check existed to register; the fixture had to
+  be built. The red was demonstrated at unit level instead, by neutering the
+  predicate and confirming `cross-layer.test.ts` fails on exactly the
+  cross-layer cases while the negatives stay green. See the note in
+  [known-red.ts](known-red.ts).
+
+**Test:** T-A3 (`buildCrossLayerOffer` → p4, both doors) plus
+[cross-layer.test.ts](../../validator/cross-layer.test.ts).
 
 ### 2.5 Basket offers pollute price discovery → **PR-F** — **RULING: ACCEPT, but exclude from market data**
 
@@ -476,12 +484,33 @@ wrong (each ignores half the consideration), and C's volume counted twice.
 unfiltered by color, so one 4-leg offer inserts four pair rows and four
 `trade_count` increments. Nothing in the suite has ever built more than two legs.
 
-**Ruling needed.** Either reject at ingestion (`MULTI_LEG_UNSUPPORTED`, cheapest
-and matches the "one pair per offer" model the whole market layer assumes), or
-price and attribute them properly (needs a defined convention for what the price
-of a basket even is). Recommend rejecting.
+**CLOSED (PR-#7).** Ruled ACCEPT-but-exclude, and implemented as a single
+`notABasketPredicate(idExpr, tokensTable)` fragment applied at all FIVE surfaces
+in [queries.app.ts](../../database/sql/queries.app.ts): `getPairStats24h`,
+`getTradeHistory`, `getOpenLegs` (→ `currentMid`), `upsertPairStatsByOfferId`
+(the write-side projection) and `getPairs` (both the rows its `live` subquery
+manufactures and the `open_count` it contributes). Ingestion, serving and
+settlement are unchanged — the offer is still accepted, still settles, still
+archives `CONSUMED`.
 
-**Red in PR-A:** T-D5.
+`MULTI_LEG_UNSUPPORTED` was NOT taken. A basket is a legitimate sealed
+settlement; rejecting it would refuse a trade the parties genuinely agreed on
+because our market schema finds it awkward to display.
+
+Two notes on how it landed:
+
+- **The write side matters.** Filtering only at read time would leave permanent
+  basket rows in `pair_stats` that every future reader must remember to skip.
+  `upsertPairStatsByOfferId` is where it is actually stopped.
+- **`multileg-pairs.test.ts` was a `test.failing` going green for the wrong
+  reason** — `realStats` threw on a table the fixture never created, and bun
+  counts a throw as the expected failure. That red could never have signalled
+  its own fix. The fixture now creates the table, the file asserts all five
+  surfaces plus a CONTROL offer (so "baskets excluded" is distinguishable from
+  "market data broken"), and it was measured against the unfiltered queries.
+
+**Test:** T-D5 (`p3c-basket.ts`, both halves against a running stack) and
+[multileg-pairs.test.ts](../../database/multileg-pairs.test.ts).
 
 ### 2.6 `expiresAt` is already in the past when the offer is indexed → **PR-G**
 
@@ -626,7 +655,7 @@ the code path only by construction accident.**
 
 ---
 
-#### T-A3 · Cross-layer rejection *(red until PR-E)*
+#### T-A3 · Cross-layer rejection *(DONE — PR-#6)*
 
 → `actors/adversary.ts`, p4 · depends on §2.4
 
@@ -1049,19 +1078,33 @@ now meaningful, since that column became chain time.
 
 ---
 
-#### T-D5 · Multi-leg offer *(red until PR-F)*
+#### T-D5 · Multi-leg offer *(DONE — PR-#7)*
 
-→ p3 + p7b · depends on §2.5
+→ [`phases/p3c-basket.ts`](phases/p3c-basket.ts) · §2.5
 
-**How to build one.** `initSwap` takes `desiredOutputs` as an array — pass two
-entries with different colors, or two shielded outputs in one entry, to get a
-3-leg transaction. `buildOffer`'s existing post-build `validateZswapOffer` guard
-already reports the derived legs, so the fixture asserts `gives.length +
-wants.length === 3` before publishing; if the SDK silently drops a leg (as it
-does cross-layer), the fixture fails at construction rather than proving nothing.
+**How it is built.** Two ordinary shielded swaps on one specialist wallet —
+`TA -> TB` and `TC -> TB` — combined with `Transaction.merge()`. The result
+gives TA + TC and wants TB.
 
-Assert the ruling from §2.5: rejected with `MULTI_LEG_UNSUPPORTED`, or indexed
-with volume attributed exactly once. Register under PR-F.
+A third shielded colour is genuinely required, not convenience: merging any two
+offers drawn from `{TA, TB}` nets back to one colour per side (`TA->TB` with
+`TB->TA` cancels; `TA->TB` with `TA->TB` just sums). `TC` (sep `0xe4`) is minted
+at setup and funded ONLY to the basket specialist, so the maker/taker funding
+arithmetic every other offer depends on is untouched.
+
+The give amounts (337 TA, 293 TC) sit deliberately BELOW the run's `GIVE_MIN` of
+500. Chart rows carry no offer id, so "did THIS settlement print?" is answered
+by size — and on `TA/TB`, a pair the suite trades all run, that is the only way
+to ask without requiring the pair to be empty. Anything involving TC is simpler:
+nothing else in the run touches it, so any TC-bearing market surface is
+unambiguously a leak.
+
+Asserts both halves: accepted, indexed, all legs stored, settleable, archives
+`CONSUMED` — and invisible on all five surfaces both while open and after
+settling. It also registers itself in the ledger with `basket: true`, which is
+what stops `aggregate()` from expecting a per-pair price the API correctly
+refuses to report, and what keeps p7b's live-set audit from reading it as a
+stray row.
 
 ---
 

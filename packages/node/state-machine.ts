@@ -219,7 +219,7 @@ addTransition("midnight-zswap-event", function* (data) {
       yield* World.resolve(markNullifierMatched, { nullifier });
       console.log("[MIDNIGHT] Archived offer(s) for nullifier", nullifier, archived);
       for (const row of archived) {
-        emitAppEvent({ type: "offer_consumed", offerId: row.id, nullifier });
+        emitAppEvent({ type: "offer_consumed", offerId: row.id, nullifier }, data.blockHeight);
       }
     }
 
@@ -310,7 +310,7 @@ addTransition("midnight-unshielded-spend", function* (data) {
           type: "offer_consumed",
           offerId: row.id,
           unshieldedSpend: { owner, intentHash, outputNo },
-        });
+        }, data.blockHeight);
       }
     }
   } catch (e) {
@@ -414,8 +414,9 @@ addTransition("celestia-zswap", function* (data) {
   // the batcher can both be bypassed. It is ordered cheapest-first so that a
   // blob which was never going to be indexed costs as little as possible:
   //
-  //   HRP → length bound → bech32m → size → deserialize → two-sided → roots
-  //   → dedup (indexed) → liveness (indexed) → wellFormed (crypto, LAST)
+  //   HRP → length bound → bech32m → size → deserialize → two-sided
+  //   → same-layer → roots → dedup (indexed) → liveness (indexed)
+  //   → wellFormed (crypto, LAST)
   //
   // Crypto is deferred to the end deliberately: it is orders of magnitude more
   // expensive than every other step, so a replayed or stale blob must never
@@ -458,7 +459,7 @@ addTransition("celestia-zswap", function* (data) {
       reason,
       blockHeight: data.blockHeight,
       ...extra,
-    });
+    }, data.blockHeight);
   };
 
   const result = validateZswapOfferBytes(rawBytes, {
@@ -750,7 +751,7 @@ addTransition("celestia-zswap", function* (data) {
       });
       yield* World.resolve(markNullifierMatched, { nullifier: nullifierStr });
       for (const row of archived) {
-        emitAppEvent({ type: "offer_consumed", offerId: row.id, nullifier: nullifierStr });
+        emitAppEvent({ type: "offer_consumed", offerId: row.id, nullifier: nullifierStr }, data.blockHeight);
       }
       if (archived.length > 0) archivedEarly = true;
     }
@@ -776,7 +777,7 @@ addTransition("celestia-zswap", function* (data) {
     });
 
     console.log(`[ZSWAP] Saved at Celestia block ${data.blockHeight}`);
-    emitAppEvent({ type: "offer_indexed", offerId: offerFileId, offerHash, blockHeight: data.blockHeight, gives, wants });
+    emitAppEvent({ type: "offer_indexed", offerId: offerFileId, offerHash, blockHeight: data.blockHeight, gives, wants }, data.blockHeight);
   } catch (e) {
     console.error("[ZSWAP] Failed to save offer file", e);
   }
@@ -818,7 +819,7 @@ addTransition("zswap-ttl-cleanup", function* (data) {
       offerId,
       archived,
     );
-    emitAppEvent({ type: "offer_expired", offerId });
+    emitAppEvent({ type: "offer_expired", offerId }, data.blockHeight);
   } catch (e) {
     console.error(
       "[ZSWAP] Failed to archive offer by TTL",

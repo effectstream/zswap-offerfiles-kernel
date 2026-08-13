@@ -6,6 +6,19 @@ import { P2pAtomicSwaps, UnknownTokenTagError } from "@effectstream/mip-zswap-of
 import type { OfferLeg, UnshieldedSpendRef } from "./types.ts";
 
 // Re-export so existing validator consumers keep a single import path.
+//
+// UNKNOWN_TOKEN, like ROOT_UNREADABLE, is NOT reachable from the wire —
+// measured 2026-08-12 (#5 phase (a)); see the census note in extract-root.ts
+// for the method and numbers. A token tag lives inside the transaction's SCALE
+// stream, so a tag mutation bad enough to be unrecognised also breaks
+// deserialization, and the ledger refuses the transaction first.
+//
+// The check stays: it is a fail-closed guard against a ledger upgrade
+// introducing a tag this code does not know, which is a real risk and exactly
+// what it should cover. It just cannot be driven by a hostile publisher, so it
+// has no e2e fixture and its unit doubles are the complete coverage. Worth
+// raising with the SDK if it ever grows a way to emit offers with arbitrary
+// token configurations.
 export { UnknownTokenTagError };
 
 // Normalize a value that may be a Uint8Array or a hex string into lowercase

@@ -179,10 +179,19 @@ Errors — all bodies are `{ "error": CODE, "reason": "human text", …extras }`
 | 400 | `BAD_ENCODING`, `BAD_DESERIALIZE` | Not a valid `swapoffer1…` blob. |
 | 400 | `TOO_LARGE` | Decoded blob over the size cap. |
 | 400 | `NOT_A_SWAP`, `NO_SPENDABLE_INPUT` | Valid tx, but not a takeable offer. |
+| 400 | `CROSS_LAYER` | The offer mixes shielded and unshielded legs. Unfillable by construction — no shielded↔unshielded settlement path exists. Terminal; the user must rebuild both legs on one layer. |
 | 400 | `NULLIFIER_SPENT`, `UTXO_NOT_LIVE`, `UTXO_SPENT`, `UTXO_UNKNOWN` | An input coin is already spent/unknown — the offer can never settle. Terminal; don't offer retry. |
 | 400 | `ROOT_UNKNOWN` | The wallet proved against a Merkle root this node hasn't synced. Body includes `hint` + `diagnostics` (node's indexer URI vs the wallet's). **Show `hint` verbatim** — it names the exact Lace misconfiguration. Retrying the same blob will not help. |
 | 400 | `VALIDATION` | Malformed request body. |
 | 429 | `RATE_LIMITED` | Back off. |
+
+**Basket offers are accepted but carry no market data.** An offer with more than
+one token color on a side (give A+B, want C+D) is a sealed pre-agreed
+settlement, not a price: nobody agreed what A alone is worth in C. It is
+indexed, listed on `GET /v1/offers`, and settles normally — but it contributes
+nothing to `/v1/pairs` (no row, no `open_count`), `/v1/chart/history` or
+`/v1/chart/stats`. Don't build a market list expecting every open offer to
+appear as a pair.
 
 ### `GET /v1/offers/stream` — SSE
 

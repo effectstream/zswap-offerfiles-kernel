@@ -13,13 +13,9 @@
 //   spends across two txs       → cancelled (settlement is atomic)
 //   only some spends landed     → cancelled (same argument)
 //
-// Markers are matched on (owner, token_type, value) — the interim scheme. The
-// original rationale ("intent hash and output index belong to the SETTLING
-// intent, unknowable at publish") was REFUTED by experiment on 2026-08-07: the
-// payout's creating intent IS the offer's own intent, hash computable from the
-// blob (REMAINING-ISSUES.md #5). Shape matching is forgeable across same-shape
-// offers; these tests move to exact (owner, intentHash(0), outputNo) identities
-// when #5 lands.
+// Phase (b) persists exact (owner, intent_hash, output_no) markers. This file's
+// classifier remains on the interim (owner, token_type, value) comparison until
+// Phase (d); the identity columns below ensure the transition loses no data.
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
@@ -28,7 +24,14 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
-const { migrationTable, getOfferStatusByHash, getTradeHistory, getPairStats24h } =
+const {
+  migrationTable,
+  getOfferStatusByHash,
+  getTradeHistory,
+  getPairStats24h,
+  insertOfferFileUnshieldedOutput,
+  archiveOfferByIdTtlWithHash,
+} =
   await import("@zswap-da/database");
 
 const PORT = 54345;
@@ -76,9 +79,10 @@ async function seedOffer(
   if (opts.markers !== false) {
     // What the offer says the maker is owed: 20 WANT to the maker's address.
     await client.query(
-      `INSERT INTO offer_file_unshielded_outputs_history (offer_file_id, owner, token_type, value, count)
-       VALUES ($1, $2, $3, '20', 1)`,
-      [id, MAKER, WANT],
+      `INSERT INTO offer_file_unshielded_outputs_history
+         (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
+       VALUES ($1, $2, $3, 0, $4, '20', 1)`,
+      [id, MAKER, `payout-intent-${id}`, WANT],
     );
   }
 }
@@ -203,11 +207,15 @@ test("N identical wanted outputs require N payouts, not one", async () => {
      VALUES ($1, $2, $3, 0, NOW() - INTERVAL '30 minutes')`,
     [id, MAKER, `intent-${id}`],
   );
-  // The offer declares THREE outputs of 20 — recorded as one row with count 3.
+  // The offer declares THREE exact output identities of 20. The interim shape
+  // predicate must still sum them rather than let one payout satisfy all three.
   await client.query(
-    `INSERT INTO offer_file_unshielded_outputs_history (offer_file_id, owner, token_type, value, count)
-     VALUES ($1, $2, $3, '20', 3)`,
-    [id, MAKER, WANT],
+    `INSERT INTO offer_file_unshielded_outputs_history
+       (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
+     VALUES ($1, $2, $3, 0, $4, '20', 1),
+            ($1, $2, $3, 1, $4, '20', 1),
+            ($1, $2, $3, 2, $4, '20', 1)`,
+    [id, MAKER, `payout-intent-${id}`, WANT],
   );
   await spent(id, 0, TX(id));
   // The spending tx creates only ONE 20 — the underpayment.
@@ -243,4 +251,73 @@ test("the shielded path is unaffected — each predicate is inert on the other l
   );
   // No stored commitments → branch 3 vacuous, branches 1/2 false → consumed.
   expect(await statusOf(90)).toBe("consumed");
+});
+
+test("declared outputs persist their exact identity plus audit fields", async () => {
+  const columns = (await client.query(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_name = 'offer_file_unshielded_outputs'`,
+  )).rows.map((row: any) => row.column_name);
+  expect(columns).toEqual(expect.arrayContaining(["intent_hash", "output_no"]));
+
+  const id = 95;
+  const intentA = "a".repeat(64);
+  const intentB = "b".repeat(64);
+  await client.query(
+    `INSERT INTO offer_file
+       (id, celestia_height, transaction_hex, offer_hash, first_seen_at)
+     VALUES ($1, 1, 'identity-blob', $2, NOW())`,
+    [id, hashOf(id)],
+  );
+  await insertOfferFileUnshieldedOutput.run({
+    offer_file_id: id,
+    owner: MAKER,
+    intent_hash: intentA,
+    output_no: 7,
+    token_type: WANT,
+    value: "20",
+  }, client);
+  await insertOfferFileUnshieldedOutput.run({
+    offer_file_id: id,
+    owner: MAKER,
+    intent_hash: intentB,
+    output_no: 0,
+    token_type: WANT,
+    value: "20",
+  }, client);
+
+  const stored = (await client.query(
+    `SELECT owner, intent_hash, output_no, token_type, value
+     FROM offer_file_unshielded_outputs WHERE offer_file_id = $1
+     ORDER BY intent_hash`,
+    [id],
+  )).rows;
+  expect(stored).toEqual([
+    {
+      owner: MAKER,
+      intent_hash: intentA,
+      output_no: 7,
+      token_type: WANT,
+      value: "20",
+    },
+    {
+      owner: MAKER,
+      intent_hash: intentB,
+      output_no: 0,
+      token_type: WANT,
+      value: "20",
+    },
+  ]);
+
+  await archiveOfferByIdTtlWithHash.run({
+    offer_file_id: id,
+    archived_at: new Date().toISOString(),
+  }, client);
+  const archived = (await client.query(
+    `SELECT owner, intent_hash, output_no, token_type, value
+     FROM offer_file_unshielded_outputs_history WHERE offer_file_id = $1
+     ORDER BY intent_hash`,
+    [id],
+  )).rows;
+  expect(archived).toEqual(stored);
 });

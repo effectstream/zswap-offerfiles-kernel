@@ -361,7 +361,9 @@ CREATE TABLE unshielded_creates (
     height      BIGINT  NOT NULL,
     PRIMARY KEY (owner, intent_hash, output_no)
 );
--- The fill-marker match is "did tx T create a UTXO paying <owner, type, value>".
+-- Phase (d) moves the fill-marker match to the exact primary key. Keep this
+-- shape index until that read-path migration lands; Phase (b) only changes
+-- what the offer declares and persists.
 CREATE INDEX idx_unshielded_creates_marker
     ON unshielded_creates (tx_hash, owner, token_type, value);
 
@@ -369,45 +371,38 @@ CREATE INDEX idx_unshielded_creates_marker
 -- unshielded counterpart of offer_file_commitments. A settling transaction must
 -- create every one of them; a maker walking away creates none.
 --
--- Matched on (owner, token_type, value) rather than on the intent hash and
--- output index — on the belief that those belong to the SETTLING intent and the
--- maker cannot know them when publishing.
+-- Exact identity is (owner, intent_hash, output_no), precomputed from the
+-- published intent exactly as the ledger will stamp it. The segment rule is
+-- asymmetric: guaranteed outputs use intentHash(0), while fallible outputs use
+-- intentHash(the intent map's physical segment key). Transaction.merge
+-- preserves those map keys, so both are knowable at ingestion.
 --
--- THAT BELIEF IS REFUTED BY EXPERIMENT (2026-08-07, REMAINING-ISSUES.md #5).
--- Per-party intents survive Transaction.merge verbatim, and the payout's
--- creating-intent hash equals intentHash(0) of the offer's OWN intent —
--- computable from the blob at ingestion. So the true marker is the exact UTXO
--- identity (owner, intentHash(0), output_no): the direct unshielded analogue of
--- a commitment, and it closes the cross-offer bypass by construction. This
--- table moves to exact identities when #5 lands; until then, shape matching
--- plus `count` below is the interim, and it is KNOWN to be forgeable across
--- offers (one payout can satisfy two same-shape offers).
---
--- `count` is load-bearing, not bookkeeping. Without it, N identical outputs
--- collapse into one row and the marker check degrades to existence: an offer
--- declaring 5 x 20-UB records wants=100 (deriveTokenLegs NETS the imbalance)
--- but stores a single marker (owner, UB, "20"), so a maker self-spend creating
--- ONE 20-UB output satisfies it and the offer classifies `consumed` — a
--- fabricated fill at 5x its real size, for 1/5 the cost. That is a full bypass
--- of the very check these tables exist to add, and it is attacker-chosen.
+-- token_type and value are deliberately retained for display and audit even
+-- though they are not identity. `count` remains load-bearing for a repeated
+-- declaration of the exact same identity and lets the pre-Phase-(d) shape
+-- predicate preserve multiplicity by summing across exact-identity rows.
 -- No DEFAULT: insertOfferFileUnshieldedOutput writes 1 explicitly and
--- increments on conflict, and the archive copies the value.
+-- increments only when the full identity conflicts.
 CREATE TABLE offer_file_unshielded_outputs (
     offer_file_id INTEGER NOT NULL REFERENCES offer_file(id) ON DELETE CASCADE,
     owner         TEXT    NOT NULL,
+    intent_hash   TEXT    NOT NULL,
+    output_no     INTEGER NOT NULL,
     token_type    TEXT    NOT NULL,
     value         TEXT    NOT NULL,
     count         INTEGER NOT NULL,
-    PRIMARY KEY (offer_file_id, owner, token_type, value)
+    PRIMARY KEY (offer_file_id, owner, intent_hash, output_no)
 );
 
 CREATE TABLE offer_file_unshielded_outputs_history (
     offer_file_id INTEGER NOT NULL,
     owner         TEXT    NOT NULL,
+    intent_hash   TEXT    NOT NULL,
+    output_no     INTEGER NOT NULL,
     token_type    TEXT    NOT NULL,
     value         TEXT    NOT NULL,
     count         INTEGER NOT NULL,
-    PRIMARY KEY (offer_file_id, owner, token_type, value)
+    PRIMARY KEY (offer_file_id, owner, intent_hash, output_no)
 );
 
 -- cancelledPredicate correlates on offer_file_id five times per candidate row,

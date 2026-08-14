@@ -38,6 +38,17 @@ export interface UnshieldedSpendRef {
   outputNo: number;
 }
 
+// An unshielded output declared by the offer, identified exactly as the ledger
+// will identify the UTXO it creates. `tokenType` and `value` are retained for
+// display/audit; classification keys on (owner, intentHash, outputNo).
+export interface UnshieldedOutputRef {
+  owner: string;
+  intentHash: string;
+  outputNo: number;
+  tokenType: string;
+  value: string;
+}
+
 // A give/want leg derived from the transaction's per-segment imbalances.
 // `token` is the lowercase token color (RawTokenType hex); `amount` is a
 // non-negative decimal string (the absolute imbalance for that direction);

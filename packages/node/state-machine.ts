@@ -353,9 +353,10 @@ addTransition("midnight-unshielded-create", function* (data) {
     // Permanent create record, mirroring `commitments`. created_unshielded
     // above is a live-set that deletes on spend, so it cannot answer "did tx T
     // pay the maker what the offer asked for" once the payout is itself spent.
-    // value + tokenType are what make the fill-marker match possible: the
-    // settling intent's hash and output index are unknowable to the maker at
-    // publication time, but the amounts are exact.
+    // Exact identity is owner + intentHash + outputNo; Phase (b) now
+    // precomputes the same triple from the published offer. value + tokenType
+    // remain useful for display/audit and for the interim classifier until
+    // Phase (d) switches its read predicate to exact identities.
     yield* World.resolve(insertUnshieldedCreate, {
       owner,
       intent_hash: intentHash,
@@ -698,6 +699,8 @@ addTransition("celestia-zswap", function* (data) {
       yield* World.resolve(insertOfferFileUnshieldedOutput, {
         offer_file_id: offerFileId,
         owner: out.owner,
+        intent_hash: out.intentHash,
+        output_no: out.outputNo,
         token_type: out.tokenType,
         value: out.value,
       });

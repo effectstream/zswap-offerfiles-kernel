@@ -27,6 +27,7 @@ export type {
   OfferRejectCode,
   OfferValidation,
   OfferLeg,
+  UnshieldedOutputRef,
   UnshieldedSpendRef,
   ValidateOpts,
 } from "./types.ts";

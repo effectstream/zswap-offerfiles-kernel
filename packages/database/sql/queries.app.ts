@@ -126,9 +126,11 @@ const shieldedCancelledPredicate = (idExpr: string) => `(
 //      unshielded_spends. Settlement is atomic, so this cannot have been a fill.
 //   2. SPLIT SPEND — the offer's spends span more than one tx. Same argument.
 //   3. MISSING FILL MARKERS — all spends in ONE tx, but that tx did not create
-//      every unshielded output the offer declared. Matched on
-//      (owner, token_type, value): the settling intent's hash and output index
-//      are unknowable to the maker at publication, but the amounts are exact.
+//      every unshielded output the offer declared. Phase (b) now persists the
+//      exact (owner, intent_hash, output_no) identity, precomputed from the
+//      offer's own intent. This Phase-(d)-deferred predicate still groups on
+//      (owner, token_type, value); Phase (b) preserves that behavior while
+//      carrying the exact fields through live storage and archival.
 //
 // Vacuous, as on the shielded side, when the offer declares no unshielded
 // outputs — a `uu` offer always does, so in practice branch 3 applies wherever
@@ -179,11 +181,16 @@ const unshieldedCancelledPredicate = (idExpr: string) => `(
                      AND us.output_no = uxh.output_no
                     WHERE uxh.offer_file_id = ${idExpr} AND us.tx_hash IS NULL)
     AND EXISTS (
-      -- COUNT, not EXISTS. An offer wanting N identical outputs must be paid N
-      -- of them; existence alone lets one payout satisfy any multiplicity.
-      SELECT 1 FROM offer_file_unshielded_outputs_history uo
-      WHERE uo.offer_file_id = ${idExpr}
-        AND uo.count > (
+      -- SUM the multiplicity across exact-identity rows with the same display
+      -- shape. Until Phase (d) switches this branch to exact identity lookup,
+      -- one payout must still not satisfy N identical declared outputs.
+      SELECT 1 FROM (
+        SELECT owner, token_type, value, SUM(count) AS required_count
+        FROM offer_file_unshielded_outputs_history
+        WHERE offer_file_id = ${idExpr}
+        GROUP BY owner, token_type, value
+      ) uo
+      WHERE uo.required_count > (
           SELECT COUNT(*) FROM unshielded_creates uc
           WHERE uc.owner = uo.owner AND uc.token_type = uo.token_type
             AND uc.value = uo.value
@@ -326,8 +333,9 @@ archived_commitments AS (
 -- commitments do: classification is READ-time, so evidence left behind in the
 -- live tables is evidence that no longer exists when the question is asked.
 archived_unshielded_outputs AS (
-    INSERT INTO offer_file_unshielded_outputs_history (offer_file_id, owner, token_type, value, count)
-    SELECT offer_file_id, owner, token_type, value, count
+    INSERT INTO offer_file_unshielded_outputs_history
+      (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
+    SELECT offer_file_id, owner, intent_hash, output_no, token_type, value, count
     FROM offer_file_unshielded_outputs
     WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
 )
@@ -960,13 +968,16 @@ export const insertUnshieldedCreate = prepared<IInsertUnshieldedCreateParams, ne
 export interface IInsertOfferFileUnshieldedOutputParams {
   offer_file_id: number;
   owner: string;
+  intent_hash: string;
+  output_no: number;
   token_type: string;
   value: string;
 }
 export const insertOfferFileUnshieldedOutput = prepared<IInsertOfferFileUnshieldedOutputParams, never>(
-      `INSERT INTO offer_file_unshielded_outputs (offer_file_id, owner, token_type, value, count)
-       VALUES (:offer_file_id!, :owner!, :token_type!, :value!, 1)
-       ON CONFLICT (offer_file_id, owner, token_type, value)
+      `INSERT INTO offer_file_unshielded_outputs
+         (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
+       VALUES (:offer_file_id!, :owner!, :intent_hash!, :output_no!, :token_type!, :value!, 1)
+       ON CONFLICT (offer_file_id, owner, intent_hash, output_no)
        DO UPDATE SET count = offer_file_unshielded_outputs.count + 1`,
 );
 

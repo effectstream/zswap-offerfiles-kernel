@@ -3,7 +3,11 @@ import { addressFromKey } from "@midnight-ntwrk/ledger-v8";
 import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
 import { P2pAtomicSwaps, UnknownTokenTagError } from "@effectstream/mip-zswap-offer/mip6";
 
-import type { OfferLeg, UnshieldedSpendRef } from "./types.ts";
+import type {
+  OfferLeg,
+  UnshieldedOutputRef,
+  UnshieldedSpendRef,
+} from "./types.ts";
 
 // Re-export so existing validator consumers keep a single import path.
 //
@@ -138,30 +142,42 @@ export function collectOutputCommitments(tx: UnprovenTransaction): string[] {
  * unshielded path had no equivalent, which is why every unshielded
  * consumption classified `consumed`.
  *
- * Identified by (owner, tokenType, value) and NOT by intent hash or output
- * index — on the belief that those belong to the SETTLING intent, unknowable at
- * publish time. REFUTED by experiment (2026-08-07, grand-e2e
- * REMAINING-ISSUES.md #5): per-party intents survive Transaction.merge, and the
- * payout's creating-intent hash is intentHash(0) of the offer's own intent —
- * computable RIGHT HERE, from `tx`, at ingestion. When #5 lands this function
- * returns exact (owner, intentHash(0), outputNo) identities instead of shapes;
- * shape matching is interim and forgeable across same-shape offers.
+ * Exact identity is (owner, intentHash(SEG), outputNo), precomputable from the
+ * published blob because Transaction.merge preserves each party's intent.
+ * The segment rule is deliberately asymmetric and mirrors the ledger's two
+ * `UtxoState::apply_offer` call sites:
+ *
+ *   guaranteed output -> intentHash(0)
+ *   fallible output   -> intentHash(the intent map's physical segment key)
+ *
+ * Generalising segment 0 to the fallible section produces an identity the
+ * ledger will never create and therefore classifies every valid fallible fill
+ * as cancelled. Iterating map entries (not values) is load-bearing: the key is
+ * stable across Transaction.merge and is the fallible section's hash segment.
+ * Token type and value remain attached for display and audit, but are not the
+ * identity — shape matching is forgeable across different offers.
  */
 export function collectUnshieldedOutputs(
   tx: UnprovenTransaction,
-): { owner: string; tokenType: string; value: string }[] {
-  const outputs: { owner: string; tokenType: string; value: string }[] = [];
+): UnshieldedOutputRef[] {
+  const outputs: UnshieldedOutputRef[] = [];
   const intents = (tx as any).intents;
-  if (!intents || typeof intents.values !== "function") return outputs;
-  for (const intent of intents.values() as Iterable<any>) {
-    for (const offer of [intent.guaranteedUnshieldedOffer, intent.fallibleUnshieldedOffer].filter(Boolean)) {
-      for (const out of offer.outputs ?? []) {
+  if (!intents || typeof intents.entries !== "function") return outputs;
+  for (const [physicalSegment, intent] of intents.entries() as Iterable<[number, any]>) {
+    const collect = (offer: any, hashSegment: number) => {
+      if (!offer) return;
+      const intentHash = bytesOrStringToHex(intent.intentHash(hashSegment));
+      for (const [outputNo, out] of (offer.outputs ?? []).entries()) {
         const owner = bytesOrStringToHex(out.owner ?? out.address);
         const tokenType = bytesOrStringToHex(out.type ?? out.tokenType);
         const value = String(out.value ?? out.amount ?? "");
-        if (owner && tokenType && value) outputs.push({ owner, tokenType, value });
+        if (owner && tokenType && value) {
+          outputs.push({ owner, intentHash, outputNo, tokenType, value });
+        }
       }
-    }
+    };
+    collect(intent.guaranteedUnshieldedOffer, 0);
+    collect(intent.fallibleUnshieldedOffer, Number(physicalSegment));
   }
   return outputs;
 }

@@ -32,10 +32,13 @@ function snapWith(bookRead: { count: number; p50: number; p95: number }) {
 }
 
 const BASE = {
-  submitP95Ms: 6654,
-  publishToIndexedP95Ms: 23983,
+  submitP50Ms: 3619,
+  submitP95Ms: 12167,
+  publishToIndexedP95Ms: 27183,
   bookReadP50Ms: 8,
   bookReadP95Ms: 20,
+  sseDeliveryLagP50Ms: 2254,
+  sseDeliveryLagP95Ms: 10008,
   maxStmLagBlocks: 95,
 };
 
@@ -61,6 +64,38 @@ test("the tail IS enforced once there are enough samples", () => {
   expect(notes).toEqual([]);
 });
 
+test("a deliberately slowed submit path still fails the median gate", () => {
+  const snap = snapWith({ count: 10, p50: 7, p95: 18 });
+  const slowedP50 = BASE.submitP50Ms * 2;
+  snap.submit = { count: 60, p50: slowedP50, p95: slowedP50 * 1.5, max: slowedP50 * 2 };
+  const { violations } = baselineViolations(snap, BASE);
+  expect(violations.join(" ")).toContain("submit p50 ms");
+});
+
+test("the five-slot calibration sample passes without baked-in headroom", () => {
+  const snap = snapWith({ count: 10, p50: 9, p95: 12 });
+  snap.submit = { count: 58, p50: 3619, p95: 12167, max: 14478 };
+  snap.publishToIndexedMs = { count: 63, p50: 18635, p95: 27183, max: 29535 };
+  snap.sseDeliveryLagMs = { count: 38, p50: 2254, p95: 10008, max: 10008 };
+  snap.stmLag = { samples: 146, maxLagBlocks: 59, lastLagBlocks: 0 };
+  const verdict = baselineViolations(snap, BASE);
+  expect(verdict).toEqual({ violations: [], notes: [] });
+});
+
+test("an out-of-band SSE median fails once its baseline keys are present", () => {
+  const snap = snapWith({ count: 10, p50: 7, p95: 18 });
+  snap.sseDeliveryLagMs = { count: 21, p50: 4000, p95: 4500, max: 5000 };
+  const { violations } = baselineViolations(snap, BASE);
+  expect(violations.join(" ")).toContain("SSE delivery lag p50 ms");
+});
+
+test("a run beyond the STM validity envelope still fails the lag gate", () => {
+  const snap = snapWith({ count: 10, p50: 7, p95: 18 });
+  snap.stmLag = { samples: 146, maxLagBlocks: 151, lastLagBlocks: 151 };
+  const { violations } = baselineViolations(snap, BASE);
+  expect(violations.join(" ")).toContain("max STM lag blocks");
+});
+
 test("a healthy run produces neither violations nor notes", () => {
   const { violations, notes } = baselineViolations(snapWith({ count: 10, p50: 7, p95: 18 }), BASE);
   expect(violations).toEqual([]);
@@ -76,10 +111,15 @@ test("absent baseline keys are not enforced (calibration runs stay green)", () =
   expect(violations).toEqual([]);
 });
 
-test("the committed baseline.json actually carries the median key", async () => {
-  // Guards the fix end-to-end: the gate reads bookReadP50Ms, so a baseline
-  // without it silently reverts to tail-only enforcement.
+test("the committed baseline carries every calibrated closeout key", async () => {
+  // Guards the closeout end-to-end: absent keys are deliberately ignored, so
+  // losing one would silently make its metric decorative.
   const base = (await import("./baseline.json")).default as Record<string, unknown>;
-  expect(typeof base["bookReadP50Ms"]).toBe("number");
+  expect(base["submitP50Ms"]).toBe(3619);
+  expect(base["submitP95Ms"]).toBe(12167);
+  expect(base["publishToIndexedP95Ms"]).toBe(27183);
+  expect(base["sseDeliveryLagP50Ms"]).toBe(2254);
+  expect(base["sseDeliveryLagP95Ms"]).toBe(10008);
+  expect(base["maxStmLagBlocks"]).toBe(95);
   expect(base["bookReadP50Ms"]).toBeLessThan(base["bookReadP95Ms"] as number);
 });

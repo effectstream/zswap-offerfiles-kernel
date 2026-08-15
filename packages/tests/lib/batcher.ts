@@ -13,6 +13,17 @@ const BALANCER_URL = process.env["BATCHER_SUBMIT_URL"] ?? "http://127.0.0.1:3334
 const toHex = (u: Uint8Array): string =>
   Array.from(u, (x) => x.toString(16).padStart(2, "0")).join("");
 
+/** Match the balancing adapter's short content hash so a live fixture can
+ * correlate a submitted transaction with its batcher trace line. */
+export function batcherInputFingerprint(tx: FinalizedTransaction): string {
+  const input = JSON.stringify({ tx: toHex(tx.serialize()), txStage: "finalized" });
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = (Math.imul(31, hash) + input.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 /** Merge N independently-proven offers into one atomic, token-balanced tx.
  *  Each offer must already be finalized (proven + bound) by its own owner —
  *  zswap requires each spend be proven by its key, so we prove per-owner first

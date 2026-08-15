@@ -1,3 +1,9 @@
+/* File-level SQL comments must use block form. A top-level `--` comment makes
+   this pgtyped version abort parsing, log `Skipped`, and exit 0. The
+   `check:pgtypes` guard deletes the generated file first so that silent path
+   fails instead of preserving stale bindings. `--` remains valid inside a
+   named query after its @name declaration. */
+
 /* @name InsertKnownToken */
 INSERT INTO known_tokens (token_color, name, kind)
 VALUES (:token_color!, :name!, :kind!)

@@ -180,10 +180,19 @@ Errors — all bodies are `{ "error": CODE, "reason": "human text", …extras }`
 | 400 | `TOO_LARGE` | Decoded blob over the size cap. |
 | 400 | `NOT_A_SWAP`, `NO_SPENDABLE_INPUT` | Valid tx, but not a takeable offer. |
 | 400 | `CROSS_LAYER` | The offer mixes shielded and unshielded legs. Unfillable by construction — no shielded↔unshielded settlement path exists. Terminal; the user must rebuild both legs on one layer. |
-| 400 | `NULLIFIER_SPENT`, `UTXO_NOT_LIVE`, `UTXO_SPENT`, `UTXO_UNKNOWN` | An input coin is already spent/unknown — the offer can never settle. Terminal; don't offer retry. |
+| 400 | `NULLIFIER_SPENT`, `UTXO_NOT_LIVE` | An input coin is already spent/unknown — the offer can never settle. Terminal; don't offer retry. (`UTXO_SPENT` and `UTXO_UNKNOWN` are library-level distinctions folded into `UTXO_NOT_LIVE` by this route.) |
 | 400 | `ROOT_UNKNOWN` | The wallet proved against a Merkle root this node hasn't synced. Body includes `hint` + `diagnostics` (node's indexer URI vs the wallet's). **Show `hint` verbatim** — it names the exact Lace misconfiguration. Retrying the same blob will not help. |
 | 400 | `VALIDATION` | Malformed request body. |
 | 429 | `RATE_LIMITED` | Back off. |
+
+For completeness, the validator union is: `BAD_ENCODING`, `TOO_LARGE`,
+`BAD_DESERIALIZE`, `WRONG_TX_VARIANT`, `NO_SPENDABLE_INPUT`, `NOT_A_SWAP`,
+`CROSS_LAYER`, `UNKNOWN_TOKEN`, `PROOF_INVALID`, `SIGNATURE_INVALID`,
+`NULLIFIER_SPENT`, `UTXO_SPENT`, `UTXO_UNKNOWN`, `ROOT_UNKNOWN`,
+`ROOT_UNREADABLE`, `DUPLICATE`. `WRONG_TX_VARIANT` is reserved;
+`UNKNOWN_TOKEN` and `ROOT_UNREADABLE` are fail-closed guards not reachable from
+today's wire format; callback-only `UTXO_*`/`DUPLICATE` values map to the
+public codes described above.
 
 **Basket offers are accepted but carry no market data.** An offer with more than
 one token color on a side (give A+B, want C+D) is a sealed pre-agreed

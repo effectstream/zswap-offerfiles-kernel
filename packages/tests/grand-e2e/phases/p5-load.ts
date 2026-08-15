@@ -8,6 +8,8 @@
 // live-fated offers publish LAST so they are still live at audit time.
 
 import type { Client } from "pg";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   ARCHIVE_WAIT_TRIES,
   EXPIRY_SLACK_MS,
@@ -266,19 +268,31 @@ async function celestiaGarbageStorm(art: P1Artifacts): Promise<number> {
 
 // ── phase entry ─────────────────────────────────────────────────────────────
 
+function readCanonicalBatcherTrace(): string {
+  try {
+    return readFileSync(
+      fileURLToPath(new URL("../../../../batcher-debug.log", import.meta.url)),
+      "utf-8",
+    );
+  } catch {
+    return "";
+  }
+}
+
 export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Promise<void> {
   beginPhase("p5-load");
+  const batcherTraceBefore = readCanonicalBatcherTrace();
+  const batcherTraceOffset = batcherTraceBefore.length;
   const plan = planOffers(actors);
   note(
     "plan",
     `expired=${plan.expired.length} settled=${plan.settled.length} cancelled=${plan.cancels.length} live=${plan.live.length}`,
   );
   note(
-    "FINDING (throughput ceiling, reported)",
-    "the dev batcher runs its midnight-balancer with ONE wallet and the SDK default maxSlotsPerWallet=1 " +
-      "(pool W1 in its logs) — every settlement/cancel/split serializes at ~25 s/tx (~2.4 tx/min). " +
-      "The suite gates offer builds on settle depth to keep offers inside their 600 s window; production " +
-      "load needs maxSlotsPerWallet>1 and/or multiple batcher wallet seeds.",
+    "batcher throughput configuration",
+    "the dev batcher now blocks startup until one wallet has five registered NIGHT UTXOs, five " +
+      "fee-capable dust streams and maxSlotsPerWallet=5. The startup 'worker slots: 5' line is the " +
+      "resource proof; p5 records the actual settle overlap below.",
   );
 
   const offersBeforeStorm = await tableCount(db, "offer_file");
@@ -309,9 +323,25 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     // ── settled pipeline + cancels + storms + chaos, all concurrent ─────────
     let settleInFlight = 0;
     let settlePeak = 0;
+    let batcherInFlight = 0;
+    let batcherPeak = 0;
+    let batcherRequests = 0;
+    let firstBatcherRequestAt = 0;
+    let lastBatcherRequestAt = 0;
     const settleDone: Promise<void>[] = [];
-    // Backpressure: the single-worker batcher settles ~2.4 tx/min. Unthrottled
-    // makers would out-publish it, and offers queued past ~8 min age out
+    const recordBatcherRequest = (delta: 1 | -1): void => {
+      if (delta === 1) {
+        if (firstBatcherRequestAt === 0) firstBatcherRequestAt = Date.now();
+        batcherRequests++;
+        batcherInFlight++;
+        batcherPeak = Math.max(batcherPeak, batcherInFlight);
+      } else {
+        batcherInFlight--;
+        lastBatcherRequestAt = Date.now();
+      }
+    };
+    // Backpressure: even with five workers, unthrottled makers can out-publish
+    // the proof server, and offers queued past ~8 min age out
     // (600 s TTL sweep + root window) before their settle runs. Gate offer
     // BUILDS on in-flight settle depth so index→settle stays inside the window.
     const SETTLE_GATE = actors.takers.length * 2;
@@ -333,7 +363,13 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
               return;
             }
             const { loadBlob } = await import("../actors/wallets.ts");
-            await settleOffer(taker, rec, loadBlob(rec.offerHash!));
+            // p5 is the throughput proof: independent taker wallets must reach
+            // the batcher concurrently instead of queueing behind the suite's
+            // ordinary deterministic client chain.
+            await settleOffer(taker, rec, loadBlob(rec.offerHash!), {
+              parallelBatcher: true,
+              onBatcherRequest: recordBatcherRequest,
+            });
             const archived = await waitUntil(
               `settle-archive #${rec.index}`,
               async () => (await offerRowByHash(db, rec.offerHash!)) === null,
@@ -494,6 +530,30 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     await Promise.all(settleDone);
 
     await check("taker settle concurrency reached queue depth ≥ 4", async () => settlePeak >= 4, `peak=${settlePeak}`);
+    await check(
+      "batcher received concurrent p5 settlements",
+      async () => batcherPeak >= 2,
+      `HTTP peak=${batcherPeak}; five slots are decorative if the client still serializes requests`,
+    );
+    const p5BatcherTrace = readCanonicalBatcherTrace().slice(batcherTraceOffset);
+    const batchSizes = [...p5BatcherTrace.matchAll(/Built batch B\d+:\s*(\d+) tx\(s\)/g)]
+      .map((match) => Number(match[1]));
+    const maxBatchSize = Math.max(0, ...batchSizes);
+    await check(
+      "batcher formed a multi-transaction p5 batch",
+      async () => batcherTraceOffset > 0 && maxBatchSize >= 2,
+      `trace-at-start=${batcherTraceOffset} chars, max p5 batch=${maxBatchSize}; ` +
+        `startup capacity alone is not a throughput proof`,
+    );
+    const batcherWallMs = Math.max(0, lastBatcherRequestAt - firstBatcherRequestAt);
+    const effectiveMs = batcherRequests > 0 ? Math.round(batcherWallMs / batcherRequests) : 0;
+    note(
+      "settlement overlap",
+      `task peak=${settlePeak}, batcher HTTP peak=${batcherPeak}, max batch=${maxBatchSize}, ` +
+        `requests=${batcherRequests}, ` +
+        `wall=${(batcherWallMs / 1000).toFixed(1)}s, effective=${(effectiveMs / 1000).toFixed(1)}s/request; ` +
+        `the former client-serialized run measured roughly 25s/request`,
+    );
 
     // 5a post-storm invariants.
     await check("5a: node RSS grew < 30% across the storm", async () => {

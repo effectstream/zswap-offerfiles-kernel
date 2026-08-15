@@ -1,0 +1,66 @@
+import { expect, test } from "bun:test";
+
+import { CELESTIA_RPC_TIMEOUT_MS, INDEX_WAIT_TRIES } from "../config.ts";
+import {
+  PARTIAL_OVERLAP_COINS,
+  PARTIAL_OVERLAP_GIVES,
+  exactSubsetIndexes,
+  hasBatcherChainRejection,
+} from "./p3b-closeout.ts";
+import { partialOverlapHeldCoinAmount } from "./p3b-competing.ts";
+import { submitConcurrentlyToBalancer } from "../actors/wallets.ts";
+
+test("raw Celestia RPC and downstream indexing share one timeout budget", () => {
+  expect(CELESTIA_RPC_TIMEOUT_MS).toBe(INDEX_WAIT_TRIES * 5_000);
+  expect(CELESTIA_RPC_TIMEOUT_MS).toBe(180_000);
+});
+
+test("T-E2 denominations select {A,B} and {B,C}, with exactly B shared", () => {
+  expect(partialOverlapHeldCoinAmount()).toBe(PARTIAL_OVERLAP_COINS[0]);
+  const [offer1, offer2] = PARTIAL_OVERLAP_GIVES.map((amount) =>
+    exactSubsetIndexes(PARTIAL_OVERLAP_COINS, amount),
+  );
+  expect(offer1).toEqual([[0, 1]]);
+  expect(offer2).toEqual([[1, 2]]);
+  // During offer2 construction A is deliberately reserved, leaving B+C as
+  // the only selectable exact subset instead of the greedy A+B+C-with-change.
+  expect(exactSubsetIndexes(PARTIAL_OVERLAP_COINS.slice(1), PARTIAL_OVERLAP_GIVES[1])).toEqual([
+    [0, 1],
+  ]);
+  expect(offer1[0]!.filter((i) => offer2[0]!.includes(i))).toEqual([1]);
+});
+
+test("T-E5 submitter has both requests in flight before the first receipt", async () => {
+  let active = 0;
+  let release!: () => void;
+  const bothStarted = new Promise<void>((resolve) => (release = resolve));
+
+  const outcome = await submitConcurrentlyToBalancer(
+    [{ id: 1 }, { id: 2 }],
+    async (tx) => {
+      active++;
+      if (active === 2) release();
+      await bothStarted;
+      active--;
+      return {
+        ok: tx.id === 1,
+        status: 200,
+        body: tx.id === 1 ? { success: true } : { success: false, error: "double spend" },
+      };
+    },
+  );
+
+  expect(outcome.peakInFlight).toBe(2);
+  expect(outcome.allStartedBeforeFirstReceipt).toBe(true);
+  expect(outcome.results.filter((result) => result.ok)).toHaveLength(1);
+});
+
+test("T-E5 requires transaction-specific chain rejection evidence", () => {
+  const log = [
+    "[balancing] [B20:1/W1:s4 #a3ba1c1c] Submit failed after 1080ms: Transaction submission error",
+    "[balancing] [B20:2/W1:s0 #1f1049e0] Submitted",
+  ].join("\n");
+  expect(hasBatcherChainRejection(log, "a3ba1c1c")).toBe(true);
+  expect(hasBatcherChainRejection(log, "1f1049e0")).toBe(false);
+  expect(hasBatcherChainRejection("Receipt confirmation timeout", "a3ba1c1c")).toBe(false);
+});

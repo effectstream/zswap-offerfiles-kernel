@@ -14,18 +14,22 @@ timestamp, and (optionally) liveness checks.
 
 ## Pipeline (`validate.ts`)
 
-1. `BAD_ENCODING` — bech32m `swapoffer1…` via MIP-0005 (`@effectstream/mip-zswap-offer/mip5`)
-2. `TOO_LARGE` — decoded size ≤ `maxBytes`
-3. `BAD_DESERIALIZE` — `Transaction.deserialize("signature","proof","binding")`
-4. structural — `NO_SPENDABLE_INPUT` / `CROSS_LAYER` (legs span both value
-   layers) / `NOT_A_SWAP` (MIP-0006 two-sided) / `UNKNOWN_TOKEN`. `CROSS_LAYER`
-   is checked BEFORE the two-sided rule: a cross-layer offer IS two-sided, so
-   the other order would name the wrong defect.
-5. **crypto** — `Transaction.wellFormed` (`enforceBalancing=false`; verifies the
-   ZK proofs + signatures). Rejects forged/made-up coins. State-independent, so
-   a blank `LedgerState` suffices (see `refstate.ts`).
-6. liveness (optional) — `NULLIFIER_SPENT` / `UTXO_SPENT`
+1. encoding — HRP/encoded-length/bech32m checks (`BAD_ENCODING`, `TOO_LARGE`;
+   string entrypoint only)
+2. decoded size — `TOO_LARGE`
+3. deserialize — `BAD_DESERIALIZE`
+4. structural, in code order — `NO_SPENDABLE_INPUT`; leg derivation
+   (`UNKNOWN_TOKEN` or `BAD_DESERIALIZE`); `NOT_A_SWAP`; then `CROSS_LAYER`.
+   The two-sided rule deliberately runs first so a degenerate one-sided shape
+   gets the more basic verdict; a genuine two-sided cross-layer offer reaches
+   and fails `CROSS_LAYER`.
+5. root extraction — `ROOT_UNREADABLE` (fail-closed)
+6. liveness (optional) — `NULLIFIER_SPENT`, `UTXO_SPENT`, `UTXO_UNKNOWN`,
+   `ROOT_UNKNOWN`
 7. dedup (optional) — `DUPLICATE`
+8. **crypto** — `Transaction.wellFormed` (`enforceBalancing=false`; verifies the
+   ZK proofs + signatures), last because it dominates cost. A blank
+   `LedgerState` suffices (see `refstate.ts`).
 
 On success it returns the derived `nullifiers / unshieldedSpends / gives /
 wants / identifiers` so callers don't re-parse.

@@ -17,6 +17,7 @@
     "seed:market": "bun run packages/tests/seed-market.ts",
     "build:midnight": "bun run --filter @zswap-da/contract-offer-files compact",
     "build:pgtypes": "bun run --filter @zswap-da/database pgtyped:update",
+    "check:pgtypes": "bun run scripts/check-pgtyped.ts",
     "docs:dev": "bun run --filter @zswap-da/docs-playground dev",
     "docs:build": "bun run --filter @zswap-da/docs-playground build",
     "docs:preview": "bun run --filter @zswap-da/docs-playground preview"

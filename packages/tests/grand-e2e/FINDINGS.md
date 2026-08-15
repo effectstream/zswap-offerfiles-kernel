@@ -1,229 +1,149 @@
-# Findings & resume point — production-readiness work
+# Production-readiness findings and closeout record
 
-State as of 2026-08-06, **plus the 2026-08-07 addendum directly below**, which
-supersedes §1, §3 and item 3 of §6. Read with
-[PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) (full plan, per-defect
-detail) and [REMAINING-ISSUES.md](REMAINING-ISSUES.md) (the live work queue —
-now targeted at merging #35).
+Current as of 2026-08-15. This file records conclusions that should survive the
+work. See `PRODUCTION-READINESS.md` for detailed red→green reasoning,
+`ISSUES.md` for the remaining separate work, and `HANDOFF.md` for operations.
 
----
+## Current state
 
-## 0. Addendum, 2026-08-07 — four findings that change the picture
+- Closeout branch `fix/production-readiness-closeout` is open as PR #46.
+- Static gate: 274 pass, 0 fail, 707 assertions across 39 files.
+- The pgtyped delete/regenerate/diff guard is green and the grand runner
+  bundles.
+- Final fresh-chain run at `63c9fc5`: **238 checks, 0 failures, 87.9 minutes,
+  `maxLagBlocks 101`, `lastLagBlocks 2`**.
+- Both p7a determinism checks passed; state A/B share SHA-256
+  `24ef7cc73f84f9a3277e167a1ab6c6b4b0db62a868b93a5b4ed8151d6d0477b0`.
+- The loud-skip grep is empty. No foreign heavy process or indexer pool error
+  contaminated the run.
+- Final evidence is hash-pinned at
+  `/tmp/zswap-closeout-evidence/run6-final-green/`.
 
-**(1) The stack is one PR.** #30–#34 are closed;
-[#35](https://github.com/effectstream/zswap-offerfiles-kernel/pull/35)
-(`feat/production-readiness`) carries every commit. The restack §1 worries about
-became unnecessary: the review fixes sat on the wrong branches, and one atomic
-PR cannot land PR-B without its marker gate. Also folded in: migrations 001–015
-collapsed into `000-init.sql`, 25 dead generated queries removed, and
-`bun run build:pgtypes` un-broken (it had been failing on a parse error and
-exiting 0, which is why `queries.queries.ts` had drifted).
+## Findings that changed the design
 
-**(2) The clean run landed.** 205 checks, **1 failure**, 72.7 min,
-`maxLagBlocks` **113** — a valid verdict, unlike 2026-08-06. Both p7a
-determinism checks passed: a second node replayed ~4400 blocks from height 1
-into byte-identical public tables, which verifies the collapsed schema, the
-NOT NULL tightenings, the new cursor key and PR-B/C/D/H across replicas. RED-8
-fired correctly; XPASS 0. The one failure is a metric artefact (bookRead p95 at
-count=10 IS the max; median unmoved at 7 ms) — fixed as A1: the median now
-carries the gate, tails below 50 samples are reported as notes.
+### Batcher concurrency is coin-count limited
 
-**(3) §3's mystery is solved, and the recorded hypothesis was wrong.** The
-`maxLagBlocks: 1403` cause was NOT stale processes — the table was verified
-clean before the 2026-08-07 morning run, which then degraded live under
-observation: load 4 → 104 as a Codex sandbox (different project,
-`umbradb-fork`) ran a cargo build then a crash-test suite on the same box. The
-decisive symptom: **the Celestia tip stopped advancing** — the chain node
-itself was starved, after which every index-wait fails for the same non-reason.
-That run was aborted; the rerun under a CPU reservation
-(`systemd-run --user --scope -p CPUWeight=500 -p CPUQuota=1200%`, verified at
-the kernel, 0.16% throttling cost) is the clean run above. Rule for future
-runs: watch the tip, not just the load — a stalled tip voids the run
-immediately.
+A wallet can hold a large NIGHT balance and still serialize because each
+in-flight transaction reserves a distinct spendable coin. The dev stack now
+blocks readiness until one wallet proves five registered NIGHT UTXOs, five
+fee-capable dust streams and `maxSlotsPerWallet=5`; it self-splits when
+genesis supplies fewer.
 
-**(4) The unshielded marker premise is false — experiment, not argument.** The
-schema and `derive.ts` claimed payout intent hash / output index "belong to the
-SETTLING intent, which the maker cannot know when publishing", which is why
-markers match fungible shapes `(owner, token_type, value)` — the root of the
-cross-offer bypass (one payout satisfying two same-shape offers). Tested
-against this run's database, offer #3 / settling tx `f2516323…`: per-party
-intents **survive `Transaction.merge` verbatim** (2 intents / 2 owners in every
-two-party settle), and the maker payouts' creating intent equals
-**`intentHash(0)` of the offer's own published intent** — computable from the
-blob at ingestion. So exact UTXO-identity markers `(owner, intentHash(0),
-output_no)` — the true unshielded analogue of shielded commitments — are
-possible, and the bypass dies by construction: forging an offer's payout
-identity means executing its intent, and executing it is paying. The
-feasibility-assignment design this replaces is deleted from
-[REMAINING-ISSUES.md](REMAINING-ISSUES.md) #5. Confirm `intentHash(0)` on 2–3
-more settles (including a fallible-section output) before building.
+Configuration is not the proof. The final p5 run measured task peak 15,
+batcher HTTP peak 6 and max batch 4. Its 23.3 s/effective request was close to
+the old ~25 s wall rate, but six simultaneous HTTP requests and a
+four-transaction batch prove the client-side single-file path is gone.
 
----
+### Unshielded output identities are knowable at publication
 
-## 1. The PR stack
+The old premise said payout intent hash/output index belonged to the settling
+intent, forcing marker shape matching by `(owner, token_type, value)`. Live
+evidence disproved it: per-party intents survive `Transaction.merge`, and the
+offer itself reveals each output's creating identity.
 
-Each is stacked on the previous, so review/merge bottom-up.
+PR #45 persists exact `(owner, intent_hash, output_no)` marker identities,
+including segment-aware intent hashes; token type/value remain audit fields.
+The separate Phase-(d) SQL classifier still uses its temporary shape grouping.
+Closeout does not claim that read switch or unusual-shape execution complete.
 
-| PR | branch | what | verified |
-|---|---|---|---|
-| [#30](https://github.com/effectstream/zswap-offerfiles-kernel/pull/30) | `test/production-readiness-base` | PR-A: base test suite, `KNOWN_RED` registry, `p8-served` phase. **No product code.** | full run 205/0 |
-| [#31](https://github.com/effectstream/zswap-offerfiles-kernel/pull/31) | `fix/unshielded-fill-classification` | PR-B: §2.1 unshielded fill-vs-cancel + migration 014 | full run 205/0, determinism identical |
-| [#32](https://github.com/effectstream/zswap-offerfiles-kernel/pull/32) | `fix/pair-stats-price-orientation` | PR-C: §2.2 `last_price` inversion | unit red→green; e2e price checks passed in the 2026-08-06 run |
-| [#33](https://github.com/effectstream/zswap-offerfiles-kernel/pull/33) | `fix/chart-window-chain-clock` | PR-D: §2.3 24 h window on chain clock | unit red→green; **not yet e2e-verified** |
-| [#34](https://github.com/effectstream/zswap-offerfiles-kernel/pull/34) | `fix/cursor-chain-ordered` | PR-H: cursor on `first_seen_at`, excluded-columns guard | unit 180/0; **not yet e2e-verified** |
+### Performance baselines need provenance, not accumulated slack
 
-Independent reviews exist at `/home/eddie/zswap-offerfiles-kernel-x/PR-3{0,1,2,3,4}-REVIEW.md`.
-Verification of their claims was in progress when this was written — **read those and
-the agent verdicts before merging anything.**
+The old submit baseline was calibrated at 25 offers and a different slot
+profile, then used against 60 offers. Run 5 supplied clean five-slot
+measurements: submit p50/p95 3619/12167 ms and publish-to-index p95 27183 ms.
+`baseline.json` records the source run and relies only on the existing ×1.2
+enforcement margin.
 
----
+The submit p50 companion prevents a low-count tail from carrying the gate
+alone. An exact run-5 snapshot passes, a 2× slowed submit median fails, and a
+151-block path fails the lag gate.
 
-## 2. Product defects — status
+### SSE tail and TTL scheduling are different populations
 
-Six found, four fixed. All six were confirmed by measurement, not by reading code.
+SSE measures CONSUMED archives. TTL scheduling lag is reported separately and
+covered by STM lag. Clean samples 2 and 3 measured 2224/2708 and 2254/10008 ms;
+the committed p50/p95 keys use the required maximum per-run values
+2254/10008, without extra headroom. Below 50 samples the SSE p95 is reported,
+while the median remains enforced.
 
-| § | defect | status |
-|---|---|---|
-| 2.1 | Unshielded fill-vs-cancel unclassifiable — a maker spending their own UTXO on themselves was recorded as a completed sale (measured: 9 trades vs 4 real, volume 13009 vs 5009) | **FIXED** PR-B |
-| 2.2 | `pair_stats.last_price` inverted for half of all trades — `want÷give` with no reference to which colour became base | **FIXED** PR-C |
-| 2.3 | 24 h stats window bounded on `NOW()` while comparing chain-derived `archived_at` | **FIXED** PR-D |
-| — | Keyset pagination ordered on `created_at` (`DEFAULT NOW()`) — replicas served different page orders, invisible to the determinism diff by construction | **FIXED** PR-H |
-| 2.4 | Cross-layer offers unenforced. **Confirmed reachable**: `Transaction.merge` of a real shielded + unshielded offer passes our FULL ladder including `wellFormed`. Ruled REJECT. | **OPEN** → PR-E |
-| 2.5 | Basket offers fabricate prints — one settlement becomes 4 trades at 4 prices, volume double-counted. Ruled ACCEPT-but-exclude-from-market-data. | **OPEN** → PR-F |
-| 2.6 | `expiresAt` already in the past at ingestion on a quiet chain (measured: ingested 18:34:20, served expiry 18:23:36) while the offer is served `status: live` | **OPEN** → PR-G, red recording correctly |
+### Lag failures must be classified before product debugging
 
-### The pattern worth carrying forward
+A historical contended run reached `maxLagBlocks 1403` while another workload
+starved the devnet. Closeout classified two later runs VOID at 233.9 and 162.9
+blocks instead of treating downstream timeouts as product failures.
 
-Three of these (§2.2, §2.3, PR-H) are the same shape: **two halves of the system on
-different clocks, where a partial fix created the divergence.** Making `archived_at`
-chain-derived is what turned the 24 h window's `NOW()` from accidentally-consistent
-into contradictory. Adding the `MAX(height)` escape to the read gate and not to the
-expiry derivation is §2.6.
+The final run peaked at 101: above the 53–96 calibration-sample band but below
+the committed 114 gate and 150 VOID ceiling. It is valid final evidence, not a
+calibration sample.
 
-PR-H closes the class structurally: `excluded-columns-are-write-only.test.ts` asserts
-no `DIFF_EXCLUDED_COLUMNS` column appears in any `ORDER BY`/`WHERE`/`GROUP BY`/`JOIN`.
-A column can be legitimately excluded from the determinism diff *and* silently driving
-behaviour; nothing connected those two facts before.
+### A transport error is not a settlement verdict
 
----
+A batcher connection failure can occur after the chain has decided the
+transaction. T-E5 therefore correlates its losing transaction's fingerprint
+with the batcher chain-rejection trace and checks final chain/API state rather
+than treating a callback timeout as the verdict.
 
-## 3. The last run (2026-08-06 18:11) — COMPROMISED, do not use as a verdict
+### `test.failing` can produce a false red→green story
 
-15 failures, but they are **one throughput failure counted fifteen times**, not fifteen
-defects.
+Bun treats a thrown exception inside `test.failing` as the expected failure.
+The basket test once passed because a table was missing. Closeout uses explicit
+before/after evidence; the scoped repository search contains no
+`test.failing(...)` calls.
 
-**What is cleared.** Zero STF failures. Zero NOT NULL violations. p7b's deep audit
-passed (`stored spend refs equal the transaction's own nullifiers / UTXO triples`,
-`fill markers stored for every offer that has shielded outputs`). So ingestion,
-migration 014's tables and migration 015's `NOT NULL` are all healthy under load.
+## What is proven
 
-**What went wrong.** The `maker self-fill` settle timed out; from that point publishes
-starved. `taker settle concurrency reached queue depth ≥ 4` **failed** — it passed on
-every previous run — so batcher concurrency was materially down. p3b then skipped BOTH
-competitor sets (`publish failed for #20`, `#30`), producing zero checks, and p5's
-batches failed to publish. Everything downstream (chart counts, volume, classification,
-`trade_count`, casualty rate) follows from offers never existing.
+| Area | Final evidence |
+|---|---|
+| Stored truth | 66/66 blobs revalidated; bytes, hashes, legs, spends and markers agree |
+| Served truth | p8 12/12; full validation, liveness, expiry and payload presence |
+| Fill/cancel | Ordinary shielded/unshielded fates and chart totals agree |
+| Exact unshielded identities | Persistence is merged and deep-audited; Phase-(d) read switch remains separate |
+| Cross-layer offers | Explicit `CROSS_LAYER` at both ingestion doors |
+| Baskets | Accepted and excluded from all five market surfaces |
+| Duplicate competition | N-way, cross-door, late-loser and same-block checks green |
+| T-E2 | Exact `{A,B}` / `{B,C}` partial overlap green |
+| T-E5 | True in-flight race, one chain winner, exact archive/status/print accounting green |
+| Five-slot throughput | Five spendable UTXOs/slots, HTTP peak 6, max batch 4 |
+| Performance | Final metrics gate green; slowed-path and VOID-path unit gates red |
+| Determinism | Independent replay state and offer-hash sets identical |
 
-**ROOT CAUSE — found after the run completed, and it is not what I first said.**
+## Final run metrics
 
-    maxLagBlocks: 1403      (previous runs: 95, 83, 53)
+| Metric | Result |
+|---|---:|
+| Submit p50 / p95 / max | 3025 / 12129 / 13123 ms |
+| Publish-to-index p50 / p95 / max | 18041 / 27205 / 30887 ms |
+| SSE p50 / p95 / max | 1925 / 10440 / 10441 ms |
+| Book read p50 / p95 / max | 8 / 15 / 15 ms |
+| STM max / last | 101 / 2 blocks |
+| Batcher queue max | 6 |
 
-The STM fell ~1403 blocks — roughly 23 minutes — behind the chain. That is 15x worse
-than anything previously recorded, and it explains every failure at once: with the
-indexer that far behind, the 3-minute index-wait budget cannot be met. Offers were
-published fine; they could not be INDEXED in time. Casualty rate, both batch checks,
-p3b's skipped sets, the chart comparisons and SSE p95 29448 are all downstream of that
-single number.
+## Run playbook
 
-**The self-fill reservation was therefore NOT the trigger.** It was the first casualty —
-a settle timing out because the STM was already far behind. The `revert` fix committed
-alongside this file is still correct (it aligns the self-fill with the pattern p3b and
-the cancel cycles use) but it does not explain this run and must not be credited with
-fixing it.
+```sh
+GRAND_OFFERS=60 GRAND_STORM_API=200 GRAND_STORM_CELESTIA=30 \
+ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 \
+bash ./packages/tests/grand-e2e/fresh-run.sh
+```
 
-**Unexplained.** Why the STM lagged 1403 blocks is OPEN. The run also took 85 min vs
-~70. Candidates, none verified:
-  - box contention from something outside the suite
-  - a write-path regression from the new indexes (migration 015 adds two on offer_file /
-    offer_file_history; migration 014 adds one on unshielded_creates plus two inserts per
-    unshielded chain event — but PR-B's own run recorded maxLagBlocks 83, so 014 alone
-    does not account for it)
-  - the reaper additions interacting with the stack in a way not anticipated
-Next run should record maxLagBlocks FIRST and treat anything above ~150 as a stop
-condition rather than debugging the downstream cascade.
+Never reuse a chain. Check foreign load before launch, read `maxLagBlocks`
+before diagnosing downstream assertions, grep for `not built (`, record both
+determinism checks, and tear down the stack.
 
-**Confound to keep in view.** p5's own note reports the dev batcher runs one wallet at
-`maxSlotsPerWallet=1`, ~25 s/tx serialised. PR-A added ~14 on-chain offers (three
-unshielded cancel shapes, 3-way competition per layer, held-back republishes, self-fill,
-unshielded expiry). If the next run still starves, the suite's load has genuinely
-outgrown the dev batcher and that is a **provisioning decision, not a test fix**. Do not
-widen the 3-minute index timeout to make it pass.
+## Environment traps worth retaining
 
----
+- Convert file URLs with `fileURLToPath`; the workspace path contains a space.
+- System PostgreSQL can reclaim port 5432 after reboot.
+- Bracket `pkill -f` patterns so the command does not match itself.
+- Top-level `--` SQL comments can make pgtyped skip generation with exit 0.
+- Backticks in SQL comments terminate generated template literals.
+- `gh pr edit` fails on this repository's deprecated Projects query; use
+  `gh api` to patch PR bodies.
+- There is no root `tsconfig`; bundle the grand runner with Bun.
 
-## 4. Open items
+## Next boundary
 
-**Blocking nothing, but unresolved:**
-
-- **SSE baseline keys are absent** from `baseline.json` on purpose. The metric was
-  redefined (see below) so its number must be re-derived from measurement, and one
-  quiet run is not enough. Need 2–3 clean runs at typical load. Populate
-  `sseDeliveryLagP50Ms` / `sseDeliveryLagP95Ms` then.
-- **`/v1/pairs is ordered by last_traded_at, newest first`** failed in the last run.
-  Could be real or an artefact of too few fills. Recheck on a clean run before
-  investigating.
-
-**The SSE metric split (done, but its premise is weaker than first claimed).** p7b now
-gates CONSUMED archives only and reports TTL archives as a note. Rationale: a TTL
-archive runs from a scheduled input, so its `archived_at` is a block timestamp the STM
-may not reach until much later during storm catch-up — STM scheduling latency wearing
-the label of SSE delivery, and `maxStmLagBlocks` already gates that. **However**: on the
-run that measured it, TTL max was 4777 ms, nowhere near the 23572 spike it was meant to
-explain, and `maxLagBlocks` was 53 vs 83–95 before — i.e. that run was simply calmer.
-The split is good metric hygiene; it is **not proven** to be the cause of the spikes.
-
-**Best remaining hypothesis for the lag spikes:** stale processes from hard-killed runs.
-`fresh-run.sh`'s reaper originally covered only the batcher, dust provisioner and
-indexer. It now also covers `main.grand-b.ts` (the p7a replica node — the heaviest thing
-the suite runs, measured at load 17 while replaying), `main.dev.ts`, and `start-pglite`
-(which owns port 5432, so a survivor blocks the next bootstrap entirely). Both high-lag
-runs followed a session kill. Watch `maxLagBlocks` over the next few runs.
-
----
-
-## 5. Environment gotchas that cost real time
-
-- **A reboot re-enables system PostgreSQL on 5432**, which the stack's PGlite needs.
-  Symptom: three identical bootstrap failures whose only real evidence is
-  `SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string` one line deep in
-  `stack.log`; the `exited with code 143` lines are the orchestrator tearing down
-  afterwards. Fix: `sudo systemctl stop postgresql` (already `disable`d on this box).
-  A preflight check in `start-stack.sh` would turn 6 wasted minutes into one clear line.
-- **`pkill -f` matches the killing shell's own command line.** Cost two debugging cycles
-  in this project. Always bracket: `'main[.]dev[.]ts'`.
-- **Backticks inside SQL comments terminate the enclosing TS template literal.** The
-  query strings in `queries.app.ts` are template literals; prose punctuation is not free.
-- **No `tsconfig.json` in this repo.** `bunx tsc` does not work; the gate is
-  `bun build --target=bun packages/tests/grand-e2e/run.ts` plus `bun test`.
-
----
-
-## 6. Resume here
-
-1. **Read the independent reviews** at `/home/eddie/zswap-offerfiles-kernel-x/PR-3*.md`
-   and the agent verdicts on them. Fix what is valid before merging.
-2. **Commit the staged self-fill revert** in `phases/p3-lifecycle.ts`.
-3. **Re-run** `./packages/tests/grand-e2e/fresh-run.sh` (~55 min, preflight 5432 first).
-   Expect: 8 §2.1 checks green, RED-8 as `[RED ]`, no XPASS, determinism identical.
-   This run also owes: PR-D and PR-H e2e verification, a `maxLagBlocks` reading, and a
-   CONSUMED-only SSE measurement.
-4. **Then PR-G** (§2.6) — smallest remaining fix, apply the `MAX(height)` escape the
-   read gate already uses to the `expiresAt` derivation in `state-machine.ts`.
-5. **PR-E / PR-F** need fixtures built, not just code. §2.4's fixture route is proven
-   (`probe-cross-layer.ts`); §2.5's needs a third shielded colour, which is one
-   `TOKEN_SEPS` entry — `mintShielded` parameterises the colour by domain separator on
-   the already-deployed contract, so no new contract is required.
-
-Two standalone probes are committed and reproduce their findings in seconds with no
-stack: `probe-cross-layer.ts` (§2.4 + §2.5) and `packages/database/multileg-pairs.test.ts`
-(renders the actual API responses for a basket offer).
+Production-readiness closeout is complete. The next product work is the
+separate unshielded Phase-(c)/(d) workstream, especially switching
+`unshieldedCancelledPredicate` from shape matching to the exact identities
+already persisted by PR #45. PR #46 remains unmerged until maintainer review.

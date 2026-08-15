@@ -54,6 +54,7 @@ console.log("compact v${COMPACT_VERSION} is available");
 `.trim();
 
 const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
+const midnightMintTestTokens = "midnight-mint-test-tokens";
 
 export default {
   processes: [
@@ -86,7 +87,7 @@ export default {
     ),
 
     {
-      name: "midnight-mint-test-tokens",
+      name: midnightMintTestTokens,
       description: "Mint dev test tokens (2 shielded + 1 unshielded) via the offer-files contract",
       cwd: path.join(root, "packages/contracts-midnight"),
       args: ["run", "mint-test-tokens.ts"],
@@ -124,7 +125,11 @@ export default {
       type: "system-dependency",
       link: "http://localhost:3334",
       stopProcessAtPort: [3334],
-      dependsOn: [...midnightDeps],
+      // The dev bootstrap temporarily keeps the batcher's unshielded wallet
+      // online while it verifies/splits NIGHT. Do not overlap those extra
+      // indexer subscriptions with the mint wallet: the packaged indexer's
+      // wallet DB pool can exhaust and kill the indexer mid-bootstrap.
+      dependsOn: [...midnightDeps, midnightMintTestTokens],
     },
 
     // The frontend lives in paima-engine/templates/zswap-da — run it separately

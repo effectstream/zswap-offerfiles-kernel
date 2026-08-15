@@ -1,6 +1,10 @@
 import { MidnightBalancingAdapter } from "@effectstream/batcher-sdk";
 import { waitForDustFundsWithRetry } from "@effectstream/midnight-contracts";
 import type { BatcherConfig } from "./config.ts";
+import {
+  BATCHER_NIGHT_UTXO_TARGET,
+  ensureBatcherNightUtxos,
+} from "./night-utxo-bootstrap.ts";
 
 export function createMidnightBalancingAdapter(
   batcherConfig: BatcherConfig,
@@ -27,16 +31,33 @@ export function createMidnightBalancingAdapter(
     proofServer: batcherConfig.midnight.proofServer,
   };
 
+  const devBootstrap = batcherConfig.midnight.id === "undeployed";
   const walletResultPromise = waitForDustFundsWithRetry(
     {
       networkUrls: networkUrls as any,
       seed: firstSeed,
       networkId: batcherConfig.midnight.id as any,
-      syncMode: "dust-only",
+      // The dev bootstrap needs the unshielded wallet long enough to inspect
+      // and, when necessary, self-split NIGHT. The adapter suspends the two
+      // auxiliary wallet syncs after this promise resolves. Deployed networks
+      // keep the cheaper dust-only path.
+      syncMode: devBootstrap ? "all" : "dust-only",
       stallTimeoutMs: 7_200_000,  // 2h per attempt — enough for the full 81-min scan
       maxRetries: 3,
     },
-  ).then(({ walletResult }) => walletResult);
+  ).then(async ({ walletResult }) => {
+    if (devBootstrap) {
+      const ready = await ensureBatcherNightUtxos(walletResult, {
+        target: BATCHER_NIGHT_UTXO_TARGET,
+        minSpendableDustPerCoin: batcherConfig.minSpendableDustPerCoin,
+      });
+      console.log(
+        `[zswap-da-batcher] NIGHT bootstrap: ${ready.registeredNightUtxos} registered UTXOs, ` +
+          `${ready.spendableDustUtxos} spendable dust streams${ready.split ? " (self-split)" : ""}`,
+      );
+    }
+    return walletResult;
+  });
 
   return new MidnightBalancingAdapter([firstSeed], {
     indexer: batcherConfig.midnight.indexer,

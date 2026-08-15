@@ -34,9 +34,9 @@ import type {
  * is an integration concern; the RULE deserves cheap, exhaustive coverage.
  *
  * Empty input is NOT cross-layer: an empty or one-layer shape is the two-sided
- * rule's business, and that rule runs first (see the ordering note at the call
- * site). Reporting CROSS_LAYER there would be a misleading code on a different
- * defect.
+ * rule's business, and the two-sided rule runs first (see the ordering note at
+ * the call site). Reporting CROSS_LAYER there would be a misleading code on a
+ * different defect.
  */
 export function isCrossLayer(gives: OfferLeg[], wants: OfferLeg[]): boolean {
   const layers = new Set<OfferLeg["kind"]>();

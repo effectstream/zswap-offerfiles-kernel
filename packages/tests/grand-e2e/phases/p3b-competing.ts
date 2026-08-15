@@ -26,17 +26,23 @@
 // suspicion.
 
 import type { Client } from "pg";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { offerHashFromBlob } from "@zswap-da/offer-guard";
+import { shieldedKeys } from "../../lib/wallet.ts";
+import { batcherInputFingerprint } from "../../lib/batcher.ts";
 import { ARCHIVE_WAIT_TRIES } from "../config.ts";
 import { ledger, type OfferRecord } from "../ledger.ts";
 import {
   COMPETING_COIN,
   amountsFor,
   buildOffer,
+  prepareSettlement,
   publishAndIndex,
   settleOffer,
   storeBlob,
+  submitConcurrentlyToBalancer,
   type Actors,
   type BuiltOffer,
   type PoolWallet,
@@ -45,6 +51,11 @@ import { getChartHistory, getOfferStatus, submitOffer2 } from "../lib/api2.ts";
 import { submitBlobRaw } from "../lib/celestia.ts";
 import { historyRowByHash, offerRowByHash, rejectionTotalsByCode } from "../lib/db2.ts";
 import { beginPhase, check, note, waitUntil } from "../lib/util.ts";
+import {
+  hasBatcherChainRejection,
+  PARTIAL_OVERLAP_COINS,
+  PARTIAL_OVERLAP_GIVES,
+} from "./p3b-closeout.ts";
 
 /** How many competitors share one coin. A maker laddering the same coin at
  *  several prices is the NORMAL pattern, not an edge case — two proved only
@@ -56,6 +67,7 @@ interface Competitors {
   winner: OfferRecord;
   losers: OfferRecord[];
   winnerBlob: string;
+  loserBlobs: string[];
   /** Built from the same coin but NEVER published — submitted only AFTER the
    *  winner settles, so the liveness gate is the only thing that can refuse
    *  it. Detached from the ledger: it is adversarial input, not an offer. */
@@ -125,6 +137,7 @@ async function buildCompetingSet(
     winner: published[0]!.rec,
     losers: published.slice(1).map((p) => p.rec),
     winnerBlob: published[0]!.b.blob,
+    loserBlobs: published.slice(1).map((p) => p.b.blob),
     heldBack: { rec: held.rec, blob: held.b.blob },
   };
 }
@@ -137,6 +150,277 @@ async function sharesInput(db: Client, a: OfferRecord, b: OfferRecord, shielded:
   const ka = (await db.query(q, [a.rowId])).rows.map((r: any) => r.k);
   const kb = (await db.query(q, [b.rowId])).rows.map((r: any) => r.k);
   return ka.length > 0 && ka.some((k: string) => kb.includes(k));
+}
+
+async function shieldedInputKeys(db: Client, rec: OfferRecord): Promise<string[]> {
+  const rows = await db.query(
+    `SELECT nullifier AS k FROM offer_file_nullifiers WHERE offer_file_id = $1 ORDER BY nullifier`,
+    [rec.rowId],
+  );
+  return rows.rows.map((row: any) => String(row.k));
+}
+
+function workerSlotsFromCanonicalLog(): number {
+  try {
+    const log = readFileSync(
+      fileURLToPath(new URL("../out/stack.log", import.meta.url)),
+      "utf-8",
+    );
+    const matches = [...log.matchAll(/worker slots:\s*(\d+)/g)];
+    return Number(matches[matches.length - 1]?.[1] ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function chartTradesAtAmount(
+  giveToken: OfferRecord["giveToken"],
+  wantToken: OfferRecord["wantToken"],
+  amount: bigint,
+): Promise<number> {
+  const hist = await getChartHistory(
+    ledger.colors[giveToken]!,
+    ledger.colors[wantToken]!,
+  );
+  if (hist.status !== 200 || !Array.isArray(hist.body)) return -1;
+  return hist.body.filter((row: any) => Number(row.amt) === Number(amount)).length;
+}
+
+/** Keep the live T-E2 reservation wired to the same denomination fixture the
+ * pure subset test audits. Calling this from the unit test also catches a
+ * missing runtime import, which a Bun bundle alone does not diagnose. */
+export function partialOverlapHeldCoinAmount(): bigint {
+  return PARTIAL_OVERLAP_COINS[0];
+}
+
+async function runPartialOverlap(db: Client, actors: Actors): Promise<void> {
+  const recs = PARTIAL_OVERLAP_GIVES.map((give, i) =>
+    ledger.addOffer({
+      index: 70 + i,
+      fate: i === 0 ? "settled" : "cancelled",
+      layer: "ss",
+      makerSeed: actors.partialOverlap.seed,
+      giveToken: "TA",
+      wantToken: "TB",
+      giveAmount: give.toString(),
+      wantAmount: amountsFor(70 + i, "TA", "TB").want.toString(),
+      publishPath: "api",
+      phase: "p3b-e2",
+      state: "planned",
+    }),
+  );
+  const built: BuiltOffer[] = [];
+  const first = await buildOffer(actors.partialOverlap, recs[0]!);
+  built.push(first);
+  storeBlob(first.hash, first.blob);
+  await actors.partialOverlap.run(() =>
+    (actors.partialOverlap.wr.wallet as any).revert(first.finalized),
+  );
+
+  // The SDK's selector is greedy in wallet order. With A, B, C all visible,
+  // offer2 can select A+B+C and return change even though B+C is exact. Book A
+  // in a temporary self-transfer recipe so B+C are the only available coins;
+  // release both reservations after the offer bytes have been serialized.
+  const heldA = await actors.partialOverlap.run(() =>
+    actors.partialOverlap.wr.wallet.transferTransaction(
+      [
+        {
+          type: "shielded",
+          outputs: [
+            {
+              type: ledger.colors.TA!,
+              amount: partialOverlapHeldCoinAmount(),
+              receiverAddress: actors.partialOverlap.shieldedAddr,
+            },
+          ],
+        } as any,
+      ],
+      shieldedKeys(actors.partialOverlap.wr),
+      { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
+    ),
+  );
+  try {
+    const second = await buildOffer(actors.partialOverlap, recs[1]!);
+    built.push(second);
+    storeBlob(second.hash, second.blob);
+    await actors.partialOverlap.run(() =>
+      (actors.partialOverlap.wr.wallet as any).revert(second.finalized),
+    );
+  } finally {
+    await actors.partialOverlap.run(() =>
+      (actors.partialOverlap.wr.wallet as any).revert(heldA),
+    );
+  }
+  for (let i = 0; i < recs.length; i++) {
+    if (!(await publishAndIndex(db, recs[i]!, built[i]!))) {
+      note("T-E2", `offer#${recs[i]!.index} did not index; exact-overlap checks cannot run`);
+      return;
+    }
+  }
+
+  const [offer1, offer2] = recs as [OfferRecord, OfferRecord];
+  const [keys1, keys2] = await Promise.all([
+    shieldedInputKeys(db, offer1),
+    shieldedInputKeys(db, offer2),
+  ]);
+  const shared = keys1.filter((key) => keys2.includes(key));
+  await check("T-E2: exact {A,B}/{B,C} inputs share only B", async () =>
+    keys1.length === 2 && keys2.length === 2 && shared.length === 1,
+  `offer1=${keys1.length}, offer2=${keys2.length}, shared=${shared.length}`);
+
+  const settled = await check("T-E2: offer 1 settles", async () => {
+    await settleOffer(actors.takers[0]!, offer1, built[0]!.blob);
+    return true;
+  });
+  if (!settled) return;
+
+  await check("T-E2: partial-overlap loser leaves the live book", () =>
+    waitUntil(
+      "T-E2 both offers archived",
+      async () =>
+        (await offerRowByHash(db, offer1.offerHash!)) === null &&
+        (await offerRowByHash(db, offer2.offerHash!)) === null,
+      ARCHIVE_WAIT_TRIES,
+      5000,
+    ));
+  for (const rec of recs) {
+    rec.state = "resolved";
+    rec.resolvedAt = Date.now();
+  }
+
+  await check("T-E2: partial-overlap loser reads cancelled", async () =>
+    (await getOfferStatus(offer2.offerHash!)).body?.status === "cancelled");
+
+  let retryDetail = "settlement preparation failed";
+  let retryRejected = false;
+  try {
+    const prepared = await prepareSettlement(actors.takers[1]!, offer2, built[1]!.blob);
+    const outcome = await submitConcurrentlyToBalancer([prepared.tx]);
+    retryRejected = outcome.results.length === 1 && !outcome.results[0]!.ok;
+    retryDetail = JSON.stringify(outcome.results[0]!.body).slice(0, 240);
+    if (retryRejected) {
+      await (actors.takers[1]!.wr.wallet as any).revert(prepared.tx).catch(() => {});
+    }
+  } catch (error) {
+    retryRejected = true;
+    retryDetail = error instanceof Error ? error.message : String(error);
+  }
+  await check(
+    "T-E2: partial-overlap loser cannot settle",
+    async () => retryRejected,
+    retryDetail,
+  );
+  await check("T-E2: partial-overlap loser creates no trade print", async () =>
+    (await chartTradesAtAmount("TA", "TB", PARTIAL_OVERLAP_GIVES[1])) === 0);
+}
+
+async function runConcurrentTakers(db: Client, actors: Actors): Promise<void> {
+  const slots = workerSlotsFromCanonicalLog();
+  const slotsOk = await check(
+    "T-E5: batcher startup proved at least two worker slots",
+    async () => slots >= 2,
+    `worker slots=${slots}; canonical run must use fresh-run.sh so stack.log is pinned`,
+  );
+  if (!slotsOk) return;
+
+  const beforePrints = await chartTradesAtAmount("TA", "TB", COMPETING_COIN);
+  const set = await buildCompetingSet(db, actors.concurrentCompeting, true, 80);
+  if (!set) return;
+  const contestants = [set.winner, set.losers[0]!] as const;
+  const blobs = [set.winnerBlob, set.loserBlobs[0]!] as const;
+  const takers = [actors.takers[2]!, actors.takers[3]!] as const;
+  const prepared = await Promise.all(
+    contestants.map((rec, i) => prepareSettlement(takers[i]!, rec, blobs[i]!)),
+  );
+  const outcome = await submitConcurrentlyToBalancer(prepared.map((item) => item.tx));
+
+  await check(
+    "T-E5: both settlement requests were in flight before the first receipt",
+    async () => outcome.peakInFlight >= 2 && outcome.allStartedBeforeFirstReceipt,
+    `peak=${outcome.peakInFlight}, allStarted=${outcome.allStartedBeforeFirstReceipt}`,
+  );
+  const successes = outcome.results.filter((result) => result.ok);
+  const failures = outcome.results.filter((result) => !result.ok);
+  await check(
+    "T-E5: exactly one concurrent settlement lands",
+    async () => successes.length === 1 && failures.length === 1,
+    JSON.stringify(outcome.results).slice(0, 500),
+  );
+  await check(
+    "T-E5: loser is a batcher/chain double-spend result, not UTXO_NOT_LIVE",
+    async () => {
+      const failureIndex = outcome.results.findIndex((result) => !result.ok);
+      const detail = JSON.stringify(failures[0]?.body ?? "");
+      const fingerprint = failureIndex >= 0
+        ? batcherInputFingerprint(prepared[failureIndex]!.tx as any)
+        : "";
+      let trace = "";
+      try {
+        trace = readFileSync(
+          fileURLToPath(new URL("../../../../batcher-debug.log", import.meta.url)),
+          "utf-8",
+        );
+      } catch {
+        // The canonical runner always starts the batcher at repo root. An
+        // absent trace must fail this proof instead of degrading to timeout.
+      }
+      return (
+        failures.length === 1 &&
+        !detail.includes("UTXO_NOT_LIVE") &&
+        hasBatcherChainRejection(trace, fingerprint)
+      );
+    },
+    JSON.stringify(failures[0]?.body ?? {}).slice(0, 300),
+  );
+
+  for (let i = 0; i < outcome.results.length; i++) {
+    if (!outcome.results[i]!.ok) {
+      await (takers[i]!.wr.wallet as any).revert(prepared[i]!.tx).catch(() => {});
+    }
+  }
+
+  const all = [set.winner, ...set.losers];
+  await check("T-E5: every offer sharing the coin leaves the live book", () =>
+    waitUntil(
+      "T-E5 competitors archived",
+      async () => {
+        for (const rec of all) {
+          if ((await offerRowByHash(db, rec.offerHash!)) !== null) return false;
+        }
+        return true;
+      },
+      ARCHIVE_WAIT_TRIES,
+      5000,
+    ));
+
+  const statuses = await Promise.all(
+    all.map(async (rec) => (await getOfferStatus(rec.offerHash!)).body?.status),
+  );
+  const consumed = statuses.filter((status) => status === "consumed").length;
+  const cancelled = statuses.filter((status) => status === "cancelled").length;
+  await check(
+    "T-E5: one winner reads consumed and every loser reads cancelled",
+    async () => consumed === 1 && cancelled === all.length - 1,
+    `statuses=${statuses.join(",")}`,
+  );
+  for (let i = 0; i < all.length; i++) {
+    all[i]!.fate = statuses[i] === "consumed" ? "settled" : "cancelled";
+    all[i]!.state = "resolved";
+    all[i]!.resolvedAt = Date.now();
+  }
+  await check("T-E5: each competitor archives exactly once with raw reason CONSUMED", async () => {
+    for (const rec of all) {
+      const rows = await db.query(
+        `SELECT archive_reason FROM offer_file_history WHERE offer_hash = $1`,
+        [rec.offerHash],
+      );
+      if (rows.rows.length !== 1 || rows.rows[0]?.archive_reason !== "CONSUMED") return false;
+    }
+    return true;
+  });
+  await check("T-E5: the concurrent race adds exactly one trade print", async () =>
+    (await chartTradesAtAmount("TA", "TB", COMPETING_COIN)) === beforePrints + 1,
+  `before=${beforePrints}`);
 }
 
 export async function p3bCompeting(db: Client, actors: Actors): Promise<void> {
@@ -317,4 +601,7 @@ export async function p3bCompeting(db: Client, actors: Actors): Promise<void> {
       );
     }
   }
+
+  await runPartialOverlap(db, actors);
+  await runConcurrentTakers(db, actors);
 }

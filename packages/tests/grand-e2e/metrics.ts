@@ -111,6 +111,7 @@ export function writeMetrics(snap: MetricsSnapshot): void {
 // ── Baseline enforcement ─────────────────────────────────────────────────────
 
 interface Baseline {
+  submitP50Ms?: number;
   submitP95Ms?: number;
   publishToIndexedP95Ms?: number;
   bookReadP50Ms?: number;
@@ -176,13 +177,15 @@ export function baselineViolations(snap: MetricsSnapshot, base: Baseline): Basel
       );
     }
   };
+  checkOne("submit p50 ms", snap.submit.p50, base.submitP50Ms);
   checkOne("submit p95 ms", snap.submit.p95, base.submitP95Ms);
   checkOne("publish→indexed p95 ms", snap.publishToIndexedMs.p95, base.publishToIndexedP95Ms);
-  // Book reads: the median is the gate, the tail is a note until there are
-  // enough samples. NOTE submit (≈29 samples) and publish→indexed (≈33) have
-  // the same low-count property and are still gated on p95 alone — they pass
-  // today, so tightening them is a separate change, but they should gain p50
-  // baselines the next time anyone recalibrates.
+  // Submit has both a median and a tail: the p50 catches a path-wide slowdown
+  // even at this run's modest sample count, while p95 preserves the existing
+  // regression ceiling. Book reads follow the same median-first principle;
+  // their tail is a note until there are
+  // enough samples. publish→indexed (≈33 samples) still has the same
+  // low-count property and remains tail-only pending a later recalibration.
   checkOne("book read p50 ms", snap.bookReadMs.p50, base.bookReadP50Ms);
   checkTail("book read p95 ms", snap.bookReadMs.p95, base.bookReadP95Ms, snap.bookReadMs.count);
   // SSE lag is gated on BOTH ends, and the median is the one that means

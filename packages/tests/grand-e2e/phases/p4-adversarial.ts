@@ -8,6 +8,7 @@
 
 import type { Client } from "pg";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
+import { INDEX_WAIT_TRIES } from "../config.ts";
 import { ledger } from "../ledger.ts";
 import type { P1Artifacts } from "./p1-happy.ts";
 import {
@@ -293,12 +294,10 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
   }
 
   // ── 4.8 byte-identical duplicates inside ONE L2 block ────────────────────
-  // Both blobs are processed inside a single block transaction, so the second
-  // one's dedup probe (getOfferStatusByHash) must observe the first one's
-  // UNCOMMITTED insert. If it does not, the unique index catches it instead —
-  // as an STF error that aborts the whole block, taking every legitimate offer
-  // at that height down with it. That is the NUL crash's blast-radius shape,
-  // and it has never been tested.
+  // Both blobs are processed inside one block transaction against the already
+  // indexed canonical offer. Prove the burst yields two coded refusals without
+  // aborting the block, deleting the canonical row or duplicating it. This
+  // does not claim visibility between two new, uncommitted inserts.
   {
     const dupBytes = OfferFiles.decode(art.liveBlob);
     const dupHash = offerHashFromBlob(art.liveBlob);
@@ -328,7 +327,12 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
           const now = await rejectionTotalsByCode(db);
           return (now.DUPLICATE_OFFER ?? 0) >= (before.DUPLICATE_OFFER ?? 0) + 2;
         },
-        24,
+        // This is the same Celestia -> STM -> DB path as normal indexing.
+        // Keep its budget aligned with the suite-wide index wait instead of
+        // failing at 120 s while an otherwise-valid (<150-block lag) run is
+        // still catching up. Run 2 observed both rows 14 s after that old
+        // deadline; the exactly-once safety assertion below already passed.
+        INDEX_WAIT_TRIES,
         5000,
       ),
     );

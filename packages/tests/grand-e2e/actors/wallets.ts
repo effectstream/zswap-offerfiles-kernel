@@ -65,6 +65,7 @@ import { submitOffer2 } from "../lib/api2.ts";
 import { submitBlobRaw } from "../lib/celestia.ts";
 import { offerRowByHash } from "../lib/db2.ts";
 import { publishToIndexed, submitLatencies } from "../metrics.ts";
+import { PARTIAL_OVERLAP_COINS } from "../phases/p3b-closeout.ts";
 
 const TAG = "[actors]";
 
@@ -119,6 +120,10 @@ export interface Actors {
   competingShielded: PoolWallet;
   /** One unshielded UTXO, backing two mutually exclusive offers. */
   competingUnshielded: PoolWallet;
+  /** Three exact-denomination coins for T-E2's {A,B}/{B,C} overlap. */
+  partialOverlap: PoolWallet;
+  /** One coin shared by T-E5's two genuinely concurrent settlements. */
+  concurrentCompeting: PoolWallet;
   /** Holds TA + TC, the two give colours the §2.5 basket fixture merges. */
   basketMaker: PoolWallet;
   takers: PoolWallet[];
@@ -146,6 +151,8 @@ const COMPETING_UNSHIELDED_SEED = "e1".padStart(64, "0");
 // specialists have theirs: it must hold EXACTLY the coins the fixture merges,
 // so coin selection has no freedom to pick a colour the fixture did not mean.
 const BASKET_MAKER_SEED = "e2".padStart(64, "0");
+const PARTIAL_OVERLAP_SEED = "e3".padStart(64, "0");
+const CONCURRENT_COMPETING_SEED = "e4".padStart(64, "0");
 /** One coin of each give colour — the basket gives strictly less than one. */
 export const BASKET_COIN = 1200n;
 
@@ -224,8 +231,8 @@ export async function selfSplit(
 
 // All /send-input calls are serialized through one client-side chain. The
 // batcher's HTTP server shares its event loop with in-process balancing work,
-// so concurrent POSTs can sit unanswered long enough to hit any sane fetch
-// timeout — and the single worker means concurrency buys nothing anyway.
+// so the ordinary suite flow keeps request ordering predictable. Adversarial
+// concurrency fixtures bypass this chain explicitly and prove their overlap.
 // no-wait submissions get one retry on a transport timeout: if the first
 // attempt actually landed, the duplicate tx fails on-chain inside the batcher
 // (same inputs already spent) without affecting wallet state.
@@ -251,9 +258,78 @@ export function submitToBalancer(
   return job;
 }
 
+/** Submit without the suite-wide client queue. Only throughput/concurrency
+ * fixtures should use this; ordinary lifecycle phases keep deterministic
+ * request ordering through submitToBalancer(). */
+export function submitDirectlyToBalancer(
+  tx: any,
+  opts: { level: "no-wait" | "wait-receipt"; timeoutMs: number; serverTimeoutMs?: number },
+): Promise<{ ok: boolean; status: number; body: any }> {
+  return settleViaBatcher(tx as any, opts);
+}
+
+export interface ConcurrentBatcherOutcome {
+  results: { ok: boolean; status: number; body: any }[];
+  peakInFlight: number;
+  allStartedBeforeFirstReceipt: boolean;
+}
+
+/**
+ * T-E5-only raw submission path. It deliberately bypasses `balancerChain` and
+ * releases every request from one barrier, then records whether all requests
+ * had entered the batcher call before the first response arrived.
+ */
+export async function submitConcurrentlyToBalancer<T>(
+  txs: readonly T[],
+  submit: (tx: T) => Promise<{ ok: boolean; status: number; body: any }> =
+    (tx) =>
+      submitDirectlyToBalancer(tx as any, {
+        level: "wait-receipt",
+        // A successful submit can legitimately spend 90s in the adapter's
+        // submit timeout before its receipt is found. The loser never gets a
+        // callback after the SDK drops it at maxRetries, so cap that wait at
+        // 150s and corroborate its actual chain rejection in T-E5.
+        timeoutMs: 180_000,
+        serverTimeoutMs: 150_000,
+      }),
+): Promise<ConcurrentBatcherOutcome> {
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => (release = resolve));
+  let inFlight = 0;
+  let peakInFlight = 0;
+  let submitted = 0;
+  let submittedAtFirstReceipt: number | null = null;
+
+  const jobs = txs.map(async (tx) => {
+    await barrier;
+    submitted++;
+    inFlight++;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    try {
+      return await submit(tx);
+    } catch (error) {
+      return {
+        ok: false,
+        status: 0,
+        body: { error: error instanceof Error ? error.message : String(error) },
+      };
+    } finally {
+      if (submittedAtFirstReceipt === null) submittedAtFirstReceipt = submitted;
+      inFlight--;
+    }
+  });
+  release();
+  const results = await Promise.all(jobs);
+  return {
+    results,
+    peakInFlight,
+    allStartedBeforeFirstReceipt: submittedAtFirstReceipt === txs.length,
+  };
+}
+
 /** Wait for the batcher's midnight-balancer queue to fully drain — used after
- *  bulk no-wait submissions. The batcher runs ONE worker (~25 s/tx), so bulk
- *  flows queue everything and wait once here instead of per-tx. */
+ *  bulk no-wait submissions. Bulk flows queue everything and wait once here
+ *  instead of waiting for every individual receipt. */
 export async function drainBatcherQueue(label: string, timeoutMs = 60 * 60_000): Promise<void> {
   const { BATCHER_URL } = await import("../config.ts");
   const deadline = Date.now() + timeoutMs;
@@ -434,6 +510,8 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   const competingShielded = await buildPoolWallet("CMP-S", COMPETING_SHIELDED_SEED);
   const competingUnshielded = await buildPoolWallet("CMP-U", COMPETING_UNSHIELDED_SEED);
   const basketMaker = await buildPoolWallet("BSK", BASKET_MAKER_SEED);
+  const partialOverlap = await buildPoolWallet("OVERLAP", PARTIAL_OVERLAP_SEED);
+  const concurrentCompeting = await buildPoolWallet("RACE", CONCURRENT_COMPETING_SEED);
 
   const plan = defaultFundingPlan(totalOffers);
   // FUNDING: genesis emits the FINAL per-offer denominations directly.
@@ -485,6 +563,10 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   });
   outsByKey.TA.push({ receiverAddress: competingShielded.shieldedAddr, amount: COMPETING_COIN });
   outsByKey.UA.push({ receiverAddress: competingUnshielded.unshieldedObj, amount: COMPETING_COIN });
+  for (const amount of PARTIAL_OVERLAP_COINS) {
+    outsByKey.TA.push({ receiverAddress: partialOverlap.shieldedAddr, amount });
+  }
+  outsByKey.TA.push({ receiverAddress: concurrentCompeting.shieldedAddr, amount: COMPETING_COIN });
   // Basket specialist: exactly one TA coin and one TC coin — the two halves
   // the fixture merges into a single two-give offer.
   outsByKey.TA.push({ receiverAddress: basketMaker.shieldedAddr, amount: BASKET_COIN });
@@ -510,6 +592,12 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   cancelDoubles.forEach((c, i) => expect.push({ pw: c, key: cancelGiveToken("double", i), total: CANCEL_COIN * 2n }));
   expect.push({ pw: competingShielded, key: "TA", total: COMPETING_COIN });
   expect.push({ pw: competingUnshielded, key: "UA", total: COMPETING_COIN });
+  expect.push({
+    pw: partialOverlap,
+    key: "TA",
+    total: PARTIAL_OVERLAP_COINS.reduce((sum, amount) => sum + amount, 0n),
+  });
+  expect.push({ pw: concurrentCompeting, key: "TA", total: COMPETING_COIN });
   expect.push({ pw: basketMaker, key: "TA", total: BASKET_COIN });
   expect.push({ pw: basketMaker, key: "TC", total: BASKET_COIN });
 
@@ -527,7 +615,20 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
     throw new Error(`funding did not land for ${short.length} wallet/color pairs: ${short[0]!.reason}`);
   }
   console.log(`${TAG} funding complete (${totalOuts} coins, batcher untouched).`);
-  return { genesis, genesisPw, deployed, makers, cancelSingles, cancelDoubles, competingShielded, competingUnshielded, basketMaker, takers };
+  return {
+    genesis,
+    genesisPw,
+    deployed,
+    makers,
+    cancelSingles,
+    cancelDoubles,
+    competingShielded,
+    competingUnshielded,
+    partialOverlap,
+    concurrentCompeting,
+    basketMaker,
+    takers,
+  };
 }
 
 // ── Offer construction / publication ─────────────────────────────────────────
@@ -986,39 +1087,83 @@ export function pickPublishPath(index: number): "api" | "celestia" {
 
 // ── Taker settle ─────────────────────────────────────────────────────────────
 
-export async function settleOffer(taker: PoolWallet, rec: OfferRecord, blob: string): Promise<void> {
-  await taker.run(async () => {
-    const offerTx = reconstructOffer(blob);
-    const kinds = new Set<string>();
-    kinds.add(isShieldedKey(rec.giveToken) ? "shielded" : "unshielded");
-    kinds.add(isShieldedKey(rec.wantToken) ? "shielded" : "unshielded");
-    const balRecipe = await (taker.wr.wallet as any).balanceFinalizedTransaction(
-      offerTx,
-      shieldedKeys(taker.wr),
-      { ttl: new Date(Date.now() + TX_TTL_MS), tokenKindsToBalance: [...kinds] },
-    );
-    let settleTx: any;
-    try {
-      let recipe = balRecipe;
-      if (kinds.has("unshielded")) {
-        recipe = await (taker.wr.wallet as any).signRecipe(balRecipe, (p: Uint8Array) =>
-          taker.wr.unshieldedKeystore.signData(p),
-        );
-      }
-      settleTx = await withProveSlot(() => taker.wr.wallet.finalizeRecipe(recipe));
-    } catch (e) {
-      await (taker.wr.wallet as any).revert(balRecipe).catch(() => {});
-      throw e;
+export interface PreparedSettlement {
+  tx: any;
+  recipe: any;
+}
+
+async function prepareSettlementOnce(
+  taker: PoolWallet,
+  rec: OfferRecord,
+  blob: string,
+): Promise<PreparedSettlement> {
+  const offerTx = reconstructOffer(blob);
+  const kinds = new Set<string>();
+  kinds.add(isShieldedKey(rec.giveToken) ? "shielded" : "unshielded");
+  kinds.add(isShieldedKey(rec.wantToken) ? "shielded" : "unshielded");
+  const balRecipe = await (taker.wr.wallet as any).balanceFinalizedTransaction(
+    offerTx,
+    shieldedKeys(taker.wr),
+    { ttl: new Date(Date.now() + TX_TTL_MS), tokenKindsToBalance: [...kinds] },
+  );
+  let settleTx: any;
+  try {
+    let recipe = balRecipe;
+    if (kinds.has("unshielded")) {
+      recipe = await (taker.wr.wallet as any).signRecipe(balRecipe, (p: Uint8Array) =>
+        taker.wr.unshieldedKeystore.signData(p),
+      );
     }
-    const bad = nonDustImbalances(settleTx as any);
-    if (bad.length > 0) throw new Error(`settle offer#${rec.index}: non-dust imbalance after balancing`);
-    // Long timeouts: the single-worker batcher (~25 s/tx) can hold a settle
-    // behind a deep queue; the client must outlast it, not give up.
-    const res = await submitToBalancer(settleTx, {
-      level: "wait-receipt",
-      timeoutMs: 900_000,
-      serverTimeoutMs: 600_000,
-    });
+    settleTx = await withProveSlot(() => taker.wr.wallet.finalizeRecipe(recipe));
+  } catch (e) {
+    await (taker.wr.wallet as any).revert(balRecipe).catch(() => {});
+    throw e;
+  }
+  const bad = nonDustImbalances(settleTx as any);
+  if (bad.length > 0) {
+    throw new Error(`settle offer#${rec.index}: non-dust imbalance after balancing`);
+  }
+  return { tx: settleTx, recipe: balRecipe };
+}
+
+/** Build/prove a taker's half without submitting it. T-E5 prepares both halves
+ * before releasing its concurrent HTTP barrier. */
+export async function prepareSettlement(
+  taker: PoolWallet,
+  rec: OfferRecord,
+  blob: string,
+): Promise<PreparedSettlement> {
+  return taker.run(() => prepareSettlementOnce(taker, rec, blob));
+}
+
+export async function settleOffer(
+  taker: PoolWallet,
+  rec: OfferRecord,
+  blob: string,
+  opts: {
+    parallelBatcher?: boolean;
+    onBatcherRequest?: (delta: 1 | -1) => void;
+  } = {},
+): Promise<void> {
+  await taker.run(async () => {
+    // Keep prepare + submit under the wallet's ordinary serialization lock.
+    // T-E5 uses the split path above; p5 keeps that wallet safety while
+    // bypassing only the suite-wide HTTP queue across independent takers.
+    const prepared = await prepareSettlementOnce(taker, rec, blob);
+    // Long timeouts: a contended proof server or chaos restart can hold a
+    // settle behind a deep queue; the client must outlast it, not give up.
+    const submit = opts.parallelBatcher ? submitDirectlyToBalancer : submitToBalancer;
+    opts.onBatcherRequest?.(1);
+    let res: Awaited<ReturnType<typeof submit>>;
+    try {
+      res = await submit(prepared.tx, {
+        level: "wait-receipt",
+        timeoutMs: 900_000,
+        serverTimeoutMs: 600_000,
+      });
+    } finally {
+      opts.onBatcherRequest?.(-1);
+    }
     if (!res.ok) throw new Error(`settle offer#${rec.index}: batcher ${res.status} ${JSON.stringify(res.body).slice(0, 200)}`);
   });
 }
@@ -1092,7 +1237,20 @@ export function makeRefill(genesisPw: PoolWallet, target: PoolWallet, giveToken:
 }
 
 export async function stopActors(a: Actors): Promise<void> {
-  const all = [a.genesis, ...[...a.makers, ...a.cancelSingles, ...a.cancelDoubles, a.competingShielded, a.competingUnshielded, a.basketMaker, ...a.takers].map((p) => p.wr)];
+  const all = [
+    a.genesis,
+    ...[
+      ...a.makers,
+      ...a.cancelSingles,
+      ...a.cancelDoubles,
+      a.competingShielded,
+      a.competingUnshielded,
+      a.partialOverlap,
+      a.concurrentCompeting,
+      a.basketMaker,
+      ...a.takers,
+    ].map((p) => p.wr),
+  ];
   for (const wr of all) await wr.wallet.stop().catch(() => {});
 }
 

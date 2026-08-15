@@ -299,7 +299,18 @@ Lightweight status probe by content hash:
 
 `status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"`.
 
-**Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's inputs in *one* Midnight transaction — so an archived offer whose nullifiers were spent across different transactions, or only partially spent, is reported `"cancelled"` with certainty: it can never have settled. `"consumed"` means all inputs left in a single transaction — and for offers with stored **fill markers** (the offer's own output commitments, plaintext in the published blob and captured at ingestion) the classification is exact in both directions: a genuine settlement must create those commitments on-chain (merging preserves outputs verbatim), so their absence from the spending tx proves a cancel, single-input offers included. Marker-less offers (unshielded-only wants, rows indexed before the commitments migration) keep the one-tx heuristic. Chain-side commitments come from the `Midnight:NullifierAndCommitment` primitive at zero extra indexer cost. Chart/trade data counts only `"consumed"` offers.
+**Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's
+inputs in one Midnight transaction. Partial or split spends are therefore
+`"cancelled"`. For shielded outputs, the offer's commitments are exact fill
+markers. For unshielded outputs, PR #45 replaced the marker data model with the
+exact ledger identity `(owner, intentHash, outputNo)`; `tokenType` and `value`
+remain audit fields. The current read-time classifier has not yet completed the
+Phase-(d) switch and temporarily compares those unshielded markers by
+`(owner, tokenType, value)` within the spending transaction. Ordinary cancels
+are classified correctly, but two offers asking the same owner for the same
+shape can still share one observed payout until that scoped work lands.
+Pre-marker historical rows retain the conservative one-transaction heuristic.
+Chart/trade data counts only `"consumed"` offers.
 
 ---
 
@@ -464,28 +475,39 @@ curl -X POST http://host:9999/v1/offers \
 
 `offerId` is the offer's content hash — track it with `GET /v1/offers/:offerId` once indexed. Ignore `result` (internal batcher receipt; shape not stable).
 
-**Error `400`**
+**Validation error `400`**
 
 ```json
 { "error": "ROOT_UNKNOWN", "reason": "input merkle root not a known recent chain root: abc123..." }
 ```
 
-| Error code | Meaning |
+The shared validator's `OfferRejectCode` is the source of truth. The table is
+intentionally complete, including fail-closed and callback-only codes that the
+current HTTP route does not emit directly.
+
+| `OfferRejectCode` | Meaning / current route behaviour |
 |---|---|
 | `BAD_ENCODING` | Blob is not a valid `swapoffer1…` bech32m encoding (wrong HRP, bad charset, bad checksum) |
-| `BAD_DESERIALIZE` | Decoded bytes are not a ledger `Transaction` |
 | `TOO_LARGE` | Decoded transaction exceeds `OFFER_MAX_BYTES` |
+| `BAD_DESERIALIZE` | Decoded bytes are not a ledger `Transaction` |
+| `WRONG_TX_VARIANT` | Reserved structural verdict; not emitted by the current deserializer path |
 | `NO_SPENDABLE_INPUT` | The transaction spends nothing — nothing to swap |
 | `NOT_A_SWAP` | Not two-sided: needs ≥1 give **and** ≥1 want (MIP-0006) |
 | `CROSS_LAYER` | Gives and wants span both value layers. Nothing moves value between shielded and unshielded, so no taker could ever fill it |
+| `UNKNOWN_TOKEN` | Fail-closed unknown ledger token tag; current wire bytes deserialize-fail before reaching it |
 | `PROOF_INVALID` | ZK proof verification failed |
 | `SIGNATURE_INVALID` | Signature verification failed |
 | `NULLIFIER_SPENT` | A shielded input coin is already spent on Midnight |
-| `UTXO_NOT_LIVE` | An unshielded UTXO was spent or was never created on-chain |
+| `UTXO_SPENT` | Optional validator callback found an already-spent unshielded UTXO; the HTTP route folds this and unknown UTXOs into `UTXO_NOT_LIVE` |
+| `UTXO_UNKNOWN` | Optional validator callback found a UTXO never created on-chain; the HTTP route folds this into `UTXO_NOT_LIVE` |
 | `ROOT_UNKNOWN` | The shielded input proves against a Merkle root outside the `ROOT_WINDOW_SECONDS` retention window |
 | `ROOT_UNREADABLE` | The input's Merkle root could not be extracted (fail-closed) |
-| `DUPLICATE_OFFER` (`409`) | Byte-identical offer already indexed (open **or** archived) — rejected before any Celestia fee |
-| `RATE_LIMITED` (`429`) | More than 60 requests/min from this IP |
+| `DUPLICATE` | Optional validator dedup callback found an existing identity; production HTTP/STM content dedup reports `DUPLICATE_OFFER` instead |
+
+API-gate and transport codes are deliberately separate from
+`OfferRejectCode`: `UTXO_NOT_LIVE` (`400`) folds the production live-set probe;
+`DUPLICATE_OFFER` (`409`) is byte-identical content dedup; `VALIDATION` (`400`)
+is a malformed JSON body; and `RATE_LIMITED` (`429`) is the HTTP limiter.
 
 Non-`400` transport failures you may also see: a request body larger than
 twice `OFFER_MAX_BYTES` is refused by the HTTP layer as
@@ -760,7 +782,7 @@ Anyone can post any bytes to the shared Celestia namespace for the price of a bl
 | 3 | bech32m charset + checksum | O(n) | corrupt / non-offer text |
 | 4 | Decoded size vs `OFFER_MAX_BYTES` | O(1) | oversized payloads |
 | 5 | `Transaction.deserialize` | O(n) | not a ledger transaction |
-| 6 | Structural: spendable input, two-sided legs (MIP-0006) | cheap | giveaways, non-swaps |
+| 6 | Structural: spendable input, two-sided legs, same value layer (MIP-0006) | cheap | giveaways, non-swaps, cross-layer offers |
 | 7 | Merkle-root extraction | cheap byte parse | unreadable roots |
 | 8 | **Dedup** by content hash | one indexed probe | replays (open *and* archived) |
 | 9 | **Liveness**: nullifier unspent, UTXO live, root known | indexed probes | stale / un-settleable offers |

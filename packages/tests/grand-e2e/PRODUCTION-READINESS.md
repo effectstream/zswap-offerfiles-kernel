@@ -1,19 +1,26 @@
-# Production-readiness plan — what the grand e2e suite still does not prove
+# Production-readiness record — what the grand e2e suite proves and still defers
 
 Goal: before this indexer serves real money, six properties must be *tested*, not
 argued:
 
 | | Property | Status today |
 |---|---|---|
-| a | Bad data cannot get into the history | **partial** — the ladder is unit-tested, but 6 of its 14 reject codes never fire against a real gate, and history has no integrity audit at all |
-| b | Bad transactions don't reach users | **weak** — nothing re-validates what the API actually serves, and `expiresAt` is already in the past at ingestion on a quiet chain (§2.6) |
-| c | All data is correctly logged as real sales | **broken on the unshielded path** — and the suite currently asserts the break as correct behaviour |
-| d | History and pricing is correct | **broken** — `/v1/pairs.last_price` is inverted for half of all trades; the 24 h window still mixes clocks. Baskets no longer fabricate prints: §2.5 CLOSED by PR-#7 |
-| e | Duplicate zswaps allowed, accepting one disables the others | **partial** — only the N=2, single-input, same-door case |
-| f | Works for shielded *and* unshielded | **no** — cancels, chaos, TTL sweep and the liveness gate are shielded-only |
+| a | Bad data cannot get into the history | **proven for reachable wire paths** — both doors are asserted by code, history integrity and stored-byte/leg audits run, and the two fail-closed codes unreachable from today's wire format are documented as such |
+| b | Bad transactions don't reach users | **proven** — p8 re-validates served bytes, legs, liveness and expiry; §2.6 is fixed |
+| c | All data is correctly logged as real sales | **partial** — ordinary shielded and unshielded fill-vs-cancel is fixed and live-proven; PR #45 persists exact unshielded output identities, but the Phase-(d) read predicate still needs to switch off shape matching |
+| d | History and pricing is correct | **proven for the implemented market contract** — price orientation, chain-clock windows, basket exclusion and `/v1/pairs` ordering are fixed and live-proven |
+| e | Duplicate zswaps allowed, accepting one disables the others | **proven** — N-way, exact partial overlap, cross-door, late-loser, true concurrent-taker and same-block competition all pass |
+| f | Works for shielded *and* unshielded | **proven for wallet-built shapes** — cancels, chaos, TTL, liveness and layer-split audits pass; unusual unshielded execution/read shapes remain in their separate Phase-(c)/(d) workstream |
 
-Six product defects are named in §2. Every one of them gets a **failing test
-first** (PR-A), then a fix in its own PR, then the same test green.
+All six product defects named in §2 are fixed and merged. Closeout run 6 at
+`63c9fc5` recorded **238 checks, 0 failures, `maxLagBlocks 101`**, an empty
+loud-skip grep and both determinism checks green. Five-slot bootstrap,
+performance/SSE calibration, T-E2 and T-E5 are live-proven. The separate
+unshielded Phase-(c)/(d) workstream is not hidden by that result.
+
+> The sections below preserve the original red→green reasoning. “Today” inside
+> a historical defect or test design refers to the pre-fix tree; the status
+> table above and explicit DONE/FIXED labels are the current state.
 
 ---
 
@@ -35,7 +42,8 @@ first** (PR-A), then a fix in its own PR, then the same test green.
   [api.ts](../../node/api.ts),
   [queries.app.ts](../../database/sql/queries.app.ts),
   [000-init.sql](../../database/migrations/000-init.sql).
-- Suite: all 8 phases, 143 checks; `ledger.ts`, `adversary.ts`, `dump.ts`.
+- Suite: 12 scored phases, 238 final checks; `ledger.ts`, `adversary.ts`,
+  `dump.ts`.
 - Installed primitive grammars under
   `@effectstream/sm/primitives/src/midnight-*/` — to establish what the STM
   *could* see today without a framework change.
@@ -53,28 +61,28 @@ what did not:
 |---|---|
 | T-A1 Celestia door asserted by code | ✅ `p4` + `celestiaFixtures()`, incl. crypto-tamper and aged-root families |
 | T-A2 `NOT_A_SWAP` at both doors | ✅ `buildOneSidedOffer()`; skips with a loud note if the SDK stops dropping the leg |
-| T-A2 `NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` / `ROOT_UNREADABLE` | ⛔ not built — see §1.0.1 |
+| T-A2 `NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` / `ROOT_UNREADABLE` | ✅ `NO_SPENDABLE_INPUT` is shape-covered; exhaustive byte surgery proved `UNKNOWN_TOKEN` / `ROOT_UNREADABLE` unreachable from today's wire format, so both remain fail-closed unit guards by ruling |
 | T-A3 cross-layer | ✅ `buildCrossLayerOffer()` merges a live ss+uu pair; asserts `CROSS_LAYER` at both doors and **specifically not** `NOT_A_SWAP`; skips with a loud note if the merge stops producing one (§2.4) |
 | T-A4 history referential integrity | ✅ `p7b`, 5 SQL assertions |
 | T-A5 every stored blob re-validates (proofs included) | ✅ `p7b` deep pass, `GRAND_DEEP_AUDIT` |
-| T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass |
+| T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass; PR #45's exact unshielded identity persistence passed the final 66/66-blob deep audit |
 | T-B1…B4 what the API serves | ✅ new `p8-served` phase — **found §2.6** |
-| T-C1 unshielded cancels read `cancelled` | ✅ **red** RED-1a/b/c, RED-2 |
-| T-C2 Σ volume == Σ settled | ✅ **red** RED-5, RED-6 |
+| T-C1 unshielded cancels read `cancelled` | ✅ green, PR-B merged |
+| T-C2 Σ volume == Σ settled | ✅ green, PR-B merged |
 | T-C3 expiries are never trades | ✅ `p7b` |
 | T-C4 maker self-fill | ✅ `p3` |
-| T-D1 chain-clock 24 h window | ✅ **red** `trade-data.test.ts` (`test.failing`) |
+| T-D1 chain-clock 24 h window | ✅ green, PR-D merged |
 | T-D2 price orientation + inversion | ✅ `p2`, anchored to a known fill |
-| T-D3 `/v1/pairs` vs `/v1/chart/stats` | ✅ `p7b` (unregistered — see §1.2) + **red** in `fill-vs-cancel.test.ts` |
+| T-D3 `/v1/pairs` vs `/v1/chart/stats` | ✅ green, PR-C merged |
 | T-D4 `trade_count` + chain ordering | ✅ `p7b` |
 | T-D5 basket offers | ✅ `p3c-basket.ts` (both halves, running stack) + `multileg-pairs.test.ts` (all five surfaces, with a control) — §2.5 CLOSED |
 | T-E1 N-way competition | ✅ `p3b`, 3 competitors per layer |
-| T-E2 partial overlap between live offers | ⛔ deferred — needs denomination-controlled funding |
+| T-E2 partial overlap between live offers | ✅ exact `{A,B}` / `{B,C}` fixture; loser archives, reads cancelled, cannot settle and prints no trade |
 | T-E3 cross-door competition | ✅ `p3b`, one competitor via `blob.Submit` |
 | T-E4 loser arrives after the winner settled | ✅ `p3b`, both doors, by code |
-| T-E5 two takers, one coin | ⛔ deferred |
+| T-E5 two takers, one coin | ✅ barrier proves both requests in flight; one chain winner, one transaction-specific double-spend loser, one trade |
 | T-E6 same-block byte-identical duplicates | ✅ `p4` |
-| T-F1 cancel shapes, unshielded | ✅ **red** RED-1a/b/c — 3 of the 4 shapes |
+| T-F1 cancel shapes, unshielded | ✅ green, PR-B merged |
 | T-F2 `UTXO_NOT_LIVE` | ✅ via T-E4's unshielded arm |
 | T-F3 unshielded `expiresAt` + unreachable fallback | ✅ `p3` |
 | T-F4 chaos batch mixed-layer | ✅ `p5` |
@@ -107,28 +115,26 @@ run. See §2.4 and §2.5 for the measurements.
   wallet, that is a finding in itself — a fail-closed branch no real input can
   reach is either dead code or a defence against a future wire format.
 
-The remaining deferrals, T-E2 and T-E5, are ordinary ones: both need new wallet plumbing
-(denomination-controlled funding; concurrent taker settlement) rather than an
-unanswered question.
+T-E2 and T-E5 were the remaining ordinary wallet-plumbing gaps. Both are now
+implemented and passed live in closeout runs 5 and 6; the details and exact
+observables are recorded in §3(e).
 
-### 1.1 PR sequence
+### 1.1 Historical PR sequence and current merge state
 
 | PR | Contents | Product code touched |
 |---|---|---|
-| **A** | **Base test suite.** Every test in §3, the `KNOWN_RED` registry, the new helpers, the new `p8-served` phase. Ends with a full run whose scorecard lists each defect as a recorded red. | **none** |
-| **B** | Unshielded fill-vs-cancel (§2.1) — **DONE**, verified 205/0 | validator, STM, schema, `cancelledPredicate` |
-| **C** | `pair_stats.last_price` inversion (§2.2) — **DONE** | `upsertPairStatsByOfferId` |
-| **D** | 24 h stats window clock (§2.3) | `getPairStats24h`, `trade-data.ts` |
-| **E** | Cross-layer rule (§2.4) — **ruled: REJECT** | validator ladder, new `CROSS_LAYER` code |
-| **F** | Basket offers (§2.5) — **ruled: ACCEPT, exclude from market data** | the four market queries only; ingestion unchanged |
-| **G** | `expiresAt` already-expired on a quiet chain (§2.6) | `state-machine.ts` expiry derivation |
-| **H** | Sweep: reds that turn out to be unreachable-code findings; delete `KNOWN_RED` | docs |
+| **A–D/H** | Base suite plus §2.1–§2.3 and cursor/determinism fixes | merged through consolidation PR #35 |
+| **G** | §2.6 advertised and actual expiry | merged as PR #37 |
+| **E/F** | Cross-layer rejection, basket exclusion, ordering contract; plus post-commit events and shape fixtures | merged through consolidation PR #43 |
+| **Run fixes** | Six defects found by the first full run | merged as PR #44 |
+| **Unshielded (b)** | Segment-aware exact output identities and ladder verdicts | merged as PR #45; execution/read phases remain separate |
+| **Closeout** | Docs/pgtyped guard, five-slot bootstrap, calibration, T-E2/T-E5 and final green run | PR #46, ready for maintainer review; never agent-merged |
 
 PR-A is deliberately product-inert. Its job is to make every defect **visible
 and reproducible** before anyone touches the code that causes it, so each later
 PR has a specific red to point at and a specific green to earn.
 
-### 1.2 Red-green discipline — the `KNOWN_RED` registry
+### 1.2 Red-green discipline — the `KNOWN_RED` registry *(mechanism retained; registry currently empty)*
 
 A test that fails on merge is worthless if it just turns the suite red and gets
 ignored. So PR-A adds an explicit expected-failure registry, keyed on the exact
@@ -194,73 +200,44 @@ what proves the test, not just the fix.
 
 ---
 
-## 2. Product defects — each gets a red in PR-A
+## 2. Historical product defects and their red gates
 
-### 2.1 Unshielded fill-vs-cancel — a market-data integrity hole → **PR-B**
+### 2.1 Unshielded fill-vs-cancel — **FIXED by PR-B; exact-identity read switch remains Phase (d)**
 
-**Today.** `cancelledPredicate`
+**Historical defect.** `cancelledPredicate`
 ([queries.app.ts:84](../../database/sql/queries.app.ts)) classifies using
 nullifier tx-grouping plus shielded output commitments as fill markers.
 Unshielded spends have neither: `midnight-unshielded-spend`
 ([state-machine.ts:233](../../node/state-machine.ts)) reads only
 `(owner, intentHash, outputIndex)` and `offer_file_unshielded_spends`
 ([000-init.sql:71](../../database/migrations/000-init.sql)) has no `tx_hash`
-column. So **every** consumption of an unshielded-only offer classifies
-`consumed`.
+column. Consequently **every** consumption of an unshielded-only offer used to
+classify `consumed`.
 
 **Impact.** A maker publishes an unshielded offer, then spends their own UTXO on
 themselves. The offer is recorded as a completed sale: it enters
 `/v1/chart/history`, adds to `volume_base`/`volume_quote`, moves `last_price`,
 and increments `pair_stats.trade_count`. Cost of fabricating arbitrary volume on
 any unshielded pair, at a price and size of the maker's choosing: one
-self-transfer. The suite currently asserts this twice as intended behaviour —
+self-transfer. The pre-PR-B suite asserted this twice as intended behaviour —
 [p3-lifecycle.ts:167](phases/p3-lifecycle.ts) and
 [p3b-competing.ts:196](phases/p3b-competing.ts) — and `ledger.fillLedger()`
 ([ledger.ts:132](ledger.ts)) *models* the inflation so the audit stays green.
 
-**Fixable now, no framework change.** Verified against the installed grammars
-(`primitives/src/midnight-unshielded-{spend,create}/…-grammar.ts`): **both**
-payloads already carry `txHash`, plus `value` and `tokenType`. The state machine
-discards them. So the shielded rule ports over exactly.
+**What is current.** PR-B retained spend/create transaction evidence and added
+the same partial/split/missing-marker branches used on the shielded side; the
+wallet-built cancel cases, chart totals and layer audits are green. PR #45 then
+made every declared unshielded marker an exact ledger identity
+`(owner, intent_hash, output_no)` derived from the offer's own intent, with
+`token_type` and `value` retained only for display/audit.
 
-**Fix shape (PR-B):**
+One deliberately separate step remains: `unshieldedCancelledPredicate` still
+groups its missing-marker comparison by `(owner, token_type, value)`. Phase (d)
+will switch that lookup to the already-persisted exact identity and close the
+cross-offer same-shape bypass. This closeout does not implement or claim that
+separate workstream.
 
-1. `packages/database/migrations/000-init.sql` (edited in place — new system, no
-   migration): new permanent table mirroring `nullifiers`:
-   ```sql
-   CREATE TABLE unshielded_spends (
-       owner       TEXT    NOT NULL,
-       intent_hash TEXT    NOT NULL,
-       output_no   INTEGER NOT NULL,
-       tx_hash     TEXT,
-       height      BIGINT  NOT NULL,
-       PRIMARY KEY (owner, intent_hash, output_no)
-   );
-   ```
-   plus `tx_hash TEXT` on `offer_file_unshielded_spends{,_history}`.
-   Today the `created_unshielded` row is DELETEd on spend and nothing survives,
-   which is why branches 1 and 2 can never fire for unshielded offers.
-2. `state-machine.ts` `midnight-unshielded-spend`: insert into
-   `unshielded_spends` with `bytesOrStringToHex(payload.txHash)` before the
-   existing `deleteCreatedUnshielded`.
-3. `derive.ts`: new `collectUnshieldedOutputs(tx)` mirroring
-   `collectOutputCommitments` — the offer's own unshielded outputs
-   `(recipient, tokenType, value)`, read from
-   `intent.{guaranteed,fallible}UnshieldedOffer.outputs`. These are the
-   unshielded **fill markers**: a settling tx creates exactly these UTXOs.
-4. `celestia-zswap`: persist them alongside the commitment markers.
-5. `cancelledPredicate`: add the three unshielded branches, `OR`-ed with the
-   existing shielded ones —
-   - partial: an `offer_file_unshielded_spends_history` row with no matching
-     `unshielded_spends` row;
-   - split: `COUNT(DISTINCT tx_hash) > 1` over the offer's spends;
-   - missing markers: all spends in one tx, but that tx did not create every one
-     of the offer's declared unshielded outputs (join `created_unshielded`
-     history on the same `tx_hash` + `(owner, tokenType, value)`).
-
-**Red in PR-A:** T-C1, T-C2, T-F1, and the `uu` arms of T-E1/T-E2.
-
-### 2.2 `pair_stats.last_price` is inverted for half of all trades → **PR-C — FIXED**
+### 2.2 `pair_stats.last_price` was inverted for half of all trades → **PR-C — FIXED**
 
 *(found while writing T-D3 — not previously reported)*
 
@@ -305,7 +282,11 @@ CASE WHEN g.token_color = LEAST(g.token_color, w.token_color)
 **Red in PR-A:** T-D2 (direction-dependence, one direction fails) and T-D3
 (route disagreement).
 
-### 2.3 The 24 h stats window still mixes clocks → **PR-D**
+### 2.3 The 24 h stats window mixed clocks → **PR-D — FIXED**
+
+**Current status.** `getPairStats24h` receives a cutoff derived from the L2 tip,
+and `trade-data.test.ts` proves a node replaying behind wall clock keeps recent
+chain-time fills inside its 24-hour window.
 
 `getPairStats24h` ([queries.app.ts:311](../../database/sql/queries.app.ts))
 bounds its window with `NOW() - INTERVAL '24 hours'` while comparing against
@@ -512,7 +493,11 @@ Two notes on how it landed:
 **Test:** T-D5 (`p3c-basket.ts`, both halves against a running stack) and
 [multileg-pairs.test.ts](../../database/multileg-pairs.test.ts).
 
-### 2.6 `expiresAt` is already in the past when the offer is indexed → **PR-G**
+### 2.6 `expiresAt` was already in the past when indexed → **PR-G — FIXED**
+
+**Current status.** The expiry derivation uses the same current-root escape as
+the liveness gate, and cleanup uses the same bounded policy. The 2026-08-13 full
+run proved the advertised-expiry and live-book checks green.
 
 *(found by p8 on the third full run — the first run where p8 had a populated
 book to audit)*
@@ -572,13 +557,14 @@ it is implemented**, and **what it catches**.
 
 **Why.** The Celestia namespace is permissionless — `/v1/offers` can be bypassed
 entirely, which is why `celestia-zswap` calls itself "the real gate"
-([state-machine.ts:362](../../node/state-machine.ts)). Today all four garbage
-families ([adversary.ts:151](actors/adversary.ts)) fail at step 3 (deserialize);
-the STM's own gates are exercised **only** through the API.
+([state-machine.ts:362](../../node/state-machine.ts)). Before T-A1 all four
+garbage families failed at step 3 (deserialize), so deeper STM gates were
+exercised only through the API. T-A1 now drives those codes at the Celestia
+door and checks the persisted rejection totals.
 
 **How.**
 
-1. `lib/db2.ts` — the assertion primitive that is missing today. `offer_rejections`
+1. `lib/db2.ts` — the assertion primitive added for this test. `offer_rejections`
    is keyed `(celestia_height, code)`, and heights are L2 so they cannot be
    correlated; but per-code *totals* diff cleanly:
    ```ts
@@ -723,7 +709,7 @@ Plus two that need the suite's own record:
 **Catches.** #1 is the important one: `getTradeHistory` inner-joins both sides,
 so an offer that loses a leg during archival **disappears from trade history
 silently**. A real sale vanishing is worse than a wrong one appearing, and
-nothing today would notice.
+nothing before T-A4 would have noticed.
 
 ---
 
@@ -731,7 +717,7 @@ nothing today would notice.
 
 → `phases/p7b-audit.ts` + new `lib/verify.ts`
 
-p7b today recomputes only sha256 ([p7b-audit.ts:79](phases/p7b-audit.ts)) — a
+Before T-A5, p7b recomputed only sha256 — a
 row can be hash-correct and semantically garbage.
 
 ```ts
@@ -844,7 +830,7 @@ export async function p8Served(db: Client): Promise<void> {
    ```
    with `$2` = tip `ms_timestamp` − `ROOT_WINDOW_SECONDS`·1000.
 
-**(4) is the one that matters.** Nothing today stops the book listing an offer
+**(4) is the one that matters.** Before p8, nothing stopped the book listing an offer
 that has become unfillable. The code names the failure class itself — "phantom,
 unfillable offers", [network-windows.ts:12](../../node/network-windows.ts) —
 without testing it.
@@ -897,7 +883,7 @@ is not covered even at unit level ([api.test.ts:96,111](../../node/api.test.ts))
 
 ---
 
-#### T-C1 · Unshielded cancels read `cancelled` *(red until PR-B)*
+#### T-C1 · Unshielded cancels read `cancelled` *(DONE — PR-B)*
 
 → `phases/p3-lifecycle.ts`, `phases/p3b-competing.ts` · depends on §2.1
 
@@ -923,11 +909,11 @@ fail for an unrelated-looking reason.
 
 ---
 
-#### T-C2 · Aggregate volume equals settled offers *(red until PR-B)*
+#### T-C2 · Aggregate volume equals settled offers *(DONE — PR-B)*
 
 → p7b
 
-Today the oracle is bent to match the bug. Once §2.1 lands, assert the invariant
+Before PR-B the oracle was bent to match the bug. The landed check asserts the invariant
 directly instead of pair-by-pair against a modelled ledger:
 
 ```ts
@@ -988,7 +974,7 @@ it is wrong here.
 
 ---
 
-#### T-D1 · The 24 h window follows the chain clock *(red until PR-D)*
+#### T-D1 · The 24 h window follows the chain clock *(DONE — PR-D)*
 
 → `packages/node/trade-data.test.ts` (unit) + p7b (guard)
 
@@ -1012,7 +998,7 @@ routes must never contradict each other about whether trades exist.
 
 ---
 
-#### T-D2 · Price inversion *(red until PR-C)*
+#### T-D2 · Price inversion *(DONE — PR-C)*
 
 → `phases/p2-api.ts`
 
@@ -1045,7 +1031,7 @@ a literal expectation does not.
 
 ---
 
-#### T-D3 · `/v1/pairs` and `/v1/chart/stats` agree *(red until PR-C)*
+#### T-D3 · `/v1/pairs` and `/v1/chart/stats` agree *(DONE — PR-C)*
 
 → p7b
 
@@ -1117,7 +1103,8 @@ stray row.
 → `phases/p3b-competing.ts`
 
 A price ladder over one coin is the *normal* maker pattern, not an edge case.
-p3b builds exactly two ([p3b-competing.ts:55](phases/p3b-competing.ts)).
+p3b now builds three published competitors plus one held-back late arrival per
+layer.
 
 **How.** Generalise `buildCompetingPair` → `buildCompetingSet(pw, shielded,
 idxBase, n)`: the existing build → `storeBlob` → `wallet.revert(finalized)`
@@ -1127,12 +1114,11 @@ byte-identical sibling would be rejected by content dedup — a different test).
 
 Assert: all `n` indexed and sharing one input; settle exactly one; **all** `n`
 archive; the winner reads `consumed`, all `n−1` losers read `cancelled`; the
-pair shows exactly **one** trade. Run for both layers (the `uu` arm is red until
-PR-B).
+pair shows exactly **one** trade. Both layer arms are green after PR-B.
 
 ---
 
-#### T-E2 · Partial overlap between two live offers
+#### T-E2 · Partial overlap between two live offers *(DONE — PR #46)*
 
 → p3b
 
@@ -1157,17 +1143,19 @@ Build X (2500) → `revert` → build Y (3500) → `revert` → publish both →
 rows. Settle Y. Assert X archives, reads `cancelled`, contributes no volume, and
 leaves the book while c1 is still unspent.
 
+**Live result.** Runs 5 and 6 proved the input sets share exactly B; offer 1
+settles; the loser leaves the live book, reads `cancelled`, cannot settle and
+adds no trade print. The final p3b phase passed all 34 checks.
+
 ---
 
 #### T-E3 · Cross-door competition
 
 → p3b
 
-Both competitors currently publish via `api` (`publishPath: "api"` is hard-coded
-in `buildCompetingPair`'s `mk()`). Set the loser's `publishPath` to `"celestia"`
-so `publishAndIndex` routes it through `submitBlobRaw`, and the STM's own
-dedup/liveness ordering decides rather than the API's. One-line change, real
-coverage.
+**DONE.** One competitor publishes through raw `blob.Submit`, so the STM's own
+dedup/liveness ordering decides rather than the API's. Its siblings use the API,
+proving both doors participate in the same competition.
 
 ---
 
@@ -1192,18 +1180,22 @@ same coin has no dedup match, so only liveness can stop it.
 
 ---
 
-#### T-E5 · Two takers, two competing offers, one coin
+#### T-E5 · Two takers, two competing offers, one coin *(DONE — PR #46)*
 
 → p3b
 
-**How.** Take the winner and one loser from `buildCompetingSet`, hand each to a
-different taker, and fire both settlements without awaiting in between (the
-existing `submitToBalancer` is already non-blocking;
-[wallets.ts:207](actors/wallets.ts)). Exactly one lands on chain.
+**How.** Take two offers from `buildCompetingSet` and hand them to different
+takers. Prepare/prove both transactions before submission. The ordinary
+`submitToBalancer` deliberately serializes through the suite-wide
+`balancerChain`, so T-E5 bypasses it with `submitConcurrentlyToBalancer`,
+releases both raw requests from one barrier and records whether both entered
+the batcher call before the first response. Exactly one may land on chain.
 
-Assert: exactly one trade on the pair; both offers archived; the losing taker's
-failure leaves no half-archived state (T-A4's integrity queries re-run after);
-and volume counted once.
+**Live result.** Runs 5 and 6 proved at least two startup worker slots, both
+requests in flight before receipt 1, exactly one winner and a losing
+transaction fingerprint with batcher/chain submission rejection (never the
+ingestion-only `UTXO_NOT_LIVE` code). Every competitor archived exactly once;
+reads split one `consumed` / remaining `cancelled`; exactly one trade printed.
 
 ---
 
@@ -1211,19 +1203,19 @@ and volume counted once.
 
 → p4
 
-**How.** `submitBlobRaw(bytes)` twice back-to-back with no delay, so both land
-inside one Celestia `delayMs` window and therefore one L2 block.
+**How.** After one canonical offer is indexed, publish its raw bytes twice
+back-to-back with no delay, so both replays land inside one Celestia `delayMs`
+window and therefore one L2 block.
 
-Assert: exactly one `offer_file` row; exactly one `DUPLICATE_OFFER` rejection;
-and — the real point — **the node is still alive** (`p0`'s process check
-re-run) and the block's other offers were indexed.
+Assert: both replay blobs are refused `DUPLICATE_OFFER`; the canonical offer
+still exists exactly once; and — the real point — **the node is still alive**
+and the block transaction did not abort.
 
-**Why.** Both blobs are processed inside a single block transaction, so the
-second one's dedup probe (`getOfferStatusByHash`) must observe the first one's
-*uncommitted* INSERT. If it does not, the unique index catches it as an STF
-error that aborts the whole block — taking every legitimate offer at that height
-with it. That is the same blast-radius shape as the NUL crash, and it is
-currently untested.
+**Why.** Both blobs are processed inside one block transaction against an
+already-indexed canonical offer. The fixture proves a same-block duplicate
+burst produces two coded refusals without aborting the block, deleting the
+canonical row or duplicating it. It does **not** claim to exercise visibility
+between two new, uncommitted inserts.
 
 ---
 
@@ -1231,7 +1223,7 @@ currently untested.
 
 ---
 
-#### T-F1 · The four cancel shapes, unshielded *(red until PR-B)*
+#### T-F1 · The four cancel shapes, unshielded *(DONE — PR-B)*
 
 → p3 · depends on §2.1
 
@@ -1303,12 +1295,12 @@ picks.
 Report every audit result split by layer, and **fail if either layer contributed
 zero offers to a class** (settled / cancelled / expired / live). Coverage that
 silently collapses onto one layer is the exact failure mode this whole section
-exists to catch — and it is how the current shielded-only cancel coverage went
+exists to catch — and it is how the then-current shielded-only cancel coverage went
 unnoticed.
 
 ---
 
-## 4. Infrastructure PR-A must add
+## 4. Historical PR-A infrastructure
 
 1. **`known-red.ts`** + the `check()` branch (§1.2).
 2. **`lib/verify.ts`** — `fullyValidate()`, the one place that re-derives truth
@@ -1326,7 +1318,7 @@ unnoticed.
    the fates table (T-F5).
 8. **`config.ts`** — `GRAND_DEEP_AUDIT` for T-A5's exhaustive mode.
 
-## 5. Budget
+## 5. Historical implementation budget
 
 | | |
 |---|---|

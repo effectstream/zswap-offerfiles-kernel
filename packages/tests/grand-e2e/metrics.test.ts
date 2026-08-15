@@ -64,7 +64,8 @@ test("the tail IS enforced once there are enough samples", () => {
 
 test("a deliberately slowed submit path still fails the median gate", () => {
   const snap = snapWith({ count: 10, p50: 7, p95: 18 });
-  snap.submit = { count: 60, p50: 4000, p95: 6000, max: 6500 };
+  const slowedP50 = BASE.submitP50Ms * 2;
+  snap.submit = { count: 60, p50: slowedP50, p95: slowedP50 * 1.5, max: slowedP50 * 2 };
   const { violations } = baselineViolations(snap, BASE);
   expect(violations.join(" ")).toContain("submit p50 ms");
 });

@@ -281,7 +281,8 @@ function readCanonicalBatcherTrace(): string {
 
 export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Promise<void> {
   beginPhase("p5-load");
-  const batcherTraceOffset = readCanonicalBatcherTrace().length;
+  const batcherTraceBefore = readCanonicalBatcherTrace();
+  const batcherTraceOffset = batcherTraceBefore.length;
   const plan = planOffers(actors);
   note(
     "plan",
@@ -540,8 +541,9 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     const maxBatchSize = Math.max(0, ...batchSizes);
     await check(
       "batcher formed a multi-transaction p5 batch",
-      async () => maxBatchSize >= 2,
-      `max p5 batch=${maxBatchSize}; startup capacity alone is not a throughput proof`,
+      async () => batcherTraceOffset > 0 && maxBatchSize >= 2,
+      `trace-at-start=${batcherTraceOffset} chars, max p5 batch=${maxBatchSize}; ` +
+        `startup capacity alone is not a throughput proof`,
     );
     const batcherWallMs = Math.max(0, lastBatcherRequestAt - firstBatcherRequestAt);
     const effectiveMs = batcherRequests > 0 ? Math.round(batcherWallMs / batcherRequests) : 0;

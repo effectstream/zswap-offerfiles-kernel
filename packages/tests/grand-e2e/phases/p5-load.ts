@@ -274,11 +274,10 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     `expired=${plan.expired.length} settled=${plan.settled.length} cancelled=${plan.cancels.length} live=${plan.live.length}`,
   );
   note(
-    "FINDING (throughput ceiling, reported)",
-    "the dev batcher runs its midnight-balancer with ONE wallet and the SDK default maxSlotsPerWallet=1 " +
-      "(pool W1 in its logs) — every settlement/cancel/split serializes at ~25 s/tx (~2.4 tx/min). " +
-      "The suite gates offer builds on settle depth to keep offers inside their 600 s window; production " +
-      "load needs maxSlotsPerWallet>1 and/or multiple batcher wallet seeds.",
+    "batcher throughput configuration",
+    "the dev batcher now blocks startup until one wallet has five registered NIGHT UTXOs, five " +
+      "fee-capable dust streams and maxSlotsPerWallet=5. The startup 'worker slots: 5' line is the " +
+      "resource proof; p5 records the actual settle overlap below.",
   );
 
   const offersBeforeStorm = await tableCount(db, "offer_file");
@@ -310,8 +309,8 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     let settleInFlight = 0;
     let settlePeak = 0;
     const settleDone: Promise<void>[] = [];
-    // Backpressure: the single-worker batcher settles ~2.4 tx/min. Unthrottled
-    // makers would out-publish it, and offers queued past ~8 min age out
+    // Backpressure: even with five workers, unthrottled makers can out-publish
+    // the proof server, and offers queued past ~8 min age out
     // (600 s TTL sweep + root window) before their settle runs. Gate offer
     // BUILDS on in-flight settle depth so index→settle stays inside the window.
     const SETTLE_GATE = actors.takers.length * 2;
@@ -494,6 +493,10 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     await Promise.all(settleDone);
 
     await check("taker settle concurrency reached queue depth ≥ 4", async () => settlePeak >= 4, `peak=${settlePeak}`);
+    note(
+      "settlement overlap",
+      `peak=${settlePeak}; the former one-worker run could not process more than one batcher request at once`,
+    );
 
     // 5a post-storm invariants.
     await check("5a: node RSS grew < 30% across the storm", async () => {

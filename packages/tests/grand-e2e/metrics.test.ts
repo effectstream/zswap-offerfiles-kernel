@@ -32,6 +32,7 @@ function snapWith(bookRead: { count: number; p50: number; p95: number }) {
 }
 
 const BASE = {
+  submitP50Ms: 2627,
   submitP95Ms: 6654,
   publishToIndexedP95Ms: 23983,
   bookReadP50Ms: 8,
@@ -59,6 +60,24 @@ test("the tail IS enforced once there are enough samples", () => {
   const { violations, notes } = baselineViolations(snapWith({ count: 200, p50: 7, p95: 42 }), BASE);
   expect(violations.join(" ")).toContain("book read p95 ms");
   expect(notes).toEqual([]);
+});
+
+test("a deliberately slowed submit path still fails the median gate", () => {
+  const snap = snapWith({ count: 10, p50: 7, p95: 18 });
+  snap.submit = { count: 60, p50: 4000, p95: 6000, max: 6500 };
+  const { violations } = baselineViolations(snap, BASE);
+  expect(violations.join(" ")).toContain("submit p50 ms");
+});
+
+test("an out-of-band SSE median fails once its baseline keys are present", () => {
+  const snap = snapWith({ count: 10, p50: 7, p95: 18 });
+  snap.sseDeliveryLagMs = { count: 21, p50: 4000, p95: 4500, max: 5000 };
+  const { violations } = baselineViolations(snap, {
+    ...BASE,
+    sseDeliveryLagP50Ms: 2224,
+    sseDeliveryLagP95Ms: 2708,
+  });
+  expect(violations.join(" ")).toContain("SSE delivery lag p50 ms");
 });
 
 test("a healthy run produces neither violations nor notes", () => {

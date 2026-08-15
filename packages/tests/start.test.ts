@@ -13,6 +13,7 @@ import {
 const root = path.resolve(import.meta.dirname!, "../..");
 
 const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
+const midnightMintTestTokens = "midnight-mint-test-tokens";
 
 export default {
   processes: [
@@ -36,7 +37,7 @@ export default {
     ),
 
     {
-      name: "midnight-mint-test-tokens",
+      name: midnightMintTestTokens,
       description: "Mint test tokens (2 shielded + 1 unshielded) via the offer-files contract",
       cwd: path.join(root, "packages/contracts-midnight"),
       args: ["run", "mint-test-tokens.ts"],
@@ -72,7 +73,9 @@ export default {
       stopProcessAtPort: [3334],
       waitToExit: false,
       type: "system-dependency",
-      dependsOn: [...midnightDeps],
+      // Match the dev stack: the batcher's temporary full-wallet bootstrap
+      // starts only after the mint wallet has released its indexer sessions.
+      dependsOn: [...midnightDeps, midnightMintTestTokens],
     },
   ],
 } satisfies OrchestratorConfig;

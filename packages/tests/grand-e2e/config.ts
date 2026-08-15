@@ -104,6 +104,13 @@ export const INDEX_WAIT_TRIES = 36;     // × 5 s — publish → offer_file row
 export const ARCHIVE_WAIT_TRIES = 36;   // × 5 s — spend → history row
 export const EXPIRY_SLACK_MS = 240_000; // sweep slack past the 600 s TTL
 
+// A raw blob.Submit is the first leg of the same Celestia → STM → DB path.
+// Give it the same 180-second budget as indexing: a fixed 90-second fetch
+// timeout aborted the run-3 same-block pair while measured STM lag was still
+// inside the valid-run envelope. This is one shared budget, not a second knob
+// that can silently drift from INDEX_WAIT_TRIES.
+export const CELESTIA_RPC_TIMEOUT_MS = INDEX_WAIT_TRIES * 5_000;
+
 // Client-side API budget: the node rate-limits 60 req/min/IP, and this suite
 // shares that budget across everything it does. Normal phases stay under it
 // (DB polls are free); the 5a storm deliberately blows through it.

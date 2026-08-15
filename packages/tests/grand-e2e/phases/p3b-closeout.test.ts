@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { CELESTIA_RPC_TIMEOUT_MS, INDEX_WAIT_TRIES } from "../config.ts";
 import {
   PARTIAL_OVERLAP_COINS,
   PARTIAL_OVERLAP_GIVES,
@@ -7,6 +8,11 @@ import {
   hasBatcherChainRejection,
 } from "./p3b-closeout.ts";
 import { submitConcurrentlyToBalancer } from "../actors/wallets.ts";
+
+test("raw Celestia RPC and downstream indexing share one timeout budget", () => {
+  expect(CELESTIA_RPC_TIMEOUT_MS).toBe(INDEX_WAIT_TRIES * 5_000);
+  expect(CELESTIA_RPC_TIMEOUT_MS).toBe(180_000);
+});
 
 test("T-E2 denominations select {A,B} and {B,C}, with exactly B shared", () => {
   const [offer1, offer2] = PARTIAL_OVERLAP_GIVES.map((amount) =>

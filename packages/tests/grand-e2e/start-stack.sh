@@ -33,7 +33,12 @@ for i in $(seq 300); do
       echo "BOOTSTRAP FAILED: $(grep -a 'exited with code' "$LOG" | tail -1 | sed 's/\x1b\[[0-9;]*m//g')"
       exit 2
     fi
-    curl -s --max-time 5 http://127.0.0.1:9999/v1/health | grep -q '"status":"ok"' && { echo "STACK READY"; exit 0; }
+    if curl -s --max-time 5 http://127.0.0.1:9999/v1/health | grep -q '"status":"ok"' &&
+      grep -qa 'NIGHT bootstrap: .*5 spendable dust streams' "$LOG" &&
+      grep -qa 'worker slots: 5 ' "$LOG"; then
+      echo "STACK READY"
+      exit 0
+    fi
   fi
   grep -qa "Shutting down: " "$LOG" && {
     echo "BOOTSTRAP FAILED: $(grep -a 'exited with code' "$LOG" | tail -1 | sed 's/\x1b\[[0-9;]*m//g')"

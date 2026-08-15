@@ -9,7 +9,7 @@ Use:
 - [`ISSUES.md`](ISSUES.md) for the current open issues;
 - [`PRODUCTION-READINESS.md`](PRODUCTION-READINESS.md) for the six properties,
   test contracts and historical red→green analysis;
-- [`FINDINGS.md`](FINDINGS.md) for measured conclusions and the resume point;
+- [`FINDINGS.md`](FINDINGS.md) for measured conclusions and the next boundary;
 - [`HANDOFF.md`](HANDOFF.md) for the current run playbook.
 
 The retired analysis remains available in git history. Do not add new work to

@@ -294,12 +294,10 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
   }
 
   // ── 4.8 byte-identical duplicates inside ONE L2 block ────────────────────
-  // Both blobs are processed inside a single block transaction, so the second
-  // one's dedup probe (getOfferStatusByHash) must observe the first one's
-  // UNCOMMITTED insert. If it does not, the unique index catches it instead —
-  // as an STF error that aborts the whole block, taking every legitimate offer
-  // at that height down with it. That is the NUL crash's blast-radius shape,
-  // and it has never been tested.
+  // Both blobs are processed inside one block transaction against the already
+  // indexed canonical offer. Prove the burst yields two coded refusals without
+  // aborting the block, deleting the canonical row or duplicating it. This
+  // does not claim visibility between two new, uncommitted inserts.
   {
     const dupBytes = OfferFiles.decode(art.liveBlob);
     const dupHash = offerHashFromBlob(art.liveBlob);

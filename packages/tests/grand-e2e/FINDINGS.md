@@ -1,113 +1,149 @@
-# Production-readiness findings and resume point
+# Production-readiness findings and closeout record
 
-Current as of 2026-08-14. This file records the conclusions that should survive
-the work, not a stale merge queue. See `PRODUCTION-READINESS.md` for detailed
-red→green reasoning and `ISSUES.md` for the current open set.
+Current as of 2026-08-15. This file records conclusions that should survive the
+work. See `PRODUCTION-READINESS.md` for detailed red→green reasoning,
+`ISSUES.md` for the remaining separate work, and `HANDOFF.md` for operations.
 
 ## Current state
 
-- `main` is `5aec4d7` after PR #45.
-- Unit baseline is 262 pass, 0 fail.
-- Latest valid full run: 223 checks, 1 failure, `maxLagBlocks 80`; both p7a
-  determinism checks passed.
-- The one failure is a performance baseline calibrated at 25 offers/seven
-  slots but exercised at 60 offers/one slot. It is not permission to raise the
-  threshold; concurrency must be fixed and measured first.
-- Remaining closeout: five-slot bootstrap/recalibration, SSE keys, T-E2/T-E5,
-  and the final fully-green run.
+- Closeout branch `fix/production-readiness-closeout` is open as PR #46.
+- Static gate: 274 pass, 0 fail, 707 assertions across 39 files.
+- The pgtyped delete/regenerate/diff guard is green and the grand runner
+  bundles.
+- Final fresh-chain run at `63c9fc5`: **238 checks, 0 failures, 87.9 minutes,
+  `maxLagBlocks 101`, `lastLagBlocks 2`**.
+- Both p7a determinism checks passed; state A/B share SHA-256
+  `24ef7cc73f84f9a3277e167a1ab6c6b4b0db62a868b93a5b4ed8151d6d0477b0`.
+- The loud-skip grep is empty. No foreign heavy process or indexer pool error
+  contaminated the run.
+- Final evidence is hash-pinned at
+  `/tmp/zswap-closeout-evidence/run6-final-green/`.
 
 ## Findings that changed the design
 
-### Concurrency is coin-count limited
+### Batcher concurrency is coin-count limited
 
-The batcher can have a large NIGHT balance and still serialize. Each in-flight
-transaction reserves a distinct spendable coin. The closeout configuration is
-one wallet with at least five spendable NIGHT UTXOs and
-`maxSlotsPerWallet=5`; bootstrap self-splits when needed. The proof is p5 no
-longer reporting roughly 25 s per single-file transaction.
+A wallet can hold a large NIGHT balance and still serialize because each
+in-flight transaction reserves a distinct spendable coin. The dev stack now
+blocks readiness until one wallet proves five registered NIGHT UTXOs, five
+fee-capable dust streams and `maxSlotsPerWallet=5`; it self-splits when
+genesis supplies fewer.
+
+Configuration is not the proof. The final p5 run measured task peak 15,
+batcher HTTP peak 6 and max batch 4. Its 23.3 s/effective request was close to
+the old ~25 s wall rate, but six simultaneous HTTP requests and a
+four-transaction batch prove the client-side single-file path is gone.
 
 ### Unshielded output identities are knowable at publication
 
 The old premise said payout intent hash/output index belonged to the settling
-intent and therefore markers had to shape-match `(owner, token_type, value)`.
-Live settlement evidence disproved it: per-party intents survive
-`Transaction.merge`, and each payout's creating identity is derivable from the
-offer's own intent.
+intent, forcing marker shape matching by `(owner, token_type, value)`. Live
+evidence disproved it: per-party intents survive `Transaction.merge`, and the
+offer itself reveals each output's creating identity.
 
-PR #45 now persists exact `(owner, intent_hash, output_no)` marker identities,
+PR #45 persists exact `(owner, intent_hash, output_no)` marker identities,
 including segment-aware intent hashes; token type/value remain audit fields.
-The Phase-(d)-deferred SQL classifier still uses its temporary shape grouping,
-so the cross-offer same-shape bypass is not claimed fixed by closeout.
+The separate Phase-(d) SQL classifier still uses its temporary shape grouping.
+Closeout does not claim that read switch or unusual-shape execution complete.
 
-### Lag failures can be external and must be classified first
+### Performance baselines need provenance, not accumulated slack
 
-One compromised run reached `maxLagBlocks 1403` while another workload starved
-the Celestia devnet; the chain tip itself stopped advancing. Downstream publish,
-index, chart and SSE failures were consequences, not separate product defects.
-Healthy historical lag is 53–96. Above roughly 150 voids a run.
+The old submit baseline was calibrated at 25 offers and a different slot
+profile, then used against 60 offers. Run 5 supplied clean five-slot
+measurements: submit p50/p95 3619/12167 ms and publish-to-index p95 27183 ms.
+`baseline.json` records the source run and relies only on the existing ×1.2
+enforcement margin.
+
+The submit p50 companion prevents a low-count tail from carrying the gate
+alone. An exact run-5 snapshot passes, a 2× slowed submit median fails, and a
+151-block path fails the lag gate.
+
+### SSE tail and TTL scheduling are different populations
+
+SSE measures CONSUMED archives. TTL scheduling lag is reported separately and
+covered by STM lag. Clean samples 2 and 3 measured 2224/2708 and 2254/10008 ms;
+the committed p50/p95 keys use the required maximum per-run values
+2254/10008, without extra headroom. Below 50 samples the SSE p95 is reported,
+while the median remains enforced.
+
+### Lag failures must be classified before product debugging
+
+A historical contended run reached `maxLagBlocks 1403` while another workload
+starved the devnet. Closeout classified two later runs VOID at 233.9 and 162.9
+blocks instead of treating downstream timeouts as product failures.
+
+The final run peaked at 101: above the 53–96 calibration-sample band but below
+the committed 114 gate and 150 VOID ceiling. It is valid final evidence, not a
+calibration sample.
 
 ### A transport error is not a settlement verdict
 
-A batcher connection failure was measured twice while the transaction outcome
-remained discoverable on chain. Re-check chain state before deciding whether a
-settlement failed or retrying it.
+A batcher connection failure can occur after the chain has decided the
+transaction. T-E5 therefore correlates its losing transaction's fingerprint
+with the batcher chain-rejection trace and checks final chain/API state rather
+than treating a callback timeout as the verdict.
 
-### `test.failing` can produce a false red/green story
+### `test.failing` can produce a false red→green story
 
 Bun treats a thrown exception inside `test.failing` as the expected failure.
-The basket test once passed for a missing-table throw and could never signal its
-fix. Closeout uses explicit before/after evidence and removes all remaining
-`test.failing` calls.
+The basket test once passed because a table was missing. Closeout uses explicit
+before/after evidence; the scoped repository search contains no
+`test.failing(...)` calls.
 
-## What is merged and proven
+## What is proven
 
-| Area | State |
+| Area | Final evidence |
 |---|---|
-| Schema collapse, deterministic cursor, chain-derived timestamps | merged; replay-identical |
-| Unshielded ordinary fill-vs-cancel | merged; live cancel/fill and chart totals green |
-| Price orientation and 24-hour chain window | merged; unit and live cross-checks green |
-| Expiry advertisement and cleanup | merged; p8 live/expiry checks green |
-| Cross-layer offers | rejected by explicit `CROSS_LAYER`; both doors covered |
-| Baskets | accepted but absent from all five market surfaces; live fixture covered |
-| Post-commit SSE publication | merged; uncommitted/retry gates unit-covered |
-| Segment-aware unshielded identities | merged in PR #45; unit baseline green, final full run pending |
+| Stored truth | 66/66 blobs revalidated; bytes, hashes, legs, spends and markers agree |
+| Served truth | p8 12/12; full validation, liveness, expiry and payload presence |
+| Fill/cancel | Ordinary shielded/unshielded fates and chart totals agree |
+| Exact unshielded identities | Persistence is merged and deep-audited; Phase-(d) read switch remains separate |
+| Cross-layer offers | Explicit `CROSS_LAYER` at both ingestion doors |
+| Baskets | Accepted and excluded from all five market surfaces |
+| Duplicate competition | N-way, cross-door, late-loser and same-block checks green |
+| T-E2 | Exact `{A,B}` / `{B,C}` partial overlap green |
+| T-E5 | True in-flight race, one chain winner, exact archive/status/print accounting green |
+| Five-slot throughput | Five spendable UTXOs/slots, HTTP peak 6, max batch 4 |
+| Performance | Final metrics gate green; slowed-path and VOID-path unit gates red |
+| Determinism | Independent replay state and offer-hash sets identical |
+
+## Final run metrics
+
+| Metric | Result |
+|---|---:|
+| Submit p50 / p95 / max | 3025 / 12129 / 13123 ms |
+| Publish-to-index p50 / p95 / max | 18041 / 27205 / 30887 ms |
+| SSE p50 / p95 / max | 1925 / 10440 / 10441 ms |
+| Book read p50 / p95 / max | 8 / 15 / 15 ms |
+| STM max / last | 101 / 2 blocks |
+| Batcher queue max | 6 |
 
 ## Run playbook
 
-Use the same window configuration on stack and suite:
-
 ```sh
-NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 bun run dev
+GRAND_OFFERS=60 GRAND_STORM_API=200 GRAND_STORM_CELESTIA=30 \
+ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 \
+bash ./packages/tests/grand-e2e/fresh-run.sh
 ```
 
-```sh
-GRAND_OFFERS=60 ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 \
-  bun run packages/tests/grand-e2e/run.ts
-```
-
-Wait for `MINTED`. Never reuse a chain. Check `maxLagBlocks` before debugging
-other failures, and grep the log for `not built (` before accepting a green
-score. Record scorecard totals plus both determinism checks, then tear down the
-stack.
+Never reuse a chain. Check foreign load before launch, read `maxLagBlocks`
+before diagnosing downstream assertions, grep for `not built (`, record both
+determinism checks, and tear down the stack.
 
 ## Environment traps worth retaining
 
-- The workspace path contains a space; convert file URLs with `fileURLToPath`.
+- Convert file URLs with `fileURLToPath`; the workspace path contains a space.
 - System PostgreSQL can reclaim port 5432 after reboot.
-- `pkill -f` can kill its own shell; bracket the pattern.
-- Top-level `--` comments can make pgtyped skip generation with exit 0.
-- Backticks in SQL comments terminate `queries.app.ts` template literals.
-- `gh pr edit` fails on this repository's deprecated Projects query; patch PR
-  bodies through `gh api`.
-- There is no root `tsconfig`; build `packages/tests/grand-e2e/run.ts` with Bun.
+- Bracket `pkill -f` patterns so the command does not match itself.
+- Top-level `--` SQL comments can make pgtyped skip generation with exit 0.
+- Backticks in SQL comments terminate generated template literals.
+- `gh pr edit` fails on this repository's deprecated Projects query; use
+  `gh api` to patch PR bodies.
+- There is no root `tsconfig`; bundle the grand runner with Bun.
 
-## Resume here
+## Next boundary
 
-1. Make five spendable NIGHT UTXOs observable at bootstrap and set five slots.
-2. Prove p5 serialization is gone.
-3. Recalibrate at 60 offers, add submit p50, and prove a slowed path still
-   fails.
-4. Use the same healthy run for SSE sample 3 and baseline keys.
-5. Implement T-E2/T-E5 red→green.
-6. Run the final suite and record zero failures, healthy lag, no fixture skips,
-   and both determinism checks.
+Production-readiness closeout is complete. The next product work is the
+separate unshielded Phase-(c)/(d) workstream, especially switching
+`unshieldedCancelledPredicate` from shape matching to the exact identities
+already persisted by PR #45. PR #46 remains unmerged until maintainer review.

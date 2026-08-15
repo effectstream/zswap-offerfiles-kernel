@@ -1,4 +1,4 @@
-# Production-readiness plan — what the grand e2e suite still does not prove
+# Production-readiness record — what the grand e2e suite proves and still defers
 
 Goal: before this indexer serves real money, six properties must be *tested*, not
 argued:
@@ -9,14 +9,14 @@ argued:
 | b | Bad transactions don't reach users | **proven** — p8 re-validates served bytes, legs, liveness and expiry; §2.6 is fixed |
 | c | All data is correctly logged as real sales | **partial** — ordinary shielded and unshielded fill-vs-cancel is fixed and live-proven; PR #45 persists exact unshielded output identities, but the Phase-(d) read predicate still needs to switch off shape matching |
 | d | History and pricing is correct | **proven for the implemented market contract** — price orientation, chain-clock windows, basket exclusion and `/v1/pairs` ordering are fixed and live-proven |
-| e | Duplicate zswaps allowed, accepting one disables the others | **partial** — N-way, cross-door, late-loser and same-block duplicates pass; T-E2 partial overlap and T-E5 concurrent takers remain |
+| e | Duplicate zswaps allowed, accepting one disables the others | **proven** — N-way, exact partial overlap, cross-door, late-loser, true concurrent-taker and same-block competition all pass |
 | f | Works for shielded *and* unshielded | **proven for wallet-built shapes** — cancels, chaos, TTL, liveness and layer-split audits pass; unusual unshielded execution/read shapes remain in their separate Phase-(c)/(d) workstream |
 
-All six product defects named in §2 are fixed and merged. The last full run on
-the post-fix tree recorded 223 checks, one performance-baseline scale mismatch,
-`maxLagBlocks 80`, and both determinism checks green. Closeout work is now the
-SSE/performance calibration plus T-E2/T-E5; the separate unshielded Phase-(c)
-and Phase-(d) workstream is not hidden by that closeout.
+All six product defects named in §2 are fixed and merged. Closeout run 6 at
+`63c9fc5` recorded **238 checks, 0 failures, `maxLagBlocks 101`**, an empty
+loud-skip grep and both determinism checks green. Five-slot bootstrap,
+performance/SSE calibration, T-E2 and T-E5 are live-proven. The separate
+unshielded Phase-(c)/(d) workstream is not hidden by that result.
 
 > The sections below preserve the original red→green reasoning. “Today” inside
 > a historical defect or test design refers to the pre-fix tree; the status
@@ -42,7 +42,8 @@ and Phase-(d) workstream is not hidden by that closeout.
   [api.ts](../../node/api.ts),
   [queries.app.ts](../../database/sql/queries.app.ts),
   [000-init.sql](../../database/migrations/000-init.sql).
-- Suite: all 8 phases, 143 checks; `ledger.ts`, `adversary.ts`, `dump.ts`.
+- Suite: 12 scored phases, 238 final checks; `ledger.ts`, `adversary.ts`,
+  `dump.ts`.
 - Installed primitive grammars under
   `@effectstream/sm/primitives/src/midnight-*/` — to establish what the STM
   *could* see today without a framework change.
@@ -64,7 +65,7 @@ what did not:
 | T-A3 cross-layer | ✅ `buildCrossLayerOffer()` merges a live ss+uu pair; asserts `CROSS_LAYER` at both doors and **specifically not** `NOT_A_SWAP`; skips with a loud note if the merge stops producing one (§2.4) |
 | T-A4 history referential integrity | ✅ `p7b`, 5 SQL assertions |
 | T-A5 every stored blob re-validates (proofs included) | ✅ `p7b` deep pass, `GRAND_DEEP_AUDIT` |
-| T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass; PR #45's exact unshielded identity persistence is unit-proven and awaits the closeout full run |
+| T-A6 stored legs / spends / markers == derived | ✅ `p7b`, same pass; PR #45's exact unshielded identity persistence passed the final 66/66-blob deep audit |
 | T-B1…B4 what the API serves | ✅ new `p8-served` phase — **found §2.6** |
 | T-C1 unshielded cancels read `cancelled` | ✅ green, PR-B merged |
 | T-C2 Σ volume == Σ settled | ✅ green, PR-B merged |
@@ -76,10 +77,10 @@ what did not:
 | T-D4 `trade_count` + chain ordering | ✅ `p7b` |
 | T-D5 basket offers | ✅ `p3c-basket.ts` (both halves, running stack) + `multileg-pairs.test.ts` (all five surfaces, with a control) — §2.5 CLOSED |
 | T-E1 N-way competition | ✅ `p3b`, 3 competitors per layer |
-| T-E2 partial overlap between live offers | ⛔ deferred — needs denomination-controlled funding |
+| T-E2 partial overlap between live offers | ✅ exact `{A,B}` / `{B,C}` fixture; loser archives, reads cancelled, cannot settle and prints no trade |
 | T-E3 cross-door competition | ✅ `p3b`, one competitor via `blob.Submit` |
 | T-E4 loser arrives after the winner settled | ✅ `p3b`, both doors, by code |
-| T-E5 two takers, one coin | ⛔ deferred |
+| T-E5 two takers, one coin | ✅ barrier proves both requests in flight; one chain winner, one transaction-specific double-spend loser, one trade |
 | T-E6 same-block byte-identical duplicates | ✅ `p4` |
 | T-F1 cancel shapes, unshielded | ✅ green, PR-B merged |
 | T-F2 `UTXO_NOT_LIVE` | ✅ via T-E4's unshielded arm |
@@ -114,9 +115,9 @@ run. See §2.4 and §2.5 for the measurements.
   wallet, that is a finding in itself — a fail-closed branch no real input can
   reach is either dead code or a defence against a future wire format.
 
-The remaining deferrals, T-E2 and T-E5, are ordinary ones: both need new wallet plumbing
-(denomination-controlled funding; concurrent taker settlement) rather than an
-unanswered question.
+T-E2 and T-E5 were the remaining ordinary wallet-plumbing gaps. Both are now
+implemented and passed live in closeout runs 5 and 6; the details and exact
+observables are recorded in §3(e).
 
 ### 1.1 Historical PR sequence and current merge state
 
@@ -127,6 +128,7 @@ unanswered question.
 | **E/F** | Cross-layer rejection, basket exclusion, ordering contract; plus post-commit events and shape fixtures | merged through consolidation PR #43 |
 | **Run fixes** | Six defects found by the first full run | merged as PR #44 |
 | **Unshielded (b)** | Segment-aware exact output identities and ladder verdicts | merged as PR #45; execution/read phases remain separate |
+| **Closeout** | Docs/pgtyped guard, five-slot bootstrap, calibration, T-E2/T-E5 and final green run | PR #46, ready for maintainer review; never agent-merged |
 
 PR-A is deliberately product-inert. Its job is to make every defect **visible
 and reproducible** before anyone touches the code that causes it, so each later
@@ -198,7 +200,7 @@ what proves the test, not just the fix.
 
 ---
 
-## 2. Product defects — each gets a red in PR-A
+## 2. Historical product defects and their red gates
 
 ### 2.1 Unshielded fill-vs-cancel — **FIXED by PR-B; exact-identity read switch remains Phase (d)**
 
@@ -1116,7 +1118,7 @@ pair shows exactly **one** trade. Both layer arms are green after PR-B.
 
 ---
 
-#### T-E2 · Partial overlap between two live offers
+#### T-E2 · Partial overlap between two live offers *(DONE — PR #46)*
 
 → p3b
 
@@ -1140,6 +1142,10 @@ Build X (2500) → `revert` → build Y (3500) → `revert` → publish both →
 `sharesInput` returns exactly one common key, and that each offer has two spend
 rows. Settle Y. Assert X archives, reads `cancelled`, contributes no volume, and
 leaves the book while c1 is still unspent.
+
+**Live result.** Runs 5 and 6 proved the input sets share exactly B; offer 1
+settles; the loser leaves the live book, reads `cancelled`, cannot settle and
+adds no trade print. The final p3b phase passed all 34 checks.
 
 ---
 
@@ -1174,18 +1180,22 @@ same coin has no dedup match, so only liveness can stop it.
 
 ---
 
-#### T-E5 · Two takers, two competing offers, one coin
+#### T-E5 · Two takers, two competing offers, one coin *(DONE — PR #46)*
 
 → p3b
 
-**How.** Take the winner and one loser from `buildCompetingSet`, hand each to a
-different taker, and fire both settlements without awaiting in between (the
-existing `submitToBalancer` is already non-blocking;
-[wallets.ts:207](actors/wallets.ts)). Exactly one lands on chain.
+**How.** Take two offers from `buildCompetingSet` and hand them to different
+takers. Prepare/prove both transactions before submission. The ordinary
+`submitToBalancer` deliberately serializes through the suite-wide
+`balancerChain`, so T-E5 bypasses it with `submitConcurrentlyToBalancer`,
+releases both raw requests from one barrier and records whether both entered
+the batcher call before the first response. Exactly one may land on chain.
 
-Assert: exactly one trade on the pair; both offers archived; the losing taker's
-failure leaves no half-archived state (T-A4's integrity queries re-run after);
-and volume counted once.
+**Live result.** Runs 5 and 6 proved at least two startup worker slots, both
+requests in flight before receipt 1, exactly one winner and a losing
+transaction fingerprint with batcher/chain submission rejection (never the
+ingestion-only `UTXO_NOT_LIVE` code). Every competitor archived exactly once;
+reads split one `consumed` / remaining `cancelled`; exactly one trade printed.
 
 ---
 
@@ -1193,18 +1203,19 @@ and volume counted once.
 
 → p4
 
-**How.** `submitBlobRaw(bytes)` twice back-to-back with no delay, so both land
-inside one Celestia `delayMs` window and therefore one L2 block.
+**How.** After one canonical offer is indexed, publish its raw bytes twice
+back-to-back with no delay, so both replays land inside one Celestia `delayMs`
+window and therefore one L2 block.
 
-Assert: exactly one `offer_file` row; exactly one `DUPLICATE_OFFER` rejection;
-and — the real point — **the node is still alive** (`p0`'s process check
-re-run) and the block's other offers were indexed.
+Assert: both replay blobs are refused `DUPLICATE_OFFER`; the canonical offer
+still exists exactly once; and — the real point — **the node is still alive**
+and the block transaction did not abort.
 
-**Why.** Both blobs are processed inside a single block transaction, so the
-second one's dedup probe (`getOfferStatusByHash`) must observe the first one's
-*uncommitted* INSERT. If it does not, the unique index catches it as an STF
-error that aborts the whole block — taking every legitimate offer at that height
-with it. That is the same blast-radius shape as the NUL crash; T-E6 now pins it.
+**Why.** Both blobs are processed inside one block transaction against an
+already-indexed canonical offer. The fixture proves a same-block duplicate
+burst produces two coded refusals without aborting the block, deleting the
+canonical row or duplicating it. It does **not** claim to exercise visibility
+between two new, uncommitted inserts.
 
 ---
 
@@ -1289,7 +1300,7 @@ unnoticed.
 
 ---
 
-## 4. Infrastructure PR-A must add
+## 4. Historical PR-A infrastructure
 
 1. **`known-red.ts`** + the `check()` branch (§1.2).
 2. **`lib/verify.ts`** — `fullyValidate()`, the one place that re-derives truth
@@ -1307,7 +1318,7 @@ unnoticed.
    the fates table (T-F5).
 8. **`config.ts`** — `GRAND_DEEP_AUDIT` for T-A5's exhaustive mode.
 
-## 5. Budget
+## 5. Historical implementation budget
 
 | | |
 |---|---|

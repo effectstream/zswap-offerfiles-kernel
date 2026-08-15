@@ -1,98 +1,101 @@
 # Open issues from the grand-e2e suite
 
-Current as of 2026-08-14. Fixed issues are summarized at the end; detailed
-red→green history remains in git and in `PRODUCTION-READINESS.md`.
+Current as of 2026-08-15. Closeout blockers 1–4 are closed. The remaining
+classifier work below is intentionally a separate unshielded workstream.
 
-## 1. Five-slot batcher bootstrap and performance recalibration
+## 1. Exact-identity classification read switch (separate workstream)
 
-**Verdict:** provisioning plus measurement; closeout blocker.
+PR #45 changed unshielded marker storage and archival to exact
+`(owner, intent_hash, output_no)` identities. Token type and value remain
+audit fields. The current `unshieldedCancelledPredicate` still groups its
+final create lookup by `(owner, token_type, value)`.
 
-The last two 60-offer runs measured submit p95 at 10.79 s and 10.74 s against a
-baseline calibrated at 25 offers and seven slots. Both later runs used a dev
-batcher capped at one slot. p5 reported the consequence directly: settlement,
-cancel and split transactions serialized at roughly 25 s per transaction.
+Phase (d) must switch that read path to the already-persisted exact identity and
+execute the unusual fallible/multi-intent shapes prepared in phases (a)/(b).
+This was explicitly outside production-readiness closeout PR #46; do not mark
+it fixed from the ordinary wallet-built fate matrix.
 
-The ruling is one master/batcher wallet with:
+## Named limitations, unchanged by closeout
 
-- at least five spendable NIGHT UTXOs at bootstrap;
-- a bootstrap self-split when genesis provides fewer;
-- `maxSlotsPerWallet=5` in the dev stack.
+- **Reorg recovery:** archival is destructive. A consuming block reorg requires
+  a full resync until a confirmation-depth/reversible-state design is chosen.
+- **Celestia inclusion height:** the primitive boundary drops the original DA
+  height. `blockHeight` is the indexer's L2 height, not a blob lookup height.
+- **Dev health-tip display:** the suite derives real lag from
+  `blockL2.timestamp`; the dev endpoint's configured NTP tip can report a
+  misleading permanent syncing state.
 
-NIGHT balance is not concurrency: the SDK reserves a whole input coin per
-in-flight transaction. The fix is not proven until p5 no longer reports the
-single-file roughly-25-second pattern. Only then may `baseline.json` be
-recalibrated at `GRAND_OFFERS=60`, and `submitP95Ms` must gain a p50 companion.
-A deliberately slowed submit path must still fail the new gate.
+## Closeout items closed on 2026-08-15
 
-## 2. SSE latency baseline keys
+### Five-slot bootstrap and performance recalibration — CLOSED
 
-`sseDeliveryLagP50Ms` and `sseDeliveryLagP95Ms` are intentionally absent while
-the CONSUMED-only metric is calibrated. Two samples exist; the clean one is
-p50 2224 ms / p95 2708 ms (n=21). The next five-slot run may supply sample 3
-only if `maxLagBlocks` is in the healthy 53–96 band.
+Fresh bootstrap proved five registered/spendable NIGHT UTXOs and five worker
+slots. If genesis yields fewer coins, the dev bootstrap self-splits. p5 then
+proved actual overlap rather than trusting configuration: task peak 15,
+batcher HTTP peak 6 and maximum batch 4 on the final run.
 
-Use the maximum per-run p50 and maximum per-run p95 across valid clean samples.
-Do not add extra headroom: metrics enforcement already applies ×1.2. After
-setting the keys, prove an out-of-band sample fails.
+`baseline.json` is calibrated at `GRAND_OFFERS=60` / five slots from clean
+run 5: submit p50/p95 3619/12167 ms and publish-to-index p95 27183 ms. The final
+run measured 3025/12129 and 27205 ms and passed. A 2× slowed submit median still
+fails the unit gate.
 
-## 3. T-E2 partial-overlap competition
+### SSE latency baseline keys — CLOSED
 
-Fund exact UTXOs `{A,B,C}`. Offer 1 spends `{A,B}` and offer 2 spends `{B,C}`.
-Settle offer 1. Assert offer 2 leaves the live book, reads `cancelled`, cannot
-settle, and creates no trade print. The observable contract is archival and
-classification; the loser cannot remain live because the shared-input spend
-archives it in the same transition.
+Clean sample 2 measured p50/p95 2224/2708 ms (n=21). Clean five-slot sample 3
+measured 2254/10008 ms (n=38) with `maxLagBlocks 59`. Per the standing rule,
+the committed keys use the maximum per-run values: 2254/10008, with no extra
+headroom beyond enforcement's ×1.2. The final run measured 1925/10440 and
+passed; the p95 remains reported below 50 samples while the median is enforced.
 
-## 4. T-E5 two takers, one coin
+### T-E2 partial-overlap competition — CLOSED
 
-Use a concurrent submission helper that bypasses the module-level
-`balancerChain`, verify at least two batcher worker slots, and prove both
-requests were in flight before the first receipt. Exactly one settlement must
-land; the other must fail with the batcher/chain double-spend result. The offer
-archives `CONSUMED` once and produces one print. `UTXO_NOT_LIVE` is an offer
-ingestion code and is not the expected loser result here.
+The live fixture constructs exact inputs `{A,B}` / `{B,C}`, sharing only B.
+Settling offer 1 removes the partial-overlap loser, which reads `cancelled`,
+cannot settle and creates no trade print. All assertions passed in runs 5 and
+6.
 
-## 5. Exact-identity classification read switch (separate workstream)
+### T-E5 two takers, one coin — CLOSED
 
-PR #45 changed the unshielded marker storage model to exact
-`(owner, intent_hash, output_no)` identities and carries those fields through
-archival. The current `unshieldedCancelledPredicate` still groups the final
-create lookup by `(owner, token_type, value)`. Switching that read path and
-executing unusual fallible/multi-intent shapes belongs to unshielded phases
-(c)/(d), not this closeout.
+The fixture prepares two settlements, bypasses the ordinary client queue and
+releases both through one barrier. It proves both requests were in flight
+before the first receipt; exactly one lands; the loser carries
+transaction-specific batcher/chain double-spend evidence rather than
+`UTXO_NOT_LIVE`; competitors archive once with correct read statuses; and
+exactly one trade prints. All assertions passed in runs 5 and 6.
 
-## Run rules
+## Final closeout run
+
+Run 6 at `63c9fc5` used a brand-new chain and matching
+`ROOT_WINDOW_SECONDS=600` / `OFFER_TTL_SECONDS=600`:
+
+- 238 checks, 0 failures, 87.9 minutes;
+- `maxLagBlocks 101`, `lastLagBlocks 2` (valid, below the 114 gate and 150
+  VOID ceiling; not reused as a calibration sample);
+- both determinism checks passed;
+- no loud fixture skip, foreign heavy process or indexer pool error;
+- hash-pinned evidence:
+  `/tmp/zswap-closeout-evidence/run6-final-green/`.
+
+## Canonical run rules
 
 ```sh
-NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 bun run dev
+GRAND_OFFERS=60 GRAND_STORM_API=200 GRAND_STORM_CELESTIA=30 \
+ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 \
+bash ./packages/tests/grand-e2e/fresh-run.sh
 ```
 
-```sh
-GRAND_OFFERS=60 ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 \
-  bun run packages/tests/grand-e2e/run.ts
-```
-
-- Same expiry environment on both processes.
-- Wait for `MINTED`; do not reuse a chain.
-- A bare runner defaults to 500 offers.
-- `maxLagBlocks > 150` voids the run.
-- Grep for `not built (` before accepting green.
-- Tear down this stack when done.
-
-## Latest valid run
-
-2026-08-13: 223 checks, 1 failure, `maxLagBlocks 80`; both determinism checks
-passed. The only failure was the scale/slot performance baseline mismatch.
+Never reuse a chain. Treat `maxLagBlocks > 150` as VOID, grep for
+`not built (`, and tear down only this stack when finished.
 
 ## Fixed or ruled
 
 | Issue | Current state |
 |---|---|
-| Batcher dust livelock | Fixed upstream in batcher-sdk 0.103.1; closeout still owes honest five-coin provisioning |
+| Batcher dust livelock | Fixed upstream in batcher-sdk 0.103.1; dev bootstrap now proves five fee-capable streams |
 | `celestiaHeight` mislabeled | REST/SSE field renamed `blockHeight`; DB legacy name remains internal |
-| Cross-layer offers | Ruled REJECT; `CROSS_LAYER` enforced at the shared validator |
-| Invisible STF errors | Local transition wrapper logs and rethrows |
-| Unshielded ordinary fill-vs-cancel | Fixed and live-proven; exact-identity read switch is item 5 above |
+| Cross-layer offers | Ruled REJECT; `CROSS_LAYER` enforced at both doors |
+| Invisible STF errors | Transition wrapper logs and rethrows |
+| Unshielded ordinary fill-vs-cancel | Fixed and live-proven; exact-identity read switch remains item 1 |
 | `pair_stats.last_price` orientation | Fixed and cross-checked against chart stats |
 | 24-hour wall/chain clock mix | Fixed on L2 chain time |
 | Root window and advertised expiry | Fixed with current-root escape and bounded cleanup |

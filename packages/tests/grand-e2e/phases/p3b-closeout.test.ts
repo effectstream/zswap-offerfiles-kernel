@@ -7,6 +7,7 @@ import {
   exactSubsetIndexes,
   hasBatcherChainRejection,
 } from "./p3b-closeout.ts";
+import { partialOverlapHeldCoinAmount } from "./p3b-competing.ts";
 import { submitConcurrentlyToBalancer } from "../actors/wallets.ts";
 
 test("raw Celestia RPC and downstream indexing share one timeout budget", () => {
@@ -15,6 +16,7 @@ test("raw Celestia RPC and downstream indexing share one timeout budget", () => 
 });
 
 test("T-E2 denominations select {A,B} and {B,C}, with exactly B shared", () => {
+  expect(partialOverlapHeldCoinAmount()).toBe(PARTIAL_OVERLAP_COINS[0]);
   const [offer1, offer2] = PARTIAL_OVERLAP_GIVES.map((amount) =>
     exactSubsetIndexes(PARTIAL_OVERLAP_COINS, amount),
   );

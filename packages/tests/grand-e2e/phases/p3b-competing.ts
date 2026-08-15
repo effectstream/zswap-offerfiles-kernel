@@ -51,7 +51,11 @@ import { getChartHistory, getOfferStatus, submitOffer2 } from "../lib/api2.ts";
 import { submitBlobRaw } from "../lib/celestia.ts";
 import { historyRowByHash, offerRowByHash, rejectionTotalsByCode } from "../lib/db2.ts";
 import { beginPhase, check, note, waitUntil } from "../lib/util.ts";
-import { hasBatcherChainRejection, PARTIAL_OVERLAP_GIVES } from "./p3b-closeout.ts";
+import {
+  hasBatcherChainRejection,
+  PARTIAL_OVERLAP_COINS,
+  PARTIAL_OVERLAP_GIVES,
+} from "./p3b-closeout.ts";
 
 /** How many competitors share one coin. A maker laddering the same coin at
  *  several prices is the NORMAL pattern, not an edge case — two proved only
@@ -182,6 +186,13 @@ async function chartTradesAtAmount(
   return hist.body.filter((row: any) => Number(row.amt) === Number(amount)).length;
 }
 
+/** Keep the live T-E2 reservation wired to the same denomination fixture the
+ * pure subset test audits. Calling this from the unit test also catches a
+ * missing runtime import, which a Bun bundle alone does not diagnose. */
+export function partialOverlapHeldCoinAmount(): bigint {
+  return PARTIAL_OVERLAP_COINS[0];
+}
+
 async function runPartialOverlap(db: Client, actors: Actors): Promise<void> {
   const recs = PARTIAL_OVERLAP_GIVES.map((give, i) =>
     ledger.addOffer({
@@ -218,7 +229,7 @@ async function runPartialOverlap(db: Client, actors: Actors): Promise<void> {
           outputs: [
             {
               type: ledger.colors.TA!,
-              amount: PARTIAL_OVERLAP_COINS[0],
+              amount: partialOverlapHeldCoinAmount(),
               receiverAddress: actors.partialOverlap.shieldedAddr,
             },
           ],

@@ -8,6 +8,7 @@
 
 import type { Client } from "pg";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
+import { INDEX_WAIT_TRIES } from "../config.ts";
 import { ledger } from "../ledger.ts";
 import type { P1Artifacts } from "./p1-happy.ts";
 import {
@@ -328,7 +329,12 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
           const now = await rejectionTotalsByCode(db);
           return (now.DUPLICATE_OFFER ?? 0) >= (before.DUPLICATE_OFFER ?? 0) + 2;
         },
-        24,
+        // This is the same Celestia -> STM -> DB path as normal indexing.
+        // Keep its budget aligned with the suite-wide index wait instead of
+        // failing at 120 s while an otherwise-valid (<150-block lag) run is
+        // still catching up. Run 2 observed both rows 14 s after that old
+        // deadline; the exactly-once safety assertion below already passed.
+        INDEX_WAIT_TRIES,
         5000,
       ),
     );

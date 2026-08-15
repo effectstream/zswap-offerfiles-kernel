@@ -105,4 +105,6 @@ GRAND_STORM_CELESTIA=${GRAND_STORM_CELESTIA:-30} \
 ROOT_WINDOW_SECONDS=${ROOT_WINDOW_SECONDS:-600} \
 OFFER_TTL_SECONDS=${OFFER_TTL_SECONDS:-600} \
   bun run "$HERE/run.ts" 2>&1 | tee "$OUT/grand-v3.log"
-say "suite exited with ${PIPESTATUS[0]}"
+suite_status=${PIPESTATUS[0]}
+say "suite exited with $suite_status"
+exit "$suite_status"

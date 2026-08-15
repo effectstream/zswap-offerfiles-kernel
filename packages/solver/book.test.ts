@@ -32,7 +32,7 @@ test("bookOfferFromApi parses amounts, legs, and timestamps", () => {
       wants: [{ token: B, amount: "500000", type: "SHIELDED" }],
       expiresAt: "2026-06-01T13:00:00.000Z",
       firstSeenAt: "2026-06-01T12:00:00.000Z",
-      inputNullifiers: ["7C1D9B"],
+      inputNullifiers: ["7C1D9B".padEnd(64, "0")],
       status: "live",
     },
   };
@@ -40,13 +40,21 @@ test("bookOfferFromApi parses amounts, legs, and timestamps", () => {
   expect(parsed.offerHash).toBe(A);
   expect(parsed.gives[0]).toEqual({ token: A, amount: 1000000n, kind: "UNSHIELDED" });
   expect(parsed.wants[0].amount).toBe(500000n);
-  expect(parsed.inputNullifiers).toEqual(["7c1d9b"]);
+  expect(parsed.inputNullifiers).toEqual(["7c1d9b".padEnd(64, "0")]);
   expect(parsed.expiresAt).toBe(Date.parse("2026-06-01T13:00:00.000Z"));
 });
 
-test("a row with no content hash is untrackable and is dropped", () => {
-  const row = { version: 1, offerId: null, computed: { gives: [], wants: [], inputNullifiers: [], status: "live" } };
-  expect(bookOfferFromApi(row as ApiZswap)).toBeNull();
+test("a row without a canonical content hash is untrackable and is dropped", () => {
+  const computed = {
+    gives: [],
+    wants: [],
+    expiresAt: "2026-06-01T13:00:00.000Z",
+    inputNullifiers: [],
+    status: "live",
+  };
+  expect(bookOfferFromApi({ version: 1, offerId: null, computed } as ApiZswap)).toBeNull();
+  expect(bookOfferFromApi({ version: 1, offerId: "abc", computed } as ApiZswap)).toBeNull();
+  expect(bookOfferFromApi({ version: 1, offerId: `${"a".repeat(63)}g`, computed } as ApiZswap)).toBeNull();
 });
 
 test("consumed by hash removes the offer and its indexes", () => {
@@ -58,20 +66,20 @@ test("consumed by hash removes the offer and its indexes", () => {
   expect(book.byPair(A, B)).toEqual([]);
   // The nullifier index must go with it, or a later consumed event removes a
   // hash that is no longer in the book.
-  expect(book.removeByNullifier("n-h1")).toBeNull();
+  expect(book.removeByNullifier("n-h1")).toEqual([]);
 });
 
 test("consumed with only a nullifier still finds the offer", () => {
   const book = new Book();
   book.upsert(offer("h1", A, B, ["null-x"]));
-  expect(book.removeByNullifier("NULL-X")).toBe("h1");
+  expect(book.removeByNullifier("NULL-X")).toEqual(["h1"]);
   expect(book.size).toBe(0);
 });
 
 test("removing an unknown hash or nullifier is a no-op, not an error", () => {
   const book = new Book();
   expect(book.remove("nope")).toBe(false);
-  expect(book.removeByNullifier("nope")).toBeNull();
+  expect(book.removeByNullifier("nope")).toEqual([]);
 });
 
 test("upsert re-indexes rather than leaving a stale pair bucket", () => {
@@ -128,7 +136,7 @@ test("resync reports the diff and evicts offers the node no longer lists", () =>
   expect(diff.removed).toEqual(["goes"]);
   expect(book.hashes().sort()).toEqual(["arrives", "stays"]);
   // The evicted offer's nullifier index went with it.
-  expect(book.removeByNullifier("n2")).toBeNull();
+  expect(book.removeByNullifier("n2")).toEqual([]);
 });
 
 test("resync keeps a cached blob the blob-free list cannot resupply", () => {
@@ -136,4 +144,74 @@ test("resync keeps a cached blob the blob-free list cannot resupply", () => {
   book.upsert({ ...offer("h1", A, B), blob: "swapoffer1cached" });
   book.resync([offer("h1", A, B)]);
   expect(book.get("h1")!.blob).toBe("swapoffer1cached");
+});
+
+test("an unknown leg kind or malformed amount rejects the complete external row", () => {
+  const base = {
+    version: 1,
+    offerId: A,
+    computed: {
+      gives: [{ token: A, amount: "10", type: "SHIELDED" }],
+      wants: [{ token: B, amount: "9", type: "SHIELDED" }],
+      expiresAt: "2026-06-01T13:00:00.000Z",
+      inputNullifiers: ["a".repeat(64)],
+      status: "live",
+    },
+  };
+  expect(
+    bookOfferFromApi({
+      ...base,
+      computed: { ...base.computed, gives: [{ token: A, amount: "10", type: "FUTURE_KIND" }] },
+    } as ApiZswap),
+  ).toBeNull();
+  expect(
+    bookOfferFromApi({
+      ...base,
+      computed: { ...base.computed, wants: [{ token: B, amount: "1e3", type: "SHIELDED" }] },
+    } as ApiZswap),
+  ).toBeNull();
+  expect(
+    bookOfferFromApi({
+      ...base,
+      computed: { ...base.computed, expiresAt: "not-a-date" },
+    } as ApiZswap),
+  ).toBeNull();
+});
+
+test("solver admission rejects missing expiry and malformed shielded nullifiers", () => {
+  const base = {
+    version: 1,
+    offerId: A,
+    computed: {
+      gives: [{ token: A, amount: "10", type: "SHIELDED" }],
+      wants: [{ token: B, amount: "9", type: "SHIELDED" }],
+      expiresAt: "2026-06-01T13:00:00.000Z",
+      inputNullifiers: ["c".repeat(64)],
+      status: "live",
+    },
+  };
+  expect(
+    bookOfferFromApi({
+      ...base,
+      computed: { ...base.computed, expiresAt: null },
+    } as ApiZswap),
+  ).toBeNull();
+  for (const nullifier of ["abc", `${"a".repeat(63)}g`, `0x${"a".repeat(64)}`]) {
+    expect(
+      bookOfferFromApi({
+        ...base,
+        computed: { ...base.computed, inputNullifiers: [nullifier] },
+      } as ApiZswap),
+    ).toBeNull();
+  }
+});
+
+test("duplicate-nullifier offers coexist in the index and are removed together", () => {
+  const book = new Book();
+  book.upsert(offer("h1", A, B, ["SAME"]));
+  book.upsert(offer("h2", A, C, ["same"]));
+  expect(book.removeByNullifier("SaMe").sort()).toEqual(["h1", "h2"]);
+  expect(book.size).toBe(0);
+  expect(book.byPair(A, B)).toEqual([]);
+  expect(book.byPair(A, C)).toEqual([]);
 });

@@ -57,6 +57,24 @@ function prepared<P, R>(statement: string): PreparedQuery<P, R> {
   return new PreparedQuery<P, R>(compileIR(statement) as any);
 }
 
+// Effectstream runtime 0.103.1 defines an input SAVEPOINT helper but does not
+// call it around scheduled application STFs. A JavaScript exception after one
+// or more successful World.resolve writes is caught by the runtime, which then
+// records the input as failed and COMMITs the block. Bracket the application
+// generator explicitly until the runtime invokes its own helper. The static,
+// application-specific identifier is intentional: transaction-control names
+// cannot be SQL parameters, and scheduled inputs execute serially on one
+// checked-out transaction connection.
+export const createAppInputSavepoint = prepared<void, never>(
+  "SAVEPOINT zswap_da_app_input_v1",
+);
+export const rollbackAppInputSavepoint = prepared<void, never>(
+  "ROLLBACK TO SAVEPOINT zswap_da_app_input_v1",
+);
+export const releaseAppInputSavepoint = prepared<void, never>(
+  "RELEASE SAVEPOINT zswap_da_app_input_v1",
+);
+
 // ── SQL fragment helpers (must precede all prepared() consts: statements
 // are compiled at module load, so these can no longer live mid-file) ──
 
@@ -77,10 +95,16 @@ function prepared<P, R>(statement: string): PreparedQuery<P, R> {
 //      the exact commitments is a maker self-fill: the offer's terms
 //      executed, so `consumed` is the right answer there.)
 //
-// Branch 3 is vacuous for offers with no stored commitments (rows indexed
-// before migration 013, or offers whose wants are unshielded-only): those
-// keep the branch-1/2 heuristic. NULL tx_hash on any spend row also falls
-// back — never classify on absent evidence.
+// Branch 3 is deliberately not used as a positive fill proof for offers with
+// no stored commitments (rows indexed before migration 013, or shielded-input
+// offers whose outputs are entirely unshielded). Nor is it positive proof for
+// an offer with unshielded inputs: the index does not retain the transaction
+// identity that spent those inputs, so matching only the shielded half cannot
+// prove the complete offer settled atomically. The status CASE below marks
+// those archived rows `unknown`: one shielded spend transaction is compatible
+// with both a complete settlement and a partial/maker spend, so guessing
+// `consumed` would let the solver release a quarantined wallet operation on
+// ambiguous evidence. NULL tx_hash is similarly insufficient evidence.
 const cancelledPredicate = (idExpr: string) => `(
   EXISTS (SELECT 1 FROM offer_file_nullifiers_history cnx
           LEFT JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
@@ -110,11 +134,29 @@ const cancelledPredicate = (idExpr: string) => `(
   )
 )`;
 
-// Status of an archived row: expired (TTL) / cancelled / consumed.
+const verifiedConsumedPredicate = (idExpr: string) => `(
+  EXISTS (SELECT 1 FROM offer_file_commitments_history oc
+          WHERE oc.offer_file_id = ${idExpr})
+  AND NOT EXISTS (SELECT 1 FROM offer_file_unshielded_spends_history ous
+                  WHERE ous.offer_file_id = ${idExpr})
+  AND (SELECT COUNT(DISTINCT cnn.tx_hash)
+       FROM offer_file_nullifiers_history cnx
+       JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
+       WHERE cnx.offer_file_id = ${idExpr} AND cnn.tx_hash IS NOT NULL) = 1
+  AND NOT EXISTS (SELECT 1 FROM offer_file_nullifiers_history cnx
+                  JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
+                  WHERE cnx.offer_file_id = ${idExpr} AND cnn.tx_hash IS NULL)
+  AND NOT ${cancelledPredicate(idExpr)}
+)`;
+
+// Status of an archived row: expired / cancelled / cryptographically verified
+// consumed. Markerless archived rows are `unknown` and must be reconciled by
+// an operator or a future protocol-specific proof, never treated as a fill.
 const archivedStatusCase = (tableIdExpr: string) => `
   CASE WHEN archive_reason <> 'CONSUMED' THEN 'expired'
        WHEN ${cancelledPredicate(tableIdExpr)} THEN 'cancelled'
-       ELSE 'consumed'
+       WHEN ${verifiedConsumedPredicate(tableIdExpr)} THEN 'consumed'
+       ELSE 'unknown'
   END`;
 
 
@@ -328,7 +370,7 @@ export const getPairStats24h = prepared<IGetPairStats24hParams, IGetPairStats24h
                WHERE direction = 'WANTING' AND token_color IN (:base!, :quote!)
                GROUP BY 1, 2) w ON w.offer_file_id = h.id
          WHERE h.archive_reason = 'CONSUMED'
-           AND NOT ${cancelledPredicate("h.id")}
+           AND ${verifiedConsumedPredicate("h.id")}
            AND g.amount::numeric > 0
            AND w.amount::numeric > 0
            AND ((g.token_color = :base! AND w.token_color = :quote!)
@@ -384,7 +426,7 @@ export const getTradeHistory = prepared<IGetTradeHistoryParams, IGetTradeHistory
              WHERE direction = 'WANTING' AND token_color IN (:base!, :quote!)
              GROUP BY 1, 2) w ON w.offer_file_id = h.id
        WHERE h.archive_reason = 'CONSUMED'
-         AND NOT ${cancelledPredicate("h.id")}
+         AND ${verifiedConsumedPredicate("h.id")}
          AND ((g.token_color = :base! AND w.token_color = :quote!)
            OR (g.token_color = :quote! AND w.token_color = :base!))
        ORDER BY h.archived_at DESC
@@ -477,7 +519,7 @@ export const upsertPairStatsByOfferId = prepared<IUpsertPairStatsByOfferIdParams
              GROUP BY 1, 2) w ON w.offer_file_id = g.offer_file_id
        JOIN offer_file_history h ON h.id = g.offer_file_id
        WHERE g.offer_file_id = :offer_id!
-         AND NOT ${cancelledPredicate("g.offer_file_id")}
+         AND ${verifiedConsumedPredicate("g.offer_file_id")}
        ON CONFLICT (pair_key) DO UPDATE SET
            trade_count    = pair_stats.trade_count + 1,
            last_price     = EXCLUDED.last_price,
@@ -558,10 +600,10 @@ export const insertOfferFileWithHash = prepared<IInsertOfferFileWithHashParams, 
 //   (a) some of its nullifiers were never spent at all (the maker moved one
 //       coin elsewhere; the rest can now never settle), or
 //   (b) its nullifiers were spent across MORE THAN ONE transaction.
-// Everything else stays `consumed`. All-in-one-tx is a heuristic (a maker
-// consolidating the same coins in one personal tx looks identical) until
-// phase 2 adds output-commitment tracking; offers with no shielded inputs
-// (unshielded-only) have no nullifiers to group and classify as `consumed`.
+// Positive `consumed` status additionally requires the output-commitment proof
+// encoded by verifiedConsumedPredicate above. All-in-one-tx without markers
+// is ambiguous and reads `unknown`; no shielded spend identity also reads
+// `unknown` because there is no transaction-bound settlement proof.
 //
 // Read-time on purpose: the archive fires on the FIRST nullifier event of a
 // block, before its same-tx siblings are processed — but the whole block
@@ -819,12 +861,18 @@ export const archiveOfferByUnshieldedSpendWithHash = prepared<IArchiveOfferByUns
       ),
 );
 
-export interface IArchiveOfferByIdTtlWithHashParams { offer_file_id: number; archived_at: DateOrString }
+export interface IArchiveOfferByIdTtlWithHashParams {
+  offer_file_id: number;
+  expires_at_cutoff: DateOrString;
+  archived_at: DateOrString;
+}
 export const archiveOfferByIdTtlWithHash = prepared<IArchiveOfferByIdTtlWithHashParams, IArchiveOfferResult>(
       archiveOfferSql(
         `    SELECT id AS offer_file_id
     FROM offer_file
     WHERE id = :offer_file_id!
+      AND metadata_expires_at IS NOT NULL
+      AND metadata_expires_at <= :expires_at_cutoff!
     LIMIT 1`,
         "TTL",
       ),

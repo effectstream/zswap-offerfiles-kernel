@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // Keyset pagination (item #14): pages must cover the book exactly once —
 // no duplicates, no gaps — including across rows that SHARE a created_at
@@ -18,7 +19,7 @@ const {
 } = await import("@zswap-da/database");
 
 const PORT = 54337;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 const TOTAL = 25;
@@ -49,9 +50,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 async function fetchPage(afterHash: string | null, limit: number) {

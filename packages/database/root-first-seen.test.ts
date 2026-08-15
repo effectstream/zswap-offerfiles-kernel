@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // Item #10: known_roots.first_seen_ms — the deterministic basis for shielded
 // expiry. The drift bug this prevents: computing expiry from last_seen_ms,
@@ -18,7 +19,7 @@ const {
 } = await import("@zswap-da/database");
 
 const PORT = 54347;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 beforeAll(async () => {
@@ -36,9 +37,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 test("first_seen_ms is pinned on first insert and never moves; last_seen_ms advances", async () => {

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { closeTestPglite } from "../database/test-pglite.ts";
 
 // HTTP-level tests: the REAL apiRouter registered on a real fastify instance
 // over in-memory PGlite with the real migrations — no route copies, no mocks.
@@ -7,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
+process.env["POST_COMMIT_EVENT_BRIDGE_ENABLED"] = "false";
 delete process.env["ENABLE_TOKEN_REGISTRY"]; // default-off is part of the contract
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
@@ -16,7 +18,7 @@ const fastify = (await import("fastify")).default;
 const { apiRouter } = await import("./api.ts");
 
 const PORT = 54339;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 let server: any;
 
@@ -56,8 +58,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await server?.close();
-    await handle?.close();
-  } catch { /* noop */ }
+  } finally {
+    await closeTestPglite(handle, client);
+  }
 });
 
 const getJson = async (url: string) => {

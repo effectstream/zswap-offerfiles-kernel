@@ -102,8 +102,22 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `CELESTIA_POLLING_INTERVAL_MS` | optional | Sync cadence. Defaults: devnet 6 000 ms, mainnet 30 000 ms. |
 | `MIDNIGHT_START_BLOCK` | yes | Numeric block height to start Midnight sync from. |
 | `NTP_START_TIME` | optional | NTP reference timestamp; resumed from DB when unset. |
+| `BATCHER_SUBMIT_TIMEOUT_MS` | optional | Absolute batcher fetch + receipt-body deadline; default 310 000 ms, bounded to 1 000–600 000 ms. |
+| `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
+| `SOLVER_LEVELS_AUTH_KEYS` / `SOLVER_LEVELS_AUTH_SECRET` | required on the node to accept levels | Server-side bearer credentials. The node endpoint is disabled if both are absent; do not copy the credential map into the solver process. |
+| `SOLVER_ENABLE_LEVELS_PUBLICATION` | optional | Solver-side, exact `true` opt-in. Defaults to `false` and is also suppressed in dry-run mode. |
+| `SOLVER_LEVELS_AUTH_TOKEN` | required when solver publication is enabled | Solver-side bearer token matching one node credential (at least 16 non-whitespace characters). The node derives the solver identity from it. |
+| `SOLVER_LEVELS_QUOTE_ENABLED` | optional | Literal `true` opts `/v1/quote` into fresh authenticated indicative ladders; default is `false`. |
+| `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | The mainnet solver defaults to dry-run. Live settlement requires `SOLVER_DRY_RUN=false` **and** the separate exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
+| `SOLVER_ENABLE_PATH_B` | optional | Defaults to `false`; Path A posted-price fills are the only execution mode enabled by default. |
+| `SOLVER_ENABLE_CYCLES` / `SOLVER_ENABLE_RESIDUAL_TOPUPS` | optional | Independent experimental opt-ins, both default `false` and have no effect unless Path B is also enabled. |
 
 A complete dev → mainnet env template lives at `.env.mainnet.example`.
+
+> **Dry-run limitation:** the current dry-run mirrors the offer book but does not
+> load wallet inventory, so it cannot prove which Path-A fills a funded solver
+> would admit. Treat it as a no-submit synchronization check, not live-decision
+> parity; real-funds readiness remains blocked by the project plan.
 
 ## Testing
 
@@ -245,6 +259,8 @@ There are **two ways** to post and read offers:
 | `GET` | `/v1/midnight/config` | Public Midnight config the browser contract client needs. |
 | `POST` | `/v1/offers` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, `409` on duplicate, else forward to the batcher → Celestia. Returns the offer's `offerId`. |
 | `GET` | `/v1/offers/stream` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
+| `POST` | `/v1/solver/levels` | Authenticated, monotonic full-snapshot publication of indicative ladders. Empty `pairs` withdraws all. |
+| `GET` | `/v1/solver/levels` | Fresh authenticated ladder declarations. |
 
 Beyond the above, the node also serves `GET /health`, `GET /v1/health/sync`,
 `GET /v1/pairs`, `GET /v1/quote`, and

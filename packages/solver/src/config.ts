@@ -9,20 +9,27 @@
 
 import { readFile } from "node:fs/promises";
 
-import { LadderBook, type PriceLevel, type PriceLevels } from "./ladder.ts";
+import {
+  LadderBook,
+  MAX_PAIRS_PER_PUSH,
+  pairKey,
+  type PriceLevel,
+  type PriceLevels,
+} from "./ladder.ts";
+import { parseCanonicalPrice } from "./engine.ts";
 
 export interface SolverLadderConfig {
   /** Alias → 64-hex color. Optional; pairs may use raw colors throughout. */
   tokens?: Record<string, string>;
   /** Color or alias → reference price, used only to value a crossing set's
    *  residual. Exact-zero crossings never consult it. */
-  refPricesUsd?: Record<string, number>;
+  refPricesUsd?: Record<string, string>;
   pairs: Array<{ tokenIn: string; tokenOut: string; levels: PriceLevel[] }>;
 }
 
 export interface LoadedLadders {
   ladders: LadderBook;
-  refPricesUsd: Map<string, number>;
+  refPricesUsd: Map<string, bigint>;
 }
 
 const isColor = (v: string): boolean => /^[0-9a-f]{64}$/i.test(v);
@@ -45,19 +52,39 @@ export function buildLadders(config: SolverLadderConfig): LoadedLadders {
   if (!Array.isArray(config.pairs)) {
     throw new Error("ladder config: `pairs` must be an array");
   }
+  if (config.pairs.length > MAX_PAIRS_PER_PUSH) {
+    throw new Error(
+      `ladder config: pairs has ${config.pairs.length} entries; maximum is ${MAX_PAIRS_PER_PUSH}`,
+    );
+  }
 
   const pairs: PriceLevels[] = config.pairs.map((pair, i) => ({
     tokenIn: resolveToken(pair.tokenIn, aliases, `pairs[${i}].tokenIn`),
     tokenOut: resolveToken(pair.tokenOut, aliases, `pairs[${i}].tokenOut`),
     levels: pair.levels,
   }));
-
-  const refPricesUsd = new Map<string, number>();
-  for (const [name, price] of Object.entries(config.refPricesUsd ?? {})) {
-    if (typeof price !== "number" || !Number.isFinite(price) || price < 0) {
-      throw new Error(`refPricesUsd["${name}"]: must be a non-negative finite number`);
+  const seenPairs = new Set<string>();
+  for (const [i, pair] of pairs.entries()) {
+    const key = pairKey(pair.tokenIn, pair.tokenOut);
+    if (seenPairs.has(key)) {
+      throw new Error(`pairs[${i}]: duplicate directed pair ${pair.tokenIn}→${pair.tokenOut}`);
     }
-    refPricesUsd.set(resolveToken(name, aliases, `refPricesUsd["${name}"]`), price);
+    seenPairs.add(key);
+  }
+
+  const refPricesUsd = new Map<string, bigint>();
+  for (const [name, price] of Object.entries(config.refPricesUsd ?? {})) {
+    const scaled = parseCanonicalPrice(price);
+    if (scaled === null) {
+      throw new Error(
+        `refPricesUsd["${name}"]: expected a positive canonical decimal string with at most 9 places`,
+      );
+    }
+    const token = resolveToken(name, aliases, `refPricesUsd["${name}"]`);
+    if (refPricesUsd.has(token)) {
+      throw new Error(`refPricesUsd["${name}"]: duplicate price for resolved token ${token}`);
+    }
+    refPricesUsd.set(token, scaled);
   }
 
   return { ladders: LadderBook.fromPairs(pairs), refPricesUsd };

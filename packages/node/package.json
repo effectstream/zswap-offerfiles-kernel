@@ -16,6 +16,7 @@
     "@effectstream/concise": "0.103.1",
     "@effectstream/coroutine": "0.103.1",
     "@effectstream/db": "0.103.1",
+    "@effectstream/event-client": "0.103.1",
     "@effectstream/log": "0.103.1",
     "@effectstream/midnight-contracts": "0.103.1",
     "@effectstream/runtime": "0.103.1",

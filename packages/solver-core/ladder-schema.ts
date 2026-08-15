@@ -27,8 +27,10 @@ export const MAX_RUNGS_PER_PAIR = 64;
 export const pairKey = (tokenIn: string, tokenOut: string): string =>
   `${tokenIn.toLowerCase()}|${tokenOut.toLowerCase()}`;
 
+const MAX_U256 = (1n << 256n) - 1n;
+
 const isAmountString = (v: unknown): v is string =>
-  typeof v === "string" && /^[0-9]+$/.test(v);
+  typeof v === "string" && /^(?:0|[1-9][0-9]{0,77})$/.test(v) && BigInt(v) <= MAX_U256;
 
 const isTokenColor = (v: unknown): v is string =>
   typeof v === "string" && /^[0-9a-f]{64}$/i.test(v);

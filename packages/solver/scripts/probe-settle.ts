@@ -106,7 +106,16 @@ console.log("[probe] settlement submitted");
 
 let settled = false;
 for (let i = 0; i < 36; i++) {
-  const { status } = await getOfferStatus(offerId).catch(() => ({ status: "live" as const }));
+  let status;
+  try {
+    ({ status } = await getOfferStatus(offerId));
+  } catch (error) {
+    console.log(
+      `[probe] settlement status unknown: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    await sleep(5000);
+    continue;
+  }
   if (status === "consumed") {
     settled = true;
     break;
@@ -169,7 +178,16 @@ check("the reverted coins fund a second attempt at the same offer", rebalanced, 
 
 let secondSettled = false;
 for (let i = 0; i < 36; i++) {
-  const { status } = await getOfferStatus(secondOfferId).catch(() => ({ status: "live" as const }));
+  let status;
+  try {
+    ({ status } = await getOfferStatus(secondOfferId));
+  } catch (error) {
+    console.log(
+      `[probe] retried-settlement status unknown: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    await sleep(5000);
+    continue;
+  }
   if (status === "consumed") {
     secondSettled = true;
     break;

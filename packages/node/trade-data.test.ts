@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "../database/test-pglite.ts";
 
 // Item #15 regression proof: 24 h chart stats must aggregate over EVERY fill
 // in the window, not the display query's LIMIT 120. Seeds >120 fills at known
@@ -15,7 +16,7 @@ const { migrationTable } = await import("@zswap-da/database");
 const { realStats, realHistory } = await import("./trade-data.ts");
 
 const PORT = 54341;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 const BASE = "b".repeat(64);
@@ -34,6 +35,9 @@ async function seedFill(
   colors: [string, string] = [BASE, QUOTE],
 ) {
   const id = nextId++;
+  const nullifier = `trade-nullifier-${id}`;
+  const commitment = `trade-commitment-${id}`;
+  const txHash = `trade-tx-${id}`;
   await client.query(
     `INSERT INTO offer_file_history
        (id, celestia_height, transaction_hex, created_at, ttl_seconds, archive_reason, archived_at)
@@ -46,6 +50,30 @@ async function seedFill(
      VALUES ($1, $2, $3, 'GIVING', 'SHIELDED', NOW() - ($6 || ' minutes')::interval),
             ($1, $4, $5, 'WANTING', 'SHIELDED', NOW() - ($6 || ' minutes')::interval)`,
     [id, colors[0], String(baseAmt), colors[1], String(quoteAmt), String(minutesAgo)],
+  );
+  // A CONSUMED archive is only a fill when the same transaction both spends
+  // every offer input and creates every declared offer output. Seed that exact
+  // proof so these market-data fixtures cannot accidentally count an
+  // ambiguous markerless cancellation as a trade.
+  await client.query(
+    `INSERT INTO offer_file_nullifiers_history (offer_file_id, nullifier, archived_at)
+     VALUES ($1, $2, NOW() - ($3 || ' minutes')::interval)`,
+    [id, nullifier, String(minutesAgo)],
+  );
+  await client.query(
+    `INSERT INTO nullifiers (nullifier, height, tx_hash)
+     VALUES ($1, $2, $3)`,
+    [nullifier, 1000 + id, txHash],
+  );
+  await client.query(
+    `INSERT INTO offer_file_commitments_history (offer_file_id, commitment)
+     VALUES ($1, $2)`,
+    [id, commitment],
+  );
+  await client.query(
+    `INSERT INTO commitments (commitment, tx_hash, mt_index, height)
+     VALUES ($1, $2, $3, $4)`,
+    [commitment, txHash, String(id), 1000 + id],
   );
 }
 
@@ -80,9 +108,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 test("volume covers ALL 130 in-window fills, not the newest 120", async () => {

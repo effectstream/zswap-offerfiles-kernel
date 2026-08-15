@@ -134,7 +134,7 @@ const levels = [
 
 const config = {
   tokens: { TESTA: tokenA, TESTB: tokenB },
-  refPricesUsd: { TESTA: 1, TESTB: 1 },
+  refPricesUsd: { TESTA: "1", TESTB: "1" },
   pairs: [
     { tokenIn: "TESTA", tokenOut: "TESTB", levels },
     { tokenIn: "TESTB", tokenOut: "TESTA", levels },

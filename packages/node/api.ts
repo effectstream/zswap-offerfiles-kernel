@@ -23,11 +23,29 @@ import {
   resolveOfferCursor,
 } from "@zswap-da/database";
 
-import { apiRateLimitAllowList, apiRateLimitMax, isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WINDOW_SECONDS, midnightContract } from "./env.ts";
+import {
+  apiRateLimitAllowList,
+  apiRateLimitMax,
+  apiSseMaxConnections,
+  authenticateSolverLevelsToken,
+  isPostCommitEventBridgeEnabled,
+  isSolverLevelsQuoteEnabled,
+  isTokenRegistryEnabled,
+  MIDNIGHT_NETWORK_ID,
+  OFFER_MAX_BYTES,
+  ROOT_WINDOW_SECONDS,
+  midnightContract,
+  solverLevelsCredentials,
+} from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
-import { eventBus, emitAppEvent, type AppEvent } from "./event-bus.ts";
+import {
+  eventBus,
+  emitAppEvent,
+  startPostCommitEventBridge,
+  type AppEvent,
+} from "./event-bus.ts";
 import { quoteWithPrices, priceOf } from "./market-mock.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
@@ -36,9 +54,10 @@ import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
 import {
   MAX_PAIRS_PER_PUSH,
+  parseLevelsVersion,
   solverLevels,
   validatePair,
-  type SolverPriceLevels,
+  type PriceLevels,
 } from "./solver-levels.ts";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
@@ -46,6 +65,30 @@ import {
 // MIP-0006 TokenLeg: { token, amount, type } — camelCase, `type` is the
 // value layer. Our DB column is `kind`; the wire name is the MIP's.
 type TokenLegDto = { token: string; amount: string; type: string };
+
+/** Write one SSE frame without retaining an unbounded slow-client buffer. */
+export function writeSseChunk(
+  raw: any,
+  chunk: string,
+  cleanup: () => void,
+): boolean {
+  if (raw.destroyed || raw.writableEnded) {
+    cleanup();
+    return false;
+  }
+  try {
+    if (raw.write(chunk) === true) return true;
+  } catch {
+    // Treat write failures exactly like response close.
+  }
+  // ServerResponse.write() returning false means the per-client buffer crossed
+  // its high-water mark. SSE has no replay cursor here, so retaining arbitrary
+  // event data is both misleading and a public memory-DoS primitive. Clients
+  // reconnect after the socket closes and refresh state from GET /v1/offers.
+  try { raw.destroy(); } catch { /* already closed */ }
+  cleanup();
+  return false;
+}
 
 export const apiRouter: StartConfigApiRouter = async function (
   server: any,
@@ -114,7 +157,33 @@ export const apiRouter: StartConfigApiRouter = async function (
       }
     }
   };
+  // Establish the external subscription before retaining process-local state.
+  // If broker startup fails, apiRouter rejects without leaking onAppEvent.
+  const stopPostCommitBridge = isPostCommitEventBridgeEnabled()
+    ? await startPostCommitEventBridge()
+    : async () => {};
   eventBus.on("app_event", onAppEvent);
+  const sseMaxConnections = apiSseMaxConnections();
+  // The emitter warning threshold should reflect the explicit connection cap,
+  // plus non-SSE projection listeners. The cap, not EventEmitter warnings, is
+  // the resource boundary.
+  const priorEventBusMaxListeners = eventBus.getMaxListeners();
+  eventBus.setMaxListeners(Math.max(priorEventBusMaxListeners, sseMaxConnections + 10));
+  let activeSseConnections = 0;
+  const activeSseResponses = new Set<any>();
+  // Fastify's preClose hook runs before it waits for active requests. Without
+  // this, persistent streams can prevent server.close() and therefore delay
+  // the post-commit broker unsubscribe indefinitely.
+  server.addHook("preClose", async () => {
+    for (const raw of activeSseResponses) {
+      try { raw.destroy(); } catch { /* already closed */ }
+    }
+  });
+  server.addHook("onClose", async () => {
+    eventBus.off("app_event", onAppEvent);
+    eventBus.setMaxListeners(priorEventBusMaxListeners);
+    await stopPostCommitBridge();
+  });
 
   // GET /v1/offers — list open offers, newest first, with optional filtering
   // & keyset pagination. Deliberately does NOT include the offer blob: a
@@ -330,6 +399,14 @@ export const apiRouter: StartConfigApiRouter = async function (
   }
 
   const TOKEN_COLOR_RE = /^[0-9a-f]{64}$/;
+  const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,77})$/; // bounded above by u256
+  const MAX_AMOUNT = (1n << 256n) - 1n;
+
+  const parseQuoteAmount = (value: unknown): bigint | null => {
+    if (typeof value !== "string" || !AMOUNT_RE.test(value)) return null;
+    const amount = BigInt(value);
+    return amount <= MAX_AMOUNT ? amount : null;
+  };
 
   server.get("/v1/quote", async (request: any, reply: any) => {
     const q = request?.query ?? {};
@@ -341,6 +418,29 @@ export const apiRouter: StartConfigApiRouter = async function (
         reason: "from_token and to_token must be 64-hex token colors",
       });
     }
+    if (fromToken === toToken) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "from_token and to_token must be distinct",
+      });
+    }
+    const fromAmount = parseQuoteAmount((q as any).from_amount);
+    if (fromAmount === null || fromAmount <= 0n) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "from_amount must be a positive canonical decimal integer no larger than u256",
+      });
+    }
+    const hasToAmount = (q as any).to_amount !== undefined;
+    const parsedToAmount = hasToAmount ? parseQuoteAmount((q as any).to_amount) : undefined;
+    if (hasToAmount && parsedToAmount === null) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "to_amount must be a canonical decimal integer no larger than u256",
+      });
+    }
+    const toAmount: bigint | undefined = parsedToAmount ?? undefined;
+
     // DEMO FALLBACK — unknown tokens quote at $1 (so two unknowns are 1:1).
     // This endpoint used to 404 UNKNOWN_TOKEN for unregistered colors, on the
     // principle that quoting arbitrary colors fabricates a market rate. That
@@ -362,56 +462,126 @@ export const apiRouter: StartConfigApiRouter = async function (
           `No token-tracking solution yet; fix before any real pricing. Tokens: ${unknownTokens.join(", ")}`,
       );
     }
-    const digits = (v: unknown) => String(v ?? "").replace(/[^0-9]/g, "");
-    const fromAmount = BigInt(digits((q as any).from_amount) || "0");
-    const toRaw = digits((q as any).to_amount);
-    const toAmount = toRaw.length ? BigInt(toRaw) : undefined;
+    const priceFor = (color: string) =>
+      unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
+    const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
 
-    // A solver's posted ladder is a price someone will actually honour, so it
-    // outranks both the token_prices table and the demo fallback below it.
-    const posted = solverLevels.quote(fromToken, toToken, fromAmount, Date.now());
-    if (posted !== null && fromAmount > 0n) {
-      const rate = Number(posted) / Number(fromAmount);
+    // Authenticated ladders are indicative, not reservations. Precedence over
+    // the established token-price contract is disabled unless the operator
+    // explicitly acknowledges it with SOLVER_LEVELS_QUOTE_ENABLED=true.
+    const posted = isSolverLevelsQuoteEnabled()
+      ? solverLevels.quoteDetails(fromToken, toToken, fromAmount, Date.now())
+      : null;
+    if (posted !== null) {
+      // Keep the established display metrics as JSON numbers. All executable
+      // base-unit amounts above remain bounded bigint and are serialized as
+      // strings; Number is used only for approximate rate/USD presentation.
+      const rate = Number(posted.amountOut) / Number(fromAmount);
       return {
         from_token: fromToken,
         to_token: toToken,
         from_amount: fromAmount.toString(),
         market_rate: rate,
-        suggested_to_amount: posted.toString(),
-        to_amount: (toAmount ?? posted).toString(),
+        suggested_to_amount: posted.amountOut.toString(),
+        to_amount: (toAmount ?? posted.amountOut).toString(),
         implied_rate: toAmount === undefined ? rate : Number(toAmount) / Number(fromAmount),
-        discount: toAmount === undefined ? 0 : Number(posted - toAmount) / Number(posted),
-        sponsored: toAmount !== undefined && toAmount < posted,
+        discount:
+          toAmount === undefined
+            ? 0
+            : Number(posted.amountOut - toAmount) / Number(posted.amountOut),
+        sponsored: toAmount !== undefined && toAmount < posted.amountOut,
+        from_usd: Number(fromAmount) * pf,
+        to_usd: Number(toAmount ?? posted.amountOut) * pt,
+        // Authenticated declarations are still INDICATIVE market data: this
+        // response carries no reservation or quote id and grants no right to a
+        // fill. Callers must settle the underlying offer independently.
+        quote_semantics: "indicative",
+        solver_id: posted.solverId,
+        levels_version: posted.version,
         source: "solver-levels",
       };
     }
 
-    const priceFor = (color: string) =>
-      unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
-    const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
     return {
       ...quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount),
       source: unknownTokens.length > 0 ? "demo-fallback" : "token-prices",
     };
   });
 
-  // POST /v1/solver/levels — a solver publishes its price ladders.
-  //
-  // Unauthenticated: any caller can post prices the quote endpoint will serve.
-  // Acceptable on a dev stack where the solver is co-located; NOT acceptable on
-  // any deployment whose quotes anyone trusts.
-  // TODO(solver-auth): require a shared secret or signature before deploying.
+  // POST /v1/solver/levels — replace one authenticated solver's COMPLETE
+  // declaration. The bearer token selects the identity; caller-supplied
+  // solverId is ignored/refused. An empty pairs array explicitly withdraws all
+  // of that solver's prices. Versions are decimal u64 strings and strictly
+  // monotonic, which rejects stale/reordered publication races.
   server.post("/v1/solver/levels", async (request: any, reply: any) => {
-    const body = request?.body ?? {};
-    const solverId = String(body.solverId ?? "").trim();
-    if (!solverId || solverId.length > 128) {
-      return reply.code(400).send({ error: "VALIDATION", reason: "solverId is required" });
+    let credentials: ReturnType<typeof solverLevelsCredentials>;
+    try {
+      credentials = solverLevelsCredentials();
+    } catch (error) {
+      console.error("[SOLVER_LEVELS] Invalid authentication configuration", error);
+      return reply.code(503).send({
+        error: "LEVELS_DISABLED",
+        reason: "solver level publication is unavailable",
+      });
     }
-    const pairs = body.pairs;
-    if (!Array.isArray(pairs) || pairs.length === 0 || pairs.length > MAX_PAIRS_PER_PUSH) {
+    if (credentials.length === 0) {
+      return reply.code(503).send({
+        error: "LEVELS_DISABLED",
+        reason: "solver level publication is disabled until credentials are configured",
+      });
+    }
+    const authorization = String(request.headers?.authorization ?? "");
+    const match = /^Bearer ([^\s]+)$/.exec(authorization);
+    const solverId = match
+      ? authenticateSolverLevelsToken(match[1], credentials)
+      : null;
+    if (!solverId) {
+      reply.header("WWW-Authenticate", "Bearer");
+      return reply.code(401).send({
+        error: "UNAUTHORIZED",
+        reason: "valid solver levels bearer token required",
+      });
+    }
+
+    const body = request?.body ?? {};
+    if (body.solverId !== undefined) {
       return reply.code(400).send({
         error: "VALIDATION",
-        reason: `pairs must be a non-empty array of at most ${MAX_PAIRS_PER_PUSH} entries`,
+        reason: "solverId is derived from authentication and must not be supplied",
+      });
+    }
+    const version = parseLevelsVersion(body.version);
+    if (version === null) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "version must be a positive canonical decimal u64 string",
+      });
+    }
+    const pairs = body.pairs;
+    if (!Array.isArray(pairs) || pairs.length > MAX_PAIRS_PER_PUSH) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: `pairs must be an array of at most ${MAX_PAIRS_PER_PUSH} entries`,
+      });
+    }
+    // Bound numeric strings before the shared schema converts them to BigInt.
+    // The HTTP body limit bounds bytes, but a single enormous decimal still
+    // causes avoidable super-linear parsing work.
+    const overlongAmount = pairs.findIndex((pair: unknown) => {
+      if (typeof pair !== "object" || pair === null) return false;
+      const levels = (pair as Record<string, unknown>).levels;
+      if (!Array.isArray(levels)) return false;
+      return levels.some((level) => {
+        if (typeof level !== "object" || level === null) return false;
+        const record = level as Record<string, unknown>;
+        return (typeof record.input === "string" && record.input.length > 78) ||
+          (typeof record.output === "string" && record.output.length > 78);
+      });
+    });
+    if (overlongAmount !== -1) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: `pairs[${overlongAmount}] level amounts must fit canonical decimal u256`,
       });
     }
     // All-or-nothing: a partially applied push would leave the registry
@@ -422,12 +592,43 @@ export const apiRouter: StartConfigApiRouter = async function (
         error: "VALIDATION",
         reason:
           `pairs[${invalid}] is malformed — need distinct 64-hex tokenIn/tokenOut and ` +
-          `levels strictly ascending in input, as decimal-integer strings`,
+          `a non-empty concave ladder of positive canonical decimal u256 amounts ` +
+          `strictly ascending in input/output`,
+      });
+    }
+    const outOfRange = (pairs as PriceLevels[]).findIndex((pair) =>
+      pair.levels.some((level) =>
+        parseQuoteAmount(level.input) === null || parseQuoteAmount(level.output) === null
+      )
+    );
+    if (outOfRange !== -1) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: `pairs[${outOfRange}] level amounts must be positive integers no larger than u256`,
       });
     }
 
-    solverLevels.publish(solverId, pairs as SolverPriceLevels[], Date.now());
-    return { accepted: pairs.length };
+    const published = solverLevels.publish(
+      solverId,
+      pairs as PriceLevels[],
+      version,
+      Date.now(),
+    );
+    if (!published.ok) {
+      return reply.code(published.code === "REGISTRY_FULL" ? 503 : 409).send({
+        error: published.code,
+        reason: published.reason,
+        ...(published.code === "STALE_VERSION"
+          ? { lastVersion: published.lastVersion }
+          : {}),
+      });
+    }
+    return {
+      solverId,
+      version: version.toString(),
+      accepted: published.accepted,
+      withdrawn: published.withdrawn,
+    };
   });
 
   // GET /v1/solver/levels — every ladder currently fresh enough to quote from.
@@ -556,7 +757,7 @@ export const apiRouter: StartConfigApiRouter = async function (
   });
 
   // Status lookup for My Trades startup reconciliation. Returns
-  // { offer, status } with status 'live' | 'consumed' | 'cancelled' | 'expired' | 'not_found'.
+  // { offer, status } with status live/consumed/cancelled/expired/unknown/not_found.
   //
   // Always via the content hash — an indexed probe. Undecodable blobs are
   // answered WITHOUT touching the DB: they can never have been indexed
@@ -757,34 +958,69 @@ export const apiRouter: StartConfigApiRouter = async function (
 
   // GET /v1/offers/stream — Server-Sent Events stream for real-time offer lifecycle updates
   server.get("/v1/offers/stream", async (request: any, reply: any) => {
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-    });
+    if (activeSseConnections >= sseMaxConnections) {
+      return reply
+        .header("Retry-After", "5")
+        .code(503)
+        .send({
+          error: "SSE_CAPACITY",
+          reason: "Too many active event streams; retry with backoff.",
+        });
+    }
 
-    const send = (data: object) => {
-      try {
-        reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-      } catch { /* client disconnected */ }
+    const raw = reply.raw;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let listenerRegistered = false;
+    let cleaned = false;
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+    const listener = (event: object) => {
+      writeSseChunk(raw, `data: ${JSON.stringify({ ...event, timestamp: Date.now() })}\n\n`, cleanup);
+    };
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      raw.off("close", cleanup);
+      request.raw.off("aborted", cleanup);
+      if (listenerRegistered) eventBus.off("app_event", listener);
+      if (heartbeat !== undefined) clearInterval(heartbeat);
+      activeSseResponses.delete(raw);
+      activeSseConnections -= 1;
+      resolveClosed();
     };
 
-    send({ type: "connected", timestamp: Date.now() });
+    activeSseConnections += 1;
+    activeSseResponses.add(raw);
+    // A long response ends on ServerResponse.close. IncomingMessage.close can
+    // describe completion of the request side and is therefore not the stream
+    // lifecycle signal; request.aborted remains a useful secondary signal.
+    raw.once("close", cleanup);
+    request.raw.once("aborted", cleanup);
 
-    const listener = (event: object) => send({ ...event, timestamp: Date.now() });
-    eventBus.on("app_event", listener);
+    try {
+      reply.hijack();
+      raw.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+      });
+      if (!writeSseChunk(
+        raw,
+        `data: ${JSON.stringify({ type: "connected", timestamp: Date.now() })}\n\n`,
+        cleanup,
+      )) return;
 
-    const heartbeat = setInterval(() => {
-      try { reply.raw.write(": heartbeat\n\n"); } catch { /* noop */ }
-    }, 30_000);
+      eventBus.on("app_event", listener);
+      listenerRegistered = true;
+      heartbeat = setInterval(() => {
+        writeSseChunk(raw, ": heartbeat\n\n", cleanup);
+      }, 30_000);
 
-    request.raw.on("close", () => {
-      eventBus.off("app_event", listener);
-      clearInterval(heartbeat);
-    });
-
-    // Keep connection open — never resolve
-    await new Promise(() => {});
+      if (raw.destroyed || raw.writableEnded || request.raw.aborted) cleanup();
+      await closed;
+    } finally {
+      cleanup();
+    }
   });
 };

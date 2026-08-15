@@ -11,6 +11,7 @@ import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/m
 
 import { isSolverEnabled } from "./env.ts";
 import { runSolver } from "./src/run.ts";
+import { startWithSignalOwnership } from "./src/startup-signals.ts";
 
 if (net.id !== "preview") {
   throw new Error(`solver.preview.ts requires MIDNIGHT_NETWORK_ID=preview, got "${net.id}"`);
@@ -24,11 +25,16 @@ if (!isSolverEnabled()) {
 globalThis.WebSocket = WebSocket;
 setNetworkId(net.id as any);
 
-const handle = await runSolver();
-await handle.ready;
-
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    void handle.stop().then(() => process.exit(0));
-  });
-}
+await startWithSignalOwnership((signal) => runSolver({ signal }), {
+  onSecondSignal: (signal) => {
+    console.error(`[solver] second ${signal} received — forcing shutdown`);
+    process.exit(1);
+  },
+  onSignalHandled: ({ signal, stopError }) => {
+    if (stopError !== undefined) {
+      console.error(`[solver] ${signal} shutdown failed`, stopError);
+      process.exit(1);
+    }
+    process.exit(0);
+  },
+});

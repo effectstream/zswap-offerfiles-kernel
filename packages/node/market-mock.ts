@@ -54,6 +54,26 @@ export interface Quote {
   to_usd: number | null;
 }
 
+const SPONSOR_NUMERATOR = 975n;
+const SPONSOR_DENOMINATOR = 1000n;
+
+/** Exact rational representation of the decimal spelling of a finite positive
+ * JS price. This keeps base-unit multiplication in bigint; Number remains only
+ * in explicitly approximate display fields such as market_rate and *_usd. */
+function decimalRatio(value: number): { numerator: bigint; denominator: bigint } {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error("token prices must be finite and positive");
+  }
+  const [coefficient = "", exponentRaw = "0"] = value.toString().toLowerCase().split("e");
+  const exponent = Number(exponentRaw);
+  const [whole = "", fraction = ""] = coefficient.split(".");
+  const digits = `${whole}${fraction}`;
+  const scale = fraction.length - exponent;
+  return scale >= 0
+    ? { numerator: BigInt(digits), denominator: 10n ** BigInt(scale) }
+    : { numerator: BigInt(digits) * 10n ** BigInt(-scale), denominator: 1n };
+}
+
 // Quote `fromAmount` of `fromToken` into `toToken`. If `toAmount` is given (the
 // user set a custom receive amount), discount/sponsored are computed against it;
 // otherwise they describe the auto-suggested amount (which lands exactly on the
@@ -68,9 +88,15 @@ export function quoteWithPrices(
   toAmount?: bigint,
 ): Quote {
   const marketRate = pf / pt; // `to` units per 1 `from`
-  const fromNum = Number(fromAmount);
-  const suggested = BigInt(Math.max(0, Math.floor(fromNum * marketRate * (1 - SPONSOR_DISCOUNT))));
+  const fromPrice = decimalRatio(pf);
+  const toPrice = decimalRatio(pt);
+  const suggestedNumerator =
+    fromAmount * fromPrice.numerator * toPrice.denominator * SPONSOR_NUMERATOR;
+  const suggestedDenominator =
+    fromPrice.denominator * toPrice.numerator * SPONSOR_DENOMINATOR;
+  const suggested = suggestedNumerator / suggestedDenominator;
   const eff = toAmount ?? suggested;
+  const fromNum = Number(fromAmount);
   let impliedRate: number | null = null;
   let discount: number | null = null;
   let sponsored = false;
@@ -78,7 +104,8 @@ export function quoteWithPrices(
   if (fromNum > 0) {
     impliedRate = Number(eff) / fromNum;
     discount = 1 - impliedRate / marketRate;
-    sponsored = discount >= SPONSOR_DISCOUNT - 1e-9;
+    sponsored =
+      eff * suggestedDenominator <= suggestedNumerator;
     toUsd = Number(eff) * pt;
   }
   return {
@@ -102,39 +129,14 @@ export function quote(
   fromAmount: bigint,
   toAmount?: bigint,
 ): Quote {
-  const pf = priceOf(fromToken);
-  const pt = priceOf(toToken);
-  const marketRate = pf / pt; // `to` units per 1 `from`
-  const fromNum = Number(fromAmount);
-
-  // Auto price = market discounted to the sponsor threshold, floored to integer.
-  const suggested = BigInt(Math.max(0, Math.floor(fromNum * marketRate * (1 - SPONSOR_DISCOUNT))));
-  const eff = toAmount ?? suggested;
-
-  let impliedRate: number | null = null;
-  let discount: number | null = null;
-  let sponsored = false;
-  let toUsd: number | null = null;
-  if (fromNum > 0) {
-    impliedRate = Number(eff) / fromNum;
-    discount = 1 - impliedRate / marketRate; // >0 = below market (good for taker)
-    sponsored = discount >= SPONSOR_DISCOUNT - 1e-9;
-    toUsd = Number(eff) * pt;
-  }
-
-  return {
-    from_token: fromToken,
-    to_token: toToken,
-    from_amount: fromAmount.toString(),
-    market_rate: marketRate,
-    suggested_to_amount: suggested.toString(),
-    to_amount: eff.toString(),
-    implied_rate: impliedRate,
-    discount,
-    sponsored,
-    from_usd: fromNum * pf,
-    to_usd: toUsd,
-  };
+  return quoteWithPrices(
+    fromToken,
+    toToken,
+    fromAmount,
+    priceOf(fromToken),
+    priceOf(toToken),
+    toAmount,
+  );
 }
 
 // ── chart data (wired to the frontend Market screen in the charts step) ──────

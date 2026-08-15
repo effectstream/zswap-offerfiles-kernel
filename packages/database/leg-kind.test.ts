@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // Item #8: SHIELDED/UNSHIELDED tags on offer legs (MIP-0006 TokenLeg.type).
 // Two properties matter: the widened uniqueness lets the same color appear on
@@ -20,7 +21,7 @@ const {
 } = await import("@zswap-da/database");
 
 const PORT = 54345;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 const BASE = "b".repeat(64);
@@ -41,9 +42,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 test("same color on both layers of the same side coexists (widened unique tuple)", async () => {
@@ -104,6 +103,19 @@ test("market queries count a dual-kind leg ONCE, summed by color (join-duplicati
        (500, '${BASE}', '10', 'GIVING', 'SHIELDED', NOW() - INTERVAL '10 minutes'),
        (500, '${BASE}', '5',  'GIVING', 'UNSHIELDED', NOW() - INTERVAL '10 minutes'),
        (500, '${QUOTE}', '30', 'WANTING', 'SHIELDED', NOW() - INTERVAL '10 minutes')`,
+  );
+  // Market queries count only cryptographically classified fills. Bind one
+  // input and one output marker to the same transaction so this fixture tests
+  // aggregation, not the markerless `unknown` safety branch.
+  await client.query(
+    `INSERT INTO offer_file_nullifiers_history (offer_file_id, nullifier, archived_at)
+     VALUES (500, 'dual-kind-nullifier', NOW() - INTERVAL '10 minutes');
+     INSERT INTO nullifiers (nullifier, height, tx_hash)
+     VALUES ('dual-kind-nullifier', 1, 'dual-kind-tx');
+     INSERT INTO offer_file_commitments_history (offer_file_id, commitment)
+     VALUES (500, 'dual-kind-commitment');
+     INSERT INTO commitments (commitment, tx_hash, mt_index, height)
+     VALUES ('dual-kind-commitment', 'dual-kind-tx', '500', 1)`,
   );
   const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE }, client))[0];
   expect(s.fills_24h).toBe(1);

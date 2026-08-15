@@ -14,6 +14,7 @@ export {
   interpolateQuote,
   isPriceLevelArray,
   isPriceLevels,
+  MAX_PAIRS_PER_PUSH,
   pairKey,
   rejectLevels,
   rejectPair,

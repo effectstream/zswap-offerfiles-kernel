@@ -22,11 +22,17 @@ export interface EngineConfig {
   ladders: LadderBook;
   /** Color → reference price, for valuing a crossing set's residual. An
    *  exactly-crossing set never consults it. */
-  refPricesUsd: Map<string, number>;
+  refPricesUsd: Map<string, bigint>;
   stock: Stock;
   expiryMarginSeconds: number;
   /** Longest crossing cycle to enumerate. 2 is a straight A↔B cross. */
   maxCycleLen: number;
+  /** All maker-to-maker merged settlement, including exact two-way crossing. */
+  enablePathB: boolean;
+  /** Experimental N-cycle enumeration. Exact two-way crossings stay enabled. */
+  enableCycles: boolean;
+  /** Whether non-zero-net sets may consume solver inventory for a top-up. */
+  enableResidualTopUps: boolean;
 }
 
 export type Candidate =
@@ -61,16 +67,18 @@ export function payoutsFor(net: Map<string, bigint>): Map<string, bigint> {
 
 /** Decimal places a reference price is held to once scaled to an integer. */
 export const PRICE_SCALE_DP = 9;
-const PRICE_SCALE = 10n ** BigInt(PRICE_SCALE_DP);
+export const PRICE_SCALE = 10n ** BigInt(PRICE_SCALE_DP);
 
-/** A reference price as a scaled integer, or null if it cannot be represented
- *  exactly enough to trust. Bounded so the scaling itself stays inside the
- *  double's exact-integer range. */
-export function scalePrice(price: number): bigint | null {
-  if (!Number.isFinite(price) || price < 0) return null;
-  const scaled = price * Number(PRICE_SCALE);
-  if (!Number.isSafeInteger(Math.round(scaled))) return null;
-  return BigInt(Math.round(scaled));
+/** Parse the one canonical price grammar into a 9-decimal fixed-point integer.
+ * Numbers are rejected even when they look safe: JSON number parsing has
+ * already discarded source precision before this boundary can inspect it. */
+export function parseCanonicalPrice(price: unknown): bigint | null {
+  if (typeof price !== "string") return null;
+  const match = /^(0|[1-9][0-9]*)(?:\.([0-9]{0,8}[1-9]))?$/.exec(price);
+  if (!match) return null;
+  const fraction = match[2] ?? "";
+  const scaled = BigInt(match[1]) * PRICE_SCALE + BigInt(fraction.padEnd(PRICE_SCALE_DP, "0") || "0");
+  return scaled > 0n ? scaled : null;
 }
 
 /**
@@ -86,15 +94,14 @@ export function scalePrice(price: number): bigint | null {
  */
 export function residualValue(
   net: Map<string, bigint>,
-  refPricesUsd: Map<string, number>,
+  refPricesUsd: Map<string, bigint>,
 ): bigint | null {
   let total = 0n;
   for (const [token, amount] of net) {
     const price = refPricesUsd.get(token);
     if (price === undefined) return null;
-    const scaled = scalePrice(price);
-    if (scaled === null) return null;
-    total += amount * scaled;
+    if (typeof price !== "bigint" || price <= 0n) return null;
+    total += amount * price;
   }
   return total;
 }
@@ -136,9 +143,13 @@ export function evaluateSet(
   cfg: EngineConfig,
   nowMs: number,
 ): SetVerdict {
+  if (!cfg.enablePathB) return { ok: false, reason: "Path B is disabled" };
   if (offers.length < 2) return { ok: false, reason: "a crossing needs at least two offers" };
   if (new Set(offers.map((o) => o.offerHash)).size !== offers.length) {
     return { ok: false, reason: "duplicate offer in set" };
+  }
+  if (offers.some((offer) => [...offer.gives, ...offer.wants].some((leg) => leg.kind !== "SHIELDED"))) {
+    return { ok: false, reason: "unsupported non-shielded leg" };
   }
   for (const offer of offers) {
     if (!isWorkable(offer, cfg.stock, nowMs, cfg.expiryMarginSeconds)) {
@@ -155,6 +166,10 @@ export function evaluateSet(
   // An exact crossing is self-funding: the offers cover each other and the
   // solver only merges them. No prices needed, no inventory touched.
   if (net.size === 0) return { ok: true, net, payouts, residual: 0n };
+
+  if (!cfg.enableResidualTopUps) {
+    return { ok: false, reason: "residual top-ups are disabled" };
+  }
 
   for (const [token, amount] of payouts) {
     if (cfg.stock.available(token) < amount) {
@@ -180,6 +195,9 @@ export function evaluatePathA(
 ): { ok: true; payouts: Map<string, bigint>; maxPay: bigint } | { ok: false; reason: string } {
   if (offer.gives.length !== 1 || offer.wants.length !== 1) {
     return { ok: false, reason: "multi-leg offer has no single posted price" };
+  }
+  if (offer.gives[0].kind !== "SHIELDED" || offer.wants[0].kind !== "SHIELDED") {
+    return { ok: false, reason: "unsupported non-shielded leg" };
   }
   if (!isWorkable(offer, cfg.stock, nowMs, cfg.expiryMarginSeconds)) {
     return { ok: false, reason: "claimed or near expiry" };
@@ -213,6 +231,7 @@ export function findExactCrossings(
   cfg: EngineConfig,
   nowMs: number,
 ): Candidate[] {
+  if (!cfg.enablePathB) return [];
   const found: Candidate[] = [];
   const paired = new Set<string>();
 
@@ -282,6 +301,7 @@ export function findCycleCrossings(
   nowMs: number,
   exclude: Set<string> = new Set(),
 ): Candidate[] {
+  if (!cfg.enablePathB || !cfg.enableCycles) return [];
   // Best available offer per directed edge.
   const bestOnEdge = new Map<string, BookOffer>();
   const outgoing = new Map<string, string[]>();
@@ -345,10 +365,10 @@ const pairKeyOf = (giveToken: string, wantToken: string): string => `${giveToken
  *  funds the whole other side. Taking an offer onto the books when it could
  *  have been matched spends capacity for nothing. */
 export function findCandidates(book: Book, cfg: EngineConfig, nowMs: number): Candidate[] {
-  const exact = findExactCrossings(book, cfg, nowMs);
+  const exact = cfg.enablePathB ? findExactCrossings(book, cfg, nowMs) : [];
   const spokenFor = new Set(exact.flatMap((c) => c.offers.map((o) => o.offerHash)));
 
-  const cycles = findCycleCrossings(book, cfg, nowMs, spokenFor);
+  const cycles = cfg.enablePathB ? findCycleCrossings(book, cfg, nowMs, spokenFor) : [];
   for (const candidate of cycles) {
     for (const offer of candidate.offers) spokenFor.add(offer.offerHash);
   }

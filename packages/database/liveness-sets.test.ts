@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // Verifies the 002-liveness-sets migration + the created_unshielded / known_roots
 // queries end-to-end against an in-memory PGlite over the pg wire protocol — no
@@ -22,7 +23,7 @@ const {
 } = await import("@zswap-da/database");
 
 const PORT = 54331;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 beforeAll(async () => {
@@ -35,10 +36,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Close server/DB without a client Terminate (PGlite WASM throws on it).
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 test("created_unshielded: insert, present lookup, partial-mismatch absent", async () => {

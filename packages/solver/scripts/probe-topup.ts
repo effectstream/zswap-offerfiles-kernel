@@ -149,7 +149,16 @@ if (imbalance.length === 0) {
   for (const offerId of [first, second]) {
     let consumed = false;
     for (let i = 0; i < 36; i++) {
-      const { status } = await getOfferStatus(offerId).catch(() => ({ status: "live" as const }));
+      let status;
+      try {
+        ({ status } = await getOfferStatus(offerId));
+      } catch (error) {
+        console.log(
+          `[probe] match status unknown: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        await sleep(5000);
+        continue;
+      }
       if (status === "consumed") {
         consumed = true;
         break;

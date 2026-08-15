@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // Verifies the nullifiers table (merged from seen_nullifiers + spent_nullifiers)
 // and its queries end-to-end against an in-memory PGlite served over the pg wire
@@ -19,7 +20,7 @@ const {
 } = await import("@zswap-da/database");
 
 const PORT = 54329;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 beforeAll(async () => {
@@ -37,9 +38,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 test("upsertNullifier: insert then isNullifierSpent returns row, absent nullifier returns empty", async () => {

@@ -25,6 +25,7 @@ interface CachedTip {
   fetchedAt: number;
 }
 const TIP_TTL_MS = 60_000;
+const TIP_TIMEOUT_MS = 5_000;
 const tipCache: Record<string, CachedTip> = {};
 
 async function cachedFetch(key: string, fn: () => Promise<number | null>): Promise<number | null> {
@@ -36,43 +37,63 @@ async function cachedFetch(key: string, fn: () => Promise<number | null>): Promi
   return value;
 }
 
+export async function fetchJsonWithDeadline(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number = TIP_TIMEOUT_MS,
+): Promise<any> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`invalid fetch deadline: ${timeoutMs}`);
+  }
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const operation = (async () => {
+    const res = await fetchImpl(url, { ...init, signal: controller.signal });
+    if (!res.ok) throw new Error(`tip request failed with HTTP ${res.status}`);
+    // Include body decoding in the same absolute deadline. Headers alone are
+    // not progress if an upstream leaves its JSON stream open indefinitely.
+    return await res.json();
+  })();
+  // Observe any late rejection after the deadline wins the race. This matters
+  // for fetch implementations which reject only in response to abort.
+  void operation.catch(() => undefined);
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`tip request timed out after ${timeoutMs}ms`);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (!controller.signal.aborted) controller.abort();
+  }
+}
+
 async function fetchMidnightTip(): Promise<number | null> {
   return cachedFetch("midnight", async () => {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 5000);
-    try {
-      const res = await fetch(midnightNetworkConfig.indexer, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: "query { block { height } }" }),
-        signal: ac.signal,
-      });
-      const json = await res.json();
-      const h = json?.data?.block?.height;
-      return typeof h === "number" ? h : null;
-    } finally {
-      clearTimeout(t);
-    }
+    const json = await fetchJsonWithDeadline(fetch, midnightNetworkConfig.indexer, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "query { block { height } }" }),
+    });
+    const h = json?.data?.block?.height;
+    return typeof h === "number" ? h : null;
   });
 }
 
 async function fetchCelestiaTip(): Promise<number | null> {
   return cachedFetch("celestia", async () => {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 5000);
-    try {
-      const res = await fetch(CELESTIA_RPC_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", method: "header.NetworkHead", params: [], id: 1 }),
-        signal: ac.signal,
-      });
-      const json = await res.json();
-      const h = parseInt(json?.result?.header?.height, 10);
-      return Number.isFinite(h) ? h : null;
-    } finally {
-      clearTimeout(t);
-    }
+    const json = await fetchJsonWithDeadline(fetch, CELESTIA_RPC_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "header.NetworkHead", params: [], id: 1 }),
+    });
+    const h = parseInt(json?.result?.header?.height, 10);
+    return Number.isFinite(h) ? h : null;
   });
 }
 
@@ -83,12 +104,45 @@ function pct(current: number, tip: number | null): number | null {
   return current < tip ? Math.min(p, 99.9) : p;
 }
 
-// "ok"      — within 2 NTP blocks (≤ 20 min behind), serving live data.
-// "syncing" — catching up; historical data only until lag clears.
-// "error"   — no blocks finalized yet (migrations pending or node crash).
-function deriveStatus(ntpCurrent: number, lagSeconds: number): "ok" | "syncing" | "error" {
-  if (ntpCurrent === 0) return "error";
-  if (lagSeconds > BLOCK_TIME_MS * 2 / 1000) return "syncing"; // > 2 blocks
+export interface ReadinessInput {
+  ntpCurrent: number;
+  ntpLagSeconds: number;
+  ntpBlockMs: number;
+  midnightCurrent: number | null;
+  midnightTip: number | null;
+  celestiaCurrent: number | null;
+  celestiaTip: number | null;
+}
+
+// Liveness sets are unsafe to use when either source chain position is
+// unknown or behind. Permit the configured parallel delays plus a small block
+// cushion, but never report ready solely because NTP itself is current.
+export const MAX_MIDNIGHT_LAG_BLOCKS = 12;
+export const MAX_CELESTIA_LAG_BLOCKS = 4;
+
+export function deriveSyncStatus(input: ReadinessInput): "ok" | "syncing" | "error" {
+  const {
+    ntpCurrent,
+    ntpLagSeconds,
+    ntpBlockMs,
+    midnightCurrent,
+    midnightTip,
+    celestiaCurrent,
+    celestiaTip,
+  } = input;
+  if (!Number.isFinite(ntpCurrent) || ntpCurrent <= 0 ||
+      !Number.isFinite(ntpBlockMs) || ntpBlockMs <= 0 ||
+      !Number.isFinite(ntpLagSeconds) || ntpLagSeconds < 0) return "error";
+  if (
+    midnightCurrent === null || midnightTip === null ||
+    celestiaCurrent === null || celestiaTip === null
+  ) return "syncing";
+  if (![midnightCurrent, midnightTip, celestiaCurrent, celestiaTip].every(
+    (height) => Number.isFinite(height) && height >= 0,
+  )) return "syncing";
+  if (ntpLagSeconds > ntpBlockMs * 2 / 1000) return "syncing";
+  if (midnightTip - midnightCurrent > MAX_MIDNIGHT_LAG_BLOCKS) return "syncing";
+  if (celestiaTip - celestiaCurrent > MAX_CELESTIA_LAG_BLOCKS) return "syncing";
   return "ok";
 }
 
@@ -99,38 +153,130 @@ function deriveStatus(ntpCurrent: number, lagSeconds: number): "ok" | "syncing" 
 // 15 s staleness is irrelevant for totals that only ever grow.
 const SET_STATS_TTL_MS = 15_000;
 type SetStats = { nullifiers: any; roots: any; unshielded: any };
-let setStatsCache: { value: SetStats; fetchedAt: number } | null = null;
+let setStatsCaches = new WeakMap<object, { value: SetStats; fetchedAt: number }>();
 
 async function fetchSetStats(dbConn: any): Promise<SetStats> {
-  if (setStatsCache && Date.now() - setStatsCache.fetchedAt < SET_STATS_TTL_MS) {
-    return setStatsCache.value;
+  const cacheKey = dbConn as object;
+  const cached = setStatsCaches.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < SET_STATS_TTL_MS) {
+    return cached.value;
   }
-  const [nullifierRows, rootRows, unshieldedRows] = await Promise.all([
-    getNullifierStats.run(undefined, dbConn),
-    getKnownRootStats.run(undefined, dbConn),
-    getUnshieldedStats.run(undefined, dbConn),
-  ]);
+  const [nullifierRows, rootRows, unshieldedRows] = await runSequentially([
+    () => getNullifierStats.run(undefined, dbConn),
+    () => getKnownRootStats.run(undefined, dbConn),
+    () => getUnshieldedStats.run(undefined, dbConn),
+  ] as const);
   const value = {
     nullifiers: nullifierRows[0] ?? null,
     roots: rootRows[0] ?? null,
     unshielded: unshieldedRows[0] ?? null,
   };
-  setStatsCache = { value, fetchedAt: Date.now() };
+  setStatsCaches.set(cacheKey, { value, fetchedAt: Date.now() });
   return value;
 }
 
-export async function getSyncStatus(dbConn: any) {
-  const [ntpRows, ntpCfgRows, pageRows, blockRows, setStats, lastOfferRows, rejections, midnightTip, celestiaTip] = await Promise.all([
-    getNtpCurrentBlock.run(undefined, dbConn),
-    getNtpConfigSnapshot.run(undefined, dbConn),
-    getSyncProtocolPagination.run(undefined, dbConn),
-    getLatestEffectstreamBlock.run(undefined, dbConn),
-    fetchSetStats(dbConn),
-    getLastOffer.run(undefined, dbConn),
-    getRecentRejections.run({ limit: 20 }, dbConn),
-    fetchMidnightTip(),
-    fetchCelestiaTip(),
-  ]);
+const STATUS_TTL_MS = 5_000;
+
+export interface SingleFlightCache<T> {
+  get: (load: () => Promise<T>) => Promise<T>;
+  reset: () => void;
+}
+
+export function createSingleFlightCache<T>(
+  ttlMs: number,
+  now: () => number = Date.now,
+): SingleFlightCache<T> {
+  let cached: { value: T; fetchedAt: number } | null = null;
+  let inFlight: Promise<T> | null = null;
+  return {
+    get(load) {
+      const current = now();
+      if (cached && current - cached.fetchedAt < ttlMs) return Promise.resolve(cached.value);
+      if (inFlight) return inFlight;
+      let loaded: Promise<T>;
+      try {
+        loaded = load();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      inFlight = loaded.then((value) => {
+        cached = { value, fetchedAt: now() };
+        return value;
+      }).finally(() => {
+        inFlight = null;
+      });
+      return inFlight;
+    },
+    reset() {
+      cached = null;
+      inFlight = null;
+    },
+  };
+}
+
+/** Scope cached work to the resource owner. API tests and embedded nodes can
+ * host several independent database connections in one process; returning one
+ * connection's readiness for another would be a cross-instance state leak. */
+export function createOwnedSingleFlightCache<T>(
+  ttlMs: number,
+  now: () => number = Date.now,
+): {
+  get: (owner: object, load: () => Promise<T>) => Promise<T>;
+  reset: () => void;
+} {
+  let owners = new WeakMap<object, SingleFlightCache<T>>();
+  return {
+    get(owner, load) {
+      let cache = owners.get(owner);
+      if (!cache) {
+        cache = createSingleFlightCache<T>(ttlMs, now);
+        owners.set(owner, cache);
+      }
+      return cache.get(load);
+    },
+    reset() {
+      owners = new WeakMap();
+    },
+  };
+}
+
+type StatusResponse = Awaited<ReturnType<typeof computeSyncStatus>>;
+const statusResponseCache = createOwnedSingleFlightCache<StatusResponse>(STATUS_TTL_MS);
+
+type AsyncTask<T> = () => Promise<T>;
+
+/** pg.Client currently queues overlapping queries but pg@8.21 deprecates that
+ * behavior and pg@9 removes it. Health receives one connection, so preserve
+ * query ordering explicitly instead of depending on that implicit queue. */
+export async function runSequentially<
+  const Tasks extends readonly AsyncTask<unknown>[],
+>(tasks: Tasks): Promise<{
+  -readonly [Index in keyof Tasks]: Tasks[Index] extends AsyncTask<infer Value>
+    ? Value
+    : never;
+}> {
+  const values: unknown[] = [];
+  for (const task of tasks) values.push(await task());
+  return values as any;
+}
+
+async function computeSyncStatus(dbConn: any) {
+  const tips = Promise.all([fetchMidnightTip(), fetchCelestiaTip()]);
+  // If a DB query fails before tips are consumed, their late failure must not
+  // become an unhandled rejection. The original promise is still awaited on
+  // the successful path, so tip failures remain fail-closed.
+  void tips.catch(() => undefined);
+  const [ntpRows, ntpCfgRows, pageRows, blockRows, setStats, lastOfferRows, rejections] =
+    await runSequentially([
+      () => getNtpCurrentBlock.run(undefined, dbConn),
+      () => getNtpConfigSnapshot.run(undefined, dbConn),
+      () => getSyncProtocolPagination.run(undefined, dbConn),
+      () => getLatestEffectstreamBlock.run(undefined, dbConn),
+      () => fetchSetStats(dbConn),
+      () => getLastOffer.run(undefined, dbConn),
+      () => getRecentRejections.run({ limit: 20 }, dbConn),
+    ] as const);
+  const [midnightTip, celestiaTip] = await tips;
   const nullifierRows = [setStats.nullifiers].filter(Boolean);
   const rootRows = [setStats.roots].filter(Boolean);
   const unshieldedRows = [setStats.unshielded].filter(Boolean);
@@ -162,7 +308,15 @@ export async function getSyncStatus(dbConn: any) {
   return {
     ts: Date.now(),
     now: new Date().toISOString(),
-    status: deriveStatus(ntpCurrent, lagSeconds),
+    status: deriveSyncStatus({
+      ntpCurrent,
+      ntpLagSeconds: lagSeconds,
+      ntpBlockMs,
+      midnightCurrent: mn?.merged ?? null,
+      midnightTip,
+      celestiaCurrent: ce?.merged ?? null,
+      celestiaTip,
+    }),
     blockL2: latestBlock
       ? {
           height: latestBlock.block_height,
@@ -223,4 +377,17 @@ export async function getSyncStatus(dbConn: any) {
       count: r.count,
     })),
   };
+}
+
+/** Whole-response cache + single-flight. Health routes are deliberately
+ * rate-limit-exempt; one polling burst must therefore fan into one bounded
+ * batch of DB/external work rather than one batch per caller. */
+export async function getSyncStatus(dbConn: any) {
+  return statusResponseCache.get(dbConn as object, () => computeSyncStatus(dbConn));
+}
+
+export function resetSyncHealthCacheForTest(): void {
+  statusResponseCache.reset();
+  setStatsCaches = new WeakMap();
+  for (const key of Object.keys(tipCache)) delete tipCache[key];
 }

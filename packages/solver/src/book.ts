@@ -31,11 +31,22 @@ export interface BookOffer {
   blob?: string;
 }
 
-const toLeg = (leg: { token: string; amount: string; type: string }): TokenLeg => ({
-  token: leg.token.toLowerCase(),
-  amount: BigInt(leg.amount),
-  kind: leg.type === "UNSHIELDED" ? "UNSHIELDED" : "SHIELDED",
-});
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Exhaustive external-boundary parser. Unknown enum values are rejected;
+ * treating a new leg type as SHIELDED would expand execution scope silently. */
+export function parseTokenLeg(value: unknown): TokenLeg | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.token !== "string" || !/^[0-9a-f]{64}$/i.test(value.token)) return null;
+  if (typeof value.amount !== "string" || !/^[1-9][0-9]*$/.test(value.amount)) return null;
+  if (value.type !== "SHIELDED" && value.type !== "UNSHIELDED") return null;
+  return {
+    token: value.token.toLowerCase(),
+    amount: BigInt(value.amount),
+    kind: value.type,
+  };
+}
 
 const toEpochMs = (v: string | null | undefined): number | null => {
   if (!v) return null;
@@ -43,14 +54,50 @@ const toEpochMs = (v: string | null | undefined): number | null => {
   return Number.isFinite(ms) ? ms : null;
 };
 
+const isTimestamp = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && Number.isFinite(Date.parse(value));
+
+const isOptionalTimestamp = (value: unknown): value is string | null | undefined =>
+  value === undefined || value === null || isTimestamp(value);
+
 /** Build a BookOffer from a REST list row or detail row. Returns null for a row
  *  with no content hash, which cannot be tracked or acted on. */
 export function bookOfferFromApi(row: ApiZswap): BookOffer | null {
-  if (!row.offerId) return null;
+  if (
+    !isRecord(row) ||
+    typeof row.offerId !== "string" ||
+    !/^[0-9a-f]{64}$/i.test(row.offerId)
+  ) {
+    return null;
+  }
+  if (!isRecord(row.computed) || !Array.isArray(row.computed.gives) || !Array.isArray(row.computed.wants)) {
+    return null;
+  }
+  if (
+    !Array.isArray(row.computed.inputNullifiers) ||
+    row.computed.inputNullifiers.some(
+      (n) => typeof n !== "string" || !/^[0-9a-f]{64}$/i.test(n),
+    )
+  ) {
+    return null;
+  }
+  if (
+    // The generic MIP representation permits an absent expiry, but the node's
+    // validated offer API always derives one from root lifetime / intent TTL.
+    // Solver execution is intentionally narrower: an unbounded row cannot be
+    // kept outside the settlement safety margin.
+    !isTimestamp(row.computed.expiresAt) ||
+    !isOptionalTimestamp(row.computed.firstSeenAt)
+  ) {
+    return null;
+  }
+  const gives = row.computed.gives.map(parseTokenLeg);
+  const wants = row.computed.wants.map(parseTokenLeg);
+  if (gives.some((leg) => leg === null) || wants.some((leg) => leg === null)) return null;
   return {
     offerHash: row.offerId.toLowerCase(),
-    gives: row.computed.gives.map(toLeg),
-    wants: row.computed.wants.map(toLeg),
+    gives: gives as TokenLeg[],
+    wants: wants as TokenLeg[],
     expiresAt: toEpochMs(row.computed.expiresAt),
     firstSeenAt: toEpochMs(row.computed.firstSeenAt),
     inputNullifiers: row.computed.inputNullifiers.map((n) => n.toLowerCase()),
@@ -71,7 +118,7 @@ export interface ResyncDiff {
 
 export class Book {
   readonly #byHash = new Map<string, BookOffer>();
-  readonly #hashByNullifier = new Map<string, string>();
+  readonly #hashesByNullifier = new Map<string, Set<string>>();
   readonly #byPair = new Map<string, Set<string>>();
 
   get size(): number {
@@ -95,10 +142,19 @@ export class Book {
   upsert(offer: BookOffer): void {
     const hash = offer.offerHash.toLowerCase();
     if (this.#byHash.has(hash)) this.#unindex(hash);
-    const stored: BookOffer = { ...offer, offerHash: hash };
+    const stored: BookOffer = {
+      ...offer,
+      offerHash: hash,
+      inputNullifiers: [...new Set(offer.inputNullifiers.map((nullifier) => nullifier.toLowerCase()))],
+    };
     this.#byHash.set(hash, stored);
     for (const nullifier of stored.inputNullifiers) {
-      this.#hashByNullifier.set(nullifier, hash);
+      let bucket = this.#hashesByNullifier.get(nullifier);
+      if (!bucket) {
+        bucket = new Set();
+        this.#hashesByNullifier.set(nullifier, bucket);
+      }
+      bucket.add(hash);
     }
     if (isSingleLeg(stored)) {
       const key = pairKey(stored.gives[0].token, stored.wants[0].token);
@@ -115,9 +171,10 @@ export class Book {
     const existing = this.#byHash.get(hash);
     if (!existing) return;
     for (const nullifier of existing.inputNullifiers) {
-      if (this.#hashByNullifier.get(nullifier) === hash) {
-        this.#hashByNullifier.delete(nullifier);
-      }
+      const bucket = this.#hashesByNullifier.get(nullifier);
+      if (!bucket) continue;
+      bucket.delete(hash);
+      if (bucket.size === 0) this.#hashesByNullifier.delete(nullifier);
     }
     if (isSingleLeg(existing)) {
       const key = pairKey(existing.gives[0].token, existing.wants[0].token);
@@ -137,13 +194,13 @@ export class Book {
     return true;
   }
 
-  /** Drop the offer that spends `nullifier`. The fallback path for a consumed
-   *  event that carries no content hash. */
-  removeByNullifier(nullifier: string): string | null {
-    const hash = this.#hashByNullifier.get(nullifier.toLowerCase());
-    if (!hash) return null;
-    this.remove(hash);
-    return hash;
+  /** Drop every offer that spends `nullifier`. Duplicate-nullifier rows are
+   * conflicting views of the same coin, so consumption invalidates all of
+   * them rather than whichever one most recently overwrote an index entry. */
+  removeByNullifier(nullifier: string): string[] {
+    const hashes = [...(this.#hashesByNullifier.get(nullifier.toLowerCase()) ?? [])];
+    for (const hash of hashes) this.remove(hash);
+    return hashes;
   }
 
   /** Offers giving `giveToken` and wanting `wantToken`, single-leg only. */

@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 import { getEnv } from "@effectstream/utils/runtime";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
@@ -123,6 +124,108 @@ export const apiRateLimitAllowList = (): string[] =>
     .split(",")
     .map((ip) => ip.trim())
     .filter((ip) => ip.length > 0);
+
+// SSE requests remain open, so the per-minute request limiter cannot bound
+// their steady-state memory/socket cost. Cap concurrent streams per node.
+export const apiSseMaxConnections = (): number => {
+  const raw = getEnv("API_SSE_MAX_CONNECTIONS") ?? "100";
+  if (!/^[1-9][0-9]*$/.test(raw)) return 100;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 10_000 ? parsed : 100;
+};
+
+export interface SolverLevelsCredential {
+  solverId: string;
+  secret: string;
+}
+
+const validSolverId = (value: string): boolean =>
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+
+/**
+ * Server-side credentials for authenticated solver publications.
+ *
+ * Preferred multi-solver form:
+ *   SOLVER_LEVELS_AUTH_KEYS='{"maker-a":"secret-a","maker-b":"secret-b"}'
+ *
+ * A single-secret deployment may instead set SOLVER_LEVELS_AUTH_SECRET. Its
+ * public identity is derived from the secret, so a caller cannot choose or
+ * spoof another solverId. The publisher supplies the matching value via its
+ * SOLVER_LEVELS_AUTH_TOKEN environment variable.
+ */
+export function solverLevelsCredentials(): SolverLevelsCredential[] {
+  const rawKeys = getEnv("SOLVER_LEVELS_AUTH_KEYS")?.trim();
+  if (rawKeys) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawKeys);
+    } catch {
+      throw new Error("SOLVER_LEVELS_AUTH_KEYS must be a JSON object of solverId to secret");
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("SOLVER_LEVELS_AUTH_KEYS must be a JSON object of solverId to secret");
+    }
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    if (entries.length === 0) {
+      throw new Error("SOLVER_LEVELS_AUTH_KEYS must contain at least one credential");
+    }
+    const seenSecrets = new Set<string>();
+    return entries.map(([solverId, value]) => {
+      if (!validSolverId(solverId)) {
+        throw new Error(`invalid solver identity in SOLVER_LEVELS_AUTH_KEYS: ${solverId}`);
+      }
+      if (typeof value !== "string" || value.length < 16 || /\s/.test(value)) {
+        throw new Error(
+          `secret for solver '${solverId}' must contain at least 16 non-whitespace characters`,
+        );
+      }
+      if (seenSecrets.has(value)) {
+        throw new Error("SOLVER_LEVELS_AUTH_KEYS secrets must be unique per solver identity");
+      }
+      seenSecrets.add(value);
+      return { solverId, secret: value };
+    });
+  }
+
+  const secret = getEnv("SOLVER_LEVELS_AUTH_SECRET");
+  if (secret === undefined || secret === "") return [];
+  if (secret.length < 16 || /\s/.test(secret)) {
+    throw new Error(
+      "SOLVER_LEVELS_AUTH_SECRET must contain at least 16 non-whitespace characters",
+    );
+  }
+  return [{
+    solverId: `solver-${createHash("sha256").update(secret).digest("hex").slice(0, 32)}`,
+    secret,
+  }];
+}
+
+/** Constant-time bearer lookup over the configured credential set. */
+export function authenticateSolverLevelsToken(
+  token: string,
+  credentials = solverLevelsCredentials(),
+): string | null {
+  const supplied = Buffer.from(token);
+  let authenticated: string | null = null;
+  for (const credential of credentials) {
+    const expected = Buffer.from(credential.secret);
+    if (supplied.length === expected.length && timingSafeEqual(supplied, expected)) {
+      authenticated = credential.solverId;
+    }
+  }
+  return authenticated;
+}
+
+/** Solver-backed precedence changes the established /v1/quote contract and is
+ * therefore opt-in until protocol scope is approved. Only literal "true"
+ * enables it; missing or malformed values fail closed. */
+export const isSolverLevelsQuoteEnabled = (): boolean =>
+  (getEnv("SOLVER_LEVELS_QUOTE_ENABLED") ?? "false") === "true";
+
+// Unit tests can disable the MQTT subscriber explicitly; deployed nodes keep
+// it on by default because SSE/pair projections must observe committed events.
+export const isPostCommitEventBridgeEnabled = (): boolean =>
+  (getEnv("POST_COMMIT_EVENT_BRIDGE_ENABLED") ?? "true") === "true";
 
 // Demo token registry (POST /api/known-tokens). known_tokens is a manually
 // curated convenience table: the Midnight token-metadata standard is not live,

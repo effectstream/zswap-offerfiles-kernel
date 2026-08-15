@@ -20,6 +20,7 @@ const A = "a".repeat(64);
 const B = "b".repeat(64);
 const C = "c".repeat(64);
 const NOW = 1_000_000_000;
+const USD = 10n ** 9n;
 
 const LEVELS = [
   { input: "1000", output: "1000" },
@@ -49,10 +50,13 @@ function config(overrides: Partial<EngineConfig> = {}): EngineConfig {
       { tokenIn: A, tokenOut: B, levels: LEVELS },
       { tokenIn: B, tokenOut: A, levels: LEVELS },
     ]),
-    refPricesUsd: new Map([[A, 1], [B, 1], [C, 1]]),
+    refPricesUsd: new Map([[A, USD], [B, USD], [C, USD]]),
     stock,
     expiryMarginSeconds: 120,
     maxCycleLen: 3,
+    enablePathB: true,
+    enableCycles: true,
+    enableResidualTopUps: true,
     ...overrides,
   };
 }
@@ -79,14 +83,14 @@ test("netOf reports a surplus positive and a top-up negative", () => {
 
 test("an unpriced token makes the residual unjudgeable rather than zero", () => {
   const net = new Map([[C, 100n]]);
-  expect(residualValue(net, new Map([[A, 1]]))).toBeNull();
+  expect(residualValue(net, new Map([[A, USD]]))).toBeNull();
   // Scaled by 10^9; only the sign is load-bearing.
-  expect(residualValue(net, new Map([[C, 2]]))).toBe(200n * 10n ** 9n);
+  expect(residualValue(net, new Map([[C, 2n * USD]]))).toBe(200n * USD);
 });
 
 test("a loss stays a loss above 2^53, where Number arithmetic collapsed it", () => {
   const big = 9007199254740992n; // 2^53
-  const prices = new Map([[A, 1], [B, 1]]);
+  const prices = new Map([[A, USD], [B, USD]]);
   // Exactly one unit short: Number(big) === Number(big + 1n), so this used to
   // evaluate to 0 and pass a `< 0` rejection.
   const losing = new Map([[A, big], [B, -(big + 1n)]]);
@@ -116,12 +120,11 @@ test("a set that loses one unit at huge amounts is now refused", () => {
   expect((losing as { reason: string }).reason).toContain("negative");
 });
 
-test("a price that cannot be scaled exactly makes the residual unjudgeable", () => {
+test("a non-positive or type-confused scaled price makes the residual unjudgeable", () => {
   const net = new Map([[A, 1n]]);
-  expect(residualValue(net, new Map([[A, Number.POSITIVE_INFINITY]]))).toBeNull();
-  expect(residualValue(net, new Map([[A, NaN]]))).toBeNull();
-  expect(residualValue(net, new Map([[A, -1]]))).toBeNull();
-  expect(residualValue(net, new Map([[A, 1e30]]))).toBeNull();
+  expect(residualValue(net, new Map([[A, 0n]]))).toBeNull();
+  expect(residualValue(net, new Map([[A, -1n]]))).toBeNull();
+  expect(residualValue(net, new Map([[A, Number.POSITIVE_INFINITY]]) as any)).toBeNull();
 });
 
 test("nullifiersDisjoint catches two offers spending the same coin", () => {
@@ -242,7 +245,7 @@ test("a residual-positive set still needs stock for the top-up leg", () => {
 });
 
 test("a set with an unpriced residual is refused rather than assumed harmless", () => {
-  const cfg = config({ refPricesUsd: new Map([[A, 1], [B, 1]]) });
+  const cfg = config({ refPricesUsd: new Map([[A, USD], [B, USD]]) });
   const verdict = evaluateSet(
     [offer("h1", [A, 1000n], [B, 900n]), offer("h2", [B, 900n], [C, 1n])],
     cfg,
@@ -332,6 +335,47 @@ test("an unmatched offer still falls through to Path A", () => {
 
 test("findCandidates returns nothing on an empty book", () => {
   expect(findCandidates(new Book(), config(), NOW)).toEqual([]);
+});
+
+test("safe defaults keep Path A while all Path B execution is disabled", () => {
+  const exact = bookOf(
+    offer("h1", [A, 1000n], [B, 1000n]),
+    offer("h2", [B, 1000n], [A, 1000n]),
+  );
+  const disabled = config({ enablePathB: false, enableCycles: false, enableResidualTopUps: false });
+  const candidates = findCandidates(exact, disabled, NOW);
+  expect(candidates.every((candidate) => candidate.kind === "pathA")).toBe(true);
+  expect(candidates.length).toBe(2);
+
+  const enabled = config({ enablePathB: true, enableCycles: false, enableResidualTopUps: false });
+  expect(findCandidates(exact, enabled, NOW).map((candidate) => candidate.kind)).toEqual(["pathB"]);
+});
+
+test("cycles and residual top-ups remain independently disabled", () => {
+  const ring = bookOf(
+    offer("r1", [A, 1000n], [B, 1000n]),
+    offer("r2", [B, 1000n], [C, 1000n]),
+    offer("r3", [C, 1000n], [A, 1000n]),
+  );
+  expect(findCycleCrossings(ring, config({ enableCycles: false }), NOW)).toEqual([]);
+
+  const residual = evaluateSet(
+    [offer("x1", [A, 1000n], [B, 900n]), offer("x2", [B, 800n], [A, 900n])],
+    config({ enableResidualTopUps: false }),
+    NOW,
+  );
+  expect(residual).toEqual({ ok: false, reason: "residual top-ups are disabled" });
+});
+
+test("engine rejects unshielded legs even when their amounts mirror exactly", () => {
+  const left = offer("h1", [A, 1000n], [B, 1000n]);
+  left.gives[0].kind = "UNSHIELDED";
+  const right = offer("h2", [B, 1000n], [A, 1000n]);
+  expect(evaluatePathA(left, config(), NOW)).toEqual({ ok: false, reason: "unsupported non-shielded leg" });
+  expect(evaluateSet([left, right], config(), NOW)).toEqual({
+    ok: false,
+    reason: "unsupported non-shielded leg",
+  });
 });
 
 // ── N-cycles ─────────────────────────────────────────────────────────────────

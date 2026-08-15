@@ -19,6 +19,7 @@
     "@midnight-ntwrk/ledger-v8": "8.1.0",
     "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
     "@zswap-da/solver-core": "workspace:*",
+    "@zswap-da/validator": "workspace:*",
     "rxjs": "^7.8.2"
   }
 }

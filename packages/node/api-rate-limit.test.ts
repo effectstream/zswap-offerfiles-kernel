@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "../database/test-pglite.ts";
 
 // The limiter's budget and exemptions come from env. A silent break here is
 // invisible in normal use — the API keeps answering — so the wiring is pinned:
@@ -11,6 +12,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
+process.env["POST_COMMIT_EVENT_BRIDGE_ENABLED"] = "false";
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
@@ -21,7 +23,7 @@ const { apiRateLimitAllowList, apiRateLimitMax } = await import("./env.ts");
 
 // Continues the every-other-port sequence the sibling test files use (…54347).
 const PORT = 54349;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 let server: any;
 let parsedMax = 0;
@@ -52,9 +54,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await server?.close();
-  await client?.end();
-  await handle?.close();
+  try {
+    await server?.close();
+  } finally {
+    await closeTestPglite(handle, client);
+  }
 });
 
 test("env parses the budget and trims/drops blanks in the allowlist", () => {

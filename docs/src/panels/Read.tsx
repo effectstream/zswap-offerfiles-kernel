@@ -88,7 +88,11 @@ export function ReadPanel() {
         <div className="field"><label>from_amount</label><input value={amt} onChange={(e) => setAmt(e.target.value)} /></div>
         <div className="actions">
           <button className="btn primary" type="button" onClick={() => dbg.call(api.quote(from, to, amt))}>Quote</button>
+          <button className="btn" type="button" onClick={() => dbg.call(api.solverLevels())}>Indicative solver levels</button>
         </div>
+        <p className="lead" style={{ marginBottom: 0 }}>
+          Solver-backed quotes are explicit opt-in market data. <code>quote_semantics: indicative</code> is not a fill reservation.
+        </p>
         <div className="row" style={{ marginTop: 10 }}>
           <div className="field"><label>base</label><input value={base} onChange={(e) => setBase(e.target.value)} /></div>
           <div className="field"><label>quote</label><input value={quote} onChange={(e) => setQuote(e.target.value)} /></div>

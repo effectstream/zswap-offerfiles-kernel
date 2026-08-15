@@ -4,8 +4,8 @@
     "TESTB": "b3ca74538249b3d8c57cb464968f14735fda823d9a3a16ea13d881fab964a803"
   },
   "refPricesUsd": {
-    "TESTA": 1,
-    "TESTB": 1
+    "TESTA": "1",
+    "TESTB": "1"
   },
   "pairs": [
     {

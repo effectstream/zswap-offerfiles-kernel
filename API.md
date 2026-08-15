@@ -65,10 +65,19 @@ NTP_STEP_SIZE=1000
 # ── Node ──────────────────────────────────────────────────────────────────────
 EFFECTSTREAM_API_PORT=9999
 BATCHER_SUBMIT_URL=http://127.0.0.1:3334
+BATCHER_SUBMIT_TIMEOUT_MS=310000        # absolute fetch + receipt-body deadline
+API_SSE_MAX_CONNECTIONS=100             # persistent stream cap; excess gets 503
 OFFER_TTL_SECONDS=                      # offer lifetime; DEFAULTS to ROOT_WINDOW_SECONDS
                                         # (shielded fillability tracks the root window)
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
+SOLVER_LEVELS_AUTH_KEYS='{"maker-a":"replace-with-long-random-secret"}'
+                                        # preferred: server-side solver id → bearer secret map;
+                                        # publication is disabled when neither auth var is set
+# SOLVER_LEVELS_AUTH_SECRET=             # single-solver alternative; server derives its identity
+SOLVER_LEVELS_TTL_SECONDS=60             # expire pair data; last version remains as a replay tombstone
+SOLVER_LEVELS_QUOTE_ENABLED=false        # strict opt-in: let indicative ladders override /v1/quote
+# POST_COMMIT_EVENT_BRIDGE_ENABLED=true  # default true; disable only when no runtime MQTT broker exists
 ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
                                         # 3600 (1 h) on all currently deployed networks;
                                         # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
@@ -79,6 +88,17 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults
                                         # intent TTLs and moves independently. Too wide ⇒
                                         # phantom unfillable offers on the book; too narrow
                                         # ⇒ valid offers rejected ROOT_UNKNOWN.
+
+# ── Solver process (packages/solver) ───────────────────────────────────────────
+SOLVER_DRY_RUN=true                      # mainnet default; mirrors only, never settles
+                                        # current dry-run does NOT load inventory, so it is not Path-A decision parity
+SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
+SOLVER_ENABLE_PATH_B=false               # default execution scope is posted-price Path A only
+SOLVER_ENABLE_CYCLES=false               # experimental; also requires PATH_B=true
+SOLVER_ENABLE_RESIDUAL_TOPUPS=false      # experimental inventory spend; also requires PATH_B=true
+SOLVER_ENABLE_LEVELS_PUBLICATION=false   # independent explicit opt-in; dry-run always suppresses it
+# SOLVER_LEVELS_AUTH_TOKEN=              # matching bearer secret, >=16 non-whitespace characters
+                                        # required only for enabled, non-dry-run publication
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -143,6 +163,14 @@ curl http://host:9999/health
 
 ---
 
+#### `GET /v1/health`
+
+Compact protocol-readiness probe. It uses the same aggregate state as the
+detailed endpoint below and returns `{ "status": "ok|syncing|error", "synced":
+true|false }`. Unlike `/health`, this is not merely HTTP-process liveness.
+
+---
+
 #### `GET /v1/health/sync`
 
 Per-protocol sync progress. Use this to confirm the node is serving live data before submitting offers.
@@ -181,12 +209,15 @@ curl http://host:9999/v1/health/sync
 
 | Field | Description |
 |---|---|
-| `status` | `"ok"` — within 2 NTP blocks of real time (≤ 20 min lag); `"syncing"` — catching up; `"error"` — no blocks finalized yet |
+| `status` | `"ok"` only when NTP is within 2 configured blocks, both chain tips are reachable, Midnight is ≤12 blocks behind, and Celestia is ≤4 blocks behind; `"syncing"` when a chain is unknown/behind; `"error"` when no NTP block has finalized |
 | `ntp.lag_seconds` | Seconds of history remaining to process |
 | `midnight.tip` | Live Midnight chain tip (cached 60 s; `null` if unreachable) |
 | `celestia.tip` | Live Celestia chain tip (cached 60 s; `null` if unreachable) |
 | `sets.*` | Sizes of the ingested liveness sets (cached 15 s) |
 | `recent_rejections` | Blobs discarded at ingestion, as `{celestia_height, code, count}` for the 20 most recent heights. **`celestia_height` is the indexer's own L2 block height, not a Celestia height** (legacy column name). Rejected blob bodies are deleted, so this is how namespace spam stays visible — see [Ingestion pipeline](#ingestion-pipeline-the-critical-path) |
+
+The complete response is cached for 5 seconds with single-flight coalescing;
+rate-limit-exempt UI polling bursts therefore share one DB/RPC computation.
 
 On a fresh database the initial sync of 89 days of Midnight history takes approximately 4 hours.
 
@@ -234,6 +265,14 @@ Returns the current live offer book — offers published to Celestia, validated,
 ```
 
 Each row is a MIP-0006 `OffchainOfferPayload`. **`offerBech32` is omitted in list responses** — the spec's presence rule is "at least one of `offerId`/`offerBech32`", and a real offer's string is 16–25 KB, so a 100-row page carrying strings would be megabytes. Fetch the string per offer via `GET /v1/offers/:offerId`, which always includes it. `blobChars` sizes that fetch.
+
+`computed.expiresAt` is the earliest applicable ledger constraint: the
+proof-root last-seen time plus the root window and the earliest Intent TTL are
+both considered, including for mixed transactions. The publication TTL is a
+defensive fallback only when neither constraint exists. Cleanup executes on an
+L2 block and archives only when this persisted timestamp is at or before that
+block's timestamp, so an early or duplicate scheduled input cannot expire the
+offer prematurely.
 
 | Field | Description |
 |---|---|
@@ -287,7 +326,7 @@ curl "http://host:9999/v1/offers/9f2c4a...e1"
 }
 ```
 
-`computed.status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND", "offerId": "…" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
+`computed.status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"unknown"`. Unknown hashes → `404 { "error": "NOT_FOUND", "offerId": "…" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
 
 #### `GET /v1/offers/:hash/status`
 
@@ -297,9 +336,9 @@ Lightweight status probe by content hash:
 { "offerId": "9f2c4a…e1", "status": "live" }
 ```
 
-`status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"`.
+`status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"unknown"` | `"not_found"`.
 
-**Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's inputs in *one* Midnight transaction — so an archived offer whose nullifiers were spent across different transactions, or only partially spent, is reported `"cancelled"` with certainty: it can never have settled. `"consumed"` means all inputs left in a single transaction — and for offers with stored **fill markers** (the offer's own output commitments, plaintext in the published blob and captured at ingestion) the classification is exact in both directions: a genuine settlement must create those commitments on-chain (merging preserves outputs verbatim), so their absence from the spending tx proves a cancel, single-input offers included. Marker-less offers (unshielded-only wants, rows indexed before the commitments migration) keep the one-tx heuristic. Chain-side commitments come from the `Midnight:NullifierAndCommitment` primitive at zero extra indexer cost. Chart/trade data counts only `"consumed"` offers.
+**Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's inputs in *one* Midnight transaction — so an archived offer whose nullifiers were spent across different transactions, or only partially spent, is reported `"cancelled"` with certainty. `"consumed"` is reserved for shielded-input offers with stored **fill markers** (the offer's own output commitments, plaintext in the published blob and captured at ingestion) whose single spending transaction also created every marker. A marker-less archived offer (including a row indexed before the commitments migration), or any offer with an unshielded input whose spend lacks a retained transaction identity, is `"unknown"`: the available evidence cannot prove the complete atomic settlement, so it is never positive settlement evidence. Chain-side commitments come from the `Midnight:NullifierAndCommitment` primitive. Chart/trade data counts only verified `"consumed"` offers.
 
 ---
 
@@ -321,7 +360,7 @@ curl -X POST http://host:9999/v1/offers/status \
 { "offerId": "9f2c4a…e1", "status": "live" }
 ```
 
-Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"` (see *Fill vs cancel* above). A blob that does not decode answers `{ "status": "not_found" }` with no `offerId`.
+Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"unknown"` | `"not_found"` (see *Fill vs cancel* above). A blob that does not decode answers `{ "status": "not_found" }` with no `offerId`.
 
 Lookups resolve via the offer's content hash (an indexed probe). A blob that does not decode as a `swapoffer1…` string answers `"not_found"` **without touching the database** — undecodable blobs can never have been indexed, and this keeps junk submissions from costing more than a hash attempt.
 
@@ -478,13 +517,22 @@ Validation consults the node's local state only — no live RPC calls are made. 
 
 ### Market data
 
+> **Breaking compatibility note:** quote amounts that were previously sanitized
+> (for example `1_000` or `-100`) now return `400`; send canonical decimal u256
+> strings. Solver-level publication now requires bearer authentication plus a
+> positive `version`, and `pairs` is interpreted as a complete replacement.
+> Solver-backed `/v1/quote` precedence is default-off until explicitly enabled.
+
 #### `GET /v1/quote`
 
 Price quote for a token swap, backed by the `token_prices` table. On first request the deterministic fallback price is written; subsequent calls are consistent. Operators can override rows directly in the DB.
 
 Unregistered colors quote at a **$1 demo fallback** (two unknown tokens ⇒ 1:1) instead of erroring — loudly logged server-side, never persisted to `token_prices`. This is a stopgap until token identity is chain-derived (TokenMint registry); do not treat fallback quotes as market data. Malformed colors answer `400`.
 
-**Query parameters:** `from_token`, `to_token` (64-hex, no `0x`), `from_amount` (base units), optional `to_amount`.
+**Query parameters:** `from_token`, `to_token` (distinct 64-hex values, no `0x`),
+`from_amount` (positive base units), and optional `to_amount`. Amounts use canonical
+decimal u256 grammar: digits only, no sign/separator/exponent/decimal/leading zeroes.
+Malformed input returns `400 VALIDATION`; it is never sanitized into a different amount.
 
 ```bash
 curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from_amount=1000000"
@@ -504,7 +552,8 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
   "discount":            0.025,
   "sponsored":           true,
   "from_usd":            1.46,
-  "to_usd":              1.42
+  "to_usd":              1.42,
+  "source":              "token-prices"
 }
 ```
 
@@ -517,6 +566,42 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 | `discount` | Fractional gap below `market_rate` (e.g. `0.025` = 2.5% under market) |
 | `sponsored` | `true` when the implied rate is at least the sponsorship discount below market (the batcher's fee-sponsorship policy hook) |
 | `from_usd`, `to_usd` | USD value of each leg at the reference price |
+| `source` | `token-prices`, `demo-fallback`, or the explicitly enabled `solver-levels` source |
+
+By default this preserves the established token-price response above. When an
+operator explicitly sets `SOLVER_LEVELS_QUOTE_ENABLED=true`, a fresh authenticated
+ladder may win instead. The response retains every field above and additionally
+includes `source: "solver-levels"`, `quote_semantics: "indicative"`, `solver_id`, and
+`levels_version`. It is not a reservation or executable quote.
+
+#### `POST /v1/solver/levels`
+
+Replace the authenticated solver's **complete** indicative ladder declaration.
+Publication fails closed with `503 LEVELS_DISABLED` unless the node configures
+`SOLVER_LEVELS_AUTH_KEYS` (a JSON solver-id → secret map) or the single-solver
+`SOLVER_LEVELS_AUTH_SECRET`. Publishers send the matching secret through their
+`SOLVER_LEVELS_AUTH_TOKEN` environment variable as `Authorization: Bearer ...`;
+the server derives the solver identity from that credential, so the body must not
+contain `solverId`.
+
+```bash
+curl -X POST http://host:9999/v1/solver/levels \
+  -H "Authorization: Bearer $SOLVER_LEVELS_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"version":"1","pairs":[{"tokenIn":"aaaa...","tokenOut":"bbbb...","levels":[{"input":"1000","output":"990"}]}]}'
+```
+
+`version` is a positive canonical decimal u64 string and must increase for that
+identity. `pairs` is a full snapshot (maximum 64); omitted pairs are withdrawn and
+`pairs: []` withdraws everything. Each pair has at most 64 concave rungs with strictly
+ascending input and output, using positive decimal u256 amounts. Stale or reordered versions
+return `409 STALE_VERSION` with the authenticated identity's canonical
+`lastVersion`, allowing a restarted publisher to advance and retry its complete snapshot.
+The in-memory declaration expires after
+`SOLVER_LEVELS_TTL_SECONDS`, while its bounded last-version tombstone remains to
+prevent replay after expiry.
+
+`GET /v1/solver/levels` returns only currently fresh pair declarations.
 
 ---
 
@@ -559,7 +644,7 @@ Last 120 fills (consumed offers) for a pair, newest first.
 
 #### `GET /v1/offers/stream`
 
-Server-Sent Events stream for real-time offer lifecycle notifications. A comment-only keepalive (`: heartbeat`) is sent every 30 seconds.
+Server-Sent Events stream for real-time offer lifecycle notifications. A comment-only keepalive (`: heartbeat`) is sent every 30 seconds. The node accepts at most `API_SSE_MAX_CONNECTIONS` concurrent streams (default 100); excess connections receive `503 SSE_CAPACITY` with `Retry-After: 5`. A client that stops consuming and applies response backpressure is disconnected instead of being buffered without bound. Reconnect with backoff and refresh `GET /v1/offers`; the stream has no replay cursor.
 
 ```bash
 curl -N http://host:9999/v1/offers/stream
@@ -570,13 +655,13 @@ curl -N http://host:9999/v1/offers/stream
 ```
 data: {"type":"connected","timestamp":1750800000000}
 
-data: {"type":"offer_indexed","offerId":42,"blockHeight":1281600,"gives":[...],"wants":[...],"timestamp":...}
+data: {"type":"offer_indexed","offerId":42,"offerHash":"9f2c...","blockHeight":1281600,"gives":[...],"wants":[...],"timestamp":...}
 
-data: {"type":"offer_consumed","offerId":42,"nullifier":"abc123...","timestamp":...}
+data: {"type":"offer_consumed","offerId":42,"offerHash":"9f2c...","nullifier":"abc123...","timestamp":...}
 
-data: {"type":"offer_expired","offerId":42,"timestamp":...}
+data: {"type":"offer_expired","offerId":42,"offerHash":"9f2c...","timestamp":...}
 
-data: {"type":"offer_rejected","code":"ROOT_UNKNOWN","reason":"...","blockHeight":...,"timestamp":...}
+data: {"type":"offer_rejected","code":"ROOT_UNKNOWN","reason":"...","offerHash":"9f2c...","blockHeight":...,"timestamp":...}
 
 data: {"type":"token_minted","name":"MYTOKEN","color":"...","kind":"shielded","timestamp":...}
 ```
@@ -584,7 +669,9 @@ data: {"type":"token_minted","name":"MYTOKEN","color":"...","kind":"shielded","t
 `timestamp` (ms epoch) is added by the server to every event. `offer_consumed`
 carries **either** `nullifier` (shielded input spent) **or** `unshieldedSpend`
 (`{owner, intentHash, outputNo}`, unshielded UTXO spent) depending on which coin
-was consumed — handle both.
+was consumed — handle both. REST uses the content-addressed `offerHash`; numeric
+`offerId` is a node-local row id. `offerHash` can be absent only for legacy rows
+inserted before hashes were persisted, or for a rejection too malformed to hash.
 
 ---
 

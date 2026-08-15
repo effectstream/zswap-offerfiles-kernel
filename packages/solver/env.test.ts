@@ -1,0 +1,66 @@
+import { expect, test } from "bun:test";
+
+import { loadSolverRuntimeEnv, parseBooleanEnv, parseBoundedIntegerEnv } from "./env.ts";
+
+const reader = (values: Record<string, string>) => (name: string): string | undefined => values[name];
+
+test("bounded integer parser rejects coercible, zero, negative, and out-of-range values", () => {
+  for (const raw of ["", "0", "-1", "1.5", "1e3", "10ms", " 10", "9007199254740992"]) {
+    expect(() => parseBoundedIntegerEnv("TEST_LIMIT", raw, 5, 1, 100)).toThrow(/TEST_LIMIT/);
+  }
+  expect(parseBoundedIntegerEnv("TEST_LIMIT", "100", 5, 1, 100)).toBe(100);
+  expect(parseBoundedIntegerEnv("TEST_LIMIT", undefined, 5, 1, 100)).toBe(5);
+});
+
+test("boolean parser rejects malformed or ambiguous values", () => {
+  expect(parseBooleanEnv("FEATURE", undefined, false)).toBe(false);
+  expect(parseBooleanEnv("FEATURE", "true", false)).toBe(true);
+  expect(parseBooleanEnv("FEATURE", "false", true)).toBe(false);
+  for (const raw of ["TRUE", "False", "1", "yes", " true", ""]) {
+    expect(() => parseBooleanEnv("FEATURE", raw, false)).toThrow(/FEATURE/);
+  }
+});
+
+test("levels publication uses a strict default-off boolean", () => {
+  expect(parseBooleanEnv("SOLVER_ENABLE_LEVELS_PUBLICATION", undefined, false)).toBe(false);
+  expect(parseBooleanEnv("SOLVER_ENABLE_LEVELS_PUBLICATION", "true", false)).toBe(true);
+  expect(() => parseBooleanEnv("SOLVER_ENABLE_LEVELS_PUBLICATION", "yes", false)).toThrow(
+    /SOLVER_ENABLE_LEVELS_PUBLICATION/,
+  );
+});
+
+test("runtime config validates expiry and publication cross-field bounds", () => {
+  expect(() =>
+    loadSolverRuntimeEnv(reader({ SOLVER_EXPIRY_MARGIN_SECONDS: "3600", OFFER_TTL_SECONDS: "3600" })),
+  ).toThrow(/SOLVER_EXPIRY_MARGIN_SECONDS.*OFFER_TTL_SECONDS/);
+  expect(() =>
+    loadSolverRuntimeEnv(
+      reader({ SOLVER_LEVELS_PUSH_INTERVAL_MS: "60000", SOLVER_LEVELS_TTL_SECONDS: "60" }),
+    ),
+  ).toThrow(/SOLVER_LEVELS_PUSH_INTERVAL_MS.*SOLVER_LEVELS_TTL_SECONDS/);
+});
+
+test("runtime config accepts the bounded defaults", () => {
+  expect(loadSolverRuntimeEnv(reader({}))).toMatchObject({
+    maxCycleLen: 3,
+    resyncIntervalMs: 300_000,
+    expiryMarginSeconds: 120,
+    levelsPushIntervalMs: 5_000,
+    levelsTtlSeconds: 60,
+  });
+});
+
+test("every bounded runtime variable rejects malformed startup input by name", () => {
+  for (const name of [
+    "SOLVER_MAX_CYCLE_LEN",
+    "SOLVER_RESYNC_INTERVAL_MS",
+    "SOLVER_EXPIRY_MARGIN_SECONDS",
+    "OFFER_TTL_SECONDS",
+    "SOLVER_SETTLE_TTL_MINUTES",
+    "SOLVER_LEVELS_PUSH_INTERVAL_MS",
+    "SOLVER_LEVELS_TTL_SECONDS",
+    "SOLVER_STATUS_POLL_MS",
+  ]) {
+    expect(() => loadSolverRuntimeEnv(reader({ [name]: "not-an-integer" }))).toThrow(name);
+  }
+});

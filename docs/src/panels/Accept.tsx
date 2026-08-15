@@ -105,7 +105,7 @@ export function AcceptPanel({
                   <td className="truncate" title={o.offerId ?? ''}>{short(o.offerId ?? '', 12)}</td>
                   <td>{legs(o.computed?.gives)}</td>
                   <td>{legs(o.computed?.wants)}</td>
-                  <td>{o.celestiaHeight ?? ''}</td>
+                  <td>{o.blockHeight ?? ''}</td>
                   <td>{o.blobChars ? `${o.blobChars} chars` : '—'}</td>
                 </tr>
               ))}

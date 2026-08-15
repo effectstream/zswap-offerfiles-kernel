@@ -49,36 +49,88 @@ export class ImbalanceUnreadableError extends Error {
   }
 }
 
+const MAX_LEDGER_SEGMENT = 0xffff;
+
+/** ledger-v8 declares token-bearing segments in three places: guaranteed
+ * segment 0, intent keys, and fallible-offer keys. Segment IDs are arbitrary
+ * u16 values (they are not a dense 0..N range), so guessing 0/1 is unsafe. */
+export function declaredLedgerSegments(tx: FinalizedTransaction): number[] {
+  if (!tx || typeof tx !== "object") {
+    throw new ImbalanceUnreadableError("transaction is not an object");
+  }
+
+  const segments = new Set<number>([0]);
+  for (const field of ["intents", "fallibleOffer"] as const) {
+    let collection: unknown;
+    try {
+      collection = (tx as any)[field];
+    } catch {
+      throw new ImbalanceUnreadableError(`transaction.${field} could not be read`);
+    }
+    if (collection === undefined || collection === null) continue;
+    if (!(collection instanceof Map)) {
+      throw new ImbalanceUnreadableError(`transaction.${field} is not a keyed collection`);
+    }
+    try {
+      for (const segment of (collection as any).keys() as Iterable<unknown>) {
+        if (
+          typeof segment !== "number" ||
+          !Number.isInteger(segment) ||
+          segment < 0 ||
+          segment > MAX_LEDGER_SEGMENT
+        ) {
+          throw new ImbalanceUnreadableError(
+            `transaction.${field} contains an invalid ledger segment`,
+          );
+        }
+        segments.add(segment);
+      }
+    } catch (err) {
+      if (err instanceof ImbalanceUnreadableError) throw err;
+      throw new ImbalanceUnreadableError(`transaction.${field} keys could not be enumerated`);
+    }
+  }
+  return [...segments].sort((a, b) => a - b);
+}
+
 export function tokenImbalances(tx: FinalizedTransaction): Imbalance[] {
   if (typeof (tx as any)?.imbalances !== "function") {
     throw new ImbalanceUnreadableError("transaction exposes no imbalances()");
   }
 
   const out: Imbalance[] = [];
-  let readableSegments = 0;
-  for (const seg of [0, 1]) {
+  for (const seg of declaredLedgerSegments(tx)) {
     let m: unknown;
     try {
       m = (tx as any).imbalances(seg);
     } catch {
-      // A segment that does not exist is normal; a transaction where NEITHER
-      // reads is not, and is caught below.
-      continue;
+      throw new ImbalanceUnreadableError(`declared segment ${seg} could not be read`);
     }
-    if (!m || typeof (m as any).entries !== "function") continue;
-    readableSegments++;
-    for (const [k, v] of (m as any).entries() as Iterable<[unknown, bigint]>) {
-      if (typeof v !== "bigint") {
-        throw new ImbalanceUnreadableError(`segment ${seg} returned a non-bigint amount`);
+    if (!(m instanceof Map)) {
+      throw new ImbalanceUnreadableError(`declared segment ${seg} returned no imbalance map`);
+    }
+    try {
+      for (const [k, v] of (m as any).entries() as Iterable<[unknown, bigint]>) {
+        if (typeof v !== "bigint") {
+          throw new ImbalanceUnreadableError(`segment ${seg} returned a non-bigint amount`);
+        }
+        if (!k || typeof k !== "object") {
+          throw new ImbalanceUnreadableError(`segment ${seg} returned an invalid token kind`);
+        }
+        const tag = (k as any).tag;
+        const raw = tag === "dust" ? "dust" : (k as any).raw;
+        if (tag !== "dust" && tag !== "shielded" && tag !== "unshielded") {
+          throw new ImbalanceUnreadableError(`segment ${seg} returned unknown token tag`);
+        }
+        if (typeof raw !== "string") {
+          throw new ImbalanceUnreadableError(`segment ${seg} returned an invalid token value`);
+        }
+        if (v !== 0n) out.push({ seg, tag, raw, amount: v });
       }
-      const tag = typeof k === "object" && k !== null ? (k as any).tag ?? "?" : "?";
-      const raw = typeof k === "object" && k !== null ? (k as any).raw ?? String(k) : String(k);
-      if (v !== 0n) out.push({ seg, tag: String(tag), raw: String(raw), amount: v });
+    } catch (err) {
+      if (err instanceof ImbalanceUnreadableError) throw err;
+      throw new ImbalanceUnreadableError(`segment ${seg} imbalance map could not be enumerated`);
     }
-  }
-
-  if (readableSegments === 0) {
-    throw new ImbalanceUnreadableError("no segment returned a readable imbalance map");
   }
   return out;
 }
@@ -109,6 +161,62 @@ export interface SettleOpts {
   level?: "no-wait" | "wait-receipt" | "wait-effectstream-processed";
 }
 
+export interface BatcherAcknowledgement {
+  success: true;
+  message: string;
+  inputsProcessed?: 1;
+  transactionHash?: string;
+}
+
+export class BatcherRequestTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`batcher request timed out after ${timeoutMs} ms`);
+    this.name = "BatcherRequestTimeoutError";
+  }
+}
+
+/** Best-effort cleanup for a response which outlives the caller's deadline.
+ * A response body can already be locked by `text()`, in which case cancel()
+ * rejects. Observe that rejection so cleanup never creates an unhandled one. */
+function cancelResponseBody(response: Response | undefined): void {
+  try {
+    const cancellation = response?.body?.cancel();
+    if (cancellation) void cancellation.catch(() => undefined);
+  } catch {
+    // Cleanup must not replace the request's timeout failure.
+  }
+}
+
+/** The batcher's documented wait-receipt success shape. A generic HTTP 2xx,
+ * truthy object, partial payload, or non-canonical transaction identity is not
+ * evidence that a transaction was submitted. */
+export function parseBatcherAcknowledgement(
+  value: unknown,
+  level: NonNullable<SettleOpts["level"]> = "wait-receipt",
+): BatcherAcknowledgement | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  if (body.success !== true || typeof body.message !== "string" || body.message.length === 0) {
+    return null;
+  }
+  if (body.inputsProcessed !== 1) return null;
+  // no-wait acknowledges queue admission, not settlement. Keep this explicitly
+  // separate from the identity-bearing wait response used by the solver.
+  if (level === "no-wait") {
+    return { success: true, message: body.message, inputsProcessed: 1 };
+  }
+
+  if (typeof body.transactionHash !== "string") return null;
+  const rawHash = body.transactionHash.replace(/^0x/i, "");
+  if (!/^[0-9a-f]{64}$/i.test(rawHash)) return null;
+  return {
+    success: true,
+    message: body.message,
+    inputsProcessed: 1,
+    transactionHash: `0x${rawHash.toLowerCase()}`,
+  };
+}
+
 export async function settleViaBatcher(
   tx: FinalizedTransaction,
   optsOrTimeout: number | SettleOpts = 240_000,
@@ -116,6 +224,9 @@ export async function settleViaBatcher(
   const opts: SettleOpts =
     typeof optsOrTimeout === "number" ? { timeoutMs: optsOrTimeout } : optsOrTimeout;
   const timeoutMs = opts.timeoutMs ?? 240_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError(`batcher timeout must be a positive finite number, got ${timeoutMs}`);
+  }
   const level = opts.level ?? "wait-receipt";
   // SAFETY: the batcher balances dust only. Handing it a tx with a non-dust
   // imbalance would settle an incomplete swap — consuming inputs without
@@ -140,17 +251,57 @@ export async function settleViaBatcher(
     confirmationLevel: level,
     ...(opts.serverTimeoutMs !== undefined ? { timeoutMs: opts.serverTimeoutMs } : {}),
   };
-  const resp = await fetch(`${BALANCER_URL}/send-input`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
+  const controller = new AbortController();
+  const timeoutError = new BatcherRequestTimeoutError(timeoutMs);
+  let deadlineFired = false;
+  let response: Response | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      deadlineFired = true;
+      // Reject independently of fetch so a fetch/body implementation which
+      // ignores AbortSignal still cannot extend the absolute request budget.
+      reject(timeoutError);
+      controller.abort(timeoutError);
+      cancelResponseBody(response);
+    }, timeoutMs);
   });
-  let j: any;
+
+  const request = (async (): Promise<{ ok: boolean; status: number; body: unknown }> => {
+    const resp = await fetch(`${BALANCER_URL}/send-input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    response = resp;
+    if (deadlineFired) {
+      cancelResponseBody(resp);
+      throw timeoutError;
+    }
+
+    let j: unknown = null;
+    try {
+      const raw = await resp.text();
+      if (deadlineFired) throw timeoutError;
+      if (raw !== "") j = JSON.parse(raw);
+    } catch (err) {
+      if (deadlineFired) throw timeoutError;
+      // A malformed/non-JSON body is intentionally not an acknowledgement.
+    }
+    const acknowledgement = parseBatcherAcknowledgement(j, level);
+    return { ok: resp.ok && acknowledgement !== null, status: resp.status, body: j };
+  })();
+
+  // Promise.race observes its inputs, but retain an explicit rejection
+  // observer for the timed-out request because it may settle long after this
+  // function and its race have returned.
+  void request.catch(() => undefined);
+
   try {
-    j = await resp.json();
-  } catch {
-    j = await resp.text();
+    return await Promise.race([request, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
-  return { ok: resp.ok && j?.success !== false, status: resp.status, body: j };
 }

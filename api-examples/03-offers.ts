@@ -21,7 +21,7 @@ if (offers.length === 0) {
     const gives = o.computed.gives.map((g: any) => `${g.amount} ${g.token.slice(0, 8)}…`).join(", ");
     const wants = o.computed.wants.map((w: any) => `${w.amount} ${w.token.slice(0, 8)}…`).join(", ");
     const hash = o.offerId ? o.offerId.slice(0, 12) + "…" : "(no hash)";
-    console.log(`  [${hash}] gives: ${gives}  →  wants: ${wants}  (Celestia #${o.celestiaHeight})`);
+    console.log(`  [${hash}] gives: ${gives}  →  wants: ${wants}  (Effectstream L2 #${o.blockHeight})`);
   }
 
   // The list is blob-free; the content hash addresses each offer.

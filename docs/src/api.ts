@@ -30,7 +30,7 @@ export type OfferComputed = {
   expiresAt?: string | null
   inputNullifiers: string[]
   firstSeenAt?: string | null
-  status: 'live' | 'consumed' | 'cancelled' | 'expired'
+  status: 'live' | 'consumed' | 'cancelled' | 'expired' | 'unknown'
 }
 
 /** MIP-0006 OffchainOfferPayload. In LIST responses `offerBech32` is omitted
@@ -40,7 +40,9 @@ export type Offer = {
   offerId: string | null
   offerBech32?: string
   blobChars?: number
-  celestiaHeight?: string
+  /** Effectstream L2 block that indexed the offer; this is not a Celestia height. */
+  blockHeight: number | string
+  ttlSeconds?: number | string
   computed: OfferComputed
 }
 
@@ -49,7 +51,40 @@ export type OfferDetail = Offer & { offerBech32: string }
 
 export type OffersPage = { offers: Offer[]; nextCursor: string | null }
 
-export type SyncStatus = { status: string; [k: string]: unknown }
+export type HealthState = 'ok' | 'syncing' | 'error'
+export type ProtocolHealth = { status: HealthState; synced: boolean }
+export type SyncStatus = { status: HealthState; [k: string]: unknown }
+
+export type QuoteSource = 'token-prices' | 'demo-fallback' | 'solver-levels'
+export type Quote = {
+  from_token: string
+  to_token: string
+  from_amount: string
+  market_rate: number
+  suggested_to_amount: string
+  to_amount: string
+  implied_rate: number | null
+  discount: number | null
+  sponsored: boolean
+  from_usd: number
+  to_usd: number | null
+  source: QuoteSource
+  /** Present only when source === 'solver-levels'. This is never a reservation. */
+  quote_semantics?: 'indicative'
+  solver_id?: string
+  levels_version?: string
+}
+
+export type PriceLevel = { input: string; output: string }
+export type SolverPriceLevels = {
+  tokenIn: string
+  tokenOut: string
+  levels: PriceLevel[]
+  solverId: string
+  version: string
+  updatedAt: number
+}
+export type SolverLevelsSnapshot = { levels: SolverPriceLevels[] }
 
 /** Phantom-typed request: T is the expected response body. */
 export type ApiRequest<T = any> = {
@@ -71,7 +106,10 @@ const qs = (q: Record<string, string | number | undefined>) => {
 
 export const api = {
   // ── Node (:9999) ──────────────────────────────────────────────────────────
-  health: () => req<{ status: string }>('GET', `${API_BASE}/health`),
+  /** HTTP process liveness only; do not use it to decide whether the book is current. */
+  processHealth: () => req<{ status: string }>('GET', `${API_BASE}/health`),
+  /** Aggregate NTP + Midnight + Celestia readiness. */
+  health: () => req<ProtocolHealth>('GET', `${API_BASE}/v1/health`),
   sync: () => req<SyncStatus>('GET', `${API_BASE}/v1/health/sync`),
   /** Keyset pagination: pass the previous page's next_cursor as after_hash. */
   zswaps: (q: { token?: string; direction?: string; limit?: number; after_hash?: string } = {}) =>
@@ -89,8 +127,11 @@ export const api = {
   registerToken: (color: string, name: string, kind: string) =>
     req('POST', `${API_BASE}/v1/known-tokens`, { color, name, kind }),
   pairs: () => req('GET', `${API_BASE}/v1/pairs`),
-  quote: (from_token: string, to_token: string, from_amount: string) =>
-    req('GET', `${API_BASE}/v1/quote?${qs({ from_token, to_token, from_amount })}`),
+  quote: (from_token: string, to_token: string, from_amount: string, to_amount?: string) =>
+    req<Quote>('GET', `${API_BASE}/v1/quote?${qs({ from_token, to_token, from_amount, to_amount })}`),
+  /** Fresh authenticated declarations. They are indicative, not executable reservations. */
+  solverLevels: () =>
+    req<SolverLevelsSnapshot>('GET', `${API_BASE}/v1/solver/levels`),
   chartStats: (base: string, quote: string) =>
     req('GET', `${API_BASE}/v1/chart/stats?${qs({ base, quote })}`),
   chartHistory: (base: string, quote: string) =>

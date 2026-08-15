@@ -30,6 +30,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { offerHashFromBlob } from "@zswap-da/offer-guard";
+import { shieldedKeys } from "../../lib/wallet.ts";
+import { batcherInputFingerprint } from "../../lib/batcher.ts";
 import { ARCHIVE_WAIT_TRIES } from "../config.ts";
 import { ledger, type OfferRecord } from "../ledger.ts";
 import {
@@ -49,7 +51,7 @@ import { getChartHistory, getOfferStatus, submitOffer2 } from "../lib/api2.ts";
 import { submitBlobRaw } from "../lib/celestia.ts";
 import { historyRowByHash, offerRowByHash, rejectionTotalsByCode } from "../lib/db2.ts";
 import { beginPhase, check, note, waitUntil } from "../lib/util.ts";
-import { PARTIAL_OVERLAP_GIVES } from "./p3b-closeout.ts";
+import { hasBatcherChainRejection, PARTIAL_OVERLAP_GIVES } from "./p3b-closeout.ts";
 
 /** How many competitors share one coin. A maker laddering the same coin at
  *  several prices is the NORMAL pattern, not an edge case — two proved only
@@ -197,12 +199,45 @@ async function runPartialOverlap(db: Client, actors: Actors): Promise<void> {
     }),
   );
   const built: BuiltOffer[] = [];
-  for (const rec of recs) {
-    const offer = await buildOffer(actors.partialOverlap, rec);
-    built.push(offer);
-    storeBlob(offer.hash, offer.blob);
+  const first = await buildOffer(actors.partialOverlap, recs[0]!);
+  built.push(first);
+  storeBlob(first.hash, first.blob);
+  await actors.partialOverlap.run(() =>
+    (actors.partialOverlap.wr.wallet as any).revert(first.finalized),
+  );
+
+  // The SDK's selector is greedy in wallet order. With A, B, C all visible,
+  // offer2 can select A+B+C and return change even though B+C is exact. Book A
+  // in a temporary self-transfer recipe so B+C are the only available coins;
+  // release both reservations after the offer bytes have been serialized.
+  const heldA = await actors.partialOverlap.run(() =>
+    actors.partialOverlap.wr.wallet.transferTransaction(
+      [
+        {
+          type: "shielded",
+          outputs: [
+            {
+              type: ledger.colors.TA!,
+              amount: PARTIAL_OVERLAP_COINS[0],
+              receiverAddress: actors.partialOverlap.shieldedAddr,
+            },
+          ],
+        } as any,
+      ],
+      shieldedKeys(actors.partialOverlap.wr),
+      { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
+    ),
+  );
+  try {
+    const second = await buildOffer(actors.partialOverlap, recs[1]!);
+    built.push(second);
+    storeBlob(second.hash, second.blob);
     await actors.partialOverlap.run(() =>
-      (actors.partialOverlap.wr.wallet as any).revert(offer.finalized),
+      (actors.partialOverlap.wr.wallet as any).revert(second.finalized),
+    );
+  } finally {
+    await actors.partialOverlap.run(() =>
+      (actors.partialOverlap.wr.wallet as any).revert(heldA),
     );
   }
   for (let i = 0; i < recs.length; i++) {
@@ -303,11 +338,25 @@ async function runConcurrentTakers(db: Client, actors: Actors): Promise<void> {
   await check(
     "T-E5: loser is a batcher/chain double-spend result, not UTXO_NOT_LIVE",
     async () => {
+      const failureIndex = outcome.results.findIndex((result) => !result.ok);
       const detail = JSON.stringify(failures[0]?.body ?? "");
+      const fingerprint = failureIndex >= 0
+        ? batcherInputFingerprint(prepared[failureIndex]!.tx as any)
+        : "";
+      let trace = "";
+      try {
+        trace = readFileSync(
+          fileURLToPath(new URL("../../../../batcher-debug.log", import.meta.url)),
+          "utf-8",
+        );
+      } catch {
+        // The canonical runner always starts the batcher at repo root. An
+        // absent trace must fail this proof instead of degrading to timeout.
+      }
       return (
         failures.length === 1 &&
         !detail.includes("UTXO_NOT_LIVE") &&
-        /fail|invalid|spent|double|already/i.test(detail)
+        hasBatcherChainRejection(trace, fingerprint)
       );
     },
     JSON.stringify(failures[0]?.body ?? {}).slice(0, 300),

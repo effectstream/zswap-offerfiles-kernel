@@ -21,3 +21,13 @@ export function exactSubsetIndexes(
   }
   return matches;
 }
+
+/** The SDK's failed-input callback currently ages out as a receipt timeout.
+ * Require the transaction-specific adapter trace as proof that the underlying
+ * result was the expected Midnight submission rejection. */
+export function hasBatcherChainRejection(log: string, fingerprint: string): boolean {
+  return log.split("\n").some((line) =>
+    line.includes(`#${fingerprint}`) &&
+    /Submit failed.*Transaction submission error/i.test(line)
+  );
+}

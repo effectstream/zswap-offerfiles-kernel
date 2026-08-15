@@ -4,6 +4,7 @@ import {
   PARTIAL_OVERLAP_COINS,
   PARTIAL_OVERLAP_GIVES,
   exactSubsetIndexes,
+  hasBatcherChainRejection,
 } from "./p3b-closeout.ts";
 import { submitConcurrentlyToBalancer } from "../actors/wallets.ts";
 
@@ -13,6 +14,11 @@ test("T-E2 denominations select {A,B} and {B,C}, with exactly B shared", () => {
   );
   expect(offer1).toEqual([[0, 1]]);
   expect(offer2).toEqual([[1, 2]]);
+  // During offer2 construction A is deliberately reserved, leaving B+C as
+  // the only selectable exact subset instead of the greedy A+B+C-with-change.
+  expect(exactSubsetIndexes(PARTIAL_OVERLAP_COINS.slice(1), PARTIAL_OVERLAP_GIVES[1])).toEqual([
+    [0, 1],
+  ]);
   expect(offer1[0]!.filter((i) => offer2[0]!.includes(i))).toEqual([1]);
 });
 
@@ -39,4 +45,14 @@ test("T-E5 submitter has both requests in flight before the first receipt", asyn
   expect(outcome.peakInFlight).toBe(2);
   expect(outcome.allStartedBeforeFirstReceipt).toBe(true);
   expect(outcome.results.filter((result) => result.ok)).toHaveLength(1);
+});
+
+test("T-E5 requires transaction-specific chain rejection evidence", () => {
+  const log = [
+    "[balancing] [B20:1/W1:s4 #a3ba1c1c] Submit failed after 1080ms: Transaction submission error",
+    "[balancing] [B20:2/W1:s0 #1f1049e0] Submitted",
+  ].join("\n");
+  expect(hasBatcherChainRejection(log, "a3ba1c1c")).toBe(true);
+  expect(hasBatcherChainRejection(log, "1f1049e0")).toBe(false);
+  expect(hasBatcherChainRejection("Receipt confirmation timeout", "a3ba1c1c")).toBe(false);
 });

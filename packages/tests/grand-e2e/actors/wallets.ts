@@ -258,6 +258,16 @@ export function submitToBalancer(
   return job;
 }
 
+/** Submit without the suite-wide client queue. Only throughput/concurrency
+ * fixtures should use this; ordinary lifecycle phases keep deterministic
+ * request ordering through submitToBalancer(). */
+export function submitDirectlyToBalancer(
+  tx: any,
+  opts: { level: "no-wait" | "wait-receipt"; timeoutMs: number; serverTimeoutMs?: number },
+): Promise<{ ok: boolean; status: number; body: any }> {
+  return settleViaBatcher(tx as any, opts);
+}
+
 export interface ConcurrentBatcherOutcome {
   results: { ok: boolean; status: number; body: any }[];
   peakInFlight: number;
@@ -273,10 +283,14 @@ export async function submitConcurrentlyToBalancer<T>(
   txs: readonly T[],
   submit: (tx: T) => Promise<{ ok: boolean; status: number; body: any }> =
     (tx) =>
-      settleViaBatcher(tx as any, {
+      submitDirectlyToBalancer(tx as any, {
         level: "wait-receipt",
-        timeoutMs: 900_000,
-        serverTimeoutMs: 600_000,
+        // A successful submit can legitimately spend 90s in the adapter's
+        // submit timeout before its receipt is found. The loser never gets a
+        // callback after the SDK drops it at maxRetries, so cap that wait at
+        // 150s and corroborate its actual chain rejection in T-E5.
+        timeoutMs: 180_000,
+        serverTimeoutMs: 150_000,
       }),
 ): Promise<ConcurrentBatcherOutcome> {
   let release!: () => void;
@@ -1122,18 +1136,34 @@ export async function prepareSettlement(
   return taker.run(() => prepareSettlementOnce(taker, rec, blob));
 }
 
-export async function settleOffer(taker: PoolWallet, rec: OfferRecord, blob: string): Promise<void> {
+export async function settleOffer(
+  taker: PoolWallet,
+  rec: OfferRecord,
+  blob: string,
+  opts: {
+    parallelBatcher?: boolean;
+    onBatcherRequest?: (delta: 1 | -1) => void;
+  } = {},
+): Promise<void> {
   await taker.run(async () => {
     // Keep prepare + submit under the wallet's ordinary serialization lock.
-    // T-E5 opts into the split prepare/submit path above explicitly.
+    // T-E5 uses the split path above; p5 keeps that wallet safety while
+    // bypassing only the suite-wide HTTP queue across independent takers.
     const prepared = await prepareSettlementOnce(taker, rec, blob);
     // Long timeouts: a contended proof server or chaos restart can hold a
     // settle behind a deep queue; the client must outlast it, not give up.
-    const res = await submitToBalancer(prepared.tx, {
-      level: "wait-receipt",
-      timeoutMs: 900_000,
-      serverTimeoutMs: 600_000,
-    });
+    const submit = opts.parallelBatcher ? submitDirectlyToBalancer : submitToBalancer;
+    opts.onBatcherRequest?.(1);
+    let res: Awaited<ReturnType<typeof submit>>;
+    try {
+      res = await submit(prepared.tx, {
+        level: "wait-receipt",
+        timeoutMs: 900_000,
+        serverTimeoutMs: 600_000,
+      });
+    } finally {
+      opts.onBatcherRequest?.(-1);
+    }
     if (!res.ok) throw new Error(`settle offer#${rec.index}: batcher ${res.status} ${JSON.stringify(res.body).slice(0, 200)}`);
   });
 }

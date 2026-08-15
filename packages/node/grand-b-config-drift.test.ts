@@ -18,8 +18,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-const read = (f: string) => readFileSync(new URL(f, import.meta.url).pathname, "utf-8");
+const read = (f: string) => readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf-8");
 
 /**
  * The ConfigBuilder chain as a list of comparable chunks, one per declaration.

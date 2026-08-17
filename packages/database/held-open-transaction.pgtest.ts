@@ -178,7 +178,10 @@ beforeAll(async () => {
     [MAKER, WANT],
   );
   __resetEventGateForTests();
-});
+  // Starting a container and waiting out initdb does not fit bun's default 5 s
+  // hook budget — it timed out at 5001 ms on a busy box after passing at 4.1 s
+  // on an idle one. Budget for the slow case rather than the lucky one.
+}, 180_000);
 
 afterAll(async () => {
   try { await writer?.end(); } catch { /* noop */ }
@@ -269,4 +272,4 @@ test("nothing is published, and nothing is projected, while the block transactio
   expect(statsAfter.rows[0].trade_count).toBe(1);
 
   r.stop();
-});
+}, 120_000);

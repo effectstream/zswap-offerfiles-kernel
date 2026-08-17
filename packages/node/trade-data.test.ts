@@ -52,10 +52,6 @@ async function seedFill(
             ($1, $4, $5, 'WANTING', 'SHIELDED', NOW() - ($6 || ' minutes')::interval)`,
     [id, colors[0], String(baseAmt), colors[1], String(quoteAmt), String(minutesAgo)],
   );
-  // Adjudicate here rather than at each call site: market queries read stored
-  // verdicts now, so a fixture that seeds without adjudicating is invisible to
-  // them, and "I forgot" would look exactly like "the query is broken".
-  await adjudicateAll();
 }
 
 /** The product's own repair sweep, run verbatim — fixtures never hand-write
@@ -104,6 +100,12 @@ beforeAll(async () => {
   await seedFill(10, 1000, 48 * 60); // absurd price 100, 48 h ago
   // A different pair inside the window — must not leak in.
   await seedFill(10, 999, 60, [BASE, OTHER]);
+
+  // ONE sweep at the end, not one per seed: adjudicating inside seedFill made
+  // the fixture quadratic and blew the hook budget. Mid-test seeds after this
+  // point deliberately go un-adjudicated — the read fallback covers them, and
+  // letting them exercise it is worth more than uniformity here.
+  await adjudicateAll();
 });
 
 afterAll(async () => {

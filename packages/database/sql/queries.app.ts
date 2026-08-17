@@ -305,6 +305,54 @@ NOT EXISTS (
   HAVING COUNT(DISTINCT bt.token_color) > 1
 )`;
 
+/**
+ * Every PRICED FILL, from the stored verdict where one exists and computed
+ * where one does not yet.
+ *
+ * The second branch is the important one. Adjudication runs in an api.ts
+ * listener on the post-commit event, so between an offer being archived and
+ * its verdict being written there is a window — normally a second, but as long
+ * as STM lag makes it. Reading only the stored column made a settled offer
+ * report `consumed` from /v1/offers/:hash/status while being absent from
+ * /v1/chart/history at the same instant: the read/write split this refactor
+ * exists to remove, reintroduced one layer down. The grand e2e caught it on a
+ * contended box.
+ *
+ * So the stored verdict is a CACHE of a pure function, and a miss computes.
+ * That keeps read-time truth exact and leaves the column as what it is — an
+ * optimisation for the rows that have one, never the reason an answer is
+ * wrong. The fallback is bounded by the partial index on
+ * (archive_reason = 'CONSUMED' AND settled IS NULL): in steady state that set
+ * is the handful of offers archived in the last few seconds.
+ */
+const pricedFillsSql = `
+    SELECT h.id, h.archived_at, h.base_color, h.quote_color,
+           h.base_amount, h.quote_amount
+      FROM offer_file_history h
+     WHERE h.settled AND h.base_color IS NOT NULL
+    UNION ALL
+    SELECT h.id, h.archived_at,
+           LEAST(g.token_color, w.token_color),
+           GREATEST(g.token_color, w.token_color),
+           CASE WHEN g.token_color = LEAST(g.token_color, w.token_color)
+                THEN g.amount ELSE w.amount END,
+           CASE WHEN g.token_color = LEAST(g.token_color, w.token_color)
+                THEN w.amount ELSE g.amount END
+      FROM offer_file_history h
+      JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
+              FROM offer_file_tokens_history WHERE direction = 'GIVING'
+             GROUP BY 1, 2) g ON g.offer_file_id = h.id
+      JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
+              FROM offer_file_tokens_history WHERE direction = 'WANTING'
+             GROUP BY 1, 2) w ON w.offer_file_id = h.id
+     WHERE h.settled IS NULL
+       AND h.archive_reason = 'CONSUMED'
+       AND g.amount > 0 AND w.amount > 0
+       AND ${notABasketPredicate("h.id", "offer_file_tokens_history")}
+       AND NOT ${cancelledPredicate("h.id")}
+       AND NOT ${supersededByDuplicatePredicate("h.id")}`;
+
+
 // Status of an archived row: expired (TTL) / cancelled / consumed.
 const archivedStatusCase = (tableIdExpr: string) => `
   CASE WHEN archive_reason <> 'CONSUMED' THEN 'expired'
@@ -544,16 +592,16 @@ export const getPairStats24h = prepared<IGetPairStats24hParams, IGetPairStats24h
       // :base!/:quote! either way round, so amounts and price are re-oriented
       // to the caller's base here. That keeps this query's contract identical
       // to the version it replaces.
-      `WITH fills AS (
+      `WITH priced AS (${pricedFillsSql}
+       ), fills AS (
          SELECT archived_at,
                 CASE WHEN :base! = base_color
                      THEN quote_amount / NULLIF(base_amount, 0)
                      ELSE base_amount / NULLIF(quote_amount, 0) END AS price,
                 CASE WHEN :base! = base_color THEN base_amount ELSE quote_amount END AS base_amt,
                 CASE WHEN :base! = base_color THEN quote_amount ELSE base_amount END AS quote_amt
-         FROM offer_file_history
-         WHERE settled
-           AND base_color = LEAST(:base!, :quote!)
+         FROM priced
+         WHERE base_color = LEAST(:base!, :quote!)
            AND quote_color = GREATEST(:base!, :quote!)
        )
        SELECT
@@ -597,12 +645,13 @@ export const getTradeHistory = prepared<IGetTradeHistoryParams, IGetTradeHistory
       // w_color/w_amt shape is kept verbatim so trade-data.ts's toFill() is
       // untouched: it re-orients to the caller's base itself, and duplicating
       // that here would be a second place to get it wrong.
-      `SELECT (EXTRACT(EPOCH FROM archived_at) * 1000)::bigint AS at_ms,
+      `WITH priced AS (${pricedFillsSql}
+       )
+       SELECT (EXTRACT(EPOCH FROM archived_at) * 1000)::bigint AS at_ms,
               base_color  AS g_color, base_amount::text  AS g_amt,
               quote_color AS w_color, quote_amount::text AS w_amt
-       FROM offer_file_history
-       WHERE settled
-         AND base_color = LEAST(:base!, :quote!)
+       FROM priced
+       WHERE base_color = LEAST(:base!, :quote!)
          AND quote_color = GREATEST(:base!, :quote!)
        ORDER BY archived_at DESC
        LIMIT 120`,
@@ -803,20 +852,20 @@ export const getPairs = prepared<void, IGetPairsResult>(
       // DISTINCT ON gives last_price the newest fill per pair; the FULL OUTER
       // JOIN keeps pairs that have only open offers (no fills yet) and pairs
       // that have only history (no open offers).
-      `WITH fills AS (
+      `WITH priced AS (${pricedFillsSql}
+       ),
+       fills AS (
            SELECT base_color, quote_color,
                   COUNT(*)::int AS trade_count,
                   MAX(archived_at) AS last_traded_at
-           FROM offer_file_history
-           WHERE settled AND base_color IS NOT NULL
+           FROM priced
            GROUP BY base_color, quote_color
        ),
        newest AS (
            SELECT DISTINCT ON (base_color, quote_color)
                   base_color, quote_color,
                   quote_amount / NULLIF(base_amount, 0) AS last_price
-           FROM offer_file_history
-           WHERE settled AND base_color IS NOT NULL
+           FROM priced
            ORDER BY base_color, quote_color, archived_at DESC
        ),
        hist AS (

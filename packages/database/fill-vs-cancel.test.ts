@@ -356,3 +356,57 @@ test("price is quote-per-base in BOTH trade directions", async () => {
   const stats = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0];
   expect(Number(stats!.last_price)).toBeCloseTo(2, 9);
 });
+
+// ── The verdict is a CACHE, not the source of truth ─────────────────────────
+//
+// Adjudication runs in an api.ts listener on the post-commit event, so there is
+// a window between an offer being archived and its verdict existing. Before
+// this case, market queries read ONLY the stored verdict, so inside that window
+// a settled offer was archived, reported `consumed` by /v1/offers/:hash/status,
+// and was simultaneously absent from /v1/chart/history — the read/write split
+// the verdict refactor exists to remove, reintroduced one layer down.
+//
+// It is not theoretical: the grand e2e caught it on a contended box, where
+// `maker self-fill: settled + archived CONSUMED + status consumed` passed and
+// `maker self-fill counts as a trade` failed in the same breath.
+//
+// So an unadjudicated row must fall back to computing the verdict, exactly as
+// the pre-refactor queries did. The stored column is an optimisation for the
+// rows that have one; it must never be the reason an answer is wrong.
+test("an archived-but-not-yet-adjudicated fill still reads as a trade", async () => {
+  const LO = "7".repeat(64);
+  const HI = "8".repeat(64);
+  const id = 950;
+  await client.query(
+    `INSERT INTO offer_file_history
+       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+     VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '5 minutes', NOW())`,
+    [id, 900 + id, `blob-${id}`, hashOf(id)],
+  );
+  await client.query(
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+     VALUES ($1, $2, '10', 'GIVING',  'SHIELDED', NOW() - INTERVAL '5 minutes'),
+            ($1, $3, '20', 'WANTING', 'SHIELDED', NOW() - INTERVAL '5 minutes')`,
+    [id, LO, HI],
+  );
+
+  // Deliberately NOT adjudicated — this is the window.
+  const unadjudicated = await client.query(
+    `SELECT settled FROM offer_file_history WHERE id = $1`, [id],
+  );
+  expect(unadjudicated.rows[0].settled).toBe(null);
+
+  const stats = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0]!;
+  expect(stats.fills_24h).toBe(1);
+  expect(Number(stats.last_price)).toBeCloseTo(2, 9);
+
+  const hist = await getTradeHistory.run({ base: LO, quote: HI }, client);
+  expect(hist.length).toBe(1);
+
+  // And once adjudicated the answer is unchanged — the cache agrees with the
+  // computation rather than replacing it.
+  await adjudicateAll();
+  const after = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0]!;
+  expect(after.fills_24h).toBe(1);
+  expect(Number(after.last_price)).toBeCloseTo(2, 9);
+});

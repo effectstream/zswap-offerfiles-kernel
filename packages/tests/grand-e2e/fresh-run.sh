@@ -6,9 +6,9 @@
 # with the previous run's fills. `bunx orchestrator start` wipes PGlite and
 # Celestia on boot.
 #
-# Dust provisioning must land AFTER the batcher has registered: registration
-# rotates pre-existing UTXOs into at most two outputs, so funding first destroys
-# the coins it is trying to create.
+# The batcher now performs its own address-registration + five-output NIGHT
+# bootstrap before the adapter snapshots worker capacity. No external funding
+# or restart step is part of a normal run.
 #
 # Pass --keep-stack to run against a stack that is already up.
 set -uo pipefail
@@ -32,7 +32,23 @@ say() { echo "[$(date +%H:%M:%S)] $*"; }
 # 10001); those are not ours to signal and must not be touched.
 reap_orphans() {
   local pat pid
-  for pat in 'packages/batcher/[b]atcher.ts' '[p]rovision-batcher-dust.ts' '[i]ndexer-standalone'; do
+  # main.grand-b.ts is the one that hurts most and was missing: p7a spawns a
+  # SECOND full node replaying the chain from height 1, and it is by far the
+  # heaviest thing this suite runs (measured: load average 17 on a 16-core box
+  # while it replays). A run killed during p7a — which a session teardown does —
+  # leaves that replica running indefinitely, quietly loading every subsequent
+  # run: deeper STM catch-up, slower settlement, inflated latency metrics, and
+  # no visible cause. main.dev.ts is here for the same reason; the orchestrator
+  # shutdown above handles it on a clean exit, but not on a hard kill.
+  #
+  # start-pglite is the same story with a sharper edge: it holds port 5432, so a
+  # survivor does not merely slow the next run, it stops the new stack binding at
+  # all. Diagnosed the hard way when a reboot left the SYSTEM postgres on 5432 —
+  # three identical bootstrap failures whose real cause was one SASL line deep in
+  # stack.log. A stale PGlite of our own produces the same symptom.
+  for pat in 'packages/batcher/[b]atcher[.]dev[.]ts' '[p]rovision-batcher-dust.ts' \
+             '[i]ndexer-standalone' 'packages/node/main[.]grand-b[.]ts' \
+             'packages/node/main[.]dev[.]ts' '[s]tart-pglite'; do
     for pid in $(pgrep -u "$(id -u)" -f "$pat" 2>/dev/null); do
       say "reaping orphan $pid ($pat)"; kill "$pid" 2>/dev/null
     done
@@ -68,22 +84,27 @@ for i in $(seq 120); do
 done
 say "batcher: $(curl -s --max-time 3 http://127.0.0.1:3334/health)"
 
-say "provisioning 20 fat NIGHT UTXOs for the batcher (post-registration)"
-bun run "$HERE/provision-batcher-dust.ts" 20 > "$OUT/dust-provision.log" 2>&1
-say "provisioning exit $? — $(grep -aE 'sent|done|UTXO' "$OUT/dust-provision.log" | tail -1)"
-
-say "restarting the batcher so it re-scans its UTXO set"
-curl -s -X POST --max-time 20 -H 'content-type: application/json' \
-  -d '{"name":"batcher"}' http://127.0.0.1:4747/restart >/dev/null
-for i in $(seq 60); do
-  curl -s --max-time 3 http://127.0.0.1:3334/health 2>/dev/null | grep -q '"isRunning":true' && break
+for i in $(seq 120); do
+  grep -qa 'NIGHT bootstrap: .*5 spendable dust streams' "$OUT/stack.log" && \
+    grep -qa 'worker slots: 5 ' "$OUT/stack.log" && break
   sleep 5
 done
-say "batcher slots: $(grep -ao 'worker slots: .*' "$OUT/stack.log" | tail -1)"
+bootstrap_line="$(grep -ao 'NIGHT bootstrap: .*' "$OUT/stack.log" | tail -1)"
+slots_line="$(grep -ao 'worker slots: .*' "$OUT/stack.log" | tail -1)"
+say "batcher bootstrap: $bootstrap_line"
+say "batcher slots: $slots_line"
+[[ "$bootstrap_line" == *"5 spendable dust streams"* && "$slots_line" == "worker slots: 5 "* ]] || {
+  say "batcher did not prove the five-UTXO/five-slot bootstrap"
+  exit 1
+}
 
 say "running the suite"
-GRAND_OFFERS=${GRAND_OFFERS:-25} \
+GRAND_OFFERS=${GRAND_OFFERS:-60} \
 GRAND_STORM_API=${GRAND_STORM_API:-200} \
 GRAND_STORM_CELESTIA=${GRAND_STORM_CELESTIA:-30} \
+ROOT_WINDOW_SECONDS=${ROOT_WINDOW_SECONDS:-600} \
+OFFER_TTL_SECONDS=${OFFER_TTL_SECONDS:-600} \
   bun run "$HERE/run.ts" 2>&1 | tee "$OUT/grand-v3.log"
-say "suite exited with ${PIPESTATUS[0]}"
+suite_status=${PIPESTATUS[0]}
+say "suite exited with $suite_status"
+exit "$suite_status"

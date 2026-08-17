@@ -5,7 +5,7 @@ import {
   archiveOfferByIdTtlWithHash,
   compileIR,
   createAppInputSavepoint,
-  getEarliestRootFirstSeen,
+  getOfferRootTiming,
   insertCommitment,
   releaseAppInputSavepoint,
   rollbackAppInputSavepoint,
@@ -62,7 +62,7 @@ describe("the framework execution path (processSQLQueryIR on our IRs)", () => {
     for (const q of [
       insertCommitment,
       upsertKnownRootWithFirstSeen,
-      getEarliestRootFirstSeen,
+      getOfferRootTiming,
       archiveOfferByIdTtlWithHash,
       createAppInputSavepoint,
       rollbackAppInputSavepoint,
@@ -85,11 +85,17 @@ describe("the framework execution path (processSQLQueryIR on our IRs)", () => {
 
   test("array param via ANY() rides one scalar binding", () => {
     const { query, bindings } = processSQLQueryIR(
-      (getEarliestRootFirstSeen as any).queryIR,
-      { roots: ["r1", "r2"] } as any,
+      (getOfferRootTiming as any).queryIR,
+      { roots: ["r1", "r2"], block_ms: 900_000 } as any,
     );
-    expect(query).toContain("ANY($1)");
-    expect(bindings).toEqual([["r1", "r2"]]);
+    // The array is ONE binding, not two — that is the property under test.
+    // Position is deliberately not asserted: block_ms occurs first in the SQL
+    // text, so `roots` binds at $2, and pinning the number here would make this
+    // test fail on any reordering of the query rather than on a real change to
+    // how arrays are bound.
+    expect(bindings).toEqual([900_000, ["r1", "r2"]]);
+    expect(query).toMatch(/ANY\(\$\d\)/);
+    expect(query).not.toContain(":roots");
   });
 
   test("TTL archive query binds the persisted-expiry cutoff used by the transition", () => {

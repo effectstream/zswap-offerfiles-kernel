@@ -22,7 +22,9 @@
 // Reference measurements (that repo, node 1.0.0): ~7 UTXOs is enough to keep a
 // wallet busy; 20 leaves headroom for any slowdown. We default to 20.
 //
-// Run AFTER the stack is up and the batcher has logged its worker slots:
+// The dev batcher now self-splits during startup, so this is a recovery tool,
+// not part of the normal run. Run it only AFTER address registration, then
+// restart the batcher so the SDK snapshots the new UTXO count:
 //   bun run packages/tests/grand-e2e/provision-batcher-dust.ts [count]
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
@@ -39,7 +41,7 @@ const NIGHT = "0".repeat(64);
 // DERIVE its address — never build a wallet on it, since two wallets sharing a
 // seed against one node force each other to disconnect.
 const BATCHER_SEED = "0000000000000000000000000000000000000000000000000000000000000003";
-const COUNT = Number(process.argv[2] ?? 20);
+const COUNT = Number(process.argv[2] ?? 5);
 /** Per-UTXO NIGHT, in STARS (1 NIGHT = 1e6 stars).
  *
  *  Size matters more than total. A dust coin's cap is `NIGHT x 5 DUST` and it
@@ -125,7 +127,7 @@ async function main(): Promise<void> {
     console.log(
       `\ndone. Each of those ${COUNT} UTXOs is an independent dust stream, because the\n` +
         `batcher's address was already registered for dust generation at its startup.\n` +
-        `Watch the batcher log for the slot line to climb:\n` +
+        `Restart the batcher, then verify its slot line:\n` +
         `  [balancing] Wallet 1/1: worker slots: N (M UTXOs, cost=1/tx, cap=…)\n` +
         `M should approach ${COUNT}; N is capped by BATCHER_MAX_SLOTS_PER_WALLET.`,
     );

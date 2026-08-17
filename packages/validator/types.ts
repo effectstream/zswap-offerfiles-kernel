@@ -8,6 +8,12 @@ export type OfferRejectCode =
   | "WRONG_TX_VARIANT"
   | "NO_SPENDABLE_INPUT"
   | "NOT_A_SWAP"
+  // Legs span both value layers. Unfillable by construction — nothing moves
+  // value between shielded and unshielded — and reachable via Transaction.merge
+  // even though no wallet builds one. Sits beside NOT_A_SWAP because it is the
+  // same kind of judgement: a pure verdict on the derived leg SHAPE, decided
+  // before any proof work. See §2.4.
+  | "CROSS_LAYER"
   | "UNKNOWN_TOKEN"
   | "PROOF_INVALID"
   | "SIGNATURE_INVALID"
@@ -31,6 +37,17 @@ export interface UnshieldedSpendRef {
   owner: string;
   intentHash: string;
   outputNo: number;
+}
+
+// An unshielded output declared by the offer, identified exactly as the ledger
+// will identify the UTXO it creates. `tokenType` and `value` are retained for
+// display/audit; classification keys on (owner, intentHash, outputNo).
+export interface UnshieldedOutputRef {
+  owner: string;
+  intentHash: string;
+  outputNo: number;
+  tokenType: string;
+  value: string;
 }
 
 // A give/want leg derived from the transaction's per-segment imbalances.

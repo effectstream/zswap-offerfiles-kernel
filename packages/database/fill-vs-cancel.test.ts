@@ -6,11 +6,11 @@ import { closeTestPglite } from "./test-pglite.ts";
 // Midnight transaction — so split or partial spends are definitively
 // cancels. The matrix below runs the REAL status queries over pglite:
 //
-//   all nullifiers, one tx      → unknown   (fill/cancel ambiguous)
+//   all nullifiers, one tx      → consumed  (fill, heuristically)
 //   nullifiers across two txs   → cancelled (definitive)
 //   only some nullifiers spent  → cancelled (definitive)
-//   single input, spent         → unknown   (fill/cancel ambiguous)
-//   no nullifiers (unshielded)  → unknown   (no settlement proof)
+//   single input, spent         → consumed  (heuristic — no fill markers)
+//   no nullifiers (unshielded)  → consumed  (no shielded data to group)
 //   TTL archive                 → expired
 //
 // Phase 2 (item #22, Midnight:NullifierAndCommitment): offers with stored
@@ -21,7 +21,7 @@ import { closeTestPglite } from "./test-pglite.ts";
 //   1 tx + all markers created  → consumed  (verified fill)
 //   1 tx + markers NOT created  → cancelled (proven — was mislabelled before)
 //   single input + markers made → consumed  (verified — heuristic upgraded)
-//   no stored markers           → unknown unless cancellation is proven
+//   no stored markers           → heuristic unchanged (rows 1–5 above)
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
@@ -47,6 +47,9 @@ const BASE = "b".repeat(64);
 const QUOTE = "q".repeat(64);
 const BASE2 = "c".repeat(64);
 const QUOTE2 = "d".repeat(64);
+// These fixtures seed rows relative to NOW(), so their window starts 24 h
+// before wall clock. Production derives it from the chain tip instead.
+const DAY_AGO = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const hashOf = (n: number) => n.toString(16).padStart(64, "0");
 const TX_A = "aa11";
 const TX_B = "bb22";
@@ -64,8 +67,8 @@ async function seedArchived(
 ) {
   await client.query(
     `INSERT INTO offer_file_history
-       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at)
-     VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, $5, NOW() - INTERVAL '30 minutes')`,
+       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+     VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, $5, NOW() - INTERVAL '30 minutes', NOW())`,
     [id, 100 + id, `blob-${id}`, hashOf(id), reason],
   );
   await client.query(
@@ -88,15 +91,6 @@ async function seedArchived(
       [id, c],
     );
   }
-}
-
-async function addArchivedUnshieldedSpend(id: number) {
-  await client.query(
-    `INSERT INTO offer_file_unshielded_spends_history
-       (offer_file_id, owner, intent_hash, output_no, archived_at)
-     VALUES ($1, $2, $3, 0, NOW() - INTERVAL '30 minutes')`,
-    [id, `owner-${id}`, `intent-${id}`],
-  );
 }
 
 const created = (commitment: string, txHash: string | null) =>
@@ -127,7 +121,7 @@ beforeAll(async () => {
     await client.query(migration.sql);
   }
 
-  // 1: two nullifiers, both spent in TX_A → unknown without fill markers
+  // 1: two nullifiers, both spent in TX_A → consumed
   await seedArchived(1, "CONSUMED", ["n1a", "n1b"]);
   await spend("n1a", TX_A);
   await spend("n1b", TX_A);
@@ -141,11 +135,11 @@ beforeAll(async () => {
   await seedArchived(3, "CONSUMED", ["n3a", "n3b"]);
   await spend("n3a", TX_B);
 
-  // 4: single-input offer, spent → unknown without fill markers
+  // 4: single-input offer, spent → consumed (heuristic ceiling)
   await seedArchived(4, "CONSUMED", ["n4a"]);
   await spend("n4a", TX_B);
 
-  // 5: unshielded-only (no nullifiers) → unknown without a settlement proof
+  // 5: unshielded-only (no nullifiers) → consumed
   await seedArchived(5, "CONSUMED", []);
 
   // 6: TTL → expired regardless of nullifier state
@@ -177,19 +171,6 @@ beforeAll(async () => {
   await seedArchived(10, "CONSUMED", ["n10a"], ["c10a"], [BASE2, QUOTE2]);
   await spend("n10a", TX_B);
   await created("c10a", TX_A);
-
-  // 11: a pure-unshielded input has no tx-bound nullifier evidence. Even if a
-  // matching commitment exists elsewhere, it cannot prove this offer filled.
-  await seedArchived(11, "CONSUMED", [], ["c11a"], [BASE2, QUOTE2]);
-  await created("c11a", TX_A);
-
-  // 12: the shielded side has apparently valid fill markers, but this mixed
-  // offer also contains an unshielded input. The schema retains no tx hash for
-  // that spend, so the complete atomic settlement cannot be proven.
-  await seedArchived(12, "CONSUMED", ["n12a"], ["c12a"], [BASE2, QUOTE2]);
-  await addArchivedUnshieldedSpend(12);
-  await spend("n12a", TX_A);
-  await created("c12a", TX_A);
 });
 
 afterAll(async () => {
@@ -213,8 +194,6 @@ test("phase-2 matrix: fill markers make classification exact", async () => {
   expect(await statusOf(8)).toBe("cancelled");  // markers absent → proven cancel
   expect(await statusOf(9)).toBe("consumed");   // single-input, verified
   expect(await statusOf(10)).toBe("cancelled"); // marker in the wrong tx
-  expect(await statusOf(11)).toBe("unknown");   // no tx-bound spend proof
-  expect(await statusOf(12)).toBe("unknown");   // mixed input lacks complete tx proof
 });
 
 test("commitment insert is idempotent; first-seen tx wins on replay", async () => {
@@ -227,41 +206,42 @@ test("commitment insert is idempotent; first-seen tx wins on replay", async () =
 });
 
 test("classification matrix", async () => {
-  expect(await statusOf(1)).toBe("unknown"); // all-in-one-tx, but markerless
+  expect(await statusOf(1)).toBe("consumed"); // all-in-one-tx
   expect(await statusOf(2)).toBe("cancelled"); // split across txs
   expect(await statusOf(3)).toBe("cancelled"); // partial spend
-  expect(await statusOf(4)).toBe("unknown"); // single input, markerless
-  expect(await statusOf(5)).toBe("unknown"); // unshielded-only, no proof
+  expect(await statusOf(4)).toBe("consumed"); // single input
+  expect(await statusOf(5)).toBe("consumed"); // unshielded-only
   expect(await statusOf(6)).toBe("expired"); // TTL
 });
 
 test("detail endpoint query agrees with the status query", async () => {
-  for (const [id, want] of [[1, "unknown"], [2, "cancelled"], [6, "expired"]] as const) {
+  for (const [id, want] of [[1, "consumed"], [2, "cancelled"], [6, "expired"]] as const) {
     const rows = await getOfferByHash.run({ offer_hash: hashOf(id) }, client);
     expect(rows[0].status).toBe(want);
   }
 });
 
-test("chart stats count only marker-verified fills", async () => {
-  // Markerless rows 1/4/5 and proven cancels 2/3 are all excluded.
-  const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE }, client))[0];
-  expect(Number(s.volume_base_24h ?? 0)).toBe(0);
-  expect(s.fills_24h).toBe(0);
+test("chart stats count only genuine fills — cancels contribute nothing", async () => {
+  // Offers 1, 4, 5 are consumed (10 BASE each); 2 and 3 are cancels at the
+  // same price and would inflate volume by 20 BASE if counted.
+  const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE, cutoff: DAY_AGO }, client))[0];
+  expect(Number(s.volume_base_24h)).toBe(30);
+  expect(s.fills_24h).toBe(3);
 });
 
 test("trade history hides cancels", async () => {
   const rows = await getTradeHistory.run({ base: BASE, quote: QUOTE }, client);
-  expect(rows.length).toBe(0);
+  expect(rows.length).toBe(3);
 });
 
 test("pair_stats.last_traded_at is the archived block time, not NOW()", async () => {
   // The fixture archives rows with archived_at = NOW() - 30 minutes. If the
   // upsert still stamped NOW() (the old bug: node-local wall clock, divergent
   // across replicas and wrong after a resync), last_traded_at would be ~now.
-  await upsertPairStatsByOfferId.run({ offer_id: 7 }, client);
+  await upsertPairStatsByOfferId.run({ offer_id: 1 }, client);
   const r = await client.query(
     `SELECT (NOW() - last_traded_at) >= INTERVAL '29 minutes' AS chain_derived,
-            last_traded_at = (SELECT archived_at FROM offer_file_history WHERE id = 7) AS matches_archive
+            last_traded_at = (SELECT archived_at FROM offer_file_history WHERE id = 1) AS matches_archive
      FROM pair_stats`,
   );
   expect(r.rows.length).toBe(1);
@@ -274,11 +254,76 @@ test("pair_stats writer refuses cancelled offers", async () => {
   await upsertPairStatsByOfferId.run({ offer_id: 2 }, client); // cancelled
   let r = await client.query("SELECT COUNT(*)::int AS n FROM pair_stats");
   expect(r.rows[0].n).toBe(0);
-  await upsertPairStatsByOfferId.run({ offer_id: 1 }, client); // markerless unknown
-  r = await client.query("SELECT COUNT(*)::int AS n FROM pair_stats");
-  expect(r.rows[0].n).toBe(0);
-  await upsertPairStatsByOfferId.run({ offer_id: 7 }, client); // verified consumed
+  await upsertPairStatsByOfferId.run({ offer_id: 1 }, client); // consumed
   r = await client.query("SELECT trade_count FROM pair_stats");
   expect(r.rows.length).toBe(1);
   expect(r.rows[0].trade_count).toBe(1);
+});
+
+// ── §2.2, FIXED in PR-C. Kept as a permanent regression guard ───────────────
+//
+// upsertPairStatsByOfferId assigns base_color/quote_color by LEAST/GREATEST of
+// the hex color, but computes last_price as `w.amount / g.amount` with no
+// reference to which of them became base:
+//
+//   gives the lesser color (= base)  → want/give = quote per base  ✔
+//   gives the greater color (= quote) → want/give = base per quote  ✘  1/p
+//
+// Every other price path normalises explicitly — getPairStats24h does
+// `CASE WHEN g.token_color = :base THEN w/g ELSE g/w END`, and trade-data.ts's
+// toFill() does the same in JS. Only this one does not, so `/v1/pairs`'s price
+// column flips meaning with the direction of the most recent trade and
+// disagrees with `/v1/chart/stats` by a factor of p².
+//
+// This lives at unit level because the direction is only controllable here: in
+// an e2e run, whether the last fill on a pair went the "wrong" way is data
+// dependent, and a coin-flip red would fail the build at random.
+//
+// The two offers below are economically IDENTICAL — 10 LO against 20 HI — and
+// differ only in which side the maker took. Their recorded price must not.
+// Was verified to fail for the RIGHT reason before the fix: the forward
+// direction recorded 2 and the reverse 0.5 — same trade, reciprocal price.
+test("pair_stats.last_price is quote-per-base in BOTH trade directions", async () => {
+  const LO = "1".repeat(64); // lexically lesser  → becomes base_color
+  const HI = "9".repeat(64); // lexically greater → becomes quote_color
+
+  // Archived CONSUMED offers with no nullifiers: classification falls through
+  // every cancelledPredicate branch to `consumed`, so the writer accepts them.
+  const seedDirected = async (id: number, give: string, giveAmt: string, want: string, wantAmt: string) => {
+    await client.query(
+      `INSERT INTO offer_file_history
+         (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+       VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '30 minutes', NOW())`,
+      [id, 900 + id, `blob-${id}`, hashOf(id)],
+    );
+    await client.query(
+      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+       VALUES ($1, $2, $3, 'GIVING',  'SHIELDED', NOW() - INTERVAL '30 minutes'),
+              ($1, $4, $5, 'WANTING', 'SHIELDED', NOW() - INTERVAL '30 minutes')`,
+      [id, give, giveAmt, want, wantAmt],
+    );
+  };
+
+  await client.query("DELETE FROM pair_stats");
+  // Direction 1 — maker gives the lesser color. Price = 20/10 = 2.
+  await seedDirected(901, LO, "10", HI, "20");
+  await upsertPairStatsByOfferId.run({ offer_id: 901 }, client);
+  const forward = await client.query(
+    `SELECT base_color, last_price::float8 AS p FROM pair_stats WHERE base_color = $1`, [LO],
+  );
+  expect(forward.rows[0].p).toBeCloseTo(2, 9); // passes today
+
+  // Direction 2 — maker gives the greater color. Same trade, same pair, and
+  // the same quote-per-base price of 2. Today this records 0.5.
+  await seedDirected(902, HI, "20", LO, "10");
+  await upsertPairStatsByOfferId.run({ offer_id: 902 }, client);
+  const reverse = await client.query(
+    `SELECT last_price::float8 AS p FROM pair_stats WHERE base_color = $1`, [LO],
+  );
+  expect(reverse.rows[0].p).toBeCloseTo(2, 9);
+
+  // And the authoritative SQL aggregate must agree with the stored column —
+  // the cross-route disagreement users actually see.
+  const stats = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0];
+  expect(Number(stats!.last_price)).toBeCloseTo(Number(reverse.rows[0].p), 9);
 });

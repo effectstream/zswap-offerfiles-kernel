@@ -42,6 +42,7 @@ import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-
 import {
   eventBus,
   emitAppEvent,
+  markBlockCommitted,
   startPostCommitEventBridge,
   type AppEvent,
 } from "./event-bus.ts";
@@ -285,9 +286,28 @@ export const apiRouter: StartConfigApiRouter = async function (
   // This does not change the existing flattened levels or quote routes.
   registerSolverLiquidityRoute(server);
 
-  // Update pair_stats after each CONSUMED archive. The state machine fires
-  // offer_consumed after the archive transaction commits; this listener keeps
-  // pair_stats in sync without needing access to dbConn inside the generator.
+  // Drive the event gate from THIS pool — the whole point is that it is not
+  // the connection running the block transaction. The runtime writes the block
+  // record inside that transaction, so a height visible here proves its COMMIT
+  // returned, which is what releases the events buffered for it (event-bus.ts).
+  // Without this poll nothing is ever published; with it, nothing is published
+  // early. 1 s against a ~1 s block time — a tick of latency, never a lost
+  // event, since the buffer holds until the height is seen.
+  const gatePoll = setInterval(() => {
+    void getLatestEffectstreamBlock
+      .run(undefined, dbConn)
+      .then((rows) => {
+        const h = rows[0]?.block_height;
+        if (h != null) markBlockCommitted(h as any);
+      })
+      .catch(() => { /* transient; the next tick retries and the buffer waits */ });
+  }, 1000);
+  (gatePoll as any).unref?.();
+  server.addHook("onClose", async () => clearInterval(gatePoll));
+
+  // Update pair_stats after each CONSUMED archive. The event is released only
+  // after its block commits (see the gate above), so this listener's SEPARATE
+  // pool is guaranteed to see the archive and the same-block create rows.
   const onAppEvent = async (event: AppEvent) => {
     if (event.type === "offer_consumed") {
       try {
@@ -356,8 +376,8 @@ export const apiRouter: StartConfigApiRouter = async function (
     // Resolve the opaque cursor to its keyset anchor. Anything that does not
     // resolve is a caller error — a fabricated cursor would otherwise
     // silently return page one and the caller would loop forever.
-    let afterCreatedAt: unknown = null;
-    let afterId: number | null = null;
+    let afterHeight: string | null = null;
+    let afterAnchorHash: string | null = null;
     const afterHash = String((query as any).after_hash ?? "").toLowerCase();
     if (afterHash) {
       if (!/^[0-9a-f]{64}$/.test(afterHash)) {
@@ -376,8 +396,8 @@ export const apiRouter: StartConfigApiRouter = async function (
           reason: "unknown cursor — restart pagination from the first page",
         });
       }
-      afterCreatedAt = anchor[0].created_at;
-      afterId = anchor[0].id;
+      afterHeight = String(anchor[0].celestia_height);
+      afterAnchorHash = anchor[0].offer_hash;
     }
 
     const offers = await getOpenOffersPage.run(
@@ -385,8 +405,8 @@ export const apiRouter: StartConfigApiRouter = async function (
         token: token ?? "",
         direction: direction ?? "ANY",
         limit,
-        after_created_at: afterCreatedAt as any,
-        after_id: afterId,
+        after_height: afterHeight,
+        after_hash: afterAnchorHash,
       },
       dbConn,
     );
@@ -999,6 +1019,26 @@ export const apiRouter: StartConfigApiRouter = async function (
       // Dedup before paying a Celestia fee (MIP-0006: duplicates SHOULD be
       // rejected). The STM would drop the replayed blob at index time anyway;
       // rejecting here saves the maker the publication cost.
+      //
+      // DEDUP IS BYTE-IDENTICAL, DELIBERATELY. Ruled 2026-08-12.
+      //
+      // The same intent can be wrapped in two transactions at different segment
+      // keys (Transaction.fromParts pins segment 1, fromPartsRandomized picks
+      // another). Same spends, same payouts, different bytes, therefore a
+      // different offer_hash — so this check does not relate them, and no
+      // intent-level dedup is planned. Fixtures exist that demonstrate the pair
+      // (same-intent-wrapper-a/b in @zswap-da/validator's shapes testkit).
+      //
+      // The reason not to chase it is economic, not technical: publishing costs
+      // a real Celestia fee, paid per blob. Flooding the namespace with
+      // re-wrapped copies of one intent is an attack the attacker funds, and
+      // each copy still has to survive the full ladder and settle against the
+      // same inputs — the first settlement spends them and the rest become
+      // unfillable. Content addressing on raw bytes stays simple, cheap and
+      // deterministic across replicas; an intent-level rule would need a
+      // canonical form for "the same intent" that the wire does not define.
+      //
+      // Revisit only if publication ever becomes free or subsidised.
       const offerHash = offerHashFromBlob(blob);
       const existing = await getOfferStatusByHash.run(
         { offer_hash: offerHash },

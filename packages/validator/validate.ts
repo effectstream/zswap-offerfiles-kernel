@@ -17,10 +17,43 @@ import {
   orderedOfferLivenessDescriptors,
 } from "./liveness.ts";
 import type {
+  OfferLeg,
   OfferRejectCode,
   OfferValidation,
   ValidateOpts,
 } from "./types.ts";
+
+/**
+ * Do these legs span BOTH value layers? (§2.4 — ruled REJECT.)
+ *
+ * Typed on `OfferLeg`, which is what `deriveLegs` returns and what the ladder
+ * actually holds. That matters: MIP-0006's own leg calls the layer `type`,
+ * `deriveLegs` renames it to `kind`, and a predicate written against the wrong
+ * one reads `undefined` for every leg, collapses to a one-element set, and
+ * silently never fires. The type is the guard — these must not be `string`.
+ *
+ * Exported so the rule can be tested as what it is — a pure predicate over
+ * derived legs — without constructing a cross-layer transaction. Building one
+ * needs two real offers and `Transaction.merge` (probe-cross-layer.ts), which
+ * is an integration concern; the RULE deserves cheap, exhaustive coverage.
+ *
+ * Empty input is NOT cross-layer: an empty or one-layer shape is the two-sided
+ * rule's business, and the two-sided rule runs first (see the ordering note at
+ * the call site). Reporting CROSS_LAYER there would be a misleading code on a
+ * different defect.
+ */
+export function isCrossLayer(gives: OfferLeg[], wants: OfferLeg[]): boolean {
+  const layers = new Set<OfferLeg["kind"]>();
+  for (const l of [...gives, ...wants]) layers.add(l.kind);
+  return layers.size > 1;
+}
+
+/** Which layer each side sits on — for the reject reason a caller reads. */
+export function layerSummary(gives: OfferLeg[], wants: OfferLeg[]): string {
+  const side = (ls: OfferLeg[]) =>
+    ls.length === 0 ? "none" : [...new Set(ls.map((l) => l.kind))].sort().join("+");
+  return `gives ${side(gives)}, wants ${side(wants)}`;
+}
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -222,6 +255,46 @@ export function validateZswapOfferBytes(
     };
   }
 
+  // §2.4 — CROSS-LAYER OFFERS ARE REJECTED.
+  //
+  // An offer whose legs span BOTH value layers has no settlement path: nothing
+  // in this system moves value between shielded and unshielded, so a taker
+  // could never fill it. Before this check the ladder ACCEPTED such offers —
+  // probe-cross-layer.ts merges a real shielded offer with a real unshielded
+  // one via `Transaction.merge` and the result passed everything, `wellFormed`
+  // included. That is reachable by anyone holding both halves, and the DA
+  // namespace is permissionless, so "no wallet builds one" is not a defence.
+  //
+  // Placed with the other leg-shape checks and BEFORE the proof work: the
+  // verdict is a pure function of the offer bytes, so both doors and every
+  // replay agree, and a rejected offer costs no proof verification.
+  //
+  // AFTER the two-sided rule, not before. For the dangerous shape — a genuine
+  // two-sided cross-layer offer — the order is immaterial, since it passes
+  // isTwoSided either way. It only matters for a degenerate give-only tx that
+  // happens to carry both layers, and there "this is not a swap at all" is the
+  // more basic complaint; CROSS_LAYER implies there are two sides to be
+  // cross-layer about. p4 asserts the two-sided case is NOT answered
+  // NOT_A_SWAP, which is what pins this ordering against a silent reshuffle.
+  //
+  // `deriveTokenLegs` nets per (colour, LAYER), so the same colour on two
+  // layers is two legs — MIP-0006's own framing, and exactly what makes this
+  // check a simple set-size test rather than a colour comparison.
+  if (isCrossLayer(gives, wants)) {
+    return {
+      ok: false,
+      code: "CROSS_LAYER",
+      reason:
+        `offer legs span both value layers (${layerSummary(gives, wants)}); ` +
+        `no settlement path exists between shielded and unshielded`,
+      tx,
+      nullifiers,
+      unshieldedSpends,
+      gives,
+      wants,
+    };
+  }
+
   const identifiers = safeIdentifiers(tx);
   let derived: Partial<OfferValidation> = {
     tx,
@@ -317,6 +390,12 @@ export function validateZswapOfferBytes(
   }
 
   // ── 7. Dedup (optional) ──
+  // Caller-supplied and identity-based (nullifiers / tx identifiers). Note the
+  // ruling recorded at the submit gate in packages/node/api.ts: dedup is
+  // byte-identical by design. Two wrappers around the LITERAL same intent hash
+  // differently and are treated as two offers, because publication costs a
+  // Celestia fee per blob — re-wrapping is an attack the attacker pays for, and
+  // duplicates compete for the same inputs so only one can ever settle.
   if (opts.seen && opts.seen(nullifiers, identifiers)) {
     return { ok: false, code: "DUPLICATE", reason: "offer already seen", ...derived };
   }

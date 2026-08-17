@@ -13,9 +13,9 @@ export interface BatcherConfig {
   // Max concurrent balancing txs PER wallet. The SDK computes actual slots as
   // min(floor(dustUtxoCount / costPerTx), maxSlotsPerWallet), so this is only
   // a ceiling — real concurrency is still bounded by how many dust UTXOs the
-  // wallet holds (one NIGHT UTXO registered for dust ≈ one slot). Default 1
-  // preserves the SDK's serialized behavior; raise it AND split the wallet's
-  // NIGHT into that many dust UTXOs to actually parallelize. Watch the
+  // wallet holds (one NIGHT UTXO registered for dust ≈ one slot). The dev
+  // stack defaults to 5 and bootstraps five fee-capable streams; deployed
+  // networks preserve the SDK's conservative default of 1. Watch the
   // "worker slots: N (M UTXOs, cost=…, cap=…)" line on startup for what you
   // got. The proof server becomes the next ceiling.
   maxSlotsPerWallet: number;
@@ -60,10 +60,11 @@ const DEFAULT_STORAGE_DIR = path.join(
 // Dedicated seed for the zswap-da batcher wallet. Distinct from any wallet
 // the rest of the stack uses — running two wallets on the same seed against
 // a single Midnight node forces one to disconnect.
-const BATCHER_SEED = [
-  "0000000000000000000000000000000000000000000000000000000000000003",
-  "0000000000000000000000000000000000000000000000000000000000000004",
-];
+const BATCHER_SEED =
+  "0000000000000000000000000000000000000000000000000000000000000003";
+
+export const defaultMaxSlotsPerWallet = (networkId: string): number =>
+  networkId === "undeployed" ? 5 : 1;
 
 const optionalNumber = (key: string): number | undefined => {
   const raw = ENV.getString(key, "");
@@ -83,7 +84,10 @@ export function loadBatcherConfig(): BatcherConfig {
     pollingIntervalMs: ENV.getNumber("BATCHER_POLLING_INTERVAL_MS", 250),
     storageDir: ENV.getString("BATCHER_STORAGE_DIR", DEFAULT_STORAGE_DIR),
     walletSeed: ENV.getString("BATCHER_WALLET_SEED") || BATCHER_SEED,
-    maxSlotsPerWallet: ENV.getNumber("BATCHER_MAX_SLOTS_PER_WALLET", 1),
+    maxSlotsPerWallet: ENV.getNumber(
+      "BATCHER_MAX_SLOTS_PER_WALLET",
+      defaultMaxSlotsPerWallet(midnightNetworkConfig.id),
+    ),
     maxRetries: optionalNumber("BATCHER_MAX_RETRIES"),
     retryDelayMs: optionalNumber("BATCHER_RETRY_DELAY_MS"),
     dustWaitTimeoutMs: optionalNumber("BATCHER_DUST_WAIT_TIMEOUT_MS"),

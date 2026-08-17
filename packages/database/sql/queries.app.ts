@@ -95,17 +95,11 @@ export const releaseAppInputSavepoint = prepared<void, never>(
 //      the exact commitments is a maker self-fill: the offer's terms
 //      executed, so `consumed` is the right answer there.)
 //
-// Branch 3 is deliberately not used as a positive fill proof for offers with
-// no stored commitments (rows indexed before migration 013, or shielded-input
-// offers whose outputs are entirely unshielded). Nor is it positive proof for
-// an offer with unshielded inputs: the index does not retain the transaction
-// identity that spent those inputs, so matching only the shielded half cannot
-// prove the complete offer settled atomically. The status CASE below marks
-// those archived rows `unknown`: one shielded spend transaction is compatible
-// with both a complete settlement and a partial/maker spend, so guessing
-// `consumed` would let the solver release a quarantined wallet operation on
-// ambiguous evidence. NULL tx_hash is similarly insufficient evidence.
-const cancelledPredicate = (idExpr: string) => `(
+// Branch 3 is vacuous for offers with no stored commitments (rows indexed
+// before migration 013, or offers whose wants are unshielded-only): those
+// keep the branch-1/2 heuristic. NULL tx_hash on any spend row also falls
+// back — never classify on absent evidence.
+const shieldedCancelledPredicate = (idExpr: string) => `(
   EXISTS (SELECT 1 FROM offer_file_nullifiers_history cnx
           LEFT JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
           WHERE cnx.offer_file_id = ${idExpr} AND cnn.nullifier IS NULL)
@@ -134,29 +128,159 @@ const cancelledPredicate = (idExpr: string) => `(
   )
 )`;
 
-const verifiedConsumedPredicate = (idExpr: string) => `(
-  EXISTS (SELECT 1 FROM offer_file_commitments_history oc
-          WHERE oc.offer_file_id = ${idExpr})
-  AND NOT EXISTS (SELECT 1 FROM offer_file_unshielded_spends_history ous
-                  WHERE ous.offer_file_id = ${idExpr})
-  AND (SELECT COUNT(DISTINCT cnn.tx_hash)
-       FROM offer_file_nullifiers_history cnx
-       JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
-       WHERE cnx.offer_file_id = ${idExpr} AND cnn.tx_hash IS NOT NULL) = 1
-  AND NOT EXISTS (SELECT 1 FROM offer_file_nullifiers_history cnx
-                  JOIN nullifiers cnn ON cnn.nullifier = cnx.nullifier
-                  WHERE cnx.offer_file_id = ${idExpr} AND cnn.tx_hash IS NULL)
-  AND NOT ${cancelledPredicate(idExpr)}
+// ── The same three branches, on the UNSHIELDED layer ────────────────────────
+//
+// Until migration 014 this layer had NO evidence at all: nothing recorded which
+// transaction spent an unshielded UTXO, so branches 1-3 above could not fire —
+// not merely misclassify, but never fire — and every consumption of an
+// unshielded-only offer read `consumed`. A maker spending their own UTXO on
+// themselves was recorded as a completed sale.
+//
+// The evidence was always available; the state machine discarded it. The
+// primitives deliver `txHash`, `value` and `tokenType` on both the spend and
+// create events, so the shielded argument ports over intact:
+//
+//   1. PARTIAL SPEND — an offer spend ref with no matching row in
+//      unshielded_spends. Settlement is atomic, so this cannot have been a fill.
+//   2. SPLIT SPEND — the offer's spends span more than one tx. Same argument.
+//   3. MISSING FILL MARKERS — all spends in ONE tx, but that tx did not create
+//      every unshielded output the offer declared. Phase (b) now persists the
+//      exact (owner, intent_hash, output_no) identity, precomputed from the
+//      offer's own intent. This Phase-(d)-deferred predicate still groups on
+//      (owner, token_type, value); Phase (b) preserves that behavior while
+//      carrying the exact fields through live storage and archival.
+//
+// Vacuous, as on the shielded side, when the offer declares no unshielded
+// outputs — a `uu` offer always does, so in practice branch 3 applies wherever
+// it matters. NULL tx_hash falls back rather than classifying on absent
+// evidence.
+const unshieldedCancelledPredicate = (idExpr: string) => `(
+  -- MARKER GATE, and it is what makes this migration safe to deploy.
+  --
+  -- unshielded_spends starts EMPTY, while offer_file_unshielded_spends_history
+  -- is populated in every pre-014 database. Without this gate, branch 1 sees no
+  -- matching spend row for any historical offer and flips every one of them to
+  -- cancelled — silently reclassifying genuine past fills, erasing them from
+  -- chart history and volume, while pair_stats (a persisted write-side
+  -- projection, incremented once at archive time) keeps counting them. The two
+  -- would then disagree permanently.
+  --
+  -- Migration 013 avoided this by construction: its branch is gated behind
+  -- EXISTS(offer_file_commitments_history), which is empty for pre-013 rows, so
+  -- the whole branch goes vacuous and the old classification stands. This is
+  -- that same gate. Pre-014 rows have no marker rows -> predicate inert. Offers
+  -- indexed after 014 always have them, since a uu offer structurally
+  -- declares outputs. Offers live AT the upgrade also go inert, which is the
+  -- honest answer: their marker evidence was never captured.
+  EXISTS (SELECT 1 FROM offer_file_unshielded_outputs_history
+          WHERE offer_file_id = ${idExpr})
+  AND (
+  EXISTS (SELECT 1 FROM offer_file_unshielded_spends_history uxh
+          LEFT JOIN unshielded_spends us
+            ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
+           AND us.output_no = uxh.output_no
+          WHERE uxh.offer_file_id = ${idExpr} AND us.owner IS NULL)
+  OR (SELECT COUNT(DISTINCT us.tx_hash)
+      FROM offer_file_unshielded_spends_history uxh
+      JOIN unshielded_spends us
+        ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
+       AND us.output_no = uxh.output_no
+      WHERE uxh.offer_file_id = ${idExpr}) > 1
+  OR (
+    (SELECT COUNT(DISTINCT us.tx_hash)
+     FROM offer_file_unshielded_spends_history uxh
+     JOIN unshielded_spends us
+       ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
+      AND us.output_no = uxh.output_no
+     WHERE uxh.offer_file_id = ${idExpr} AND us.tx_hash IS NOT NULL) = 1
+    AND NOT EXISTS (SELECT 1 FROM offer_file_unshielded_spends_history uxh
+                    JOIN unshielded_spends us
+                      ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
+                     AND us.output_no = uxh.output_no
+                    WHERE uxh.offer_file_id = ${idExpr} AND us.tx_hash IS NULL)
+    AND EXISTS (
+      -- SUM the multiplicity across exact-identity rows with the same display
+      -- shape. Until Phase (d) switches this branch to exact identity lookup,
+      -- one payout must still not satisfy N identical declared outputs.
+      SELECT 1 FROM (
+        SELECT owner, token_type, value, SUM(count) AS required_count
+        FROM offer_file_unshielded_outputs_history
+        WHERE offer_file_id = ${idExpr}
+        GROUP BY owner, token_type, value
+      ) uo
+      WHERE uo.required_count > (
+          SELECT COUNT(*) FROM unshielded_creates uc
+          WHERE uc.owner = uo.owner AND uc.token_type = uo.token_type
+            AND uc.value = uo.value
+            AND uc.tx_hash = (SELECT MIN(us2.tx_hash)
+                              FROM offer_file_unshielded_spends_history uxh2
+                              JOIN unshielded_spends us2
+                                ON us2.owner = uxh2.owner
+                               AND us2.intent_hash = uxh2.intent_hash
+                               AND us2.output_no = uxh2.output_no
+                              WHERE uxh2.offer_file_id = ${idExpr})))
+  ))
 )`;
 
-// Status of an archived row: expired / cancelled / cryptographically verified
-// consumed. Markerless archived rows are `unknown` and must be reconciled by
-// an operator or a future protocol-specific proof, never treated as a fill.
+// Either layer's evidence is enough to prove a cancel, and each predicate is
+// INERT on the other layer: a pure shielded offer has no unshielded spend rows,
+// so every unshielded branch is false, and vice versa.
+//
+// A cross-layer offer would be judged by both, which is conservative but NOT a
+// full atomicity check: each layer counts distinct spending txs over its own
+// inputs, so shielded inputs in tx1 and unshielded inputs in tx2 fires neither
+// branch 2. That gap is now CLOSED UPSTREAM rather than here: §2.4's ruling is
+// implemented — `CROSS_LAYER` is in OfferRejectCode and validate.ts rejects the
+// shape immediately after the two-sided rule, at both doors — so no cross-layer
+// offer is ever indexed and this predicate never sees one.
+//
+// Kept as a comment rather than deleted: it records WHY these predicates are
+// safe to leave layer-independent. If §2.4 were ever relaxed, this is the
+// weakness that would come back.
+const cancelledPredicate = (idExpr: string) =>
+  `(${shieldedCancelledPredicate(idExpr)} OR ${unshieldedCancelledPredicate(idExpr)})`;
+
+// ── Baskets are not price observations (§2.5, ruled ACCEPT-but-exclude) ─────
+//
+// A basket is an offer with more than one colour on a side: give A+B, want C+D.
+// It is a legitimate, sealed, pre-agreed settlement — it lives, settles and
+// archives like any other offer, and NONE of that is affected here. What it is
+// not is a PRICE. Nobody agreed that 1317 A is worth 1983 C; they agreed that
+// A+B together are worth C+D together. Splitting that into per-pair prices
+// invents agreements that were never made.
+//
+// Measured, not argued: one 2x2 basket became FOUR trades at four different
+// prices on four pairs, with every leg's volume counted twice, and manufactured
+// four rows on /v1/pairs. See multileg-pairs.test.ts.
+//
+// Why this cannot be fixed by reconstructing the constituent swaps instead:
+// merging is lossy at the segment level. Two zswaps merged into one transaction
+// land in segment 0 TOGETHER, netted, with nothing left to say which +N pairs
+// with which -M (probe-segments.ts). The sealed sub-balances are not recoverable
+// from the bytes, so there is no honest query-side reconstruction — exclusion is
+// the only option that does not fabricate.
+//
+// Eligibility, stated positively: at most one give colour AND at most one want
+// colour. Expressed as "no direction has two colours" so a single grouped
+// subquery covers both sides.
+//
+// `tokensTable` selects the live (`offer_file_tokens`) or archived
+// (`offer_file_tokens_history`) side; they are separate tables, so the caller
+// must name the one matching `idExpr`'s table or the filter silently matches
+// nothing and every basket sails through.
+const notABasketPredicate = (idExpr: string, tokensTable: string) => `
+NOT EXISTS (
+  SELECT 1 FROM ${tokensTable} bt
+  WHERE bt.offer_file_id = ${idExpr}
+  GROUP BY bt.direction
+  HAVING COUNT(DISTINCT bt.token_color) > 1
+)`;
+
+// Status of an archived row: expired (TTL) / cancelled / consumed.
 const archivedStatusCase = (tableIdExpr: string) => `
   CASE WHEN archive_reason <> 'CONSUMED' THEN 'expired'
        WHEN ${cancelledPredicate(tableIdExpr)} THEN 'cancelled'
-       WHEN ${verifiedConsumedPredicate(tableIdExpr)} THEN 'consumed'
-       ELSE 'unknown'
+       ELSE 'consumed'
   END`;
 
 
@@ -222,6 +346,16 @@ archived_commitments AS (
     SELECT offer_file_id, commitment
     FROM offer_file_commitments
     WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
+),
+-- The unshielded fill markers must survive archival for exactly the reason the
+-- commitments do: classification is READ-time, so evidence left behind in the
+-- live tables is evidence that no longer exists when the question is asked.
+archived_unshielded_outputs AS (
+    INSERT INTO offer_file_unshielded_outputs_history
+      (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
+    SELECT offer_file_id, owner, intent_hash, output_no, token_type, value, count
+    FROM offer_file_unshielded_outputs
+    WHERE offer_file_id IN (SELECT offer_file_id FROM matched)
 )
 DELETE FROM offer_file
 WHERE id IN (SELECT offer_file_id FROM matched)
@@ -275,8 +409,14 @@ export interface IGetLatestEffectstreamBlockResult {
   main_chain_block_hash: Buffer | null;
 }
 export const getLatestEffectstreamBlock = prepared<void, IGetLatestEffectstreamBlockResult>(
+      // ms_timestamp IS NOT NULL: the column is nullable, and callers use this
+      // row AS THE CHAIN CLOCK (the 24 h window cutoff, the root-window gate).
+      // A newest row with a NULL timestamp would otherwise make them fall back
+      // to wall clock — silently reintroducing the mixed-clock defect — instead
+      // of using the newest block that actually carries a time.
       `SELECT block_height, ms_timestamp, effectstream_block_hash, main_chain_block_hash
        FROM effectstream.effectstream_blocks
+       WHERE ms_timestamp IS NOT NULL
        ORDER BY block_height DESC
        LIMIT 1`,
 );
@@ -339,6 +479,20 @@ export const getLastOffer = prepared<void, IGetLastOfferResult>(
 export interface IGetPairStats24hParams {
   base: string;
   quote: string;
+  /**
+   * Start of the 24 h window, derived from the CHAIN clock — see trade-data.ts.
+   *
+   * This used to be `NOW() - INTERVAL '24 hours'`, wall clock, compared against
+   * `h.archived_at`, which is the L2 block timestamp. Two clocks in one
+   * comparison. Any node whose chain time is not wall time — a replica catching
+   * up, a replay, a devnet anchored in the past — reported zero volume and a
+   * collapsed high/low while /v1/chart/history still listed every fill: the API
+   * contradicting itself about whether trades exist.
+   *
+   * Same defect class as the archived_at fix, one layer up; closing that one is
+   * what made this reachable.
+   */
+  cutoff: DateOrString;
 }
 export interface IGetPairStats24hResult {
   last_price: string | null;
@@ -370,7 +524,8 @@ export const getPairStats24h = prepared<IGetPairStats24hParams, IGetPairStats24h
                WHERE direction = 'WANTING' AND token_color IN (:base!, :quote!)
                GROUP BY 1, 2) w ON w.offer_file_id = h.id
          WHERE h.archive_reason = 'CONSUMED'
-           AND ${verifiedConsumedPredicate("h.id")}
+           AND NOT ${cancelledPredicate("h.id")}
+           AND ${notABasketPredicate("h.id", "offer_file_tokens_history")}
            AND g.amount::numeric > 0
            AND w.amount::numeric > 0
            AND ((g.token_color = :base! AND w.token_color = :quote!)
@@ -379,21 +534,21 @@ export const getPairStats24h = prepared<IGetPairStats24hParams, IGetPairStats24h
        SELECT
          (SELECT price FROM fills ORDER BY archived_at DESC LIMIT 1)::text AS last_price,
          (SELECT price FROM fills
-           WHERE archived_at <= NOW() - INTERVAL '24 hours'
+           WHERE archived_at <= :cutoff!
            ORDER BY archived_at DESC LIMIT 1)::text AS ref_before_24h,
          (SELECT price FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours'
+           WHERE archived_at > :cutoff!
            ORDER BY archived_at ASC LIMIT 1)::text AS oldest_in_24h,
          (SELECT COUNT(*)::int FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours') AS fills_24h,
+           WHERE archived_at > :cutoff!) AS fills_24h,
          (SELECT MAX(price) FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS high_24h,
+           WHERE archived_at > :cutoff!)::text AS high_24h,
          (SELECT MIN(price) FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS low_24h,
+           WHERE archived_at > :cutoff!)::text AS low_24h,
          (SELECT SUM(base_amt) FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS volume_base_24h,
+           WHERE archived_at > :cutoff!)::text AS volume_base_24h,
          (SELECT SUM(quote_amt) FROM fills
-           WHERE archived_at > NOW() - INTERVAL '24 hours')::text AS volume_quote_24h`,
+           WHERE archived_at > :cutoff!)::text AS volume_quote_24h`,
 );
 
 // ── Trade history ──────────────────────────────────────────────────────────
@@ -426,7 +581,8 @@ export const getTradeHistory = prepared<IGetTradeHistoryParams, IGetTradeHistory
              WHERE direction = 'WANTING' AND token_color IN (:base!, :quote!)
              GROUP BY 1, 2) w ON w.offer_file_id = h.id
        WHERE h.archive_reason = 'CONSUMED'
-         AND ${verifiedConsumedPredicate("h.id")}
+         AND NOT ${cancelledPredicate("h.id")}
+         AND ${notABasketPredicate("h.id", "offer_file_tokens_history")}
          AND ((g.token_color = :base! AND w.token_color = :quote!)
            OR (g.token_color = :quote! AND w.token_color = :base!))
        ORDER BY h.archived_at DESC
@@ -455,7 +611,8 @@ export const getOpenLegs = prepared<IGetOpenLegsParams, IGetOpenLegsResult>(
              FROM offer_file_tokens
              WHERE direction = 'WANTING' AND token_color IN (:base!, :quote!)
              GROUP BY 1, 2) w ON w.offer_file_id = o.id
-       WHERE ((g.token_color = :base! AND w.token_color = :quote!)
+       WHERE ${notABasketPredicate("o.id", "offer_file_tokens")}
+         AND ((g.token_color = :base! AND w.token_color = :quote!)
            OR (g.token_color = :quote! AND w.token_color = :base!))`,
 );
 
@@ -507,7 +664,23 @@ export const upsertPairStatsByOfferId = prepared<IUpsertPairStatsByOfferIdParams
            LEAST(g.token_color, w.token_color),
            GREATEST(g.token_color, w.token_color),
            1,
-           w.amount::numeric / NULLIF(g.amount::numeric, 0),
+           -- Quote per base, in BOTH trade directions.
+           --
+           -- base_color/quote_color above are assigned by LEAST/GREATEST of the
+           -- hex COLOUR, which has nothing to do with which side the maker took.
+           -- This used to be a bare w.amount / g.amount — want divided by give
+           -- — with no reference to which of them became base, so the recorded
+           -- price was quote-per-base only when the maker happened to give the
+           -- lexically-lesser colour, and 1/p otherwise. /v1/pairs' price column
+           -- therefore flipped meaning with the direction of the most recent
+           -- trade and disagreed with /v1/chart/stats by a factor of p^2.
+           --
+           -- Every other price path already normalises explicitly:
+           -- getPairStats24h does this same CASE, and trade-data.ts's toFill()
+           -- does it in JS. Only this one did not.
+           CASE WHEN g.token_color = LEAST(g.token_color, w.token_color)
+                THEN w.amount::numeric / NULLIF(g.amount::numeric, 0)
+                ELSE g.amount::numeric / NULLIF(w.amount::numeric, 0) END,
            h.archived_at
        FROM (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
              FROM offer_file_tokens_history
@@ -519,12 +692,34 @@ export const upsertPairStatsByOfferId = prepared<IUpsertPairStatsByOfferIdParams
              GROUP BY 1, 2) w ON w.offer_file_id = g.offer_file_id
        JOIN offer_file_history h ON h.id = g.offer_file_id
        WHERE g.offer_file_id = :offer_id!
-         AND ${verifiedConsumedPredicate("g.offer_file_id")}
+         AND NOT ${cancelledPredicate("g.offer_file_id")}
+         AND ${notABasketPredicate("g.offer_file_id", "offer_file_tokens_history")}
        ON CONFLICT (pair_key) DO UPDATE SET
            trade_count    = pair_stats.trade_count + 1,
            last_price     = EXCLUDED.last_price,
            last_traded_at = EXCLUDED.last_traded_at`,
 );
+
+/**
+ * The `/v1/pairs` ordering CONTRACT (§8, ruled 2026-08-10).
+ *
+ * "Liquidity first; we want to always show the major players — and make the
+ * users see by default the largest pools." So `open_count` leads and recency
+ * only breaks its ties.
+ *
+ * `pair_key` last is MANDATORY, not tidiness: `last_traded_at` quantises to L2
+ * block time, so full ties on both keys are common, and without a deterministic
+ * final key two replicas can order the same pairs differently — which p7a's
+ * A-vs-B byte comparison would report as a phantom failure.
+ *
+ * Exported because the tiebreaker is not observable from data: `pair_key` is
+ * `pair_stats`' primary key, so an index scan already returns it sorted and a
+ * fixture cannot tell "ordered by pair_key" from "happened to come back
+ * sorted". A test asserting this string is the only honest way to pin it; the
+ * liquidity-first half IS data-observable and is asserted normally.
+ * Documented for clients in API.md.
+ */
+export const PAIRS_ORDER_BY = "open_count DESC, last_traded_at DESC NULLS LAST, pair_key";
 
 export interface IGetPairsResult {
   pair_key: string;
@@ -552,9 +747,10 @@ export const getPairs = prepared<void, IGetPairsResult>(
            FROM offer_file_tokens g
            JOIN offer_file_tokens w ON w.offer_file_id = g.offer_file_id AND w.direction = 'WANTING'
            WHERE g.direction = 'GIVING'
+             AND ${notABasketPredicate("g.offer_file_id", "offer_file_tokens")}
            GROUP BY 1
        ) live ON live.pair_key = ps.pair_key
-       ORDER BY open_count DESC, last_traded_at DESC NULLS LAST`,
+       ORDER BY ${PAIRS_ORDER_BY}`,
 );
 
 // ── Offer hash (content-addressed lookups, MIP-0006 offerId) ───────────────
@@ -568,7 +764,14 @@ export interface IInsertOfferFileWithHashParams {
   offer_hash: string;
   metadata_created_at: DateOrString | null;
   metadata_expires_at: DateOrString | null;
-  first_seen_at: DateOrString | null;
+  /**
+   * NOT nullable — the column is NOT NULL (migration 015) because keyset
+   * every writer sets it. The SQL already required it (`:first_seen_at!`);
+   * the type said otherwise, so a caller could pass null and only find out at
+   * runtime. Chain-derived: state-machine.ts computes it from the earliest
+   * proof-root first-seen, or the Celestia block time.
+   */
+  first_seen_at: DateOrString;
   ttl_seconds: NumberOrString | null;
 }
 export interface IInsertOfferFileWithHashResult { id: number }
@@ -600,10 +803,11 @@ export const insertOfferFileWithHash = prepared<IInsertOfferFileWithHashParams, 
 //   (a) some of its nullifiers were never spent at all (the maker moved one
 //       coin elsewhere; the rest can now never settle), or
 //   (b) its nullifiers were spent across MORE THAN ONE transaction.
-// Positive `consumed` status additionally requires the output-commitment proof
-// encoded by verifiedConsumedPredicate above. All-in-one-tx without markers
-// is ambiguous and reads `unknown`; no shielded spend identity also reads
-// `unknown` because there is no transaction-bound settlement proof.
+// Everything else stays `consumed`. Classification is exact on BOTH layers
+// wherever fill markers exist: shielded markers are the offer's output
+// commitments, unshielded markers its declared outputs under #45's exact
+// (owner, intent_hash, output_no) identity. Only genuinely marker-less rows
+// keep the all-in-one-tx heuristic.
 //
 // Read-time on purpose: the archive fires on the FIRST nullifier event of a
 // block, before its same-tx siblings are processed — but the whole block
@@ -739,6 +943,63 @@ export const insertOfferFileCommitment = prepared<IInsertOfferFileCommitmentPara
        ON CONFLICT DO NOTHING`,
 );
 
+// ── Unshielded classification (migration 014) ───────────────────────────────
+// The three inserts that give the unshielded layer the same evidence the
+// shielded layer has had since 013. Each mirrors its shielded counterpart
+// exactly, including first-seen-wins on replay.
+
+// Chain-side spend record. Distinct from deleteCreatedUnshielded, which mutates
+// the LIVE set: this is the permanent "what was consumed, and by which tx"
+// record that read-time classification consults, the analogue of `nullifiers`.
+export interface IInsertUnshieldedSpendParams {
+  owner: string;
+  intent_hash: string;
+  output_no: number;
+  tx_hash: string | null;
+  height: number;
+}
+export const insertUnshieldedSpend = prepared<IInsertUnshieldedSpendParams, never>(
+      `INSERT INTO unshielded_spends (owner, intent_hash, output_no, tx_hash, height)
+       VALUES (:owner!, :intent_hash!, :output_no!, :tx_hash!, :height!)
+       ON CONFLICT (owner, intent_hash, output_no) DO NOTHING`,
+);
+
+// Chain-side create record — the analogue of `commitments`. Permanent on
+// purpose: created_unshielded deletes on spend, which would retroactively erase
+// the proof that a settlement happened and silently reclassify a historical
+// fill as a cancel.
+export interface IInsertUnshieldedCreateParams {
+  owner: string;
+  intent_hash: string;
+  output_no: number;
+  tx_hash: string | null;
+  token_type: string;
+  value: string;
+  height: number;
+}
+export const insertUnshieldedCreate = prepared<IInsertUnshieldedCreateParams, never>(
+      `INSERT INTO unshielded_creates (owner, intent_hash, output_no, tx_hash, token_type, value, height)
+       VALUES (:owner!, :intent_hash!, :output_no!, :tx_hash!, :token_type!, :value!, :height!)
+       ON CONFLICT (owner, intent_hash, output_no) DO NOTHING`,
+);
+
+// The offer's own declared unshielded outputs — its fill markers on that layer.
+export interface IInsertOfferFileUnshieldedOutputParams {
+  offer_file_id: number;
+  owner: string;
+  intent_hash: string;
+  output_no: number;
+  token_type: string;
+  value: string;
+}
+export const insertOfferFileUnshieldedOutput = prepared<IInsertOfferFileUnshieldedOutputParams, never>(
+      `INSERT INTO offer_file_unshielded_outputs
+         (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
+       VALUES (:offer_file_id!, :owner!, :intent_hash!, :output_no!, :token_type!, :value!, 1)
+       ON CONFLICT (offer_file_id, owner, intent_hash, output_no)
+       DO UPDATE SET count = offer_file_unshielded_outputs.count + 1`,
+);
+
 // Batched nullifiers for a page of offers — computed.inputNullifiers in the
 // MIP-0006 payload (the keys an indexer watches to mark an offer consumed).
 export interface IGetOfferNullifiersForOffersParams { offer_file_ids: number[]; live: boolean }
@@ -784,8 +1045,10 @@ export interface IGetOpenOffersPageParams {
   token: string;
   direction: string;
   limit: number;
-  after_created_at: DateOrString | null;
-  after_id: number | null;
+  // Keyset anchor: the PUBLICATION tuple, both parts chain/content-derived.
+  // NOT (first_seen_at, id) — see the ORDER BY note below.
+  after_height: NumberOrString | null;
+  after_hash: string | null;
 }
 export interface IGetOpenOffersPageResult {
   id: number;
@@ -798,6 +1061,30 @@ export interface IGetOpenOffersPageResult {
   ttl_seconds: NumberOrString | null;
   created_at: DateOrString | null;
 }
+// Keyset pagination on (celestia_height, offer_hash) — the PUBLICATION tuple.
+//
+// Two earlier keys were wrong for the same underlying reason, that the sort key
+// must be a fact every replica agrees on:
+//
+//   created_at  — DEFAULT NOW(), node-local wall clock. Page order was decided
+//     by when THIS node inserted each row, so two replicas served the same book
+//     in different orders. Invisible to the determinism replay BY CONSTRUCTION,
+//     since created_at is in DIFF_EXCLUDED_COLUMNS.
+//
+//   first_seen_at — chain-derived, but for a SHIELDED offer it comes from
+//     known_roots.first_seen_ms: the block in which THIS NODE first observed
+//     the proof root. A replica started at a later MIDNIGHT_START_BLOCK records
+//     a later value and orders the book differently. The determinism suite
+//     cannot see this either — main.grand-b.ts uses startBlockHeight 1 on every
+//     primitive, so both instances agree by construction, not by guarantee.
+//     It is also proof-root age, not publication time, so "newest first" did
+//     not mean what the API says it means.
+//
+// celestia_height is the DA height the offer was published at, and offer_hash
+// is the sha256 of its canonical bytes (the MIP-0006 offerId). Neither depends
+// on sync start, insertion order or SERIAL assignment, both are NOT NULL, and
+// ties break identically on every node — so `id` is no longer needed as the
+// tiebreaker. This tuple is what "newest first" should have meant all along.
 export const getOpenOffersPage = prepared<IGetOpenOffersPageParams, IGetOpenOffersPageResult>(
       `SELECT o.id, o.celestia_height, o.offer_hash,
               LENGTH(o.transaction_hex)::int AS blob_chars,
@@ -810,25 +1097,25 @@ export const getOpenOffersPage = prepared<IGetOpenOffersPageParams, IGetOpenOffe
            WHERE oft.offer_file_id = o.id
              AND oft.token_color = :token!
              AND (:direction! = 'ANY' OR oft.direction = :direction!)))
-         AND (:after_id!::int IS NULL
-              OR (o.created_at, o.id) < (:after_created_at!::timestamptz, :after_id!::int))
-       ORDER BY o.created_at DESC, o.id DESC
+         AND (:after_hash!::text IS NULL
+              OR (o.celestia_height, o.offer_hash) < (:after_height!::bigint, :after_hash!::text))
+       ORDER BY o.celestia_height DESC, o.offer_hash DESC
        LIMIT :limit!`,
 );
 
-// Resolve an `after_hash` cursor to its keyset anchor. Checks history too:
-// if the anchor offer was consumed/expired mid-pagination its row moved
-// tables, but (created_at, id) is copied on archive, so the cursor stays
+// Resolve an `after_hash` cursor to its keyset anchor. Checks history too: if
+// the anchor offer was consumed/expired mid-pagination its row moved tables,
+// but (celestia_height, offer_hash) is copied on archive, so the cursor stays
 // valid and the reader continues exactly where they left off.
 export interface IResolveOfferCursorParams { offer_hash: string }
 export interface IResolveOfferCursorResult {
-  id: number;
-  created_at: DateOrString | null;
+  celestia_height: string;
+  offer_hash: string;
 }
 export const resolveOfferCursor = prepared<IResolveOfferCursorParams, IResolveOfferCursorResult>(
-      `SELECT id, created_at FROM offer_file WHERE offer_hash = :offer_hash!
+      `SELECT celestia_height, offer_hash FROM offer_file WHERE offer_hash = :offer_hash!
        UNION ALL
-       SELECT id, created_at FROM offer_file_history WHERE offer_hash = :offer_hash!
+       SELECT celestia_height, offer_hash FROM offer_file_history WHERE offer_hash = :offer_hash!
        LIMIT 1`,
 );
 
@@ -1046,14 +1333,32 @@ export const isKnownRootLive = prepared<IIsKnownRootLiveParams, IIsKnownRootLive
 //
 // MIN across the offer's roots either way: the offer dies when the FIRST of
 // its roots leaves the window.
-export interface IGetEarliestRootFirstSeenParams { roots: string[] }
-export interface IGetEarliestRootFirstSeenResult {
+//
+// THE CURRENT-ROOT ESCAPE, and why it is inside the CASE rather than applied
+// to the aggregate. `last_seen_ms` only advances when our midnight-zswap-root
+// primitive observes a root ADVANCE, but the ledger re-inserts the CURRENT root
+// every block regardless. So on a quiet chain the newest root's stored
+// last_seen_ms goes stale while the chain still accepts proofs against it —
+// which is how an offer got served `status: live` with an expiry eleven minutes
+// in its own past (§2.6). isKnownRootLive already carries this escape for the
+// read gate; this is the same rule for the derivation.
+//
+// The escape is evaluated PER ROW, before MIN. Taking MIN(last_seen_ms) first
+// and then deciding "is any of them current?" would let a fresh current root
+// lift a SUPERSEDED root's window, extending an offer past the point its oldest
+// root actually dies. Per-root anchor, then minimum — never the reverse.
+export interface IGetOfferRootTimingParams { roots: string[]; block_ms: NumberOrString }
+export interface IGetOfferRootTimingResult {
   first_seen_ms: NumberOrString | null;
-  last_seen_ms: NumberOrString | null;
+  /** MIN over per-root window anchors; + ROOT_WINDOW_SECONDS is the deadline. */
+  window_anchor_ms: NumberOrString | null;
 }
-export const getEarliestRootFirstSeen = prepared<IGetEarliestRootFirstSeenParams, IGetEarliestRootFirstSeenResult>(
+export const getOfferRootTiming = prepared<IGetOfferRootTimingParams, IGetOfferRootTimingResult>(
       `SELECT MIN(first_seen_ms) AS first_seen_ms,
-              MIN(last_seen_ms)  AS last_seen_ms
+              MIN(CASE WHEN height >= (SELECT MAX(height) FROM known_roots)
+                       THEN GREATEST(last_seen_ms, :block_ms!)
+                       ELSE last_seen_ms
+                  END) AS window_anchor_ms
        FROM known_roots WHERE root = ANY(:roots!)`,
 );
 

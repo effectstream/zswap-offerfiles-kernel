@@ -331,7 +331,7 @@ curl "http://host:9999/v1/offers/9f2c4a...e1"
 }
 ```
 
-`computed.status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"unknown"`. Unknown hashes → `404 { "error": "NOT_FOUND", "offerId": "…" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
+`computed.status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND", "offerId": "…" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
 
 #### `GET /v1/offers/:hash/status`
 
@@ -341,9 +341,20 @@ Lightweight status probe by content hash:
 { "offerId": "9f2c4a…e1", "status": "live" }
 ```
 
-`status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"unknown"` | `"not_found"`.
+`status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"`.
 
-**Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's inputs in *one* Midnight transaction — so an archived offer whose nullifiers were spent across different transactions, or only partially spent, is reported `"cancelled"` with certainty. `"consumed"` is reserved for shielded-input offers with stored **fill markers** (the offer's own output commitments, plaintext in the published blob and captured at ingestion) whose single spending transaction also created every marker. A marker-less archived offer (including a row indexed before the commitments migration), or any offer with an unshielded input whose spend lacks a retained transaction identity, is `"unknown"`: the available evidence cannot prove the complete atomic settlement, so it is never positive settlement evidence. Chain-side commitments come from the `Midnight:NullifierAndCommitment` primitive. Chart/trade data counts only verified `"consumed"` offers.
+**Fill vs cancel.** Settlement is atomic — a fill consumes *all* of an offer's
+inputs in one Midnight transaction. Partial or split spends are therefore
+`"cancelled"`. For shielded outputs, the offer's commitments are exact fill
+markers. For unshielded outputs, PR #45 replaced the marker data model with the
+exact ledger identity `(owner, intentHash, outputNo)`; `tokenType` and `value`
+remain audit fields. The current read-time classifier has not yet completed the
+Phase-(d) switch and temporarily compares those unshielded markers by
+`(owner, tokenType, value)` within the spending transaction. Ordinary cancels
+are classified correctly, but two offers asking the same owner for the same
+shape can still share one observed payout until that scoped work lands.
+Pre-marker historical rows retain the conservative one-transaction heuristic.
+Chart/trade data counts only `"consumed"` offers.
 
 ---
 
@@ -365,7 +376,7 @@ curl -X POST http://host:9999/v1/offers/status \
 { "offerId": "9f2c4a…e1", "status": "live" }
 ```
 
-Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"unknown"` | `"not_found"` (see *Fill vs cancel* above). A blob that does not decode answers `{ "status": "not_found" }` with no `offerId`.
+Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"` (see *Fill vs cancel* above). A blob that does not decode answers `{ "status": "not_found" }` with no `offerId`.
 
 Lookups resolve via the offer's content hash (an indexed probe). A blob that does not decode as a `swapoffer1…` string answers `"not_found"` **without touching the database** — undecodable blobs can never have been indexed, and this keeps junk submissions from costing more than a hash attempt.
 
@@ -491,6 +502,25 @@ curl http://host:9999/v1/pairs
 | `last_price`, `last_traded_at` | From the most recent fill; **`null` until the pair has traded** |
 | `open_count` | Live open offers for this pair right now |
 
+**Ordering is part of the contract — liquidity first:**
+
+    open_count DESC, last_traded_at DESC NULLS LAST, pair_key
+
+The deepest books come first so a default market list shows the pairs a user
+can actually trade against; recency only breaks ties between equally-deep
+books, and `pair_key` breaks full ties. `last_traded_at` quantises to L2 block
+time, so full ties are common — the final `pair_key` key is what makes the
+response **identical across replicas**. Clients that want a different ordering
+should sort client-side; there is no `sort` parameter.
+
+**Basket offers are excluded.** An offer with more than one token color on a
+side (give A+B, want C+D) is a sealed pre-agreed settlement, not a price
+observation — nobody agreed what A alone is worth in C. Such offers are
+accepted, served on `GET /v1/offers`, and settle normally, but they contribute
+no `trade_count`, no `last_price`, and no `open_count` here, and no rows to
+`/v1/chart/history` or `/v1/chart/stats`. A pair that only ever appeared inside
+a basket does not appear as a market at all.
+
 ---
 
 #### `GET /v1/known-tokens`
@@ -580,27 +610,39 @@ curl -X POST http://host:9999/v1/offers \
 
 `offerId` is the offer's content hash — track it with `GET /v1/offers/:offerId` once indexed. Ignore `result` (internal batcher receipt; shape not stable).
 
-**Error `400`**
+**Validation error `400`**
 
 ```json
 { "error": "ROOT_UNKNOWN", "reason": "input merkle root not a known recent chain root: abc123..." }
 ```
 
-| Error code | Meaning |
+The shared validator's `OfferRejectCode` is the source of truth. The table is
+intentionally complete, including fail-closed and callback-only codes that the
+current HTTP route does not emit directly.
+
+| `OfferRejectCode` | Meaning / current route behaviour |
 |---|---|
 | `BAD_ENCODING` | Blob is not a valid `swapoffer1…` bech32m encoding (wrong HRP, bad charset, bad checksum) |
-| `BAD_DESERIALIZE` | Decoded bytes are not a ledger `Transaction` |
 | `TOO_LARGE` | Decoded transaction exceeds `OFFER_MAX_BYTES` |
+| `BAD_DESERIALIZE` | Decoded bytes are not a ledger `Transaction` |
+| `WRONG_TX_VARIANT` | Reserved structural verdict; not emitted by the current deserializer path |
 | `NO_SPENDABLE_INPUT` | The transaction spends nothing — nothing to swap |
 | `NOT_A_SWAP` | Not two-sided: needs ≥1 give **and** ≥1 want (MIP-0006) |
+| `CROSS_LAYER` | Gives and wants span both value layers. Nothing moves value between shielded and unshielded, so no taker could ever fill it |
+| `UNKNOWN_TOKEN` | Fail-closed unknown ledger token tag; current wire bytes deserialize-fail before reaching it |
 | `PROOF_INVALID` | ZK proof verification failed |
 | `SIGNATURE_INVALID` | Signature verification failed |
 | `NULLIFIER_SPENT` | A shielded input coin is already spent on Midnight |
-| `UTXO_NOT_LIVE` | An unshielded UTXO was spent or was never created on-chain |
+| `UTXO_SPENT` | Optional validator callback found an already-spent unshielded UTXO; the HTTP route folds this and unknown UTXOs into `UTXO_NOT_LIVE` |
+| `UTXO_UNKNOWN` | Optional validator callback found a UTXO never created on-chain; the HTTP route folds this into `UTXO_NOT_LIVE` |
 | `ROOT_UNKNOWN` | The shielded input proves against a Merkle root outside the `ROOT_WINDOW_SECONDS` retention window |
 | `ROOT_UNREADABLE` | The input's Merkle root could not be extracted (fail-closed) |
-| `DUPLICATE_OFFER` (`409`) | Byte-identical offer already indexed (open **or** archived) — rejected before any Celestia fee |
-| `RATE_LIMITED` (`429`) | More than 60 requests/min from this IP |
+| `DUPLICATE` | Optional validator dedup callback found an existing identity; production HTTP/STM content dedup reports `DUPLICATE_OFFER` instead |
+
+API-gate and transport codes are deliberately separate from
+`OfferRejectCode`: `UTXO_NOT_LIVE` (`400`) folds the production live-set probe;
+`DUPLICATE_OFFER` (`409`) is byte-identical content dedup; `VALIDATION` (`400`)
+is a malformed JSON body; and `RATE_LIMITED` (`429`) is the HTTP limiter.
 
 Non-`400` transport failures you may also see: a request body larger than
 twice `OFFER_MAX_BYTES` is refused by the HTTP layer as
@@ -754,6 +796,8 @@ VALIDATION`.
 
 24-hour statistics for a pair derived from consumed (filled) offers. Falls back to the mid of current open offers when no fills exist yet.
 
+Basket offers are excluded from both the fills and the open-book fallback — see [`GET /v1/pairs`](#get-v1pairs). An offer that gives two colors for one has no per-pair price to report.
+
 ```bash
 curl "http://host:9999/v1/chart/stats?base=70ce...b569&quote=0000...0000"
 ```
@@ -775,7 +819,7 @@ curl "http://host:9999/v1/chart/stats?base=70ce...b569&quote=0000...0000"
 
 #### `GET /v1/chart/history?base=<A>&quote=<B>`
 
-Last 120 fills (consumed offers) for a pair, newest first.
+Last 120 fills (consumed offers) for a pair, newest first. Basket offers never print here — see [`GET /v1/pairs`](#get-v1pairs).
 
 ```json
 [
@@ -970,7 +1014,7 @@ Anyone can post any bytes to the shared Celestia namespace for the price of a bl
 | 3 | bech32m charset + checksum | O(n) | corrupt / non-offer text |
 | 4 | Decoded size vs `OFFER_MAX_BYTES` | O(1) | oversized payloads |
 | 5 | `Transaction.deserialize` | O(n) | not a ledger transaction |
-| 6 | Structural: spendable input, two-sided legs (MIP-0006) | cheap | giveaways, non-swaps |
+| 6 | Structural: spendable input, two-sided legs, same value layer (MIP-0006) | cheap | giveaways, non-swaps, cross-layer offers |
 | 7 | Merkle-root extraction | cheap byte parse | unreadable roots |
 | 8 | **Dedup** by content hash | one indexed probe | replays (open *and* archived) |
 | 9 | **Liveness**: nullifier unspent, UTXO live, root known | indexed probes | stale / un-settleable offers |

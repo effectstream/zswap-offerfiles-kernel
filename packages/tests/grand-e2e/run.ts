@@ -19,11 +19,14 @@ import { SseRecorder } from "./lib/sse.ts";
 import {
   allResults,
   beginPhase,
+  check,
   endPhases,
   ensureOutDir,
   failures,
+  knownReds,
   note,
   phaseTimings,
+  staleReds,
   writeOut,
 } from "./lib/util.ts";
 import { initMetrics } from "./metrics.ts";
@@ -32,11 +35,13 @@ import { p1Happy } from "./phases/p1-happy.ts";
 import { p2Api } from "./phases/p2-api.ts";
 import { p3Lifecycle } from "./phases/p3-lifecycle.ts";
 import { p3bCompeting } from "./phases/p3b-competing.ts";
+import { p3cBasket } from "./phases/p3c-basket.ts";
 import { p4Adversarial } from "./phases/p4-adversarial.ts";
 import { p5Load } from "./phases/p5-load.ts";
 import { spawnedProcesses } from "./phases/p6-chaos.ts";
 import { p7Determinism, type DeterminismOutcome } from "./phases/p7-determinism.ts";
 import { p7bAudit } from "./phases/p7b-audit.ts";
+import { p8Served } from "./phases/p8-served.ts";
 
 function writeScorecard(determinism: DeterminismOutcome | null): void {
   const results = allResults();
@@ -63,15 +68,22 @@ function writeScorecard(determinism: DeterminismOutcome | null): void {
 
   lines.push(`## Offer fates (ledger vs plan)`);
   lines.push(``);
-  lines.push(`| Fate | Target | Resolved | Casualties |`);
-  lines.push(`|---|---|---|---|`);
+  // Split by value layer: coverage that silently collapses onto one layer is
+  // the failure mode p7b's layer-symmetry check exists to catch, and reading
+  // it here is how a reviewer sees it without running anything.
+  lines.push(`| Fate | Target | Resolved | shielded | unshielded | Casualties |`);
+  lines.push(`|---|---|---|---|---|---|`);
   for (const fate of ["settled", "cancelled", "expired", "live"] as const) {
     const target = Math.round(TOTAL_OFFERS * FATE_SPLIT[fate]);
-    const resolved = ledger.offers.filter(
+    const done = ledger.offers.filter(
       (o) => o.fate === fate && (o.state === "resolved" || (fate === "live" && o.state === "indexed")),
-    ).length;
+    );
+    const ss = done.filter((o) => o.layer === "ss").length;
+    const uu = done.filter((o) => o.layer === "uu").length;
     const cas = ledger.casualties().filter((o) => o.fate === fate).length;
-    lines.push(`| ${fate} | ${target} | ${resolved} | ${cas} |`);
+    lines.push(
+      `| ${fate} | ${target} | ${done.length} | ${ss} | ${uu === 0 ? "**0**" : uu} | ${cas} |`,
+    );
   }
   lines.push(``);
   const casualties = ledger.casualties();
@@ -157,12 +169,39 @@ function writeScorecard(determinism: DeterminismOutcome | null): void {
       `the NUL crash took hours to localise rather than minutes. Transitions now log and rethrow.`,
   );
   lines.push(``);
+
+  // ── Known red — the punch list ──────────────────────────────────────────
+  // Checks that assert the TRUTH about a defect the product has not fixed yet.
+  // They do not gate the run; their fix PRs must delete their registry entries,
+  // which the XPASS guard enforces. See known-red.ts and
+  // PRODUCTION-READINESS.md §1.2.
+  const reds = knownReds();
+  lines.push(`## Known red (${reds.length} expected failures)`);
+  lines.push(``);
+  if (reds.length === 0) {
+    lines.push(`None — every registered defect has been fixed and its entry removed.`);
+  } else {
+    lines.push(`| id | PR | check | why it fails | observed |`);
+    lines.push(`|---|---|---|---|---|`);
+    for (const r of reds) {
+      const observed = (r.detail ?? "").split("; observed: ")[1] ?? "";
+      lines.push(
+        `| ${r.red!.id} | ${r.red!.pr} | ${r.phase} ▸ ${r.name} | ${r.red!.why} | ${observed.slice(0, 120)} |`,
+      );
+    }
+  }
+  const stale = staleReds();
+  if (stale.length > 0) {
+    lines.push(``);
+    lines.push(
+      `> ${stale.length} registered red(s) never ran this run — either a phase was skipped, or the ` +
+        `check was renamed and its entry is now dead: ${stale.map((s) => `${s.id} (${s.pr})`).join(", ")}`,
+    );
+  }
+  lines.push(``);
+
   lines.push(`## Documented gaps asserted as current behavior`);
   lines.push(``);
-  lines.push(
-    `- **Unshielded-only cancel classification**: unshielded spends are not tx-grouped yet, so a ` +
-      `maker walking away from an unshielded-only offer reads \`consumed\`. Asserted (not fixed) in p3.`,
-  );
   lines.push(
     `- **Batcher DedupStore restart window**: in-memory published-hash set empties on restart; a ` +
       `replay across a restart can cost one duplicate blob fee (never a duplicate index). Exercised in p6.`,
@@ -188,6 +227,36 @@ function writeScorecard(determinism: DeterminismOutcome | null): void {
 
   writeOut("../SCORECARD.md", lines.join("\n"));
   console.log(`\nSCORECARD written to packages/tests/grand-e2e/SCORECARD.md`);
+}
+
+/**
+ * Run one phase so that a throw inside it costs THAT phase, not the run.
+ *
+ * Phases are long and expensive — a full pass is ~50 minutes of chain work —
+ * and most of a phase's value is independent of the others. Before this, every
+ * phase shared one try/catch, so a single unguarded throw anywhere ended
+ * everything after it: measured, a fixture builder asking a wallet for a color
+ * it was never funded with killed a run at 48 checks, and p3, p3b, p5, p8, p7b
+ * and p7a never executed. The failure was one line; the cost was the whole
+ * afternoon.
+ *
+ * The exception is recorded as a normal failure (so it gates the run and lands
+ * in the scorecard) and the next phase starts. p1 stays fatal — it produces the
+ * artifacts every later phase reads, so continuing past it would only generate
+ * misleading failures.
+ */
+async function runPhase(name: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    beginPhase(name);
+    await check(
+      `${name} completed without throwing`,
+      async () => false,
+      `phase aborted: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    console.error(`[grand-e2e] phase ${name} threw — continuing with the next phase:`, e);
+  }
 }
 
 async function main(): Promise<void> {
@@ -222,13 +291,20 @@ async function main(): Promise<void> {
     const art = await p1Happy(db, actors, sse);
     if (!art) throw new Error("p1 happy path failed — aborting (nothing downstream can pass)");
 
-    await p2Api(db, art);
-    await p4Adversarial(db, art);
-    await p3Lifecycle(db, actors);
-    await p3bCompeting(db, actors);
-    await p5Load(db, actors, art);
-    await p7bAudit(db, sse);
-    determinism = await p7Determinism(db);
+    // Each phase isolated: one phase throwing must not cost the other five.
+    await runPhase("p2-api", () => p2Api(db, art));
+    await runPhase("p4-adversarial", () => p4Adversarial(db, art, actors!));
+    await runPhase("p3-lifecycle", () => p3Lifecycle(db, actors!));
+    await runPhase("p3b-competing", () => p3bCompeting(db, actors!));
+    await runPhase("p3c-basket", () => p3cBasket(db, actors!));
+    await runPhase("p5-load", () => p5Load(db, actors!, art));
+    // p8 before p7b: it needs a populated live book, and p7b's audit is the
+    // wrap-up. Both must precede the determinism replay, which quiets the chain.
+    await runPhase("p8-served", () => p8Served(db, actors!));
+    await runPhase("p7b-audit", () => p7bAudit(db, sse));
+    await runPhase("p7a-determinism", async () => {
+      determinism = await p7Determinism(db);
+    });
   } catch (e) {
     console.error("\n[grand-e2e] fatal:", e);
     process.exitCode = 1;

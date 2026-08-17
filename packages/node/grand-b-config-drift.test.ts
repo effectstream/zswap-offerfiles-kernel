@@ -19,6 +19,7 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const read = (f: string) => readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf-8");
 

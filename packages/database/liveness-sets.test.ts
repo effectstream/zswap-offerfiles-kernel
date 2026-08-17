@@ -16,11 +16,20 @@ const {
   insertCreatedUnshielded,
   deleteCreatedUnshielded,
   isUnshieldedCreated,
-  upsertKnownRoot,
-  isKnownRoot,
+  upsertKnownRootWithFirstSeen,
   isKnownRootLive,
   pruneKnownRoots,
 } = await import("@zswap-da/database");
+
+// The only root writer there is. The generated UpsertKnownRoot it replaced did
+// not set first_seen_ms, which is now NOT NULL — so these fixtures used to seed
+// a row shape production can no longer produce.
+const seedRoot = (root: string, height: number, seen_ms: number) =>
+  upsertKnownRootWithFirstSeen.run({ root, height, seen_ms }, client);
+
+/** Presence in known_roots, ignoring the recency window. */
+const present = async (root: string) =>
+  (await client.query("SELECT 1 FROM known_roots WHERE root = $1", [root])).rows.length;
 
 const PORT = 54331;
 let handle: Awaited<ReturnType<typeof startPglite>>;
@@ -67,17 +76,23 @@ test("deleteCreatedUnshielded on absent row is a no-op", async () => {
 });
 
 test("known_roots: upsert, present lookup, absent lookup", async () => {
-  await upsertKnownRoot.run({ root: "rootA", height: 100, last_seen_ms: 1000 }, client);
-  expect((await isKnownRoot.run({ root: "rootA" }, client)).length).toBe(1);
-  expect((await isKnownRoot.run({ root: "nope" }, client)).length).toBe(0);
+  await seedRoot("rootA", 100, 1000);
+  expect(await present("rootA")).toBe(1);
+  expect(await present("nope")).toBe(0);
 });
 
-test("upsertKnownRoot refreshes height + last_seen_ms on conflict", async () => {
-  await upsertKnownRoot.run({ root: "rootB", height: 5, last_seen_ms: 500 }, client);
-  await upsertKnownRoot.run({ root: "rootB", height: 9, last_seen_ms: 900 }, client);
-  const rows = await client.query("SELECT height, last_seen_ms FROM known_roots WHERE root = 'rootB'");
+test("upserting a known root refreshes height + last_seen_ms on conflict", async () => {
+  await seedRoot("rootB", 5, 500);
+  await seedRoot("rootB", 9, 900);
+  const rows = await client.query(
+    "SELECT height, last_seen_ms, first_seen_ms FROM known_roots WHERE root = 'rootB'",
+  );
   expect(Number(rows.rows[0].height)).toBe(9);
   expect(Number(rows.rows[0].last_seen_ms)).toBe(900);
+  // first_seen_ms is set once and never moved — the whole reason expiry is
+  // derived from it rather than from last_seen_ms. Covered in depth in
+  // root-first-seen.test.ts; asserted here so the two writers cannot drift.
+  expect(Number(rows.rows[0].first_seen_ms)).toBe(500);
 });
 
 test("isKnownRootLive enforces the window at READ time (quiet-chain case)", async () => {
@@ -87,9 +102,9 @@ test("isKnownRootLive enforces the window at READ time (quiet-chain case)", asyn
   // age, because the ledger's past_roots re-inserts it every block while our
   // primitive only fires on root ADVANCE.
   await client.query("DELETE FROM known_roots");
-  await upsertKnownRoot.run({ root: "aged", height: 10, last_seen_ms: 1_000 }, client);
-  await upsertKnownRoot.run({ root: "fresh", height: 20, last_seen_ms: 5_000 }, client);
-  await upsertKnownRoot.run({ root: "current", height: 30, last_seen_ms: 1_200 }, client);
+  await seedRoot("aged", 10, 1_000);
+  await seedRoot("fresh", 20, 5_000);
+  await seedRoot("current", 30, 1_200);
   const cutoff_ms = 4_000;
   // aged: present in the table but outside the window -> NOT live.
   expect((await isKnownRootLive.run({ root: "aged", cutoff_ms }, client)).length).toBe(0);
@@ -104,13 +119,13 @@ test("isKnownRootLive enforces the window at READ time (quiet-chain case)", asyn
 test("pruneKnownRoots drops aged roots but never the latest height", async () => {
   await client.query("DELETE FROM known_roots");
   // old (age out), mid (age out), latest (must survive even though it's 'old')
-  await upsertKnownRoot.run({ root: "old", height: 10, last_seen_ms: 1_000 }, client);
-  await upsertKnownRoot.run({ root: "mid", height: 20, last_seen_ms: 2_000 }, client);
-  await upsertKnownRoot.run({ root: "latest", height: 30, last_seen_ms: 1_500 }, client);
+  await seedRoot("old", 10, 1_000);
+  await seedRoot("mid", 20, 2_000);
+  await seedRoot("latest", 30, 1_500);
   // cutoff 1_900 → "old" (1000) and "latest" (1500) are below it, "mid" (2000) is not.
   // "latest" has MAX(height)=30 so it must be retained despite being below cutoff.
   await pruneKnownRoots.run({ cutoff_ms: 1_900 }, client);
-  expect((await isKnownRoot.run({ root: "old" }, client)).length).toBe(0);
-  expect((await isKnownRoot.run({ root: "mid" }, client)).length).toBe(1);
-  expect((await isKnownRoot.run({ root: "latest" }, client)).length).toBe(1);
+  expect(await present("old")).toBe(0);
+  expect(await present("mid")).toBe(1);
+  expect(await present("latest")).toBe(1);
 });

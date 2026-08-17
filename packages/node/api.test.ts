@@ -40,8 +40,8 @@ beforeAll(async () => {
   for (let i = 1; i <= 7; i++) {
     const minute = i === 4 ? 3 : i > 4 ? i - 1 : i; // ids 3 and 4 share a timestamp
     await client.query(
-      `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, ttl_seconds, created_at)
-       VALUES ($1, $2, $3, $4, 3600, TIMESTAMPTZ '2026-07-01 00:00:00+00' + ($5 || ' minutes')::interval)`,
+      `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash, ttl_seconds, created_at, first_seen_at)
+       VALUES ($1, $2, $3, $4, 3600, TIMESTAMPTZ '2026-07-01 00:00:00+00' + ($5 || ' minutes')::interval, NOW())`,
       [i, 100 + i, `blob-${i}`, hashOf(i), String(minute)],
     );
     await client.query(

@@ -13,6 +13,7 @@ export {
   collectNullifiers,
   collectUnshieldedSpends,
   collectOutputCommitments,
+  collectUnshieldedOutputs,
   deriveLegs,
   UnknownTokenTagError,
 } from "./derive.ts";
@@ -31,6 +32,7 @@ export type {
   OfferRejectCode,
   OfferValidation,
   OfferLeg,
+  UnshieldedOutputRef,
   UnshieldedSpendRef,
   ValidateOpts,
 } from "./types.ts";
@@ -45,3 +47,20 @@ export type {
 // Re-export MIP-0005 codec so API consumers can encode/decode without a
 // separate dependency (see API.md).
 export { OFFER_HRP, OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
+
+// Test-only fixture builder for unshielded offer SHAPES (#5 phase (a)).
+// Exported so the grand-e2e suite can submit the same blobs the validator's
+// own unit tests assert on — one definition, two consumers. Not used by any
+// production path; see the SCOPE note in shapes.testkit.ts for what these
+// blobs can and cannot prove.
+export {
+  allShapes,
+  structuralShapes,
+  hostileShapes,
+  decodeShape,
+  GIVE_TOKEN,
+  WANT_TOKEN,
+  MAKER_KEY,
+  TAKER_KEY,
+  type Shape,
+} from "./shapes.testkit.ts";

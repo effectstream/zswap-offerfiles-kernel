@@ -3,7 +3,11 @@
 // batcher's ZswapCelestiaAdapter.buildBatchData wire format.
 
 import { mip6NamespaceBytes } from "@zswap-da/offer-guard";
-import { CELESTIA_AUTH_TOKEN, CELESTIA_RPC_URL } from "../config.ts";
+import {
+  CELESTIA_AUTH_TOKEN,
+  CELESTIA_RPC_TIMEOUT_MS,
+  CELESTIA_RPC_URL,
+} from "../config.ts";
 import { b64 } from "./util.ts";
 
 const NS_B64 = b64(mip6NamespaceBytes());
@@ -16,7 +20,7 @@ async function rpc(method: string, params: unknown[]): Promise<any> {
       ...(CELESTIA_AUTH_TOKEN ? { Authorization: `Bearer ${CELESTIA_AUTH_TOKEN}` } : {}),
     },
     body: JSON.stringify({ id: 1, jsonrpc: "2.0", method, params }),
-    signal: AbortSignal.timeout(90_000),
+    signal: AbortSignal.timeout(CELESTIA_RPC_TIMEOUT_MS),
   });
   const j: any = await r.json();
   if (j.error) throw new Error(`celestia ${method}: ${JSON.stringify(j.error)}`);

@@ -1,8 +1,11 @@
 {
-  "_note": "Calibrated from the first fully-green run (2026-08-04, 143 checks / 0 failures, 50.3 min) at GRAND_OFFERS=25 with the batcher at 7 slots. Enforcement is baseline x 1.2. Re-calibrate for a different scale or a different box: these are wall-clock numbers and publishToIndexed is dominated by the celestia delayMs, not by node work. sseDeliveryLagP95Ms was recalibrated (66 -> 2674) when archived_at became chain-derived: the metric compares SSE arrival (wall clock) against archived_at, so it now measures block-timestamp -> client delivery INCLUDING STM executor lag (~1.5-2.5s on dev), not pure socket delivery. The old 66ms number was only possible because archived_at used to BE wall-clock NOW() \u2014 the bug. bookReadP95Ms raised 10 -> 20: with count=10 the p95 is effectively the max single read, and a lone 19ms read (p50 unmoved at 7-8ms) tripped the x1.2 gate on the 0.103.1 verification run. A real read-path regression moves the median, not one sample.",
-  "submitP95Ms": 6654,
-  "publishToIndexedP95Ms": 23983,
+  "_note": "Calibrated 2026-08-15 at GRAND_OFFERS=60 with one batcher wallet proving 5 registered/spendable NIGHT UTXOs and 5 worker slots; enforcement supplies the only headroom at baseline x 1.2. The clean five-slot source was run 5 at 78b9832 (maxStmLagBlocks=59, no foreign heavy process or indexer-pool error): submit count=58 p50=3619 p95=12167, publishToIndexed count=63 p95=27183. SSE uses the maximum per-run p50 and p95 across clean sample 2 (2224/2708, n=21) and run 5 (2254/10008, n=38), hence 2254/10008; no additional headroom is baked in. SSE measures CONSUMED archives only; TTL scheduling lag is reported separately and covered by maxStmLagBlocks. SSE and book p95 are reported rather than enforced below MIN_TAIL_SAMPLES=50, while their medians remain gates. bookReadP50Ms/P95Ms stay 8/20 because run 5's 9/12 already passes and its 10-sample tail is not a calibration basis. maxStmLagBlocks stays 95 as the established upper edge of clean 60-offer runs; replacing it with one run's 59 would reject runs inside the documented healthy 53-96 band.",
+  "submitP50Ms": 3619,
+  "submitP95Ms": 12167,
+  "publishToIndexedP95Ms": 27183,
+  "bookReadP50Ms": 8,
   "bookReadP95Ms": 20,
-  "sseDeliveryLagP95Ms": 2674,
-  "maxStmLagBlocks": 89
+  "sseDeliveryLagP50Ms": 2254,
+  "sseDeliveryLagP95Ms": 10008,
+  "maxStmLagBlocks": 95
 }

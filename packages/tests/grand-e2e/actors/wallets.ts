@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import type { Client } from "pg";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -65,6 +66,7 @@ import { submitOffer2 } from "../lib/api2.ts";
 import { submitBlobRaw } from "../lib/celestia.ts";
 import { offerRowByHash } from "../lib/db2.ts";
 import { publishToIndexed, submitLatencies } from "../metrics.ts";
+import { PARTIAL_OVERLAP_COINS } from "../phases/p3b-closeout.ts";
 
 const TAG = "[actors]";
 
@@ -88,7 +90,7 @@ async function withProveSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-export const isShieldedKey = (k: TokenKey): boolean => k === "TA" || k === "TB";
+export const isShieldedKey = (k: TokenKey): boolean => k === "TA" || k === "TB" || k === "TC";
 
 export class PoolWallet {
   private queue: Promise<unknown> = Promise.resolve();
@@ -119,6 +121,12 @@ export interface Actors {
   competingShielded: PoolWallet;
   /** One unshielded UTXO, backing two mutually exclusive offers. */
   competingUnshielded: PoolWallet;
+  /** Three exact-denomination coins for T-E2's {A,B}/{B,C} overlap. */
+  partialOverlap: PoolWallet;
+  /** One coin shared by T-E5's two genuinely concurrent settlements. */
+  concurrentCompeting: PoolWallet;
+  /** Holds TA + TC, the two give colours the §2.5 basket fixture merges. */
+  basketMaker: PoolWallet;
   takers: PoolWallet[];
 }
 
@@ -140,6 +148,31 @@ const CANCEL_DOUBLE_SEEDS = [CANCEL_DOUBLE_SEED, "c3".padStart(64, "0")];
 // coins would silently pick a different one and the offers would not compete.
 const COMPETING_SHIELDED_SEED = "e0".padStart(64, "0");
 const COMPETING_UNSHIELDED_SEED = "e1".padStart(64, "0");
+// Basket specialist (§2.5). Its own wallet for the same reason the competing
+// specialists have theirs: it must hold EXACTLY the coins the fixture merges,
+// so coin selection has no freedom to pick a colour the fixture did not mean.
+const BASKET_MAKER_SEED = "e2".padStart(64, "0");
+const PARTIAL_OVERLAP_SEED = "e3".padStart(64, "0");
+const CONCURRENT_COMPETING_SEED = "e4".padStart(64, "0");
+/** One coin of each give colour — the basket gives strictly less than one. */
+export const BASKET_COIN = 1200n;
+
+/**
+ * Which colors maker `i` is actually funded with. Makers are NOT funded in all
+ * four colors — each gets one shielded and one unshielded color by index
+ * parity, so a fixture that picks a maker and a color independently can ask a
+ * wallet to spend something it has never held. That is a `Wallet.
+ * InsufficientFunds` deep inside the SDK, ~100 s of buildOffer retries away
+ * from the line that caused it.
+ *
+ * Exported so the fan-out and every fixture read the SAME rule; duplicating
+ * `i % 2 === 0 ? "TA" : "TB"` at a call site is how the two drift apart.
+ */
+export const makerShieldedKey = (i: number): TokenKey => (i % 2 === 0 ? "TA" : "TB");
+export const makerUnshieldedKey = (i: number): TokenKey => (i % 2 === 0 ? "UA" : "UB");
+/** The other color on the same layer — what a maker can legitimately want. */
+export const oppositeKey = (k: TokenKey): TokenKey =>
+  k === "TA" ? "TB" : k === "TB" ? "TA" : k === "UA" ? "UB" : "UA";
 
 export const CANCEL_COIN = 1000n; // exact denomination the cancel cycles use
 export const COMPETING_COIN = 1500n; // the single coin two competing offers share
@@ -199,8 +232,8 @@ export async function selfSplit(
 
 // All /send-input calls are serialized through one client-side chain. The
 // batcher's HTTP server shares its event loop with in-process balancing work,
-// so concurrent POSTs can sit unanswered long enough to hit any sane fetch
-// timeout — and the single worker means concurrency buys nothing anyway.
+// so the ordinary suite flow keeps request ordering predictable. Adversarial
+// concurrency fixtures bypass this chain explicitly and prove their overlap.
 // no-wait submissions get one retry on a transport timeout: if the first
 // attempt actually landed, the duplicate tx fails on-chain inside the batcher
 // (same inputs already spent) without affecting wallet state.
@@ -226,9 +259,78 @@ export function submitToBalancer(
   return job;
 }
 
+/** Submit without the suite-wide client queue. Only throughput/concurrency
+ * fixtures should use this; ordinary lifecycle phases keep deterministic
+ * request ordering through submitToBalancer(). */
+export function submitDirectlyToBalancer(
+  tx: any,
+  opts: { level: "no-wait" | "wait-receipt"; timeoutMs: number; serverTimeoutMs?: number },
+): Promise<{ ok: boolean; status: number; body: any }> {
+  return settleViaBatcher(tx as any, opts);
+}
+
+export interface ConcurrentBatcherOutcome {
+  results: { ok: boolean; status: number; body: any }[];
+  peakInFlight: number;
+  allStartedBeforeFirstReceipt: boolean;
+}
+
+/**
+ * T-E5-only raw submission path. It deliberately bypasses `balancerChain` and
+ * releases every request from one barrier, then records whether all requests
+ * had entered the batcher call before the first response arrived.
+ */
+export async function submitConcurrentlyToBalancer<T>(
+  txs: readonly T[],
+  submit: (tx: T) => Promise<{ ok: boolean; status: number; body: any }> =
+    (tx) =>
+      submitDirectlyToBalancer(tx as any, {
+        level: "wait-receipt",
+        // A successful submit can legitimately spend 90s in the adapter's
+        // submit timeout before its receipt is found. The loser never gets a
+        // callback after the SDK drops it at maxRetries, so cap that wait at
+        // 150s and corroborate its actual chain rejection in T-E5.
+        timeoutMs: 180_000,
+        serverTimeoutMs: 150_000,
+      }),
+): Promise<ConcurrentBatcherOutcome> {
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => (release = resolve));
+  let inFlight = 0;
+  let peakInFlight = 0;
+  let submitted = 0;
+  let submittedAtFirstReceipt: number | null = null;
+
+  const jobs = txs.map(async (tx) => {
+    await barrier;
+    submitted++;
+    inFlight++;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    try {
+      return await submit(tx);
+    } catch (error) {
+      return {
+        ok: false,
+        status: 0,
+        body: { error: error instanceof Error ? error.message : String(error) },
+      };
+    } finally {
+      if (submittedAtFirstReceipt === null) submittedAtFirstReceipt = submitted;
+      inFlight--;
+    }
+  });
+  release();
+  const results = await Promise.all(jobs);
+  return {
+    results,
+    peakInFlight,
+    allStartedBeforeFirstReceipt: submittedAtFirstReceipt === txs.length,
+  };
+}
+
 /** Wait for the batcher's midnight-balancer queue to fully drain — used after
- *  bulk no-wait submissions. The batcher runs ONE worker (~25 s/tx), so bulk
- *  flows queue everything and wait once here instead of per-tx. */
+ *  bulk no-wait submissions. Bulk flows queue everything and wait once here
+ *  instead of waiting for every individual receipt. */
 export async function drainBatcherQueue(label: string, timeoutMs = 60 * 60_000): Promise<void> {
   const { BATCHER_URL } = await import("../config.ts");
   const deadline = Date.now() + timeoutMs;
@@ -380,16 +482,19 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
     unshieldedAddressObj(genesis),
   );
 
-  console.log(`${TAG} joining offer-files contract + minting 4 colors…`);
+  console.log(`${TAG} joining offer-files contract + minting 5 colors…`);
   const deployed = await joinOfferFiles(genesis);
   const nonce = BigInt(Date.now());
   ledger.colors.TA = await mintShielded(deployed, TOKEN_SEPS.TA, MINT_AMOUNT, nonce);
   ledger.colors.TB = await mintShielded(deployed, TOKEN_SEPS.TB, MINT_AMOUNT, nonce + 1n);
   ledger.colors.UA = await mintUnshielded(deployed, TOKEN_SEPS.UA, MINT_AMOUNT, genesis.unshieldedAddress);
   ledger.colors.UB = await mintUnshielded(deployed, TOKEN_SEPS.UB, MINT_AMOUNT, genesis.unshieldedAddress);
+  // TC funds the §2.5 basket specialist only — a much smaller mint than the
+  // trading colours, which the whole maker/taker fan-out draws on.
+  ledger.colors.TC = await mintShielded(deployed, TOKEN_SEPS.TC, MINT_AMOUNT, nonce + 2n);
   console.log(`${TAG} colors:`, JSON.stringify(ledger.colors));
 
-  for (const key of ["TA", "TB"] as const) {
+  for (const key of ["TA", "TB", "TC"] as const) {
     const got = await waitForShielded(genesis, ledger.colors[key]!, MINT_AMOUNT, 36);
     if (got < MINT_AMOUNT) throw new Error(`genesis missing shielded mint ${key}`);
   }
@@ -405,6 +510,9 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   const takers = await Promise.all(TAKER_SEEDS.map((s, i) => buildPoolWallet(`T${i}`, s)));
   const competingShielded = await buildPoolWallet("CMP-S", COMPETING_SHIELDED_SEED);
   const competingUnshielded = await buildPoolWallet("CMP-U", COMPETING_UNSHIELDED_SEED);
+  const basketMaker = await buildPoolWallet("BSK", BASKET_MAKER_SEED);
+  const partialOverlap = await buildPoolWallet("OVERLAP", PARTIAL_OVERLAP_SEED);
+  const concurrentCompeting = await buildPoolWallet("RACE", CONCURRENT_COMPETING_SEED);
 
   const plan = defaultFundingPlan(totalOffers);
   // FUNDING: genesis emits the FINAL per-offer denominations directly.
@@ -428,8 +536,8 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   }
   const grants: Grant[] = [];
   makers.forEach((m, i) => {
-    grants.push({ pw: m, key: i % 2 === 0 ? "TA" : "TB", denom: SHIELDED_COIN, coins: plan.makerShieldedCoins });
-    grants.push({ pw: m, key: i % 2 === 0 ? "UA" : "UB", denom: UNSHIELDED_COIN, coins: plan.makerUnshieldedCoins });
+    grants.push({ pw: m, key: makerShieldedKey(i), denom: SHIELDED_COIN, coins: plan.makerShieldedCoins });
+    grants.push({ pw: m, key: makerUnshieldedKey(i), denom: UNSHIELDED_COIN, coins: plan.makerUnshieldedCoins });
   });
   takers.forEach((t) => {
     for (const key of ["TA", "TB", "UA", "UB"] as const) {
@@ -437,7 +545,7 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
     }
   });
 
-  const outsByKey: Record<TokenKey, { receiverAddress: unknown; amount: bigint }[]> = { TA: [], TB: [], UA: [], UB: [] };
+  const outsByKey: Record<TokenKey, { receiverAddress: unknown; amount: bigint }[]> = { TA: [], TB: [], UA: [], UB: [], TC: [] };
   for (const g of grants) {
     const addr = isShieldedKey(g.key) ? g.pw.shieldedAddr : g.pw.unshieldedObj;
     for (let c = 0; c < g.coins; c++) {
@@ -456,6 +564,14 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   });
   outsByKey.TA.push({ receiverAddress: competingShielded.shieldedAddr, amount: COMPETING_COIN });
   outsByKey.UA.push({ receiverAddress: competingUnshielded.unshieldedObj, amount: COMPETING_COIN });
+  for (const amount of PARTIAL_OVERLAP_COINS) {
+    outsByKey.TA.push({ receiverAddress: partialOverlap.shieldedAddr, amount });
+  }
+  outsByKey.TA.push({ receiverAddress: concurrentCompeting.shieldedAddr, amount: COMPETING_COIN });
+  // Basket specialist: exactly one TA coin and one TC coin — the two halves
+  // the fixture merges into a single two-give offer.
+  outsByKey.TA.push({ receiverAddress: basketMaker.shieldedAddr, amount: BASKET_COIN });
+  outsByKey.TC.push({ receiverAddress: basketMaker.shieldedAddr, amount: BASKET_COIN });
 
   const totalOuts = Object.values(outsByKey).reduce((n, a) => n + a.length, 0);
   console.log(`${TAG} funding fan-out: ${totalOuts} coins direct from genesis (no batcher)…`);
@@ -463,6 +579,7 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   await genesisFanOut(genesis, true, ledger.colors.TB!, outsByKey.TB);
   await genesisFanOut(genesis, false, ledger.colors.UA!, outsByKey.UA);
   await genesisFanOut(genesis, false, ledger.colors.UB!, outsByKey.UB);
+  await genesisFanOut(genesis, true, ledger.colors.TC!, outsByKey.TC);
 
   // Confirm every wallet actually holds what it was granted before any offer
   // is built — a missing coin here surfaces as a confusing build failure later.
@@ -476,6 +593,14 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   cancelDoubles.forEach((c, i) => expect.push({ pw: c, key: cancelGiveToken("double", i), total: CANCEL_COIN * 2n }));
   expect.push({ pw: competingShielded, key: "TA", total: COMPETING_COIN });
   expect.push({ pw: competingUnshielded, key: "UA", total: COMPETING_COIN });
+  expect.push({
+    pw: partialOverlap,
+    key: "TA",
+    total: PARTIAL_OVERLAP_COINS.reduce((sum, amount) => sum + amount, 0n),
+  });
+  expect.push({ pw: concurrentCompeting, key: "TA", total: COMPETING_COIN });
+  expect.push({ pw: basketMaker, key: "TA", total: BASKET_COIN });
+  expect.push({ pw: basketMaker, key: "TC", total: BASKET_COIN });
 
   const landed = await Promise.allSettled(
     expect.map(async (e) => {
@@ -491,7 +616,20 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
     throw new Error(`funding did not land for ${short.length} wallet/color pairs: ${short[0]!.reason}`);
   }
   console.log(`${TAG} funding complete (${totalOuts} coins, batcher untouched).`);
-  return { genesis, genesisPw, deployed, makers, cancelSingles, cancelDoubles, competingShielded, competingUnshielded, takers };
+  return {
+    genesis,
+    genesisPw,
+    deployed,
+    makers,
+    cancelSingles,
+    cancelDoubles,
+    competingShielded,
+    competingUnshielded,
+    partialOverlap,
+    concurrentCompeting,
+    basketMaker,
+    takers,
+  };
 }
 
 // ── Offer construction / publication ─────────────────────────────────────────
@@ -535,9 +673,11 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
     const wantColor = ledger.colors[rec.wantToken]!;
     // Give and want are always on the SAME value layer: cross-layer
     // (shielded↔unshielded) swaps are not a supported offer shape, so the
-    // suite never constructs one. See ISSUES.md for why the earlier
-    // cross-layer attempt produced a confusing NOT_A_SWAP rather than a
-    // clear refusal.
+    // HAPPY path never constructs one. That is a choice about this builder,
+    // not a claim about reachability — buildCrossLayerOffer() makes one on
+    // purpose via Transaction.merge, and the ladder now answers CROSS_LAYER
+    // (§2.4). ISSUES.md's "confusing NOT_A_SWAP" is fixed: the layer rule is
+    // checked before the two-sided rule, so the code names the real problem.
     const desiredInputs = giveShielded
       ? { shielded: { [giveColor]: BigInt(rec.giveAmount) } }
       : ({ unshielded: { [giveColor]: BigInt(rec.giveAmount) } } as any);
@@ -610,6 +750,278 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
   });
 }
 
+/**
+ * A structurally valid transaction that is NOT a swap: one give, zero wants.
+ *
+ * MIP-0006's two-sided rule is the most important semantic rule in the spec,
+ * and no fixture has ever exercised it against a running node — `NOT_A_SWAP`
+ * has only ever been produced by accident (ISSUES.md §3). This builds one on
+ * purpose, using the SDK defect as the tool: request a shielded input against
+ * an UNSHIELDED desired output and wallet-sdk-facade silently drops the
+ * output, yielding exactly the give-only transaction we want. Everything
+ * about it is legitimate except that it is not an offer.
+ *
+ * `giveKey` MUST be a color this maker is funded with — see makerShieldedKey.
+ *
+ * NEVER throws. A fixture builder that can throw takes the whole run with it:
+ * this is called outside a check(), so an exception propagates to run.ts and
+ * aborts every remaining phase. That is exactly what happened on the first
+ * attempt — a hardcoded TA against an odd-indexed maker funded in TB ended a
+ * 15-minute run at 48 checks. Returning null degrades to one skipped fixture
+ * with a loud note, which is the correct blast radius for a fixture.
+ */
+export async function buildOneSidedOffer(
+  pw: PoolWallet,
+  giveKey: TokenKey,
+): Promise<{ blob: string } | { skipped: string }> {
+  try {
+    return await pw.run(async () => {
+      const giveColor = ledger.colors[giveKey]!;
+      // The dropped leg: an unshielded OUTPUT needs no funding of its own.
+      const wantColor = ledger.colors[isShieldedKey(giveKey) ? "UB" : "TB"]!;
+      const recipe = await pw.wr.wallet.initSwap(
+        isShieldedKey(giveKey)
+          ? { shielded: { [giveColor]: GIVE_MIN } }
+          : ({ unshielded: { [giveColor]: GIVE_MIN } } as any),
+        [{
+          type: isShieldedKey(giveKey) ? "unshielded" : "shielded",
+          outputs: [{
+            type: wantColor,
+            amount: GIVE_MIN,
+            receiverAddress: isShieldedKey(giveKey) ? pw.unshieldedObj : pw.shieldedAddr,
+          }],
+        } as any],
+        shieldedKeys(pw.wr),
+        { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
+      );
+      let finalized: any;
+      try {
+        finalized = await withProveSlot(() => pw.wr.wallet.finalizeTransaction(recipe.transaction));
+      } catch (e) {
+        await (pw.wr.wallet as any).revert(recipe).catch(() => {});
+        return { skipped: `finalize failed: ${e instanceof Error ? e.message : String(e)}` };
+      }
+      const blob = OfferFiles.encode(finalized.serialize());
+      // Release the coin: this transaction is never published, and holding the
+      // reservation would starve the maker for the rest of the run.
+      await (pw.wr.wallet as any).revert(finalized).catch(() => {});
+
+      const v = validateZswapOffer(blob, {
+        refState: getBlankRefState(net.id),
+        tblock: new Date(),
+        maxBytes: 1024 * 1024,
+        crypto: "defer",
+      });
+      // Only NOT_A_SWAP proves the fixture is what it claims. Anything else —
+      // including success — means the SDK behaved differently and the fixture
+      // would be asserting a code for the wrong reason.
+      if (v.code !== "NOT_A_SWAP") {
+        return { skipped: `built ${v.ok ? "a VALID two-sided offer" : v.code} instead of NOT_A_SWAP` };
+      }
+      return { blob };
+    });
+  } catch (e) {
+    return { skipped: `wallet error: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
+ * A cross-layer offer: gives on one value layer, wants on the other. (§2.4)
+ *
+ * No wallet we have builds one — wallet-sdk-facade silently drops the
+ * mismatched leg, which is the whole reason this gap went untested and got
+ * mis-recorded as "unreachable". A wallet is not the only way to make a
+ * transaction, though: balancing IS a merge, and the ledger exposes
+ * `Transaction.merge()` directly. probe-cross-layer.ts established this route
+ * against real offers; this is the same construction, wired into the run.
+ *
+ * Reachability is the point. Anyone holding a shielded offer and an unshielded
+ * one can produce this in seconds, and the DA namespace is permissionless, so
+ * "no wallet builds one" was never a defence.
+ *
+ * Sources are REAL offers from this run rather than purpose-built ones, so the
+ * fixture cannot drift from what the suite actually publishes. It takes only
+ * offers past `planned` — those have blobs on disk and proofs the node will
+ * accept, so a rejection is about the LAYER RULE and nothing else.
+ */
+export async function buildCrossLayerOffer(
+  pw: PoolWallet,
+  makerIdx: number,
+): Promise<{ blob: string } | { skipped: string }> {
+  // SELF-CONTAINED, and it has to be. The first version searched
+  // `ledger.offers` for one published `ss` and one published `uu` offer and
+  // merged those. Measured on the first full run against main: it NEVER built.
+  // p4-adversarial runs SECOND in run.ts — before p3-lifecycle publishes
+  // anything — and p1-happy publishes only `layer: "ss"` offers, so the `uu`
+  // lookup found nothing and the fixture skipped every time. The same-layer
+  // rule went untested while the run still reported green.
+  //
+  // Building both halves here removes the dependency on run state entirely, so
+  // reordering phases can never silently disarm this fixture again. It is the
+  // same construction buildBasketOffer uses, and that one DID build on the
+  // same run.
+  //
+  // The maker must be funded on BOTH layers, which every maker is:
+  // makerShieldedKey(i) and makerUnshieldedKey(i) by index parity. Pass the
+  // index so the colours come from those helpers rather than being guessed —
+  // asking a wallet to spend a colour it never held is an InsufficientFunds
+  // ~100 s deep inside the SDK.
+  const half = async (giveKey: TokenKey, wantKey: TokenKey, give: bigint, want: bigint) => {
+    const giveColor = ledger.colors[giveKey]!;
+    const wantColor = ledger.colors[wantKey]!;
+    const shielded = isShieldedKey(giveKey);
+    const recipe = await pw.wr.wallet.initSwap(
+      shielded
+        ? { shielded: { [giveColor]: give } }
+        : ({ unshielded: { [giveColor]: give } } as any),
+      [{
+        type: shielded ? "shielded" : "unshielded",
+        outputs: [{
+          type: wantColor,
+          amount: want,
+          receiverAddress: shielded ? pw.shieldedAddr : pw.unshieldedObj,
+        }],
+      } as any],
+      shieldedKeys(pw.wr),
+      { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
+    );
+    return withProveSlot(() => pw.wr.wallet.finalizeTransaction(recipe.transaction));
+  };
+
+  try {
+    return await pw.run(async () => {
+      const sKey = makerShieldedKey(makerIdx);
+      const uKey = makerUnshieldedKey(makerIdx);
+      // Amounts below GIVE_MIN (500), same reasoning as the basket: nothing an
+      // ordinary offer produces can be confused with this fixture.
+      const ss = await half(sKey, oppositeKey(sKey), CROSS_GIVE_SHIELDED, 389n);
+      const uu = await half(uKey, oppositeKey(uKey), CROSS_GIVE_UNSHIELDED, 402n);
+
+      let merged: any;
+      try {
+        merged = (ss as any).merge(uu as any);
+      } catch (e) {
+        // A refusal here is a real finding, not a flake: if the LEDGER forbids
+        // the merge then §2.4 is closed below the indexer and the validator
+        // check is belt-and-braces. Surfaced with the reason so the run says so.
+        await (pw.wr.wallet as any).revert(ss).catch(() => {});
+        await (pw.wr.wallet as any).revert(uu).catch(() => {});
+        return { skipped: `ledger refused the merge: ${e instanceof Error ? e.message : String(e)}` };
+      }
+      const blob = OfferFiles.encode(merged.serialize());
+
+      // Release both halves' coins: this offer is REJECTED at both doors, so
+      // nothing settles and holding the reservations would starve the maker
+      // for the rest of the run.
+      await (pw.wr.wallet as any).revert(ss).catch(() => {});
+      await (pw.wr.wallet as any).revert(uu).catch(() => {});
+
+      // Only CROSS_LAYER proves the fixture is what it claims. NOT_A_SWAP in
+      // particular would mean a leg got dropped and the assertion downstream
+      // would be passing for the wrong reason.
+      const v = validateZswapOffer(blob, {
+        refState: getBlankRefState(net.id),
+        tblock: new Date(),
+        maxBytes: 1024 * 1024,
+        crypto: "defer",
+      });
+      if (v.code !== "CROSS_LAYER") {
+        return {
+          skipped:
+            `merged to ${v.ok ? "a VALID same-layer offer" : v.code} instead of CROSS_LAYER ` +
+            `[gives=${JSON.stringify(v.gives ?? [])} wants=${JSON.stringify(v.wants ?? [])}]`,
+        };
+      }
+      return { blob };
+    });
+  } catch (e) {
+    return { skipped: `cross-layer build failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
+ * A BASKET offer: two give colours, one want colour. (§2.5)
+ *
+ * Two ordinary shielded swaps — TA -> TB and TC -> TB — built on the same
+ * wallet and combined with the ledger's own `Transaction.merge()`. The result
+ * gives TA + TC and wants TB: a single sealed settlement whose per-pair prices
+ * do not exist, because nobody agreed what TA alone is worth in TB.
+ *
+ * A third colour is not decoration. Merging any two offers drawn from
+ * {TA, TB} nets back to one colour per side — TA->TB with TB->TA cancels,
+ * TA->TB with TA->TB just sums — so TC is the smallest thing that makes a
+ * same-layer basket exist at all.
+ *
+ * Kept on ONE value layer deliberately. The cross-layer merge is a basket too,
+ * but §2.4 rejects it at ingestion, so it could never reach the market queries
+ * this fixture is here to test.
+ *
+ * Returns the blob and the legs, so the caller can assert against the exact
+ * colours rather than re-deriving them.
+ */
+/** Below GIVE_MIN, so no ordinary offer can be mistaken for these fixtures. */
+export const CROSS_GIVE_SHIELDED = 311n;
+export const CROSS_GIVE_UNSHIELDED = 289n;
+export const BASKET_GIVE_TA = 337n;
+export const BASKET_GIVE_TC = 293n;
+
+export async function buildBasketOffer(
+  pw: PoolWallet,
+): Promise<{ blob: string; gives: string[]; wants: string[] } | { skipped: string }> {
+  const half = async (giveKey: TokenKey, wantKey: TokenKey, give: bigint, want: bigint) => {
+    const giveColor = ledger.colors[giveKey]!;
+    const wantColor = ledger.colors[wantKey]!;
+    const recipe = await pw.wr.wallet.initSwap(
+      { shielded: { [giveColor]: give } },
+      [{
+        type: "shielded",
+        outputs: [{ type: wantColor, amount: want, receiverAddress: pw.shieldedAddr }],
+      } as any],
+      shieldedKeys(pw.wr),
+      { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
+    );
+    return withProveSlot(() => pw.wr.wallet.finalizeTransaction(recipe.transaction));
+  };
+
+  try {
+    return await pw.run(async () => {
+      // Amounts chosen BELOW GIVE_MIN (500). Every ordinary offer in the run
+      // gives 500..1500, so a chart print sized 337 on TA/TB can only have come
+      // from this basket — which is what lets the phase assert "the basket left
+      // no print" on a pair the suite trades all run anyway. The two halves also
+      // price differently (1.249 vs 1.099), so a per-pair price, if one were
+      // ever invented, would be visibly wrong rather than coincidentally right.
+      const a = await half("TA", "TB", BASKET_GIVE_TA, 421n);
+      const c = await half("TC", "TB", BASKET_GIVE_TC, 322n);
+      const merged = (a as any).merge(c as any);
+      const blob = OfferFiles.encode(merged.serialize());
+
+      const v = validateZswapOffer(blob, {
+        refState: getBlankRefState(net.id),
+        tblock: new Date(),
+        maxBytes: 1024 * 1024,
+        crypto: "defer",
+      });
+      // Only a valid TWO-GIVE offer proves the fixture is what it claims. If
+      // the merge netted the legs back to one colour a side, every assertion
+      // downstream would pass for the wrong reason — the offer would be
+      // excluded from market data because it is ordinary, not because it is a
+      // basket.
+      if (!v.ok) {
+        return { skipped: `merged basket did not validate: ${v.code} — ${v.reason}` };
+      }
+      const gives = [...new Set((v.gives ?? []).map((l) => l.token))];
+      const wants = [...new Set((v.wants ?? []).map((l) => l.token))];
+      if (gives.length < 2) {
+        return { skipped: `merge produced ${gives.length} give colour(s), not a basket` };
+      }
+      return { blob, gives, wants };
+    });
+  } catch (e) {
+    return { skipped: `basket build failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 /** Publish via the planned path and wait for the offer_file row. */
 export async function publishAndIndex(
   db: Client,
@@ -676,39 +1088,83 @@ export function pickPublishPath(index: number): "api" | "celestia" {
 
 // ── Taker settle ─────────────────────────────────────────────────────────────
 
-export async function settleOffer(taker: PoolWallet, rec: OfferRecord, blob: string): Promise<void> {
-  await taker.run(async () => {
-    const offerTx = reconstructOffer(blob);
-    const kinds = new Set<string>();
-    kinds.add(isShieldedKey(rec.giveToken) ? "shielded" : "unshielded");
-    kinds.add(isShieldedKey(rec.wantToken) ? "shielded" : "unshielded");
-    const balRecipe = await (taker.wr.wallet as any).balanceFinalizedTransaction(
-      offerTx,
-      shieldedKeys(taker.wr),
-      { ttl: new Date(Date.now() + TX_TTL_MS), tokenKindsToBalance: [...kinds] },
-    );
-    let settleTx: any;
-    try {
-      let recipe = balRecipe;
-      if (kinds.has("unshielded")) {
-        recipe = await (taker.wr.wallet as any).signRecipe(balRecipe, (p: Uint8Array) =>
-          taker.wr.unshieldedKeystore.signData(p),
-        );
-      }
-      settleTx = await withProveSlot(() => taker.wr.wallet.finalizeRecipe(recipe));
-    } catch (e) {
-      await (taker.wr.wallet as any).revert(balRecipe).catch(() => {});
-      throw e;
+export interface PreparedSettlement {
+  tx: any;
+  recipe: any;
+}
+
+async function prepareSettlementOnce(
+  taker: PoolWallet,
+  rec: OfferRecord,
+  blob: string,
+): Promise<PreparedSettlement> {
+  const offerTx = reconstructOffer(blob);
+  const kinds = new Set<string>();
+  kinds.add(isShieldedKey(rec.giveToken) ? "shielded" : "unshielded");
+  kinds.add(isShieldedKey(rec.wantToken) ? "shielded" : "unshielded");
+  const balRecipe = await (taker.wr.wallet as any).balanceFinalizedTransaction(
+    offerTx,
+    shieldedKeys(taker.wr),
+    { ttl: new Date(Date.now() + TX_TTL_MS), tokenKindsToBalance: [...kinds] },
+  );
+  let settleTx: any;
+  try {
+    let recipe = balRecipe;
+    if (kinds.has("unshielded")) {
+      recipe = await (taker.wr.wallet as any).signRecipe(balRecipe, (p: Uint8Array) =>
+        taker.wr.unshieldedKeystore.signData(p),
+      );
     }
-    const bad = nonDustImbalances(settleTx as any);
-    if (bad.length > 0) throw new Error(`settle offer#${rec.index}: non-dust imbalance after balancing`);
-    // Long timeouts: the single-worker batcher (~25 s/tx) can hold a settle
-    // behind a deep queue; the client must outlast it, not give up.
-    const res = await submitToBalancer(settleTx, {
-      level: "wait-receipt",
-      timeoutMs: 900_000,
-      serverTimeoutMs: 600_000,
-    });
+    settleTx = await withProveSlot(() => taker.wr.wallet.finalizeRecipe(recipe));
+  } catch (e) {
+    await (taker.wr.wallet as any).revert(balRecipe).catch(() => {});
+    throw e;
+  }
+  const bad = nonDustImbalances(settleTx as any);
+  if (bad.length > 0) {
+    throw new Error(`settle offer#${rec.index}: non-dust imbalance after balancing`);
+  }
+  return { tx: settleTx, recipe: balRecipe };
+}
+
+/** Build/prove a taker's half without submitting it. T-E5 prepares both halves
+ * before releasing its concurrent HTTP barrier. */
+export async function prepareSettlement(
+  taker: PoolWallet,
+  rec: OfferRecord,
+  blob: string,
+): Promise<PreparedSettlement> {
+  return taker.run(() => prepareSettlementOnce(taker, rec, blob));
+}
+
+export async function settleOffer(
+  taker: PoolWallet,
+  rec: OfferRecord,
+  blob: string,
+  opts: {
+    parallelBatcher?: boolean;
+    onBatcherRequest?: (delta: 1 | -1) => void;
+  } = {},
+): Promise<void> {
+  await taker.run(async () => {
+    // Keep prepare + submit under the wallet's ordinary serialization lock.
+    // T-E5 uses the split path above; p5 keeps that wallet safety while
+    // bypassing only the suite-wide HTTP queue across independent takers.
+    const prepared = await prepareSettlementOnce(taker, rec, blob);
+    // Long timeouts: a contended proof server or chaos restart can hold a
+    // settle behind a deep queue; the client must outlast it, not give up.
+    const submit = opts.parallelBatcher ? submitDirectlyToBalancer : submitToBalancer;
+    opts.onBatcherRequest?.(1);
+    let res: Awaited<ReturnType<typeof submit>>;
+    try {
+      res = await submit(prepared.tx, {
+        level: "wait-receipt",
+        timeoutMs: 900_000,
+        serverTimeoutMs: 600_000,
+      });
+    } finally {
+      opts.onBatcherRequest?.(-1);
+    }
     if (!res.ok) throw new Error(`settle offer#${rec.index}: batcher ${res.status} ${JSON.stringify(res.body).slice(0, 200)}`);
   });
 }
@@ -782,7 +1238,20 @@ export function makeRefill(genesisPw: PoolWallet, target: PoolWallet, giveToken:
 }
 
 export async function stopActors(a: Actors): Promise<void> {
-  const all = [a.genesis, ...[...a.makers, ...a.cancelSingles, ...a.cancelDoubles, a.competingShielded, a.competingUnshielded, ...a.takers].map((p) => p.wr)];
+  const all = [
+    a.genesis,
+    ...[
+      ...a.makers,
+      ...a.cancelSingles,
+      ...a.cancelDoubles,
+      a.competingShielded,
+      a.competingUnshielded,
+      a.partialOverlap,
+      a.concurrentCompeting,
+      a.basketMaker,
+      ...a.takers,
+    ].map((p) => p.wr),
+  ];
   for (const wr of all) await wr.wallet.stop().catch(() => {});
 }
 

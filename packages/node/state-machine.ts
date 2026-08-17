@@ -7,7 +7,13 @@ import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
-import { getBlankRefState, validateZswapOfferBytes, verifyOfferCrypto, collectOutputCommitments } from "@zswap-da/validator";
+import {
+  getBlankRefState,
+  validateZswapOfferBytes,
+  verifyOfferCrypto,
+  collectOutputCommitments,
+  collectUnshieldedOutputs,
+} from "@zswap-da/validator";
 import { latin1ToBytes, offerBytesToBech32, offerHashFromBytes } from "@zswap-da/offer-guard";
 import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 
@@ -21,6 +27,9 @@ import {
   insertOfferFileCommitment,
   insertOfferFileUnshieldedSpend,
   insertOfferFileTokenWithKind,
+  insertOfferFileUnshieldedOutput,
+  insertUnshieldedSpend,
+  insertUnshieldedCreate,
   archiveOfferByNullifierWithHash,
   archiveOfferByUnshieldedSpendWithHash,
   archiveOfferByIdTtlWithHash,
@@ -30,7 +39,8 @@ import {
   insertCreatedUnshielded,
   deleteCreatedUnshielded,
   upsertKnownRootWithFirstSeen,
-  getEarliestRootFirstSeen,
+  getOfferRootTiming,
+  isKnownRootLive,
   pruneKnownRoots,
 } from "@zswap-da/database";
 
@@ -41,13 +51,15 @@ import {
 // unshielded UTXO refs of its inputs. Two limits are intentional:
 //
 //   1. Fill vs cancel is classified at READ time (cancelledPredicate in the
-//      database package). Split/partial nullifier spends are definitive
-//      cancels (settlement is atomic); and for offers with stored fill
-//      markers (their output commitments, captured at ingestion) the
-//      converse is exact too: the single spending tx must have created
-//      those commitments, else it was a cancel — single-input included.
-//      Marker-less offers (including pre-migration rows) are reported unknown;
-//      an all-in-one spend is not positive evidence of settlement.
+//      database package), and is now exact on BOTH value layers. Split or
+//      partial spends are definitive cancels (settlement is atomic); and for
+//      offers with stored fill markers the converse is exact too — the single
+//      spending tx must have created them, else it was a cancel, single-input
+//      included. Shielded markers are the offer's output commitments;
+//      unshielded markers are its declared outputs, matched on
+//      (owner, token_type, value) because the settling intent's hash cannot be
+//      known at publication. Only genuinely marker-less rows keep the old
+//      all-in-one-tx heuristic.
 //
 //   2. Archival is destructive (rows are DELETEd into history). If a
 //      consuming Midnight/Celestia block is later reorged out, the offer
@@ -60,7 +72,7 @@ import { canonicalRootHex } from "@zswap-da/validator";
 
 import { grammar } from "./grammar.ts";
 import { extractMidnightLedgerSnapshot } from "./zswap-logic.ts";
-import { queueAppEvent } from "./event-bus.ts";
+import { emitAppEvent } from "./event-bus.ts";
 import { failStopAppInput } from "./app-input-savepoint.ts";
 import { evaluateOfferLivenessInStateMachine } from "./offer-liveness.ts";
 import {
@@ -288,12 +300,12 @@ addTransition("midnight-zswap-event", function* (data) {
       yield* World.resolve(markNullifierMatched, { nullifier });
       console.log("[MIDNIGHT] Archived offer(s) for nullifier", nullifier, archived);
       for (const row of archived) {
-        queueAppEvent(data, {
+        emitAppEvent({
           type: "offer_consumed",
           offerId: row.id,
           ...(row.offer_hash ? { offerHash: row.offer_hash } : {}),
           nullifier,
-        });
+        }, data.blockHeight);
       }
     }
 
@@ -320,10 +332,13 @@ addTransition("midnight-unshielded-spend", function* (data) {
   const { payload } = data.parsedInput;
   const owner = unshieldedOwnerToCanonicalHex(payload?.owner);
   const intentHash = bytesOrStringToHex(payload?.intentHash);
-  const outputNoRaw = payload?.outputIndex ?? payload?.outputNo;
-  const outputNo = typeof outputNoRaw === "number"
-    ? outputNoRaw
-    : Number(outputNoRaw);
+  // midnight-unshielded-{spend,create}-grammar.ts declare outputIndex as a
+  // REQUIRED Type.Number(); `outputNo` appears nowhere on the wire — it is the
+  // LEDGER's field name (see validator/derive.ts), which is why the two were
+  // once conflated here. No coercion either: a non-number is a malformed
+  // payload for the guard below to reject, and coercing would silently
+  // attribute the spend to output 0 — the wrong UTXO.
+  const outputNo = payload?.outputIndex;
 
   if (!owner || !intentHash || !Number.isFinite(outputNo)) {
     console.warn(
@@ -333,7 +348,24 @@ addTransition("midnight-unshielded-spend", function* (data) {
     return;
   }
 
+  // The SPENDING transaction — the fill-vs-cancel discriminator, and the whole
+  // reason the unshielded layer could not classify. The primitive has always
+  // delivered it (grammar: owner, intentHash, outputIndex, value, tokenType,
+  // txHash); this transition simply threw it away.
+  const txHash = payload?.txHash ? bytesOrStringToHex(payload.txHash) : null;
+
   try {
+    // Permanent record, mirroring `nullifiers`. Written BEFORE the live-set
+    // delete below: the delete destroys the only trace this UTXO existed, and
+    // classification needs to know it was consumed and by whom, long after.
+    yield* World.resolve(insertUnshieldedSpend, {
+      owner,
+      intent_hash: intentHash,
+      output_no: outputNo,
+      tx_hash: txHash,
+      height: data.blockHeight,
+    });
+
     // Delete from created_unshielded — the row's absence is the "spent" signal.
     // If no offer is currently indexed for this UTXO, the delete is still
     // correct: a later Celestia offer will see no row and be rejected.
@@ -361,12 +393,12 @@ addTransition("midnight-unshielded-spend", function* (data) {
         archived,
       );
       for (const row of archived) {
-        queueAppEvent(data, {
+        emitAppEvent({
           type: "offer_consumed",
           offerId: row.id,
           ...(row.offer_hash ? { offerHash: row.offer_hash } : {}),
           unshieldedSpend: { owner, intentHash, outputNo },
-        });
+        }, data.blockHeight);
       }
     }
   } catch (e) {
@@ -387,10 +419,13 @@ addTransition("midnight-unshielded-create", function* (data) {
   const { payload } = data.parsedInput;
   const owner = unshieldedOwnerToCanonicalHex(payload?.owner);
   const intentHash = bytesOrStringToHex(payload?.intentHash);
-  const outputNoRaw = payload?.outputIndex ?? payload?.outputNo;
-  const outputNo = typeof outputNoRaw === "number"
-    ? outputNoRaw
-    : Number(outputNoRaw);
+  // midnight-unshielded-{spend,create}-grammar.ts declare outputIndex as a
+  // REQUIRED Type.Number(); `outputNo` appears nowhere on the wire — it is the
+  // LEDGER's field name (see validator/derive.ts), which is why the two were
+  // once conflated here. No coercion either: a non-number is a malformed
+  // payload for the guard below to reject, and coercing would silently
+  // attribute the spend to output 0 — the wrong UTXO.
+  const outputNo = payload?.outputIndex;
 
   if (!owner || !intentHash || !Number.isFinite(outputNo)) {
     console.warn("[MIDNIGHT] Skipping malformed unshielded-create payload", payload);
@@ -402,6 +437,22 @@ addTransition("midnight-unshielded-create", function* (data) {
       owner,
       intent_hash: intentHash,
       output_no: outputNo,
+      height: data.blockHeight,
+    });
+    // Permanent create record, mirroring `commitments`. created_unshielded
+    // above is a live-set that deletes on spend, so it cannot answer "did tx T
+    // pay the maker what the offer asked for" once the payout is itself spent.
+    // Exact identity is owner + intentHash + outputNo; Phase (b) now
+    // precomputes the same triple from the published offer. value + tokenType
+    // remain useful for display/audit and for the interim classifier until
+    // Phase (d) switches its read predicate to exact identities.
+    yield* World.resolve(insertUnshieldedCreate, {
+      owner,
+      intent_hash: intentHash,
+      output_no: outputNo,
+      tx_hash: payload?.txHash ? bytesOrStringToHex(payload.txHash) : null,
+      token_type: bytesOrStringToHex(payload?.tokenType),
+      value: String(payload?.value ?? "0"),
       height: data.blockHeight,
     });
   } catch (e) {
@@ -455,8 +506,9 @@ addTransition("celestia-zswap", function* (data) {
   // the batcher can both be bypassed. It is ordered cheapest-first so that a
   // blob which was never going to be indexed costs as little as possible:
   //
-  //   HRP → length bound → bech32m → size → deserialize → two-sided → roots
-  //   → dedup (indexed) → liveness (indexed) → wellFormed (crypto, LAST)
+  //   HRP → length bound → bech32m → size → deserialize → two-sided
+  //   → same-layer → roots → dedup (indexed) → liveness (indexed)
+  //   → wellFormed (crypto, LAST)
   //
   // Crypto is deferred to the end deliberately: it is orders of magnitude more
   // expensive than every other step, so a replayed or stale blob must never
@@ -493,12 +545,13 @@ addTransition("celestia-zswap", function* (data) {
       celestia_height: data.blockHeight,
       code,
     });
-    queueAppEvent(data, {
+    emitAppEvent({
       type: "offer_rejected",
       code,
       reason,
+      blockHeight: data.blockHeight,
       ...extra,
-    });
+    }, data.blockHeight);
   };
 
   const result = validateZswapOfferBytes(rawBytes, {
@@ -606,48 +659,59 @@ addTransition("celestia-zswap", function* (data) {
   // root window is fixed in the zswap crate (parameterized from node 2.x),
   // while `global_ttl` is an on-chain LedgerParameters field changeable by
   // governance. Moving one does not move the other.
-  let rootExpiryMs: number | null = null;
+  // ONE deadline, used for BOTH the advertised expiry and the scheduled
+  // cleanup. They were computed separately before, which meant they could
+  // disagree in either direction: a stale root window advertised an expiry in
+  // the offer's own past while cleanup sat an hour out (§2.6), and a short
+  // policy TTL would delete an offer while the API still advertised a later
+  // expiry. Two calculations that happen to agree is not the same fact.
+  //
+  // PORT NOTE (merge of 8244283): upstream's derivation replaces ours here. It
+  // consumes `getOfferRootTiming`'s anchor semantics, which S-1 obliges us to
+  // adopt, so our `requireApplicableOfferExpiry` / `deriveOfferExpiry` pair is
+  // superseded ON THIS PATH by 774b363. Both helpers remain exported and are
+  // still covered by offer-expiry.test.ts.
+  let layerDeadlineMs: number | null = null;
   // firstSeenAt (MIP-0006): shielded → the moment the offer became provable
   // on this chain (earliest proof-root first-seen); otherwise the Celestia
   // block time. Deterministic on replay — never wall-clock.
   let firstSeenAt = new Date(data.blockTimestamp).toISOString();
   const inputRoots = result.inputRoots ?? [];
   if (inputRoots.length > 0) {
-    const fs = yield* World.resolve(getEarliestRootFirstSeen, { roots: inputRoots });
+    const fs = yield* World.resolve(getOfferRootTiming, {
+      roots: inputRoots,
+      block_ms: data.blockTimestamp,
+    });
     const firstSeenMs = fs[0]?.first_seen_ms;
-    const lastSeenMs = fs[0]?.last_seen_ms;
+    const anchorMs = fs[0]?.window_anchor_ms;
     // firstSeenAt: the offer cannot predate its own proof root.
     if (firstSeenMs != null) {
       const firstSeenTimestamp = expiryTimestamp("root first-seen", Number(firstSeenMs));
       if (firstSeenTimestamp === null) throw new Error("root first-seen timestamp was not derived");
       firstSeenAt = new Date(firstSeenTimestamp).toISOString();
     }
-    // Root expiry: from LAST-seen — the refresh semantics above.
-    if (lastSeenMs != null) {
-      rootExpiryMs = Number(lastSeenMs) + ROOT_WINDOW_SECONDS * 1000;
+    // The anchor is already the MIN over per-root anchors, with the
+    // current-root escape applied per row — see getOfferRootTiming.
+    if (anchorMs != null) {
+      layerDeadlineMs = Number(anchorMs) + ROOT_WINDOW_SECONDS * 1000;
     }
   }
-  const intentTtl = P2pAtomicSwaps.earliestIntentTtl(result.tx!);
-  const rootExpiry = requireApplicableOfferExpiry(
-    "root",
-    inputRoots.length > 0,
-    rootExpiryMs,
-  );
-  const intentExpiry = requireApplicableOfferExpiry(
-    "intent",
-    hasTransactionIntents(result.tx!),
-    intentTtl,
-  );
-  // Resolve every applicable constraint before any INSERT below. If expiry
-  // derivation ever regresses, the input fails without creating an offer that
-  // has no cleanup scheduled. The returned Date is accepted directly by the
-  // pgtyped DateOrString scheduler parameter.
-  const cleanupAt = deriveOfferExpiry(
-    rootExpiry,
-    intentExpiry,
+  if (layerDeadlineMs == null) {
+    // UNSHIELDED: the earliest intent TTL. Structurally always present for a
+    // well-formed unshielded offer; the block-time fallback is defensive.
+    const intentTtl = P2pAtomicSwaps.earliestIntentTtl(result.tx!);
+    layerDeadlineMs = intentTtl
+      ? Number(new Date(intentTtl))
+      : data.blockTimestamp + OFFER_TTL_SECONDS * 1000;
+  }
+  // The indexer's retention policy is a CEILING, never an extension: an offer
+  // whose layer deadline falls sooner dies sooner, and one that would outlive
+  // the policy is still swept at the policy horizon.
+  const effectiveExpiryMs = Math.min(
+    layerDeadlineMs,
     data.blockTimestamp + OFFER_TTL_SECONDS * 1000,
   );
-  const expiresAt = cleanupAt.toISOString();
+  const expiresAt = new Date(effectiveExpiryMs).toISOString();
 
   try {
     // ── Insert offer ──
@@ -689,6 +753,20 @@ addTransition("celestia-zswap", function* (data) {
       yield* World.resolve(insertOfferFileCommitment, {
         offer_file_id: offerFileId,
         commitment,
+      });
+    }
+    // The same markers on the unshielded layer: the outputs the offer says the
+    // maker is owed. A settling tx creates every one of them; a maker walking
+    // away creates none. Without these, branch 3 of the unshielded predicate is
+    // vacuous and a self-transfer reads as a sale.
+    for (const out of collectUnshieldedOutputs(result.tx!)) {
+      yield* World.resolve(insertOfferFileUnshieldedOutput, {
+        offer_file_id: offerFileId,
+        owner: out.owner,
+        intent_hash: out.intentHash,
+        output_no: out.outputNo,
+        token_type: out.tokenType,
+        value: out.value,
       });
     }
 
@@ -740,12 +818,12 @@ addTransition("celestia-zswap", function* (data) {
       });
       yield* World.resolve(markNullifierMatched, { nullifier: nullifierStr });
       for (const row of archived) {
-        queueAppEvent(data, {
+        emitAppEvent({
           type: "offer_consumed",
           offerId: row.id,
           ...(row.offer_hash ? { offerHash: row.offer_hash } : {}),
           nullifier: nullifierStr,
-        });
+        }, data.blockHeight);
       }
       if (archived.length > 0) archivedEarly = true;
     }
@@ -756,18 +834,22 @@ addTransition("celestia-zswap", function* (data) {
       return;
     }
 
-    // Schedule cleanup at the exact expiry persisted above. Root windows and
-    // intent TTLs can be substantially earlier than publication + fallback
-    // TTL; using the latter leaves known-unfillable rows advertised as live.
+    // Sweep at EXACTLY the advertised expiry — the same effectiveExpiryMs
+    // stored in metadata_expires_at, not a second computation that happens to
+    // agree. Recomputing `blockTimestamp + OFFER_TTL_SECONDS` here is what let
+    // the two drift: an offer whose root window closed sooner stayed in the
+    // live book, served as `live`, long past the expiry the API itself
+    // reported. If the deadline is already behind us the scheduler fires at
+    // once, which is correct — the offer was never fillable.
     yield* World.resolve(newScheduledTimestampData, {
       from_address: "0x0",
       from_address_type: AddressType.NONE,
-      future_ms_timestamp: cleanupAt,
+      future_ms_timestamp: new Date(effectiveExpiryMs),
       input_data: JSON.stringify(["zswap-ttl-cleanup", offerFileId]),
     });
 
     console.log(`[ZSWAP] Saved at Celestia block ${data.blockHeight}`);
-    queueAppEvent(data, { type: "offer_indexed", offerId: offerFileId, offerHash, gives, wants });
+    emitAppEvent({ type: "offer_indexed", offerId: offerFileId, offerHash, blockHeight: data.blockHeight, gives, wants }, data.blockHeight);
   } catch (e) {
     console.error("[ZSWAP] Failed to save offer file", e);
     throw e;
@@ -817,11 +899,11 @@ export function* archiveOfferAtExpiry(data: any): Generator<any, void, any> {
       archived,
     );
     const expiredHash = archived[0]?.offer_hash;
-    queueAppEvent(data, {
+    emitAppEvent({
       type: "offer_expired",
       offerId,
       ...(expiredHash ? { offerHash: expiredHash } : {}),
-    });
+    }, data.blockHeight);
   } catch (e) {
     console.error(
       "[ZSWAP] Failed to archive offer by TTL",

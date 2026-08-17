@@ -53,10 +53,19 @@ export const CANCEL_DOUBLE_SEED = seed("c1");
 export const TAKER_SEEDS: string[] = ["b0", "b1", "b2", "b3", "b4", "b5"].map(seed);
 
 // ── Tokens ───────────────────────────────────────────────────────────────────
-// Two shielded + two unshielded colors minted by genesis at suite start.
+// Three shielded + two unshielded colors minted by genesis at suite start.
 // Domain separators are disjoint from the startup mint (0x70/0x63) and the
 // other e2e suites (0xa0/0xa1/0xd0/0xd1).
-export const TOKEN_SEPS = { TA: 0xe0, TB: 0xe1, UA: 0xe2, UB: 0xe3 } as const;
+//
+// TC exists ONLY for the §2.5 basket fixture, and a third shielded colour is
+// genuinely required for it: a basket needs two colours on one side, and
+// merging two offers drawn from {TA, TB} always nets back to one colour per
+// side (TA->TB merged with TB->TA cancels; TA->TB merged with TA->TB just
+// sums). TA->TB merged with TC->TB is the smallest real basket.
+//
+// No maker or taker is funded in TC — only the basket specialist is (see
+// setupActors) — so the funding plan's per-offer arithmetic is untouched.
+export const TOKEN_SEPS = { TA: 0xe0, TB: 0xe1, UA: 0xe2, UB: 0xe3, TC: 0xe4 } as const;
 export type TokenKey = keyof typeof TOKEN_SEPS;
 
 // Fixed reference prices per (give → want) direction, used to derive want
@@ -70,6 +79,8 @@ export const PAIR_PRICE: Record<string, number> = {
   "TB>UB": 0.5,
   "UA>TA": 0.5,
   "UB>TB": 2.0,
+  // Basket fixture only (§2.5): TC is never offered on its own.
+  "TC>TB": 1.1,
 };
 
 // Coin denominations created by the funding fan-out. Every offer gives less
@@ -93,6 +104,13 @@ export const TX_TTL_MS = 30 * 60_000;
 export const INDEX_WAIT_TRIES = 36;     // × 5 s — publish → offer_file row
 export const ARCHIVE_WAIT_TRIES = 36;   // × 5 s — spend → history row
 export const EXPIRY_SLACK_MS = 240_000; // sweep slack past the 600 s TTL
+
+// A raw blob.Submit is the first leg of the same Celestia → STM → DB path.
+// Give it the same 180-second budget as indexing: a fixed 90-second fetch
+// timeout aborted the run-3 same-block pair while measured STM lag was still
+// inside the valid-run envelope. This is one shared budget, not a second knob
+// that can silently drift from INDEX_WAIT_TRIES.
+export const CELESTIA_RPC_TIMEOUT_MS = INDEX_WAIT_TRIES * 5_000;
 
 // Client-side API budget: the node rate-limits 60 req/min/IP, and this suite
 // shares that budget across everything it does. Normal phases stay under it
@@ -139,5 +157,14 @@ export const DIFF_EXCLUDED_COLUMNS = new Set([
   "created_at",  // when this node's row was inserted — local observation
   "recorded_at", // when this node recorded the liveness-set entry — local observation
 ]);
+
+// Re-running the full validator (proofs included) over every stored blob is
+// the audit's strongest assertion and also its most expensive: wellFormed
+// dominates the whole pipeline. Exhaustive by default at suite scale; set
+// GRAND_DEEP_AUDIT=0 to sample instead when running with GRAND_OFFERS in the
+// hundreds. The sample is deterministic (detVar), never random — a flaky audit
+// surface would be worse than a cheaper one.
+export const DEEP_AUDIT = process.env["GRAND_DEEP_AUDIT"] !== "0";
+export const DEEP_AUDIT_SAMPLE = 25;
 
 export const OUT_DIR = fileURLToPath(new URL("./out/", import.meta.url));

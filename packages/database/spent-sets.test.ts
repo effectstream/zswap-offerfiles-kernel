@@ -13,7 +13,7 @@ const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const {
   migrationTable,
-  upsertNullifier,
+  insertNullifierWithTx,
   isNullifierSpent,
   markNullifierMatched,
   findUnmatchedNullifier,
@@ -41,20 +41,20 @@ afterAll(async () => {
   await closeTestPglite(handle, client);
 });
 
-test("upsertNullifier: insert then isNullifierSpent returns row, absent nullifier returns empty", async () => {
-  await upsertNullifier.run({ nullifier: "deadbeef", height: 7 }, client);
+test("insertNullifierWithTx: insert then isNullifierSpent returns row, absent nullifier returns empty", async () => {
+  await insertNullifierWithTx.run({ nullifier: "deadbeef", height: 7, tx_hash: null }, client);
   expect((await isNullifierSpent.run({ nullifier: "deadbeef" }, client)).length).toBe(1);
   expect((await isNullifierSpent.run({ nullifier: "cafe" }, client)).length).toBe(0);
 });
 
-test("upsertNullifier is idempotent (ON CONFLICT DO NOTHING)", async () => {
-  await upsertNullifier.run({ nullifier: "dup", height: 1 }, client);
-  await upsertNullifier.run({ nullifier: "dup", height: 2 }, client);
+test("insertNullifierWithTx is idempotent (ON CONFLICT DO NOTHING)", async () => {
+  await insertNullifierWithTx.run({ nullifier: "dup", height: 1, tx_hash: null }, client);
+  await insertNullifierWithTx.run({ nullifier: "dup", height: 2, tx_hash: null }, client);
   expect((await isNullifierSpent.run({ nullifier: "dup" }, client)).length).toBe(1);
 });
 
 test("findUnmatchedNullifier: returns row when offer_matched=false, empty after markNullifierMatched", async () => {
-  await upsertNullifier.run({ nullifier: "early", height: 5 }, client);
+  await insertNullifierWithTx.run({ nullifier: "early", height: 5, tx_hash: null }, client);
   expect((await findUnmatchedNullifier.run({ nullifier: "early" }, client)).length).toBe(1);
   await markNullifierMatched.run({ nullifier: "early" }, client);
   expect((await findUnmatchedNullifier.run({ nullifier: "early" }, client)).length).toBe(0);

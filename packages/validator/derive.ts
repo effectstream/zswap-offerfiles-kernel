@@ -3,9 +3,26 @@ import { addressFromKey } from "@midnight-ntwrk/ledger-v8";
 import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
 import { P2pAtomicSwaps, UnknownTokenTagError } from "@effectstream/mip-zswap-offer/mip6";
 
-import type { OfferLeg, UnshieldedSpendRef } from "./types.ts";
+import type {
+  OfferLeg,
+  UnshieldedOutputRef,
+  UnshieldedSpendRef,
+} from "./types.ts";
 
 // Re-export so existing validator consumers keep a single import path.
+//
+// UNKNOWN_TOKEN, like ROOT_UNREADABLE, is NOT reachable from the wire —
+// measured 2026-08-12 (#5 phase (a)); see the census note in extract-root.ts
+// for the method and numbers. A token tag lives inside the transaction's SCALE
+// stream, so a tag mutation bad enough to be unrecognised also breaks
+// deserialization, and the ledger refuses the transaction first.
+//
+// The check stays: it is a fail-closed guard against a ledger upgrade
+// introducing a tag this code does not know, which is a real risk and exactly
+// what it should cover. It just cannot be driven by a hostile publisher, so it
+// has no e2e fixture and its unit doubles are the complete coverage. Worth
+// raising with the SDK if it ever grows a way to emit offers with arbitrary
+// token configurations.
 export { UnknownTokenTagError };
 
 // Normalize a value that may be a Uint8Array or a hex string into lowercase
@@ -112,6 +129,57 @@ export function collectOutputCommitments(tx: UnprovenTransaction): string[] {
     }
   }
   return commitments;
+}
+
+/**
+ * The offer's own UNSHIELDED outputs — its fill markers on that layer, the
+ * counterpart of `collectOutputCommitments`.
+ *
+ * A settling transaction pays the maker exactly what the offer asked for, and
+ * merging preserves outputs verbatim, so a genuine settlement creates all of
+ * these on chain while a maker walking away creates none. That is the same
+ * proof the shielded path gets from output commitments — and until now the
+ * unshielded path had no equivalent, which is why every unshielded
+ * consumption classified `consumed`.
+ *
+ * Exact identity is (owner, intentHash(SEG), outputNo), precomputable from the
+ * published blob because Transaction.merge preserves each party's intent.
+ * The segment rule is deliberately asymmetric and mirrors the ledger's two
+ * `UtxoState::apply_offer` call sites:
+ *
+ *   guaranteed output -> intentHash(0)
+ *   fallible output   -> intentHash(the intent map's physical segment key)
+ *
+ * Generalising segment 0 to the fallible section produces an identity the
+ * ledger will never create and therefore classifies every valid fallible fill
+ * as cancelled. Iterating map entries (not values) is load-bearing: the key is
+ * stable across Transaction.merge and is the fallible section's hash segment.
+ * Token type and value remain attached for display and audit, but are not the
+ * identity — shape matching is forgeable across different offers.
+ */
+export function collectUnshieldedOutputs(
+  tx: UnprovenTransaction,
+): UnshieldedOutputRef[] {
+  const outputs: UnshieldedOutputRef[] = [];
+  const intents = (tx as any).intents;
+  if (!intents || typeof intents.entries !== "function") return outputs;
+  for (const [physicalSegment, intent] of intents.entries() as Iterable<[number, any]>) {
+    const collect = (offer: any, hashSegment: number) => {
+      if (!offer) return;
+      const intentHash = bytesOrStringToHex(intent.intentHash(hashSegment));
+      for (const [outputNo, out] of (offer.outputs ?? []).entries()) {
+        const owner = bytesOrStringToHex(out.owner ?? out.address);
+        const tokenType = bytesOrStringToHex(out.type ?? out.tokenType);
+        const value = String(out.value ?? out.amount ?? "");
+        if (owner && tokenType && value) {
+          outputs.push({ owner, intentHash, outputNo, tokenType, value });
+        }
+      }
+    };
+    collect(intent.guaranteedUnshieldedOffer, 0);
+    collect(intent.fallibleUnshieldedOffer, Number(physicalSegment));
+  }
+  return outputs;
 }
 
 /**

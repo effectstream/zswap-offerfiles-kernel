@@ -11,6 +11,14 @@ import {
   rejectPair,
   type PriceLevels,
 } from "@zswap-da/solver-core/ladder-schema";
+import {
+  createSolverLiquidityEnvelope,
+  createSolverLiquiditySnapshot,
+  formatLiquidityTimestamp,
+  parsePositiveU64String,
+  type SolverLiquidityEnvelope,
+  type SolverLiquiditySnapshot,
+} from "@zswap-da/solver-core/liquidity-contract";
 
 export {
   interpolateQuote,
@@ -26,11 +34,6 @@ export {
 const DEFAULT_TTL_SECONDS = 60;
 const MAX_TTL_SECONDS = 60 * 60;
 const DEFAULT_MAX_SOLVERS = 128;
-const UINT64_MAX = (1n << 64n) - 1n;
-// u64 has at most 20 decimal digits. Bound length before BigInt parsing so an
-// authenticated but faulty publisher cannot turn a large request string into
-// disproportionate CPU work.
-const VERSION_RE = /^[1-9][0-9]{0,19}$/;
 
 export interface StoredLevels extends PriceLevels {
   solverId: string;
@@ -42,6 +45,7 @@ interface SolverDeclaration {
   version: bigint;
   versionText: string;
   updatedAt: number;
+  expiresAt: number;
   pairs: Map<string, StoredLevels>;
 }
 
@@ -82,9 +86,7 @@ export const solverLevelsTtlSeconds = (): number => {
 /** Canonical unsigned 64-bit declaration version. JSON numbers are not
  * accepted by the API because they stop being exact above 2^53-1. */
 export function parseLevelsVersion(value: unknown): bigint | null {
-  if (typeof value !== "string" || !VERSION_RE.test(value)) return null;
-  const parsed = BigInt(value);
-  return parsed <= UINT64_MAX ? parsed : null;
+  return parsePositiveU64String(value);
 }
 
 export class SolverLevelsRegistry {
@@ -101,16 +103,31 @@ export class SolverLevelsRegistry {
     }
   }
 
-  /** Clear stale pair declarations eagerly while retaining the last accepted
-   * version. Keeping the bounded version tombstone prevents an old, replayed
-   * publication from becoming valid again merely because its prices expired. */
-  #expire(nowMs: number): void {
+  /** Resolve and store one immutable expiry at accepted-publication time.
+   * Invalid injected TTLs fail closed at the publication timestamp. */
+  #publicationExpiresAt(nowMs: number): number {
+    // Also proves the update timestamp can be represented by the frozen wire
+    // contract before any registry state changes.
+    formatLiquidityTimestamp(nowMs);
     const ttlMs = this.#ttlMs();
+    if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) return nowMs;
+    const candidate = nowMs + ttlMs;
+    if (!Number.isSafeInteger(candidate)) return nowMs;
+    try {
+      formatLiquidityTimestamp(candidate);
+      return candidate;
+    } catch {
+      return nowMs;
+    }
+  }
+
+  /** Clear stale pair declarations eagerly while retaining the last accepted
+   * version and immutable freshness tombstone. Keeping the bounded version
+   * tombstone prevents an old, replayed publication from becoming valid again
+   * merely because its prices expired. */
+  #expire(nowMs: number): void {
     for (const declaration of this.#bySolver.values()) {
-      if (
-        declaration.pairs.size > 0 &&
-        (!Number.isFinite(ttlMs) || ttlMs <= 0 || nowMs - declaration.updatedAt >= ttlMs)
-      ) {
+      if (declaration.pairs.size > 0 && nowMs >= declaration.expiresAt) {
         declaration.pairs.clear();
       }
     }
@@ -124,6 +141,8 @@ export class SolverLevelsRegistry {
     version: bigint,
     nowMs: number,
   ): PublishResult {
+    // Validate observation time before #expire can mutate any prior state.
+    formatLiquidityTimestamp(nowMs);
     this.#expire(nowMs);
     const previous = this.#bySolver.get(solverId);
     if (previous && version <= previous.version) {
@@ -142,6 +161,7 @@ export class SolverLevelsRegistry {
       };
     }
 
+    const expiresAt = this.#publicationExpiresAt(nowMs);
     const replacement = new Map<string, StoredLevels>();
     for (const pair of pairs) {
       const key = pairKey(pair.tokenIn, pair.tokenOut);
@@ -169,6 +189,7 @@ export class SolverLevelsRegistry {
       version,
       versionText: version.toString(),
       updatedAt: nowMs,
+      expiresAt,
       pairs: replacement,
     });
     return { ok: true, accepted: replacement.size, withdrawn };
@@ -182,6 +203,8 @@ export class SolverLevelsRegistry {
     amountIn: bigint,
     nowMs: number,
   ): SolverQuote | null {
+    // Fail before eager expiry can mutate registry state on an invalid clock.
+    formatLiquidityTimestamp(nowMs);
     this.#expire(nowMs);
     const key = pairKey(tokenIn, tokenOut);
     let best: SolverQuote | null = null;
@@ -214,6 +237,8 @@ export class SolverLevelsRegistry {
   /** Every currently live declaration, stable-sorted for deterministic API
    * output. Calling this also eagerly removes stale pair payloads. */
   all(nowMs: number): StoredLevels[] {
+    // Fail before eager expiry can mutate registry state on an invalid clock.
+    formatLiquidityTimestamp(nowMs);
     this.#expire(nowMs);
     return [...this.#bySolver.values()]
       .flatMap((declaration) => [...declaration.pairs.values()])
@@ -225,6 +250,35 @@ export class SolverLevelsRegistry {
         ...stored,
         levels: stored.levels.map((level) => ({ ...level })),
       }));
+  }
+
+  /** One identity's complete declaration, including explicit-withdrawal and
+   * expiry tombstones. Unknown identities return null; expired identities keep
+   * their immutable version/times and expose an empty pair set. */
+  liquiditySnapshot(solverId: string, nowMs: number): SolverLiquiditySnapshot | null {
+    // Fail before eager expiry can mutate registry state on an invalid clock.
+    formatLiquidityTimestamp(nowMs);
+    this.#expire(nowMs);
+    const declaration = this.#bySolver.get(solverId);
+    if (!declaration) return null;
+    const pairs = [...declaration.pairs.values()].map((stored) => ({
+      tokenIn: stored.tokenIn,
+      tokenOut: stored.tokenOut,
+      levels: stored.levels.map((level) => ({ ...level })),
+    }));
+    return createSolverLiquiditySnapshot({
+      solverId,
+      version: declaration.versionText,
+      updatedAtMs: declaration.updatedAt,
+      expiresAtMs: declaration.expiresAt,
+      pairs,
+    });
+  }
+
+  /** Filtered grouped source envelope for one requested solver identity. */
+  liquidityEnvelope(solverId: string, nowMs: number): SolverLiquidityEnvelope {
+    const snapshot = this.liquiditySnapshot(solverId, nowMs);
+    return createSolverLiquidityEnvelope(nowMs, snapshot ? [snapshot] : []);
   }
 
   get solverCount(): number {

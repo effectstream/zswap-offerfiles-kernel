@@ -125,12 +125,30 @@ const shieldedCancelledPredicate = (idExpr: string) => `(
 //   1. PARTIAL SPEND — an offer spend ref with no matching row in
 //      unshielded_spends. Settlement is atomic, so this cannot have been a fill.
 //   2. SPLIT SPEND — the offer's spends span more than one tx. Same argument.
-//   3. MISSING FILL MARKERS — all spends in ONE tx, but that tx did not create
-//      every unshielded output the offer declared. Phase (b) now persists the
-//      exact (owner, intent_hash, output_no) identity, precomputed from the
-//      offer's own intent. This Phase-(d)-deferred predicate still groups on
-//      (owner, token_type, value); Phase (b) preserves that behavior while
-//      carrying the exact fields through live storage and archival.
+//   3. MISSING FILL MARKERS — the offer declared an unshielded output that was
+//      never created. Phase (d) moved this branch onto the EXACT identity
+//      `(owner, intent_hash, output_no)` that phase (b) precomputes from the
+//      offer's own intent; it previously grouped on (owner, token_type, value)
+//      and leaned on the settling transaction to scope the comparison.
+//
+//      Why the identity is sound as a key, and why the transaction is no longer
+//      one: `UtxoState::apply_offer` stamps every output with
+//      `parent.intent_hash(segment_id)` (ledger 8.1.0 semantics.rs:1668-1680),
+//      so only a transaction containing THAT intent can create THAT identity,
+//      and replay protection admits an intent once (semantics.rs:1694-1705).
+//      The create therefore comes from the settling transaction necessarily —
+//      correlating on tx_hash re-derives a fact the identity already carries.
+//
+//      What that fixes: the CROSS-OFFER MARKER BYPASS. Two disjoint offers each
+//      wanting 20 UB to the same address, "settled" by one transaction paying
+//      20 once, both matched under shape grouping because a payout of the right
+//      (owner, token, value) satisfied both. Identities are per-intent, so one
+//      payout now satisfies exactly the offer that declared it.
+//
+//      It also retires the multiplicity arithmetic. N identical declared
+//      payouts used to need a SUM(count) > COUNT(creates) comparison to stop
+//      one payout satisfying all N; as distinct identities they are distinct
+//      rows, and an uncreated one fails the EXISTS on its own.
 //
 // Vacuous, as on the shielded side, when the offer declares no unshielded
 // outputs — a `uu` offer always does, so in practice branch 3 applies wherever
@@ -168,40 +186,21 @@ const unshieldedCancelledPredicate = (idExpr: string) => `(
         ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
        AND us.output_no = uxh.output_no
       WHERE uxh.offer_file_id = ${idExpr}) > 1
-  OR (
-    (SELECT COUNT(DISTINCT us.tx_hash)
-     FROM offer_file_unshielded_spends_history uxh
-     JOIN unshielded_spends us
-       ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
-      AND us.output_no = uxh.output_no
-     WHERE uxh.offer_file_id = ${idExpr} AND us.tx_hash IS NOT NULL) = 1
-    AND NOT EXISTS (SELECT 1 FROM offer_file_unshielded_spends_history uxh
-                    JOIN unshielded_spends us
-                      ON us.owner = uxh.owner AND us.intent_hash = uxh.intent_hash
-                     AND us.output_no = uxh.output_no
-                    WHERE uxh.offer_file_id = ${idExpr} AND us.tx_hash IS NULL)
-    AND EXISTS (
-      -- SUM the multiplicity across exact-identity rows with the same display
-      -- shape. Until Phase (d) switches this branch to exact identity lookup,
-      -- one payout must still not satisfy N identical declared outputs.
-      SELECT 1 FROM (
-        SELECT owner, token_type, value, SUM(count) AS required_count
-        FROM offer_file_unshielded_outputs_history
-        WHERE offer_file_id = ${idExpr}
-        GROUP BY owner, token_type, value
-      ) uo
-      WHERE uo.required_count > (
-          SELECT COUNT(*) FROM unshielded_creates uc
-          WHERE uc.owner = uo.owner AND uc.token_type = uo.token_type
-            AND uc.value = uo.value
-            AND uc.tx_hash = (SELECT MIN(us2.tx_hash)
-                              FROM offer_file_unshielded_spends_history uxh2
-                              JOIN unshielded_spends us2
-                                ON us2.owner = uxh2.owner
-                               AND us2.intent_hash = uxh2.intent_hash
-                               AND us2.output_no = uxh2.output_no
-                              WHERE uxh2.offer_file_id = ${idExpr})))
-  ))
+  OR EXISTS (
+    -- Branch 3, on exact identities: cancelled unless EVERY declared identity
+    -- exists in unshielded_creates. No transaction correlation and no
+    -- multiplicity arithmetic — see the argument above for why neither is
+    -- needed once the key is the identity the ledger itself stamps.
+    SELECT 1 FROM offer_file_unshielded_outputs_history uo
+    WHERE uo.offer_file_id = ${idExpr}
+      AND NOT EXISTS (
+        SELECT 1 FROM unshielded_creates uc
+        WHERE uc.owner = uo.owner
+          AND uc.intent_hash = uo.intent_hash
+          AND uc.output_no = uo.output_no
+      )
+  )
+  )
 )`;
 
 // Either layer's evidence is enough to prove a cancel, and each predicate is

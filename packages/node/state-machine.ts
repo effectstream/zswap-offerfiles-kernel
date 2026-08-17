@@ -58,10 +58,14 @@ import {
 //      offers with stored fill markers the converse is exact too — the single
 //      spending tx must have created them, else it was a cancel, single-input
 //      included. Shielded markers are the offer's output commitments;
-//      unshielded markers are its declared outputs, matched on
-//      (owner, token_type, value) because the settling intent's hash cannot be
-//      known at publication. Only genuinely marker-less rows keep the old
-//      all-in-one-tx heuristic.
+//      unshielded markers are its declared outputs, matched on the EXACT
+//      ledger identity (owner, intent_hash, output_no). The old note here said
+//      the settling intent's hash cannot be known at publication — that is
+//      false for the payout: per-party intents survive a merge verbatim, so
+//      the identity `intentHash(0)` (guaranteed) or `intentHash(physSeg)`
+//      (fallible) is computable from the offer's own bytes at ingestion, and
+//      was measured equal to the on-chain create on a live chain. Only
+//      genuinely marker-less rows keep the old all-in-one-tx heuristic.
 //
 //   2. Archival is destructive (rows are DELETEd into history). If a
 //      consuming Midnight/Celestia block is later reorged out, the offer

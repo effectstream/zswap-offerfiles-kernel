@@ -51,12 +51,31 @@ const TX = (n: number, suffix = "") => `tx-${n}${suffix}`;
 const DAY_AGO = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const hashOf = (n: number) => n.toString(16).padStart(64, "0");
 
+// ── Phase (d) fixtures use their own colour pair ────────────────────────────
+// The 24 h pair-stats and trade-history assertions below count rows for
+// (GIVE, WANT). Seeding new consumed offers on that pair would move those
+// numbers and make the older cases fail for a reason that has nothing to do
+// with what they test, so every t1-t4 fixture trades a separate pair.
+const GIVE2 = "3".repeat(64);
+const WANT2 = "4".repeat(64);
+
 /** An archived unshielded offer: gives 10 GIVE, wants 20 WANT. */
 async function seedOffer(
   id: number,
   spends: { outputNo: number }[],
-  opts: { markers?: boolean } = {},
+  opts: {
+    markers?: boolean;
+    /** Exact declared payout identities; defaults to one (payout-intent-N, 0). */
+    payouts?: { intentHash: string; outputNo: number; value?: string }[];
+    /** Share a spend-set with another offer by reusing its intent tag. */
+    spendTag?: string;
+    give?: string;
+    want?: string;
+  } = {},
 ) {
+  const give = opts.give ?? GIVE;
+  const want = opts.want ?? WANT;
+  const spendTag = opts.spendTag ?? `intent-${id}`;
   await client.query(
     `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash,
        created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
@@ -67,32 +86,57 @@ async function seedOffer(
     `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
      VALUES ($1, $2, '10', 'GIVING', 'UNSHIELDED', NOW() - INTERVAL '30 minutes'),
             ($1, $3, '20', 'WANTING', 'UNSHIELDED', NOW() - INTERVAL '30 minutes')`,
-    [id, GIVE, WANT],
+    [id, give, want],
   );
   for (const s of spends) {
     await client.query(
       `INSERT INTO offer_file_unshielded_spends_history (offer_file_id, owner, intent_hash, output_no, archived_at)
        VALUES ($1, $2, $3, $4, NOW() - INTERVAL '30 minutes')`,
-      [id, MAKER, `intent-${id}`, s.outputNo],
+      [id, MAKER, spendTag, s.outputNo],
     );
   }
   if (opts.markers !== false) {
     // What the offer says the maker is owed: 20 WANT to the maker's address.
-    await client.query(
-      `INSERT INTO offer_file_unshielded_outputs_history
-         (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
-       VALUES ($1, $2, $3, 0, $4, '20', 1)`,
-      [id, MAKER, `payout-intent-${id}`, WANT],
-    );
+    const payouts = opts.payouts ?? [{ intentHash: `payout-intent-${id}`, outputNo: 0 }];
+    for (const p of payouts) {
+      await client.query(
+        `INSERT INTO offer_file_unshielded_outputs_history
+           (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
+         VALUES ($1, $2, $3, $4, $5, $6, 1)`,
+        [id, MAKER, p.intentHash, p.outputNo, want, p.value ?? "20"],
+      );
+    }
   }
 }
 
 /** Chain: this UTXO was spent, by this transaction. */
-const spent = (id: number, outputNo: number, txHash: string | null) =>
+const spent = (id: number | string, outputNo: number, txHash: string | null) =>
   client.query(
     `INSERT INTO unshielded_spends (owner, intent_hash, output_no, tx_hash, height)
      VALUES ($1, $2, $3, $4, 1) ON CONFLICT DO NOTHING`,
-    [MAKER, `intent-${id}`, outputNo, txHash],
+    [MAKER, typeof id === "string" ? id : `intent-${id}`, outputNo, txHash],
+  );
+
+/**
+ * Chain: this transaction created the UTXO with this EXACT identity.
+ *
+ * `created` below keys the create on an arbitrary tag, which was enough while
+ * branch 3 grouped on (owner, token_type, value). Under exact identities the
+ * tag IS the assertion: a create only satisfies a declared marker when its
+ * (owner, intent_hash, output_no) is the one the offer declared.
+ */
+const createdExact = (
+  intentHash: string,
+  outputNo: number,
+  txHash: string,
+  value = "20",
+  owner = MAKER,
+  type = WANT,
+) =>
+  client.query(
+    `INSERT INTO unshielded_creates (owner, intent_hash, output_no, tx_hash, token_type, value, height)
+     VALUES ($1, $2, $3, $4, $5, $6, 1) ON CONFLICT DO NOTHING`,
+    [owner, intentHash, outputNo, txHash, type, value],
   );
 
 /** Chain: this transaction created a UTXO paying <owner, type, value>. */
@@ -113,9 +157,12 @@ beforeAll(async () => {
   for (const m of migrationTable) await client.query(m.sql);
 
   // 1: single input, one tx, and that tx PAID the maker → verified fill.
+  // The create carries the offer's DECLARED identity, which is what makes this
+  // a fill under exact-identity classification rather than a coincidence of
+  // (owner, token, value).
   await seedOffer(1, [{ outputNo: 0 }]);
   await spent(1, 0, TX(1));
-  await created("settle-1", TX(1), "20");
+  await createdExact("payout-intent-1", 0, TX(1));
 
   // 2: single input, one tx, maker never paid → the walk-away. THE case that
   // used to read `consumed` and put a trade that never happened on the chart.
@@ -123,10 +170,12 @@ beforeAll(async () => {
   await spent(2, 0, TX(2));
 
   // 3: two inputs spent in TWO txs → cancelled by atomicity, markers or not.
+  // The declared payout IS on chain here, so this case proves atomicity still
+  // dominates a satisfied marker rather than passing because the marker missed.
   await seedOffer(3, [{ outputNo: 0 }, { outputNo: 1 }]);
   await spent(3, 0, TX(3, "a"));
   await spent(3, 1, TX(3, "b"));
-  await created("settle-3", TX(3, "a"), "20");
+  await createdExact("payout-intent-3", 0, TX(3, "a"));
 
   // 4: two inputs, only ONE ever spent → partial, definitively a cancel.
   await seedOffer(4, [{ outputNo: 0 }, { outputNo: 1 }]);
@@ -142,6 +191,69 @@ beforeAll(async () => {
   await seedOffer(6, [{ outputNo: 0 }]);
   await spent(6, 0, TX(6));
   await created("settle-6", TX(6), "20", "z".repeat(64));
+
+  // ── Phase (d) — the cross-offer cases the shape grouping cannot answer ────
+  //
+  // t1: X and Y are DISJOINT offers — different makers' inputs, no relation to
+  // each other — both wanting 20 WANT2 to the same address, "settled" by ONE
+  // transaction that pays 20 ONCE. This is the cross-offer marker bypass: on
+  // (owner, token_type, value) that single payout satisfies BOTH offers'
+  // marker checks, so both read `consumed` and both hit the chart.
+  //
+  // The payout here carries NEITHER offer's declared identity, which is the
+  // honest model of the only way the shortfall can arise: a merge preserves
+  // declared outputs verbatim, so a transaction spending both offers carries
+  // both payouts. One payout for two offers means the maker re-signed raw
+  // spends OUTSIDE the offer intents — and a raw output is stamped with the
+  // hash of whatever intent did create it, never with theirs.
+  await seedOffer(10, [{ outputNo: 0 }], { give: GIVE2, want: WANT2 });
+  await seedOffer(11, [{ outputNo: 0 }], { give: GIVE2, want: WANT2 });
+  await spent(10, 0, TX(10));
+  await spent(11, 0, TX(10));
+  await createdExact("fabricated-intent", 0, TX(10), "20", MAKER, WANT2);
+
+  // t1b: the same shape, except the single payout IS offer 12's declared
+  // identity. The guard on t1: the fix must DISCRIMINATE, not blanket-cancel
+  // every offer that shares a settling transaction.
+  await seedOffer(12, [{ outputNo: 0 }], { give: GIVE2, want: WANT2 });
+  await seedOffer(13, [{ outputNo: 0 }], { give: GIVE2, want: WANT2 });
+  await spent(12, 0, TX(12));
+  await spent(13, 0, TX(12));
+  await createdExact("payout-intent-12", 0, TX(12), "20", MAKER, WANT2);
+
+  // t2: X and Y share ONE input — two offers over the same UTXO, deliberately
+  // (byte-identical dedup, ruled 2026-08-12). They are alternatives: only one
+  // can settle, and one payout is the CORRECT supply, not a shortfall. Exactly
+  // one must read `consumed`; today both do.
+  await seedOffer(14, [{ outputNo: 0 }], { give: GIVE2, want: WANT2, spendTag: "shared-input-a" });
+  await seedOffer(15, [{ outputNo: 0 }], { give: GIVE2, want: WANT2, spendTag: "shared-input-a" });
+  await spent("shared-input-a", 0, TX(14));
+  await createdExact("payout-intent-14", 0, TX(14), "20", MAKER, WANT2);
+
+  // t3: X and Y disjoint, one transaction paying 20 TWICE — the honest
+  // two-offer settlement. Both are genuine fills and must stay `consumed`.
+  await seedOffer(16, [{ outputNo: 0 }], { give: GIVE2, want: WANT2 });
+  await seedOffer(17, [{ outputNo: 0 }], { give: GIVE2, want: WANT2 });
+  await spent(16, 0, TX(16));
+  await spent(17, 0, TX(16));
+  await createdExact("payout-intent-16", 0, TX(16), "20", MAKER, WANT2);
+  await createdExact("payout-intent-17", 0, TX(16), "20", MAKER, WANT2);
+
+  // t4: same spend-set; the earlier alternative declares TWO identical 20-WANT2
+  // markers, the later declares ONE, and the settlement supplies ONE. Under
+  // exact identities this needs no multiplicity arithmetic at all: the earlier
+  // offer declared an identity that was never created.
+  await seedOffer(18, [{ outputNo: 0 }], {
+    give: GIVE2, want: WANT2, spendTag: "shared-input-b",
+    payouts: [{ intentHash: "payout-intent-18", outputNo: 0 },
+              { intentHash: "payout-intent-18", outputNo: 1 }],
+  });
+  await seedOffer(19, [{ outputNo: 0 }], {
+    give: GIVE2, want: WANT2, spendTag: "shared-input-b",
+    payouts: [{ intentHash: "payout-intent-19", outputNo: 0 }],
+  });
+  await spent("shared-input-b", 0, TX(18));
+  await createdExact("payout-intent-19", 0, TX(18), "20", MAKER, WANT2);
 });
 
 afterAll(async () => {
@@ -207,8 +319,9 @@ test("N identical wanted outputs require N payouts, not one", async () => {
      VALUES ($1, $2, $3, 0, NOW() - INTERVAL '30 minutes')`,
     [id, MAKER, `intent-${id}`],
   );
-  // The offer declares THREE exact output identities of 20. The interim shape
-  // predicate must still sum them rather than let one payout satisfy all three.
+  // The offer declares THREE exact output identities of 20. Under phase (d)
+  // they are three distinct (intent_hash, output_no) rows, so no multiplicity
+  // arithmetic is needed — an uncreated one fails on its own.
   await client.query(
     `INSERT INTO offer_file_unshielded_outputs_history
        (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
@@ -218,17 +331,14 @@ test("N identical wanted outputs require N payouts, not one", async () => {
     [id, MAKER, `payout-intent-${id}`, WANT],
   );
   await spent(id, 0, TX(id));
-  // The spending tx creates only ONE 20 — the underpayment.
-  await created(`settle-${id}`, TX(id), "20");
+  // The spending tx creates only ONE of the three declared identities — the
+  // underpayment. The other two were declared and never created.
+  await createdExact(`payout-intent-${id}`, 0, TX(id));
   expect(await statusOf(id)).toBe("cancelled");
 
   // Paying all three settles it.
-  for (const n of [2, 3]) {
-    await client.query(
-      `INSERT INTO unshielded_creates (owner, intent_hash, output_no, tx_hash, token_type, value, height)
-       VALUES ($1, $2, $3, $4, $5, '20', 1)`,
-      [MAKER, `settle-${id}`, n, TX(id), WANT],
-    );
+  for (const n of [1, 2]) {
+    await createdExact(`payout-intent-${id}`, n, TX(id));
   }
   expect(await statusOf(id)).toBe("consumed");
 });
@@ -320,4 +430,38 @@ test("declared outputs persist their exact identity plus audit fields", async ()
     [id],
   )).rows;
   expect(archived).toEqual(stored);
+});
+
+// ── Phase (d): classification on exact identities ──────────────────────────
+//
+// Identity is `(owner, intentHash(segment), outputNo)`, precomputed at
+// ingestion from the offer's own intent (phase (b)) and stamped on chain by
+// `UtxoState::apply_offer`. It is globally unique, so the settling transaction
+// stops being the key and becomes corroboration. These four cases are the ones
+// the (owner, token_type, value) grouping could not answer.
+
+test("t1: one payout cannot settle two disjoint offers", async () => {
+  expect(await statusOf(10)).toBe("cancelled");
+  expect(await statusOf(11)).toBe("cancelled");
+});
+
+test("t1b: ...but the offer that WAS paid still reads consumed", async () => {
+  expect(await statusOf(12)).toBe("consumed");
+  expect(await statusOf(13)).toBe("cancelled");
+});
+
+test("t2: same-input alternatives — exactly one is consumed", async () => {
+  const statuses = [await statusOf(14), await statusOf(15)];
+  expect(statuses.filter((s) => s === "consumed").length).toBe(1);
+  expect(statuses.filter((s) => s === "cancelled").length).toBe(1);
+});
+
+test("t3: one transaction paying both offers settles both", async () => {
+  expect(await statusOf(16)).toBe("consumed");
+  expect(await statusOf(17)).toBe("consumed");
+});
+
+test("t4: an alternative declaring an uncreated identity is cancelled", async () => {
+  expect(await statusOf(18)).toBe("cancelled");
+  expect(await statusOf(19)).toBe("consumed");
 });

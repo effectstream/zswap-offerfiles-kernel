@@ -44,13 +44,19 @@ import { EventEmitter } from "node:events";
 // redundant the moment every consumer reads from the runtime's feed.
 export type AppEvent =
   | { type: "offer_indexed"; offerId: number; offerHash: string; blockHeight: number | string; gives: unknown[]; wants: unknown[] }
+  // `offerId` is the local SERIAL row id, which diverges across deployments and
+  // across a resync; `offerHash` is the content address the REST API exposes,
+  // and the only key with which a consumer can correlate an event to an offer.
+  // It is optional because rows inserted out-of-band carry no hash (migration
+  // 005), not because emitters may omit it — the archive queries return it.
   | {
       type: "offer_consumed";
       offerId: number;
+      offerHash?: string;
       nullifier?: string;
       unshieldedSpend?: { owner: string; intentHash: string; outputNo: number };
     }
-  | { type: "offer_expired"; offerId: number }
+  | { type: "offer_expired"; offerId: number; offerHash?: string }
   | { type: "token_minted"; name: string; color: string; kind?: string }
   | {
       type: "offer_rejected";
@@ -85,8 +91,13 @@ const pending: { atHeight: number; key: string; event: AppEvent }[] = [];
  * gate less than it deserves: it closes the uncommitted-read defect outright.
  */
 function identity(e: AppEvent): string {
-  const subject = "offerId" in e ? String(e.offerId)
-    : "offerHash" in e && e.offerHash ? e.offerHash
+  // The hash is preferred over the row id because a retry that RE-INSERTS the
+  // offer hands the same offer a different SERIAL, and an id-keyed identity
+  // would then read the two attempts as two settlements. The id remains the
+  // fallback for events that carry no hash — collapsing those onto one empty
+  // subject would de-duplicate unrelated offers into a single release.
+  const subject = "offerHash" in e && e.offerHash ? e.offerHash
+    : "offerId" in e ? String(e.offerId)
     : "color" in e ? String(e.color)
     : "";
   return `${e.type}:${subject}`;

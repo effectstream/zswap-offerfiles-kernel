@@ -341,7 +341,7 @@ archived_unshielded_outputs AS (
 )
 DELETE FROM offer_file
 WHERE id IN (SELECT offer_file_id FROM matched)
-RETURNING id`;
+RETURNING id, offer_hash`;
 
 
 // ── Sync health — effectstream framework schema ────────────────────────────
@@ -1100,7 +1100,10 @@ export const resolveOfferCursor = prepared<IResolveOfferCursorParams, IResolveOf
        LIMIT 1`,
 );
 
-export interface IArchiveOfferResult { id: number }
+// The DELETE returns the content address alongside the row id so the archiving
+// transition can put it on the lifecycle event. Nullable because rows inserted
+// out-of-band before migration 005 have no hash.
+export interface IArchiveOfferResult { id: number; offer_hash: string | null }
 
 export interface IArchiveOfferByNullifierWithHashParams { nullifier: string; archived_at: DateOrString }
 export const archiveOfferByNullifierWithHash = prepared<IArchiveOfferByNullifierWithHashParams, IArchiveOfferResult>(

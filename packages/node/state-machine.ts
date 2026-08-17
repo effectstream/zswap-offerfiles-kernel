@@ -219,7 +219,12 @@ addTransition("midnight-zswap-event", function* (data) {
       yield* World.resolve(markNullifierMatched, { nullifier });
       console.log("[MIDNIGHT] Archived offer(s) for nullifier", nullifier, archived);
       for (const row of archived) {
-        emitAppEvent({ type: "offer_consumed", offerId: row.id, nullifier }, data.blockHeight);
+        emitAppEvent({
+          type: "offer_consumed",
+          offerId: row.id,
+          ...(row.offer_hash ? { offerHash: row.offer_hash } : {}),
+          nullifier,
+        }, data.blockHeight);
       }
     }
 
@@ -309,6 +314,7 @@ addTransition("midnight-unshielded-spend", function* (data) {
         emitAppEvent({
           type: "offer_consumed",
           offerId: row.id,
+          ...(row.offer_hash ? { offerHash: row.offer_hash } : {}),
           unshieldedSpend: { owner, intentHash, outputNo },
         }, data.blockHeight);
       }
@@ -754,7 +760,12 @@ addTransition("celestia-zswap", function* (data) {
       });
       yield* World.resolve(markNullifierMatched, { nullifier: nullifierStr });
       for (const row of archived) {
-        emitAppEvent({ type: "offer_consumed", offerId: row.id, nullifier: nullifierStr }, data.blockHeight);
+        emitAppEvent({
+          type: "offer_consumed",
+          offerId: row.id,
+          ...(row.offer_hash ? { offerHash: row.offer_hash } : {}),
+          nullifier: nullifierStr,
+        }, data.blockHeight);
       }
       if (archived.length > 0) archivedEarly = true;
     }
@@ -822,7 +833,11 @@ addTransition("zswap-ttl-cleanup", function* (data) {
       offerId,
       archived,
     );
-    emitAppEvent({ type: "offer_expired", offerId }, data.blockHeight);
+    emitAppEvent({
+      type: "offer_expired",
+      offerId,
+      ...(archived[0]?.offer_hash ? { offerHash: archived[0].offer_hash } : {}),
+    }, data.blockHeight);
   } catch (e) {
     console.error(
       "[ZSWAP] Failed to archive offer by TTL",

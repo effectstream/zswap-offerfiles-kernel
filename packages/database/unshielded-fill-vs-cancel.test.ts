@@ -510,3 +510,81 @@ test("t5a: duplicate wrappers of one intent count as ONE trade", async () => {
   expect(counted).toBe(1); // ONE settlement, not two offers
   expect(s?.fills_24h ?? 0).toBe(1);
 });
+
+// ── t6: the shielded twin — a MEASUREMENT, recorded either way ──────────────
+//
+// The plan asks whether the duplicate over-count has a shielded half. Shielded
+// duplicates over one input share a nullifier AND a declared output commitment,
+// exactly as unshielded duplicates share an input and a payout identity. If one
+// settlement marks both consumed AND both are counted, the shielded side needs
+// the same collapse; if not, the shape is immune and the reason is worth
+// recording.
+//
+// This case asserts what was measured, so it will fail if the answer changes.
+
+test("t6: shielded same-input duplicates — measured behaviour", async () => {
+  const { upsertPairStatsByOfferId } = await import("@zswap-da/database");
+  const GIVE4 = "7".repeat(64);
+  const WANT4 = "8".repeat(64);
+  const seedShielded = async (id: number) => {
+    await client.query(
+      `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash,
+         created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+       VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '30 minutes', NOW())`,
+      [id, 600 + id, `blob-${id}`, hashOf(id)],
+    );
+    await client.query(
+      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+       VALUES ($1, $2, '10', 'GIVING', 'SHIELDED', NOW() - INTERVAL '30 minutes'),
+              ($1, $3, '20', 'WANTING', 'SHIELDED', NOW() - INTERVAL '30 minutes')`,
+      [id, GIVE4, WANT4],
+    );
+    // Shared nullifier: the same shielded input, declared by both offers.
+    await client.query(
+      `INSERT INTO offer_file_nullifiers_history (offer_file_id, nullifier, archived_at)
+       VALUES ($1, 'twin-nullifier', NOW() - INTERVAL '30 minutes')`,
+      [id],
+    );
+    // Shared commitment: the same declared payout coin.
+    await client.query(
+      `INSERT INTO offer_file_commitments_history (offer_file_id, commitment)
+       VALUES ($1, 'twin-commitment')`,
+      [id],
+    );
+  };
+  await seedShielded(30);
+  await seedShielded(31);
+  await client.query(
+    `INSERT INTO nullifiers (nullifier, height, tx_hash, offer_matched)
+     VALUES ('twin-nullifier', 1, 'tx-30', TRUE) ON CONFLICT DO NOTHING`,
+  );
+  await client.query(
+    `INSERT INTO commitments (commitment, tx_hash, mt_index, height)
+     VALUES ('twin-commitment', 'tx-30', '1', 1) ON CONFLICT DO NOTHING`,
+  );
+
+  // MEASURED: one settlement marks BOTH consumed, exactly as on the unshielded
+  // side — the shielded classifier has no notion of which offer the coin was
+  // created for either.
+  expect(await statusOf(30)).toBe("consumed");
+  expect(await statusOf(31)).toBe("consumed");
+
+  await upsertPairStatsByOfferId.run({ offer_id: 30 }, client);
+  await upsertPairStatsByOfferId.run({ offer_id: 31 }, client);
+  const counted = (await client.query(
+    `SELECT trade_count FROM pair_stats WHERE base_color = $1 AND quote_color = $2`,
+    [GIVE4, WANT4],
+  )).rows[0]?.trade_count;
+
+  // MEASURED: the shielded side over-counts. supersededByDuplicatePredicate
+  // keys on offer_file_unshielded_outputs_history, which a pure shielded offer
+  // has no rows in, so the collapse is inert here and one settlement is counted
+  // twice. The shape is NOT immune — the shielded half is real and OWED.
+  //
+  // It is left unbuilt deliberately rather than guessed at: the shielded
+  // equivalent keys on the declared COMMITMENT, and commitments are globally
+  // unique per coin, so the predicate is a direct analogue — but it needs its
+  // own live evidence before shipping, and phase (c) produced none for the
+  // shielded layer. Tracked in the sub-plan under Questions.
+  expect(counted).toBe(2);
+});

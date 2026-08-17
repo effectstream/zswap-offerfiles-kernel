@@ -218,6 +218,54 @@ const unshieldedCancelledPredicate = (idExpr: string) => `(
 // Kept as a comment rather than deleted: it records WHY these predicates are
 // safe to leave layer-independent. If §2.4 were ever relaxed, this is the
 // weakness that would come back.
+/*
+ * One SETTLEMENT is one trade, even when two offers declared it.
+ *
+ * Byte-identical dedup (ruled 2026-08-12) means two offers may wrap ONE intent
+ * deliberately. They then share an input AND a declared payout identity, so a
+ * single on-chain create archives both, and the read-side classifier calls both
+ * consumed — correctly, the intent settled. Counting one row per archived offer
+ * therefore counted one settlement twice.
+ *
+ * Measured, not argued: on a live chain (2026-08-17) five settlement
+ * transactions left pair_stats.trade_count = 7, the surplus being exactly the
+ * two same-intent wrapper pairs.
+ *
+ * Sharing a payout identity IS the duplicate relation. Identities are
+ * per-intent, so disjoint offers can never collide here and only alternatives
+ * over one intent can. The earliest such offer counts; the rest defer to it.
+ *
+ * Ordered by (archived_at, offer_hash), NEVER by id: archived_at is the
+ * chain-derived L2 block time and offer_hash is the content address, so every
+ * replica picks the same winner. The SERIAL id is deployment-local and would
+ * diverge across instance A and B, which the determinism phase checks.
+ *
+ * This is deliberately NOT applied to the per-offer status: an offer whose
+ * intent settled IS consumed, and saying otherwise would make the API deny a
+ * settlement that happened. It applies to the surfaces that COUNT fills —
+ * trade history, the 24 h aggregate, and the pair_stats projection — which is
+ * what keeps the read side and the write side telling the same story.
+ *
+ * Block comments throughout: the IR compiler mangles a statement containing a
+ * "--" comment inside its WHERE clause, dropping conditions after it.
+ */
+const supersededByDuplicatePredicate = (idExpr: string) => `EXISTS (
+    SELECT 1
+      FROM offer_file_unshielded_outputs_history mine
+      JOIN offer_file_history mh ON mh.id = mine.offer_file_id
+      JOIN offer_file_unshielded_outputs_history other
+        ON  other.owner         = mine.owner
+        AND other.intent_hash   = mine.intent_hash
+        AND other.output_no     = mine.output_no
+        AND other.offer_file_id <> mine.offer_file_id
+      JOIN offer_file_history oh ON oh.id = other.offer_file_id
+     WHERE mine.offer_file_id = ${idExpr}
+       AND oh.archive_reason = 'CONSUMED'
+       AND (oh.archived_at < mh.archived_at
+            OR (oh.archived_at = mh.archived_at
+                AND oh.offer_hash < mh.offer_hash))
+)`;
+
 const cancelledPredicate = (idExpr: string) =>
   `(${shieldedCancelledPredicate(idExpr)} OR ${unshieldedCancelledPredicate(idExpr)})`;
 
@@ -506,6 +554,7 @@ export const getPairStats24h = prepared<IGetPairStats24hParams, IGetPairStats24h
                GROUP BY 1, 2) w ON w.offer_file_id = h.id
          WHERE h.archive_reason = 'CONSUMED'
            AND NOT ${cancelledPredicate("h.id")}
+           AND NOT ${supersededByDuplicatePredicate("h.id")}
            AND ${notABasketPredicate("h.id", "offer_file_tokens_history")}
            AND g.amount::numeric > 0
            AND w.amount::numeric > 0
@@ -563,6 +612,7 @@ export const getTradeHistory = prepared<IGetTradeHistoryParams, IGetTradeHistory
              GROUP BY 1, 2) w ON w.offer_file_id = h.id
        WHERE h.archive_reason = 'CONSUMED'
          AND NOT ${cancelledPredicate("h.id")}
+         AND NOT ${supersededByDuplicatePredicate("h.id")}
          AND ${notABasketPredicate("h.id", "offer_file_tokens_history")}
          AND ((g.token_color = :base! AND w.token_color = :quote!)
            OR (g.token_color = :quote! AND w.token_color = :base!))
@@ -675,6 +725,7 @@ export const upsertPairStatsByOfferId = prepared<IUpsertPairStatsByOfferIdParams
        WHERE g.offer_file_id = :offer_id!
          AND NOT ${cancelledPredicate("g.offer_file_id")}
          AND ${notABasketPredicate("g.offer_file_id", "offer_file_tokens_history")}
+         AND NOT ${supersededByDuplicatePredicate("g.offer_file_id")}
        ON CONFLICT (pair_key) DO UPDATE SET
            trade_count    = pair_stats.trade_count + 1,
            last_price     = EXCLUDED.last_price,

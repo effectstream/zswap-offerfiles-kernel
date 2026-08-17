@@ -465,3 +465,48 @@ test("t4: an alternative declaring an uncreated identity is cancelled", async ()
   expect(await statusOf(18)).toBe("cancelled");
   expect(await statusOf(19)).toBe("consumed");
 });
+
+// ── Phase (d): the write-side projection must count SETTLEMENTS, not rows ───
+//
+// Measured on a live chain (2026-08-17): after five settlement transactions,
+// pair_stats.trade_count read SEVEN. The difference was two `same-intent
+// wrapper` pairs — two byte-different offers wrapping ONE intent, which is
+// deliberate (byte-identical dedup, ruled 2026-08-12). They share an input AND
+// a declared payout identity, so one on-chain create archived both and the
+// projection, which increments once per archived offer, counted one settlement
+// twice.
+//
+// The read-side classifier is not wrong to call both `consumed` — the intent
+// did settle. The collapse has to happen in the projection.
+
+test("t5a: duplicate wrappers of one intent count as ONE trade", async () => {
+  const { upsertPairStatsByOfferId, getPairStats24h } = await import("@zswap-da/database");
+  const GIVE3 = "5".repeat(64);
+  const WANT3 = "6".repeat(64);
+  // Two offers, same declared payout identity, same input — alternatives.
+  const shared = [{ intentHash: "wrapper-intent", outputNo: 0 }];
+  await seedOffer(20, [{ outputNo: 0 }], {
+    give: GIVE3, want: WANT3, spendTag: "wrapper-input", payouts: shared,
+  });
+  await seedOffer(21, [{ outputNo: 0 }], {
+    give: GIVE3, want: WANT3, spendTag: "wrapper-input", payouts: shared,
+  });
+  await spent("wrapper-input", 0, TX(20));
+  await createdExact("wrapper-intent", 0, TX(20), "20", MAKER, WANT3);
+
+  // Both are consumed — the intent settled, and each offer declared it.
+  expect(await statusOf(20)).toBe("consumed");
+  expect(await statusOf(21)).toBe("consumed");
+
+  // The projection runs once per archived offer, as it does in api.ts.
+  await upsertPairStatsByOfferId.run({ offer_id: 20 }, client);
+  await upsertPairStatsByOfferId.run({ offer_id: 21 }, client);
+
+  const s = (await getPairStats24h.run({ base: GIVE3, quote: WANT3, cutoff: DAY_AGO }, client))[0];
+  const counted = (await client.query(
+    `SELECT trade_count FROM pair_stats WHERE base_color = $1 AND quote_color = $2`,
+    [GIVE3 < WANT3 ? GIVE3 : WANT3, GIVE3 < WANT3 ? WANT3 : GIVE3],
+  )).rows[0]!.trade_count;
+  expect(counted).toBe(1); // ONE settlement, not two offers
+  expect(s?.fills_24h ?? 0).toBe(1);
+});

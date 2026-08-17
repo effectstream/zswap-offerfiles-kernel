@@ -11,7 +11,8 @@ process.env["PGLITE_DATA_DIR"] ??= "memory://";
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
-const { migrationTable } = await import("@zswap-da/database");
+const { migrationTable, adjudicateOfferFill, findUnadjudicatedFills } =
+  await import("@zswap-da/database");
 const { realStats, realHistory } = await import("./trade-data.ts");
 
 const PORT = 54341;
@@ -51,6 +52,17 @@ async function seedFill(
             ($1, $4, $5, 'WANTING', 'SHIELDED', NOW() - ($6 || ' minutes')::interval)`,
     [id, colors[0], String(baseAmt), colors[1], String(quoteAmt), String(minutesAgo)],
   );
+  // Adjudicate here rather than at each call site: market queries read stored
+  // verdicts now, so a fixture that seeds without adjudicating is invisible to
+  // them, and "I forgot" would look exactly like "the query is broken".
+  await adjudicateAll();
+}
+
+/** The product's own repair sweep, run verbatim — fixtures never hand-write
+ *  verdict columns, so a test cannot agree with a broken adjudicator. */
+async function adjudicateAll() {
+  const owed = await findUnadjudicatedFills.run({ limit: 10_000 }, client);
+  for (const row of owed) await adjudicateOfferFill.run({ offer_id: row.id }, client);
 }
 
 beforeAll(async () => {

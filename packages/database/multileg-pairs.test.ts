@@ -35,7 +35,7 @@ process.env["PGLITE_DATA_DIR"] ??= "memory://";
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const { migrationTable, getPairStats24h, getTradeHistory, getPairs, getOpenLegs,
-        upsertPairStatsByOfferId, PAIRS_ORDER_BY } = await import("@zswap-da/database");
+        adjudicateOfferFill, findUnadjudicatedFills, PAIRS_ORDER_BY } = await import("@zswap-da/database");
 // The exact functions api.ts calls for /v1/chart/stats and /v1/chart/history.
 const { realStats, realHistory } = await import("../node/trade-data.ts");
 
@@ -77,6 +77,35 @@ const plainLegs: [string, string, string][] = [
   [E, "100", "GIVING"], [F, "250", "WANTING"],
 ];
 
+/** The product's own repair sweep, run verbatim. */
+async function adjudicateAll() {
+  const owed = await findUnadjudicatedFills.run({ limit: 10_000 }, client);
+  for (const row of owed) await adjudicateOfferFill.run({ offer_id: row.id }, client);
+}
+
+/**
+ * An archived fill for `pair` at an EXACT time — the ordering fixtures need
+ * identical last_traded_at across pairs, which is the tie the tiebreaker
+ * exists for. Seeded as a real offer and adjudicated, never by writing the
+ * verdict columns by hand: a hand-written verdict could disagree with the
+ * adjudicator and this file would not notice.
+ */
+async function seedFillAt(id: number, base: string, quote: string, at: Date) {
+  await client.query(
+    `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at,
+       ttl_seconds, archive_reason, archived_at, first_seen_at)
+     VALUES ($1, 1, 'blob', $2, $3, 3600, 'CONSUMED', $3, $3)`,
+    [id, id.toString(16).padStart(64, "0"), at],
+  );
+  await client.query(
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+     VALUES ($1, $2, '1', 'GIVING', 'SHIELDED', $4),
+            ($1, $3, '1', 'WANTING', 'SHIELDED', $4)`,
+    [id, base, quote, at],
+  );
+  await adjudicateAll();
+}
+
 async function seedArchived(id: number, hash: string, legs: [string, string, string][]) {
   await client.query(
     `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash, created_at,
@@ -113,8 +142,7 @@ await seedArchived(1, hash(0x11), basketLegs); // settled basket
 await seedOpen(2, hash(0x22), basketLegs); // open basket
 await seedArchived(3, hash(0x33), plainLegs); // settled control
 await seedOpen(4, hash(0x44), plainLegs); // open control
-await upsertPairStatsByOfferId.run({ offer_id: 1 }, client);
-await upsertPairStatsByOfferId.run({ offer_id: 3 }, client);
+await adjudicateAll();
 
 const BASKET_PAIRS: [string, string][] = [[A, C], [A, D], [B, C], [B, D], [A, B], [C, D]];
 
@@ -163,13 +191,19 @@ describe("§2.5 — baskets are accepted but excluded from market data", () => {
     expect(Number(s.volume_base_24h)).toBe(100);
   });
 
-  test("SURFACE 3 · pair_stats holds the control only, never a basket pair", async () => {
-    const rows = await client.query(`SELECT pair_key FROM pair_stats ORDER BY pair_key`);
-    const keys = rows.rows.map((r: any) => r.pair_key.split("|").map((c: string) => NAME[c] ?? c).join("|"));
-    console.log(`\n  pair_stats rows: ${JSON.stringify(keys)}`);
-    // The write-side projection is where this must be stopped. Filtering only
-    // at read time would leave permanent basket rows in pair_stats that every
-    // future reader has to remember to skip.
+  test("SURFACE 3 · the fill verdicts hold the control only, never a basket pair", async () => {
+    const rows = await client.query(
+      `SELECT DISTINCT base_color, quote_color FROM offer_file_history
+        WHERE settled AND base_color IS NOT NULL
+        ORDER BY base_color, quote_color`,
+    );
+    const keys = rows.rows.map((r: any) =>
+      [r.base_color, r.quote_color].map((c: string) => NAME[c] ?? c).join("|"));
+    console.log(`\n  priced fills: ${JSON.stringify(keys)}`);
+    // Adjudication is where this must be stopped. Filtering only at read time
+    // would leave a settled basket carrying colours that every future reader
+    // has to remember to skip; instead it is stored settled with NULL colours,
+    // which no aggregate can accidentally count.
     expect(keys).toEqual(["E|F"]);
   });
 
@@ -240,17 +274,13 @@ describe("§8 — /v1/pairs ordering contract", () => {
   test("liquidity leads, and identical (open_count, last_traded_at) ties break on pair_key", async () => {
     // Wipe the §2.5 fixture so ordering is read on a known set.
     await client.query(`DELETE FROM offer_file_tokens; DELETE FROM offer_file;
-                        DELETE FROM offer_file_tokens_history; DELETE FROM offer_file_history;
-                        DELETE FROM pair_stats`);
+                        DELETE FROM offer_file_tokens_history; DELETE FROM offer_file_history`);
 
     // Two pairs with the SAME trade time — the tie the tiebreaker exists for.
     const at = new Date(Date.now() - 60_000);
+    let seedId = 900;
     for (const [base, quote] of [[G, H], [I, J]] as [string, string][]) {
-      await client.query(
-        `INSERT INTO pair_stats (pair_key, base_color, quote_color, trade_count, last_price, last_traded_at)
-         VALUES ($1, $2, $3, 1, 1.0, $4)`,
-        [`${base}|${quote}`, base, quote, at],
-      );
+      await seedFillAt(seedId++, base, quote, at);
     }
     // G|H gets ONE open offer; I|J gets none. Under liquidity-first, G|H leads
     // despite the identical trade time — that is the whole ruling.
@@ -274,14 +304,10 @@ describe("§8 — /v1/pairs ordering contract", () => {
     // "sorted" would pass by luck on a small set. Inserting backwards means
     // ascending output can only come from an ORDER BY that names pair_key.
     await client.query(`DELETE FROM offer_file_tokens; DELETE FROM offer_file;
-                        DELETE FROM pair_stats`);
+                        DELETE FROM offer_file_tokens_history; DELETE FROM offer_file_history`);
     const tied = ["dd", "cc", "bb", "aa"].map((p) => p.repeat(32));
     for (const c of tied) {
-      await client.query(
-        `INSERT INTO pair_stats (pair_key, base_color, quote_color, trade_count, last_price, last_traded_at)
-         VALUES ($1, $2, $3, 1, 1.0, $4)`,
-        [`${c}|${c}`, c, c, at],
-      );
+      await seedFillAt(seedId++, c, c, at);
     }
     const keysOf = async () =>
       (await getPairs.run(undefined, client)).map((p: any) => p.pair_key.slice(0, 2));
@@ -293,8 +319,8 @@ describe("§8 — /v1/pairs ordering contract", () => {
   });
 
   // Stated honestly: the assertion above passes WITHOUT the pair_key
-  // tiebreaker. pair_key is pair_stats' primary key, so an index scan already
-  // returns it sorted and no fixture can distinguish "ordered by pair_key"
+  // tiebreaker: the aggregate groups by colour, so it already tends to come
+  // back sorted and no fixture can distinguish "ordered by pair_key"
   // from "came back sorted anyway". Verified, not assumed — the test was run
   // against the untiebroken query and stayed green.
   //

@@ -220,10 +220,61 @@ CREATE TABLE offer_file_history (
     -- deterministic) — NOT the wall clock of whichever node ran the archive.
     -- NOT NULL and no default on purpose: an INSERT that forgets this column
     -- must fail loudly rather than silently record node-local time. Served as
-    -- the trade timestamp (at_ms) by GetTradeHistory and copied into
-    -- pair_stats.last_traded_at.
-    archived_at TIMESTAMPTZ NOT NULL
+    -- the trade timestamp (at_ms) by GetTradeHistory and as the trade time on
+    -- every market surface.
+    archived_at TIMESTAMPTZ NOT NULL,
+
+    -- ── The FILL VERDICT: adjudicated once, then never recomputed ──────────
+    --
+    -- Fill-vs-cancel used to be decided at READ time, by running
+    -- cancelledPredicate over every archived offer on every market query. That
+    -- is ~8 correlated subqueries per offer, and it was re-deriving answers
+    -- that cannot change: every table the predicate reads (unshielded_spends,
+    -- unshielded_creates, nullifiers, commitments) is an append-only permanent
+    -- set, a UTXO is spent exactly once, and a declared identity can only be
+    -- created by the transaction carrying its intent. An offer archived last
+    -- week can never reclassify.
+    --
+    -- Measured cost of not exploiting that (PGlite, full derivation):
+    -- 0.9 s at 500 archived offers, 13.8 s at 2 000, 170 s at 10 000 — the
+    -- PER-OFFER cost itself climbing 2 ms -> 7 ms -> 17 ms. Neither the e2e
+    -- (60 offers) nor the unit fixtures are large enough to show it.
+    --
+    -- So the verdict is written ONCE, when the post-commit gate releases the
+    -- offer's lifecycle event — the first moment the evidence is guaranteed
+    -- visible, and where the pair_stats increment used to run. Market queries
+    -- then aggregate stored columns instead of re-adjudicating history.
+    --
+    -- NULL settled means NOT YET ADJUDICATED, and that is load-bearing: it is
+    -- how a write lost to a crash or a transient error is found again
+    -- (see findUnadjudicatedFills). An unadjudicated offer is absent from
+    -- market data until repaired, never silently counted as a cancel.
+    settled BOOLEAN,
+
+    -- Set only when this fill is a PRICE OBSERVATION: settled, exactly one
+    -- colour on each side (baskets are excluded by ruling 2026-08-10), and
+    -- both amounts non-zero (a zero leg has no defined price). A settled
+    -- basket is therefore `settled = true` with a NULL base_color — a real
+    -- state, not a gap. base/quote are assigned by LEAST/GREATEST of the hex
+    -- COLOUR, so price is always quote-per-base regardless of which side the
+    -- maker took.
+    base_color   TEXT,
+    quote_color  TEXT,
+    base_amount  NUMERIC,
+    quote_amount NUMERIC
 );
+
+-- Market aggregates scan fills by pair, newest first.
+CREATE INDEX idx_offer_file_history_pair_fills
+    ON offer_file_history (base_color, quote_color, archived_at DESC)
+    WHERE settled AND base_color IS NOT NULL;
+
+-- The repair sweep, and the reason a lost adjudication is recoverable rather
+-- than permanent drift: this finds exactly the offers still owed a verdict,
+-- so the sweep costs O(missing) instead of O(history).
+CREATE INDEX idx_offer_file_history_unadjudicated
+    ON offer_file_history (id)
+    WHERE archive_reason = 'CONSUMED' AND settled IS NULL;
 
 -- trade-data.ts HISTORY_SQL: WHERE archive_reason = 'CONSUMED' ORDER BY archived_at DESC LIMIT 120
 CREATE INDEX idx_offer_file_history_reason_archived_at
@@ -361,9 +412,12 @@ CREATE TABLE unshielded_creates (
     height      BIGINT  NOT NULL,
     PRIMARY KEY (owner, intent_hash, output_no)
 );
--- Phase (d) moves the fill-marker match to the exact primary key. Keep this
--- shape index until that read-path migration lands; Phase (b) only changes
--- what the offer declares and persists.
+-- Phase (d) LANDED: the fill-marker match is now the exact primary key above
+-- (owner, intent_hash, output_no), so branch 3 of unshieldedCancelledPredicate
+-- is a PK probe and needs no separate index. This shape index served the old
+-- (owner, token_type, value) grouping and no query reads it any more; it is
+-- kept only so a rollback of the read-path change does not fall off a cliff,
+-- and should be dropped once Phase (d) is merged.
 CREATE INDEX idx_unshielded_creates_marker
     ON unshielded_creates (tx_hash, owner, token_type, value);
 
@@ -404,6 +458,20 @@ CREATE TABLE offer_file_unshielded_outputs_history (
     count         INTEGER NOT NULL,
     PRIMARY KEY (offer_file_id, owner, intent_hash, output_no)
 );
+-- The DUPLICATE probe, and it must not lead with offer_file_id.
+--
+-- supersededByDuplicatePredicate asks "does ANOTHER offer declare this exact
+-- identity", i.e. it looks the table up by (owner, intent_hash, output_no)
+-- with no offer known in advance. The primary key above leads with
+-- offer_file_id and cannot serve that, so the join degrades to a scan — once
+-- per candidate row, which is quadratic in archived offers.
+--
+-- Measured on PGlite before this index existed: a full pair-stats derivation
+-- took 0.9 s at 500 archived offers, 13.8 s at 2 000, and 461 s at 10 000 —
+-- 4x the rows for 15x the time, then 5x for 33x. Neither the e2e (60 offers)
+-- nor the unit fixtures are large enough to show it.
+CREATE INDEX idx_offer_file_unshielded_outputs_history_identity
+    ON offer_file_unshielded_outputs_history (owner, intent_hash, output_no);
 
 -- cancelledPredicate correlates on offer_file_id five times per candidate row,
 -- and these history tables otherwise carry only a SERIAL primary key.
@@ -463,14 +531,18 @@ CREATE TABLE token_prices (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE pair_stats (
-    pair_key       TEXT PRIMARY KEY,   -- LEAST(a,b)||'|'||GREATEST(a,b)
-    base_color     TEXT NOT NULL,
-    quote_color    TEXT NOT NULL,
-    trade_count    INTEGER NOT NULL DEFAULT 0,
-    last_price     NUMERIC,
-    last_traded_at TIMESTAMPTZ
-);
+-- pair_stats is GONE, deliberately.
+--
+-- It was a write-side projection incremented once per archived offer, and it
+-- could not agree with the read side by construction: two implementations of
+-- "is this a fill" that drifted independently. Measured on a live chain — five
+-- settlement transactions left trade_count = 7, while the read-side aggregate
+-- over the same data disagreed with BOTH numbers. It also had no way back: the
+-- increment was not idempotent, so a lost event was permanent drift.
+--
+-- With the verdict stored on offer_file_history, the aggregate is a GROUP BY
+-- over indexed columns and needs no materialisation at all. One adjudication,
+-- one source, nothing to reconcile — see getPairs / getPairStats24h.
 
 -- ── Operations ────────────────────────────────────────────────────────────
 --

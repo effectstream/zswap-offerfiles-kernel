@@ -7,7 +7,7 @@ import { EventEmitter } from "node:events";
 // which runs inside the runtime's block transaction (`BEGIN` … `COMMIT` in
 // process-blocks.ts). A synchronous `eventBus.emit` there published state that
 // was not yet committed — and the consumers act on a DIFFERENT connection:
-// api.ts's pair-stats listener runs `upsertPairStatsByOfferId` on its own pool,
+// api.ts's fill listener runs `adjudicateOfferFill` on its own pool,
 // and the SSE route forwards to clients immediately. So a consumer could read
 // through its own connection, see nothing (the archive and same-block create
 // rows are still invisible), write nothing, and never retry — while SSE

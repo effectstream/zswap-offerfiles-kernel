@@ -6,7 +6,7 @@
 // still owed. This is that test.
 //
 // What it proves. Every emit site lives inside an STM transition, i.e. inside
-// the runtime's block transaction. The pair_stats projection runs in an api.ts
+// the runtime's block transaction. Fill adjudication runs in an api.ts
 // listener on a SEPARATE pool. If an event were published before COMMIT, that
 // listener would read through its own connection, see no archive, write
 // nothing, and never retry — while SSE had already announced a lifecycle
@@ -15,9 +15,12 @@
 // second connection can neither see the archive nor be told about it.
 //
 // What it does NOT prove, stated rather than implied: the gate is an
-// IN-PROCESS buffer. It orders publication correctly but does not make it
-// durable — a crash between COMMIT and flush drops the projection update with
-// nothing recording that it was owed. That is the outbox work, still open.
+// IN-PROCESS buffer, so it orders publication correctly but does not make it
+// durable — a crash between COMMIT and flush still drops the write. That gap
+// is closed elsewhere and by a different means than an outbox: the write is
+// now a VERDICT, so a dropped one leaves `settled IS NULL` and the repair
+// sweep in api.ts finds it. Ordering is this test's job; recovery is the
+// sweep's.
 //
 // HOW TO RUN IT: `bun run test:held-open`. The file is deliberately named
 // `.pgtest.ts`, not `.test.ts`, so `bun test packages` does NOT pick it up.
@@ -75,7 +78,7 @@ async function docker(...args: string[]): Promise<{ ok: boolean; out: string }> 
 
 let dockerAvailable = false;
 let container = "";
-const { migrationTable, upsertPairStatsByOfferId } = await import("@zswap-da/database");
+const { migrationTable, adjudicateOfferFill } = await import("@zswap-da/database");
 const {
   eventBus,
   emitAppEvent,
@@ -246,11 +249,11 @@ test("nothing is published, and nothing is projected, while the block transactio
   );
   expect(archivedDuring.rowCount).toBe(0);
 
-  // Had the event escaped, this is the projection the listener would have run.
-  // It reads nothing and writes nothing — the silent, unretried loss.
-  await upsertPairStatsByOfferId.run({ offer_id: OFFER_ID }, reader);
-  const statsDuring = await reader.query(`SELECT COUNT(*)::int AS n FROM pair_stats`);
-  expect(statsDuring.rows[0].n).toBe(0);
+  // Had the event escaped, this is the adjudication the listener would have
+  // run. From the reader's connection the archived row does not exist, so it
+  // matches nothing and writes nothing — the silent loss the gate prevents.
+  const during = await adjudicateOfferFill.run({ offer_id: OFFER_ID }, reader);
+  expect(during.length).toBe(0);
 
   // ── COMMIT, then the gate observes the height and releases ───────────────
   await writer.query("COMMIT");
@@ -265,11 +268,16 @@ test("nothing is published, and nothing is projected, while the block transactio
   expect(r.seen[0].offerHash).toBe(OFFER_HASH);
   expect(pendingEventCount()).toBe(0);
 
-  // Now the same projection, run at the moment the event actually arrives,
-  // sees the committed archive and records the trade.
-  await upsertPairStatsByOfferId.run({ offer_id: OFFER_ID }, reader);
-  const statsAfter = await reader.query(`SELECT trade_count FROM pair_stats`);
-  expect(statsAfter.rows[0].trade_count).toBe(1);
+  // Now the same adjudication, run at the moment the event actually arrives,
+  // sees the committed archive and records the verdict.
+  const after = await adjudicateOfferFill.run({ offer_id: OFFER_ID }, reader);
+  expect(after.length).toBe(1);
+  expect(after[0]!.settled).toBe(true);
+  const counted = await reader.query(
+    `SELECT COUNT(*)::int AS n FROM offer_file_history
+      WHERE settled AND base_color IS NOT NULL`,
+  );
+  expect(counted.rows[0].n).toBe(1);
 
   r.stop();
 }, 120_000);

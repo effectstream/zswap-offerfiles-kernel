@@ -31,6 +31,8 @@ const {
   getPairStats24h,
   insertOfferFileUnshieldedOutput,
   archiveOfferByIdTtlWithHash,
+  adjudicateOfferFill,
+  findUnadjudicatedFills,
 } =
   await import("@zswap-da/database");
 
@@ -150,6 +152,13 @@ const created = (tag: string, txHash: string, value: string, owner = MAKER, type
 const statusOf = async (id: number) =>
   (await getOfferStatusByHash.run({ offer_hash: hashOf(id) }, client))[0]!.status;
 
+/** The product's own repair sweep, run verbatim — fixtures never hand-write
+ *  verdict columns, so a test cannot agree with a broken adjudicator. */
+async function adjudicateAll() {
+  const owed = await findUnadjudicatedFills.run({ limit: 10_000 }, client);
+  for (const row of owed) await adjudicateOfferFill.run({ offer_id: row.id }, client);
+}
+
 beforeAll(async () => {
   handle = await startPglite(PORT);
   client = new pg.Client({ host: "127.0.0.1", port: PORT, user: "postgres", database: "postgres" });
@@ -254,6 +263,8 @@ beforeAll(async () => {
   });
   await spent("shared-input-b", 0, TX(18));
   await createdExact("payout-intent-19", 0, TX(18), "20", MAKER, WANT2);
+
+  await adjudicateAll();
 });
 
 afterAll(async () => {
@@ -480,7 +491,7 @@ test("t4: an alternative declaring an uncreated identity is cancelled", async ()
 // did settle. The collapse has to happen in the projection.
 
 test("t5a: duplicate wrappers of one intent count as ONE trade", async () => {
-  const { upsertPairStatsByOfferId, getPairStats24h } = await import("@zswap-da/database");
+  const { getPairStats24h } = await import("@zswap-da/database");
   const GIVE3 = "5".repeat(64);
   const WANT3 = "6".repeat(64);
   // Two offers, same declared payout identity, same input — alternatives.
@@ -499,12 +510,12 @@ test("t5a: duplicate wrappers of one intent count as ONE trade", async () => {
   expect(await statusOf(21)).toBe("consumed");
 
   // The projection runs once per archived offer, as it does in api.ts.
-  await upsertPairStatsByOfferId.run({ offer_id: 20 }, client);
-  await upsertPairStatsByOfferId.run({ offer_id: 21 }, client);
+  await adjudicateAll();
 
   const s = (await getPairStats24h.run({ base: GIVE3, quote: WANT3, cutoff: DAY_AGO }, client))[0];
   const counted = (await client.query(
-    `SELECT trade_count FROM pair_stats WHERE base_color = $1 AND quote_color = $2`,
+    `SELECT COUNT(*)::int AS trade_count FROM offer_file_history
+      WHERE settled AND base_color = $1 AND quote_color = $2`,
     [GIVE3 < WANT3 ? GIVE3 : WANT3, GIVE3 < WANT3 ? WANT3 : GIVE3],
   )).rows[0]!.trade_count;
   expect(counted).toBe(1); // ONE settlement, not two offers
@@ -523,7 +534,6 @@ test("t5a: duplicate wrappers of one intent count as ONE trade", async () => {
 // This case asserts what was measured, so it will fail if the answer changes.
 
 test("t6: shielded same-input duplicates — measured behaviour", async () => {
-  const { upsertPairStatsByOfferId } = await import("@zswap-da/database");
   const GIVE4 = "7".repeat(64);
   const WANT4 = "8".repeat(64);
   const seedShielded = async (id: number) => {
@@ -569,10 +579,10 @@ test("t6: shielded same-input duplicates — measured behaviour", async () => {
   expect(await statusOf(30)).toBe("consumed");
   expect(await statusOf(31)).toBe("consumed");
 
-  await upsertPairStatsByOfferId.run({ offer_id: 30 }, client);
-  await upsertPairStatsByOfferId.run({ offer_id: 31 }, client);
+  await adjudicateAll();
   const counted = (await client.query(
-    `SELECT trade_count FROM pair_stats WHERE base_color = $1 AND quote_color = $2`,
+    `SELECT COUNT(*)::int AS trade_count FROM offer_file_history
+      WHERE settled AND base_color = $1 AND quote_color = $2`,
     [GIVE4, WANT4],
   )).rows[0]?.trade_count;
 

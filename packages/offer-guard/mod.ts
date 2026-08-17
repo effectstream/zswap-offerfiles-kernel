@@ -10,8 +10,9 @@
 //   - offerHashFromBlob(): the content address (MIP-0006 offerId) — hex
 //     sha256 of the raw MIP-0005 transaction bytes, never the bech32m string
 //   - the ordered ladder (cheap → indexed → crypto LAST), as `guardOffer()`
-//     for async callers (API submit route, batcher-side tools) with
-//     pluggable dedup/liveness checks
+//     for async tools/services with pluggable dedup/liveness checks. The node
+//     API and STM use the same validator-owned liveness descriptors through
+//     their DB adapters rather than copy this callback wrapper.
 //   - DedupStore: a bounded in-memory published-hash set for the batcher,
 //     which has no database
 //
@@ -22,6 +23,7 @@ import { createHash } from "node:crypto";
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import {
+  evaluateOfferLiveness,
   getBlankRefState,
   validateZswapOffer,
   verifyOfferCrypto,
@@ -176,45 +178,30 @@ export async function guardOffer(
     }
   }
 
-  if (opts.isNullifierSpent) {
-    for (const nullifier of validation.nullifiers ?? []) {
-      if (await opts.isNullifierSpent(nullifier)) {
-        return {
-          ok: false,
-          code: "NULLIFIER_SPENT",
-          reason: `nullifier already spent: ${nullifier}`,
-          offerHash,
-          validation,
-        };
-      }
+  const liveness = await evaluateOfferLiveness(validation, async (descriptor) => {
+    switch (descriptor.kind) {
+      case "nullifier":
+        return opts.isNullifierSpent
+          ? !(await opts.isNullifierSpent(descriptor.nullifier))
+          : undefined;
+      case "unshielded":
+        return opts.isUnshieldedLive
+          ? await opts.isUnshieldedLive(descriptor.ref)
+          : undefined;
+      case "root":
+        return opts.isKnownRoot
+          ? await opts.isKnownRoot(descriptor.root)
+          : undefined;
     }
-  }
-  if (opts.isUnshieldedLive) {
-    for (const ref of validation.unshieldedSpends ?? []) {
-      if (!(await opts.isUnshieldedLive(ref))) {
-        return {
-          ok: false,
-          code: "UTXO_NOT_LIVE",
-          reason:
-            `unshielded UTXO not live (spent or never created): ${ref.owner}/${ref.intentHash}/${ref.outputNo}`,
-          offerHash,
-          validation,
-        };
-      }
-    }
-  }
-  if (opts.isKnownRoot) {
-    for (const root of validation.inputRoots ?? []) {
-      if (!(await opts.isKnownRoot(root))) {
-        return {
-          ok: false,
-          code: "ROOT_UNKNOWN",
-          reason: `input merkle root not a known recent chain root: ${root}`,
-          offerHash,
-          validation,
-        };
-      }
-    }
+  });
+  if (!liveness.ok) {
+    return {
+      ok: false,
+      code: liveness.code,
+      reason: liveness.reason,
+      offerHash,
+      validation,
+    };
   }
 
   const crypto = verifyOfferCrypto(validation.tx!, {

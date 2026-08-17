@@ -12,6 +12,10 @@ import {
 } from "./derive.ts";
 import { buildStrictness } from "./refstate.ts";
 import { extractOfferInputRoots, RootExtractError } from "./extract-root.ts";
+import {
+  offerLivenessFailure,
+  orderedOfferLivenessDescriptors,
+} from "./liveness.ts";
 import type {
   OfferRejectCode,
   OfferValidation,
@@ -250,51 +254,62 @@ export function validateZswapOfferBytes(
   derived = { ...derived, inputRoots };
 
   // ── 6. Liveness (optional synchronous checks) ──
+  const livenessDescriptors = orderedOfferLivenessDescriptors({
+    nullifiers,
+    unshieldedSpends,
+    inputRoots,
+  });
   if (opts.isNullifierSpent) {
-    for (const n of nullifiers) {
-      if (opts.isNullifierSpent(n)) {
+    for (const descriptor of livenessDescriptors) {
+      if (descriptor.kind !== "nullifier") continue;
+      if (opts.isNullifierSpent(descriptor.nullifier)) {
+        const failure = offerLivenessFailure(descriptor);
         return {
           ok: false,
-          code: "NULLIFIER_SPENT",
-          reason: `nullifier already spent: ${n}`,
+          code: failure.code,
+          reason: failure.reason,
           ...derived,
         };
       }
     }
   }
   if (opts.isUnshieldedSpent) {
-    for (const ref of unshieldedSpends) {
-      if (opts.isUnshieldedSpent(ref)) {
+    for (const descriptor of livenessDescriptors) {
+      if (descriptor.kind !== "unshielded") continue;
+      if (opts.isUnshieldedSpent(descriptor.ref)) {
+        const failure = offerLivenessFailure(descriptor, "spent");
         return {
           ok: false,
-          code: "UTXO_SPENT",
-          reason:
-            `unshielded UTXO already spent: ${ref.owner}/${ref.intentHash}/${ref.outputNo}`,
+          code: failure.code,
+          reason: failure.reason,
           ...derived,
         };
       }
     }
   }
   if (opts.isUnshieldedCreated) {
-    for (const ref of unshieldedSpends) {
-      if (!opts.isUnshieldedCreated(ref)) {
+    for (const descriptor of livenessDescriptors) {
+      if (descriptor.kind !== "unshielded") continue;
+      if (!opts.isUnshieldedCreated(descriptor.ref)) {
+        const failure = offerLivenessFailure(descriptor, "unknown");
         return {
           ok: false,
-          code: "UTXO_UNKNOWN",
-          reason:
-            `unshielded UTXO never created on chain: ${ref.owner}/${ref.intentHash}/${ref.outputNo}`,
+          code: failure.code,
+          reason: failure.reason,
           ...derived,
         };
       }
     }
   }
   if (opts.isKnownRoot) {
-    for (const root of inputRoots) {
-      if (!opts.isKnownRoot(root)) {
+    for (const descriptor of livenessDescriptors) {
+      if (descriptor.kind !== "root") continue;
+      if (!opts.isKnownRoot(descriptor.root)) {
+        const failure = offerLivenessFailure(descriptor);
         return {
           ok: false,
-          code: "ROOT_UNKNOWN",
-          reason: `input merkle root not a known recent chain root: ${root}`,
+          code: failure.code,
+          reason: failure.reason,
           ...derived,
         };
       }

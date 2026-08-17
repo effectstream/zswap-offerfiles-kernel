@@ -114,10 +114,27 @@ export const isSingleLeg = (offer: BookOffer): boolean =>
 export interface ResyncDiff {
   added: string[];
   removed: string[];
+  /** A content-addressed hash should be immutable. If a snapshot changes its
+   * indexed projection anyway, surface that as a trust-boundary mutation so
+   * cached validation evidence is revoked and rebuilt. */
+  updated: string[];
 }
 
-export class Book {
-  readonly #byHash = new Map<string, BookOffer>();
+const sameOfferProjection = (left: BookOffer, right: BookOffer): boolean => {
+  const legs = (values: TokenLeg[]): string =>
+    values.map((leg) => `${leg.kind}:${leg.token}:${leg.amount}`).sort().join("|");
+  const nullifiers = (values: string[]): string => [...values].sort().join("|");
+  return left.offerHash.toLowerCase() === right.offerHash.toLowerCase() &&
+    legs(left.gives) === legs(right.gives) &&
+    legs(left.wants) === legs(right.wants) &&
+    left.expiresAt === right.expiresAt &&
+    left.firstSeenAt === right.firstSeenAt &&
+    nullifiers(left.inputNullifiers) === nullifiers(right.inputNullifiers) &&
+    (left.blob === undefined || right.blob === undefined || left.blob === right.blob);
+};
+
+export class Book<T extends BookOffer = BookOffer> {
+  readonly #byHash = new Map<string, T>();
   readonly #hashesByNullifier = new Map<string, Set<string>>();
   readonly #byPair = new Map<string, Set<string>>();
 
@@ -125,11 +142,11 @@ export class Book {
     return this.#byHash.size;
   }
 
-  get(offerHash: string): BookOffer | undefined {
+  get(offerHash: string): T | undefined {
     return this.#byHash.get(offerHash.toLowerCase());
   }
 
-  all(): BookOffer[] {
+  all(): T[] {
     return [...this.#byHash.values()];
   }
 
@@ -139,14 +156,14 @@ export class Book {
 
   /** Insert or replace. Replacing re-indexes, so a detail fetch that adds legs
    *  or a blob to a list-sourced row cannot leave a stale index entry. */
-  upsert(offer: BookOffer): void {
+  upsert(offer: T): void {
     const hash = offer.offerHash.toLowerCase();
     if (this.#byHash.has(hash)) this.#unindex(hash);
-    const stored: BookOffer = {
+    const stored = {
       ...offer,
       offerHash: hash,
       inputNullifiers: [...new Set(offer.inputNullifiers.map((nullifier) => nullifier.toLowerCase()))],
-    };
+    } as T;
     this.#byHash.set(hash, stored);
     for (const nullifier of stored.inputNullifiers) {
       let bucket = this.#hashesByNullifier.get(nullifier);
@@ -204,7 +221,7 @@ export class Book {
   }
 
   /** Offers giving `giveToken` and wanting `wantToken`, single-leg only. */
-  byPair(giveToken: string, wantToken: string): BookOffer[] {
+  byPair(giveToken: string, wantToken: string): T[] {
     const bucket = this.#byPair.get(pairKey(giveToken.toLowerCase(), wantToken.toLowerCase()));
     if (!bucket) return [];
     return [...bucket].map((h) => this.#byHash.get(h)!).filter(Boolean);
@@ -238,18 +255,24 @@ export class Book {
   /** Replace the book with `offers`, reporting what changed. Blobs already
    *  cached are carried over — the list endpoint does not serve them, and a
    *  blob is immutable for a given hash. */
-  resync(offers: BookOffer[]): ResyncDiff {
-    const next = new Map<string, BookOffer>();
+  resync(offers: T[]): ResyncDiff {
+    const next = new Map<string, T>();
     for (const offer of offers) next.set(offer.offerHash.toLowerCase(), offer);
 
     const removed = this.hashes().filter((h) => !next.has(h));
     const added = [...next.keys()].filter((h) => !this.#byHash.has(h));
+    const updated = [...next].flatMap(([hash, offer]) => {
+      const existing = this.#byHash.get(hash);
+      return existing && !sameOfferProjection(existing, offer) ? [hash] : [];
+    });
 
     for (const hash of removed) this.remove(hash);
     for (const [hash, offer] of next) {
       const cachedBlob = this.#byHash.get(hash)?.blob;
-      this.upsert(cachedBlob && !offer.blob ? { ...offer, blob: cachedBlob } : offer);
+      this.upsert(
+        (cachedBlob && !offer.blob ? { ...offer, blob: cachedBlob } : offer) as T,
+      );
     }
-    return { added, removed };
+    return { added, removed, updated };
   }
 }

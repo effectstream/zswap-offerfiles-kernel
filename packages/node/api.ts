@@ -4,9 +4,6 @@ import rateLimit from "@fastify/rate-limit";
 import {
   getKnownTokens,
   insertKnownToken,
-  isNullifierSpent,
-  isUnshieldedCreated,
-  isKnownRootLive,
   getLatestEffectstreamBlock,
   getTokenPrice,
   upsertTokenPrice,
@@ -27,6 +24,7 @@ import {
   apiRateLimitAllowList,
   apiRateLimitMax,
   apiSseMaxConnections,
+  authenticateSolverLiquidityReadToken,
   authenticateSolverLevelsToken,
   isPostCommitEventBridgeEnabled,
   isSolverLevelsQuoteEnabled,
@@ -36,6 +34,7 @@ import {
   ROOT_WINDOW_SECONDS,
   midnightContract,
   solverLevelsCredentials,
+  solverLiquidityReadAuthSecret,
 } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
@@ -49,6 +48,8 @@ import {
 import { quoteWithPrices, priceOf } from "./market-mock.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
+import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
+import { registerOfferValidationRoute } from "./offer-validation.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
@@ -58,13 +59,129 @@ import {
   solverLevels,
   validatePair,
   type PriceLevels,
+  type SolverLevelsRegistry,
 } from "./solver-levels.ts";
+import {
+  isSolverLiquidityEnvelope,
+  isSolverLiquidityId,
+  MAX_SOLVER_LIQUIDITY_RESPONSE_BYTES,
+} from "@zswap-da/solver-core/liquidity-contract";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
 
 // MIP-0006 TokenLeg: { token, amount, type } — camelCase, `type` is the
 // value layer. Our DB column is `kind`; the wire name is the MIP's.
 type TokenLegDto = { token: string; amount: string; type: string };
+
+type SolverLiquiditySource = Pick<SolverLevelsRegistry, "liquidityEnvelope">;
+
+/** Register the dedicated read-only grouped-liquidity source. The bearer is
+ * deliberately separate from every publication credential, and authentication
+ * runs before body parsing or any query/registry work. */
+export function registerSolverLiquidityRoute(
+  server: any,
+  source: SolverLiquiditySource = solverLevels,
+  now: () => number = () => Date.now(),
+): void {
+  server.get(
+    "/v1/solver/liquidity",
+    {
+      bodyLimit: 1_024,
+      onRequest: (request: any, reply: any, done: () => void) => {
+        reply.header("Cache-Control", "no-store");
+        let expectedSecret: string;
+        try {
+          expectedSecret = solverLiquidityReadAuthSecret();
+        } catch (error) {
+          console.error("[SOLVER_LIQUIDITY] Invalid authentication configuration", error);
+          reply.code(503).send({
+            error: "LIQUIDITY_DISABLED",
+            reason: "solver liquidity reading is unavailable",
+          });
+          return;
+        }
+
+        const authorization = String(request.headers?.authorization ?? "");
+        const match = /^Bearer ([^\s]+)$/.exec(authorization);
+        if (
+          match === null ||
+          !authenticateSolverLiquidityReadToken(match[1], expectedSecret)
+        ) {
+          reply.header("WWW-Authenticate", "Bearer");
+          reply.code(401).send({
+            error: "UNAUTHORIZED",
+            reason: "valid solver liquidity read bearer token required",
+          });
+          return;
+        }
+        done();
+      },
+      preParsing: (
+        request: any,
+        reply: any,
+        payload: any,
+        done: (error: Error | null, stream?: any) => void,
+      ) => {
+        const contentLength = request.headers?.["content-length"];
+        const transferEncoding = request.headers?.["transfer-encoding"];
+        if (
+          (contentLength !== undefined && String(contentLength) !== "0") ||
+          transferEncoding !== undefined
+        ) {
+          reply.code(400).send({
+            error: "VALIDATION",
+            reason: "solver liquidity requests must not include a body",
+          });
+          return;
+        }
+        done(null, payload);
+      },
+    },
+    async (request: any, reply: any) => {
+      if (request.body !== undefined) {
+        return reply.code(400).send({
+          error: "VALIDATION",
+          reason: "solver liquidity requests must not include a body",
+        });
+      }
+      const query = request?.query;
+      const keys = typeof query === "object" && query !== null && !Array.isArray(query)
+        ? Object.keys(query)
+        : [];
+      const solverId = keys.length === 1 && keys[0] === "solver_id"
+        ? (query as Record<string, unknown>).solver_id
+        : undefined;
+      if (!isSolverLiquidityId(solverId)) {
+        return reply.code(400).send({
+          error: "VALIDATION",
+          reason: "expected exactly one solver_id using the canonical solver identity grammar",
+        });
+      }
+
+      let serialized: string;
+      try {
+        const observedAt = now();
+        const envelope = source.liquidityEnvelope(solverId, observedAt);
+        serialized = JSON.stringify(envelope);
+        if (Buffer.byteLength(serialized, "utf8") > MAX_SOLVER_LIQUIDITY_RESPONSE_BYTES) {
+          throw new RangeError(
+            `solver liquidity response exceeds ${MAX_SOLVER_LIQUIDITY_RESPONSE_BYTES} bytes`,
+          );
+        }
+        if (!isSolverLiquidityEnvelope(envelope)) {
+          throw new TypeError("solver liquidity registry returned a noncanonical envelope");
+        }
+      } catch (error) {
+        console.error("[SOLVER_LIQUIDITY] Failed to produce grouped snapshot", error);
+        return reply.code(503).send({
+          error: "LIQUIDITY_UNAVAILABLE",
+          reason: "solver liquidity snapshot is unavailable",
+        });
+      }
+      return reply.type("application/json").send(serialized);
+    },
+  );
+}
 
 /** Write one SSE frame without retaining an unbounded slow-client buffer. */
 export function writeSseChunk(
@@ -127,6 +244,20 @@ export const apiRouter: StartConfigApiRouter = async function (
     }
     const status = Number(error?.statusCode);
     if (Number.isFinite(status) && status >= 400 && status < 500) {
+      const isOfferValidation = String(request?.url ?? "").split("?", 1)[0] ===
+        "/v1/offers/validate";
+      if (status === 413 && isOfferValidation) {
+        return reply.code(413).send({
+          error: "TOO_LARGE",
+          reason: "request body exceeds the configured transport limit",
+        });
+      }
+      if (status === 415 && isOfferValidation) {
+        return reply.code(400).send({
+          error: "VALIDATION",
+          reason: "offer validation requests require application/json",
+        });
+      }
       return reply
         .code(status)
         .send({ error: error?.error ?? "BAD_REQUEST", reason: error?.message });
@@ -144,6 +275,15 @@ export const apiRouter: StartConfigApiRouter = async function (
 
   // GET /docs — interactive API playground (upload + accept/settle debugger).
   registerDocsRoutes(server);
+
+  // Authenticated, side-effect-free validate-for-use boundary. Registration
+  // happens after the router-wide limiter and before the submission route; it
+  // shares validation/liveness primitives but never calls the batcher.
+  registerOfferValidationRoute(server, dbConn);
+
+  // Dedicated read-authenticated grouped declaration for the data-only relay.
+  // This does not change the existing flattened levels or quote routes.
+  registerSolverLiquidityRoute(server);
 
   // Update pair_stats after each CONSUMED archive. The state machine fires
   // offer_consumed after the archive transaction commits; this listener keeps
@@ -873,52 +1013,33 @@ export const apiRouter: StartConfigApiRouter = async function (
         });
       }
 
-      // Liveness: never pay a Celestia fee for an offer whose coins are already
-      // spent on chain (it can never settle). The spent_* sets are populated by
-      // the node's midnight-* sync handlers.
-      for (const nullifier of validation.nullifiers ?? []) {
-        const spent = await isNullifierSpent.run({ nullifier }, dbConn);
-        if (spent.length > 0) {
-          return reply.code(400).send({
-            error: "NULLIFIER_SPENT",
-            reason: `nullifier already spent: ${nullifier}`,
-          });
-        }
-      }
-      // Liveness: unshielded UTXO must exist in created_unshielded (absent = spent or never created).
-      for (const s of validation.unshieldedSpends ?? []) {
-        const live = await isUnshieldedCreated.run(
-          { owner: s.owner, intent_hash: s.intentHash, output_no: s.outputNo },
-          dbConn,
-        );
-        if (live.length === 0) {
-          return reply.code(400).send({
-            error: "UTXO_NOT_LIVE",
-            reason:
-              `unshielded UTXO not live (spent or never created): ${s.owner}/${s.intentHash}/${s.outputNo}`,
-          });
-        }
-      }
-      // Root-known: each shielded input must prove against a known recent
-      // root, with the window enforced at read time. The cutoff is derived
-      // from the latest PROCESSED block's timestamp — the same L2 clock that
-      // stamps known_roots.last_seen_ms — never from the wall clock, and never
-      // from MAX(last_seen_ms) (which stops advancing exactly when the window
-      // needs to close). isKnownRootLive keeps the newest root valid
-      // regardless of age, mirroring the ledger's past_roots re-insertion.
-      const latestBlock = (await getLatestEffectstreamBlock.run(undefined, dbConn))[0];
-      const chainNowMs = latestBlock ? Number(latestBlock.ms_timestamp) : 0;
-      for (const root of validation.inputRoots ?? []) {
-        const known = await isKnownRootLive.run(
-          { root, cutoff_ms: chainNowMs - ROOT_WINDOW_SECONDS * 1000 },
-          dbConn,
-        );
-        if (known.length === 0) {
+      // Indexed liveness uses the same ordered descriptors and normalized
+      // reasons as STM ingestion and the future validate-for-use route. The
+      // root clock remains API-specific: latest PROCESSED Effectstream block,
+      // never wall time or MAX(last_seen_ms). It is resolved lazily only after
+      // nullifier and UTXO probes pass.
+      const liveness = await evaluateOfferLivenessFromDatabase(
+        validation,
+        dbConn,
+        {
+          getRootCutoffMs: async () => {
+            const latestBlock = (await getLatestEffectstreamBlock.run(
+              undefined,
+              dbConn,
+            ))[0];
+            const chainNowMs = latestBlock ? Number(latestBlock.ms_timestamp) : 0;
+            return chainNowMs - ROOT_WINDOW_SECONDS * 1000;
+          },
+        },
+      );
+      if (!liveness.ok) {
+        if (liveness.descriptor.kind === "root") {
+          const root = liveness.descriptor.root;
           const tip = await getSyncStatus(dbConn).catch(() => null as any);
           const rootsMeta = tip?.sets?.known_roots;
           return reply.code(400).send({
-            error: "ROOT_UNKNOWN",
-            reason: `input merkle root not a known recent chain root: ${root}`,
+            error: liveness.code,
+            reason: liveness.reason,
             hint:
               "Lace proved against a Merkle root this node has never synced. " +
               "Usually Lace's indexer URI differs from this node even when networkId matches " +
@@ -936,6 +1057,10 @@ export const apiRouter: StartConfigApiRouter = async function (
             },
           });
         }
+        return reply.code(400).send({
+          error: liveness.code,
+          reason: liveness.reason,
+        });
       }
 
       // Cryptographic verification — last and mandatory. Everything above read

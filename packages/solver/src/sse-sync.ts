@@ -9,9 +9,13 @@
 // page-through, and a periodic one runs regardless.
 
 import {
+  ApiRequestError,
+  getBackendSyncHealth,
   getZswapByHash,
   getZswapsPage,
   openSseStream,
+  reportsBackendProjectionCurrent,
+  type CurrentBackendSyncHealth,
   type SseEvent,
   type SseStreamHandle,
 } from "@zswap-da/solver-core/api-client";
@@ -25,10 +29,41 @@ export type BookChange =
 export interface SyncDependencies {
   getZswapsPage: typeof getZswapsPage;
   getZswapByHash: typeof getZswapByHash;
+  getBackendSyncHealth: typeof getBackendSyncHealth;
   openSseStream: typeof openSseStream;
 }
 
-const DEFAULT_DEPENDENCIES: SyncDependencies = { getZswapsPage, getZswapByHash, openSseStream };
+const DEFAULT_DEPENDENCIES: SyncDependencies = {
+  getZswapsPage,
+  getZswapByHash,
+  getBackendSyncHealth,
+  openSseStream,
+};
+
+export type BackendCurrentnessBlockedReason =
+  | "initializing"
+  | "stream-disconnected"
+  | "stream-generation-changed"
+  | "backend-syncing"
+  | "backend-error"
+  | "health-unavailable"
+  | "health-malformed"
+  | "health-stale"
+  | "generation-superseded"
+  | "stopped";
+
+export type BackendCurrentnessState =
+  | {
+      kind: "blocked";
+      reason: BackendCurrentnessBlockedReason;
+      streamGeneration: number;
+    }
+  | {
+      kind: "current";
+      streamGeneration: number;
+      backendBlockL2: string;
+      healthTs: number;
+    };
 
 export interface SyncOptions {
   api?: string;
@@ -54,6 +89,16 @@ export interface SyncOptions {
    * gap. Recoverable failures may retry until this deadline; afterward the
    * synchronization owner closes and readiness rejects fail-closed. */
   readinessTimeoutMs?: number;
+  /** Cadence for the bounded health probe. A blocked solver first probes health
+   * and only performs a full recovery snapshot after a current response. */
+  backendHealthCheckIntervalMs?: number;
+  /** Maximum accepted absolute server timestamp skew/age and maximum local
+   * lifetime of one successful health observation. */
+  backendHealthMaxAgeMs?: number;
+  /** Absolute fetch-plus-body deadline for one health response. */
+  backendHealthRequestTimeoutMs?: number;
+  /** Fires only when the usable-currentness boolean changes. */
+  onCurrentnessChange?: (state: BackendCurrentnessState) => void;
 }
 
 export interface SyncHandle {
@@ -61,6 +106,10 @@ export interface SyncHandle {
   /** Resolves once the first full page-through and every SSE event buffered
    * during it have been applied. Initial snapshot failures are recoverable. */
   ready: Promise<void>;
+  /** True only after one complete snapshot/buffered gap and a fresh health
+   * verdict for the currently connected SSE generation. */
+  isCurrent: () => boolean;
+  currentness: () => BackendCurrentnessState;
   resync: () => Promise<void>;
   /** Cancel new work and wait for already queued synchronization work to
    * observe cancellation. No changes are emitted after this resolves. */
@@ -73,6 +122,19 @@ export const DEFAULT_MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_MAX_SNAPSHOT_PAGES = 100;
 export const DEFAULT_MAX_SNAPSHOT_OFFERS = PAGE_LIMIT * DEFAULT_MAX_SNAPSHOT_PAGES;
 export const DEFAULT_READINESS_TIMEOUT_MS = 180_000;
+export const DEFAULT_BACKEND_HEALTH_CHECK_INTERVAL_MS = 5_000;
+export const DEFAULT_BACKEND_HEALTH_MAX_AGE_MS = 15_000;
+export const DEFAULT_BACKEND_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
+
+class BackendCurrentnessError extends Error {
+  readonly reason: BackendCurrentnessBlockedReason;
+
+  constructor(reason: BackendCurrentnessBlockedReason, message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "BackendCurrentnessError";
+    this.reason = reason;
+  }
+}
 
 export interface SnapshotLimits {
   maxPages?: number;
@@ -147,6 +209,13 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
   const maxSnapshotPages = opts.maxSnapshotPages ?? DEFAULT_MAX_SNAPSHOT_PAGES;
   const maxSnapshotOffers = opts.maxSnapshotOffers ?? DEFAULT_MAX_SNAPSHOT_OFFERS;
   const readinessTimeoutMs = opts.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+  const backendHealthCheckIntervalMs =
+    opts.backendHealthCheckIntervalMs ?? DEFAULT_BACKEND_HEALTH_CHECK_INTERVAL_MS;
+  const backendHealthMaxAgeMs =
+    opts.backendHealthMaxAgeMs ?? DEFAULT_BACKEND_HEALTH_MAX_AGE_MS;
+  const backendHealthRequestTimeoutMs =
+    opts.backendHealthRequestTimeoutMs ??
+    Math.min(DEFAULT_BACKEND_HEALTH_REQUEST_TIMEOUT_MS, backendHealthMaxAgeMs);
   for (const [name, value] of [
     ["resyncIntervalMs", resyncIntervalMs],
     ["maxBufferedEvents", maxBufferedEvents],
@@ -154,10 +223,25 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
     ["maxSnapshotPages", maxSnapshotPages],
     ["maxSnapshotOffers", maxSnapshotOffers],
     ["readinessTimeoutMs", readinessTimeoutMs],
+    ["backendHealthCheckIntervalMs", backendHealthCheckIntervalMs],
+    ["backendHealthMaxAgeMs", backendHealthMaxAgeMs],
+    ["backendHealthRequestTimeoutMs", backendHealthRequestTimeoutMs],
   ] as const) {
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new RangeError(`${name} must be a positive safe integer, got ${value}`);
     }
+  }
+  if (backendHealthCheckIntervalMs >= backendHealthMaxAgeMs) {
+    throw new RangeError(
+      `backendHealthCheckIntervalMs (${backendHealthCheckIntervalMs}) must be less than ` +
+        `backendHealthMaxAgeMs (${backendHealthMaxAgeMs})`,
+    );
+  }
+  if (backendHealthRequestTimeoutMs > backendHealthMaxAgeMs) {
+    throw new RangeError(
+      `backendHealthRequestTimeoutMs (${backendHealthRequestTimeoutMs}) must not exceed ` +
+        `backendHealthMaxAgeMs (${backendHealthMaxAgeMs})`,
+    );
   }
 
   let stopped = false;
@@ -167,6 +251,8 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
   let bufferOverflowed = false;
   let stream: SseStreamHandle | null = null;
   let resyncTimer: ReturnType<typeof setInterval> | null = null;
+  let healthCheckTimer: ReturnType<typeof setInterval> | null = null;
+  let healthExpiryTimer: ReturnType<typeof setTimeout> | null = null;
   let sweepTimer: ReturnType<typeof setInterval> | null = null;
   let pending: Promise<void> = Promise.resolve();
   let initialAttempt: Promise<void> | null = null;
@@ -176,10 +262,18 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
   let postReadyResyncRunner: Promise<void> | null = null;
   let postReadyResyncRequested = 0;
   let postReadyResyncCompleted = 0;
+  let healthCheckRunner: Promise<void> | null = null;
   let readySettled = false;
   let stopPromise: Promise<void> | null = null;
   let readinessTimer: ReturnType<typeof setTimeout> | null = null;
   const owner = new AbortController();
+  let currentness: BackendCurrentnessState = {
+    kind: "blocked",
+    reason: "initializing",
+    streamGeneration: 0,
+  };
+  let currentnessNotified = false;
+  let requestCurrentnessRecovery = (): void => {};
 
   const reportError = (err: unknown): void => {
     try {
@@ -189,6 +283,130 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
       // machine. A throwing observer must not poison the work queue.
     }
   };
+
+  const publishCurrentness = (next: BackendCurrentnessState): void => {
+    const changed = currentness.kind !== next.kind ||
+      currentness.streamGeneration !== next.streamGeneration ||
+      (currentness.kind === "blocked" && next.kind === "blocked" &&
+        currentness.reason !== next.reason) ||
+      (currentness.kind === "current" && next.kind === "current" &&
+        currentness.backendBlockL2 !== next.backendBlockL2);
+    currentness = next;
+    if (!currentnessNotified || changed) {
+      currentnessNotified = true;
+      try {
+        opts.onCurrentnessChange?.(next);
+      } catch (err) {
+        reportError(err);
+      }
+    }
+  };
+
+  const setBlocked = (reason: BackendCurrentnessBlockedReason): void => {
+    // An in-flight request may observe owner cancellation after stop has
+    // published the terminal state. It must not rewrite that state while the
+    // lifecycle barrier is joining the request.
+    if (stopped && reason !== "stopped") return;
+    if (healthExpiryTimer) clearTimeout(healthExpiryTimer);
+    healthExpiryTimer = null;
+    publishCurrentness({
+      kind: "blocked",
+      reason,
+      streamGeneration: streamOpenGeneration,
+    });
+  };
+
+  const healthIsFresh = (health: CurrentBackendSyncHealth, now = Date.now()): boolean =>
+    health.ts >= now - backendHealthMaxAgeMs && health.ts <= now + backendHealthMaxAgeMs;
+
+  const installCurrent = (
+    health: CurrentBackendSyncHealth,
+    generation: number,
+  ): void => {
+    const now = Date.now();
+    if (!healthIsFresh(health, now)) {
+      throw new BackendCurrentnessError(
+        "health-stale",
+        `backend health ts ${health.ts} is outside the ${backendHealthMaxAgeMs} ms freshness window`,
+      );
+    }
+    if (!streamConnected || generation !== streamOpenGeneration) {
+      throw new BackendCurrentnessError(
+        "generation-superseded",
+        "backend health belongs to a superseded SSE generation",
+      );
+    }
+
+    if (healthExpiryTimer) clearTimeout(healthExpiryTimer);
+    const expiresAt = Math.min(now + backendHealthMaxAgeMs, health.ts + backendHealthMaxAgeMs);
+    const observedHealthTs = health.ts;
+    healthExpiryTimer = setTimeout(() => {
+      if (
+        currentness.kind === "current" &&
+        currentness.streamGeneration === generation &&
+        currentness.healthTs === observedHealthTs
+      ) {
+        setBlocked("health-stale");
+        requestCurrentnessRecovery();
+      }
+    }, Math.max(1, expiresAt - now + 1));
+    healthExpiryTimer.unref?.();
+
+    publishCurrentness({
+      kind: "current",
+      streamGeneration: generation,
+      backendBlockL2: health.blockL2.height,
+      healthTs: health.ts,
+    });
+  };
+
+  const currentnessFailure = (error: unknown): BackendCurrentnessError => {
+    if (error instanceof BackendCurrentnessError) return error;
+    if (error instanceof ApiRequestError && error.kind === "malformed") {
+      return new BackendCurrentnessError("health-malformed", error.message, error);
+    }
+    return new BackendCurrentnessError(
+      "health-unavailable",
+      error instanceof Error ? error.message : String(error),
+      error,
+    );
+  };
+
+  const readFreshHealth = async (generation: number): Promise<CurrentBackendSyncHealth> => {
+    let health;
+    try {
+      health = await dependencies.getBackendSyncHealth({
+        ...(api ? { api } : {}),
+        timeoutMs: backendHealthRequestTimeoutMs,
+        signal: owner.signal,
+      });
+    } catch (error) {
+      throw currentnessFailure(error);
+    }
+    if (stopped || !streamConnected || generation !== streamOpenGeneration) {
+      throw new BackendCurrentnessError(
+        "generation-superseded",
+        "backend health completed for a superseded SSE generation",
+      );
+    }
+    if (!reportsBackendProjectionCurrent(health)) {
+      throw new BackendCurrentnessError(
+        health.status === "syncing" ? "backend-syncing" : "backend-error",
+        `backend projection is ${health.status}`,
+      );
+    }
+    if (!healthIsFresh(health)) {
+      throw new BackendCurrentnessError(
+        "health-stale",
+        `backend health ts ${health.ts} is outside the ${backendHealthMaxAgeMs} ms freshness window`,
+      );
+    }
+    return health;
+  };
+
+  // The runtime must start fail-closed even if its wallet was initialized
+  // before the stream/currentness owner was constructed.
+  publishCurrentness(currentness);
 
   const emit = (change: BookChange): void => {
     if (stopped) return;
@@ -259,20 +477,67 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
     return task;
   };
 
-  const resync = async (): Promise<void> => {
-    const offers = await fetchWholeBook(api, owner.signal, dependencies, {
+  const fetchSnapshot = async (): Promise<BookOffer[]> =>
+    fetchWholeBook(api, owner.signal, dependencies, {
       maxPages: maxSnapshotPages,
       maxOffers: maxSnapshotOffers,
     });
+
+  const applySnapshot = (offers: BookOffer[]): void => {
     if (stopped) return;
     const diff = book.resync(offers);
     for (const offerHash of diff.removed) emit({ kind: "removed", offerHash, reason: "resync" });
+    for (const offerHash of diff.updated) {
+      emit({ kind: "removed", offerHash, reason: "resync" });
+      const offer = book.get(offerHash);
+      if (offer) emit({ kind: "added", offer });
+    }
     for (const offerHash of diff.added) {
       const offer = book.get(offerHash);
       if (offer) emit({ kind: "added", offer });
     }
     if (diff.added.length || diff.removed.length) {
       log(`[solver] resync: +${diff.added.length} -${diff.removed.length} (book=${book.size})`);
+    }
+  };
+
+  const loadCurrentSnapshot = async (
+    generation: number,
+    preflightHealth: boolean,
+  ): Promise<{ offers: BookOffer[]; health: CurrentBackendSyncHealth }> => {
+    if (!streamConnected || generation !== streamOpenGeneration) {
+      throw new BackendCurrentnessError(
+        "generation-superseded",
+        "cannot snapshot a disconnected or superseded SSE generation",
+      );
+    }
+    // Startup retries probe the cheap cached health boundary first; a backend
+    // that is still syncing must not trigger a full offer-book walk every tick.
+    if (preflightHealth) await readFreshHealth(generation);
+    const offers = await fetchSnapshot();
+    const health = await readFreshHealth(generation);
+    return { offers, health };
+  };
+
+  const stageCurrentGeneration = async (): Promise<{
+    generation: number;
+    health: CurrentBackendSyncHealth;
+  }> => {
+    const generation = streamOpenGeneration;
+    try {
+      const { offers, health } = await loadCurrentSnapshot(generation, false);
+      if (stopped) {
+        throw new BackendCurrentnessError(
+          "generation-superseded",
+          "snapshot completed after synchronization stopped",
+        );
+      }
+      applySnapshot(offers);
+      return { generation, health };
+    } catch (error) {
+      const failure = currentnessFailure(error);
+      setBlocked(failure.reason);
+      throw failure;
     }
   };
 
@@ -292,8 +557,43 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
           const target = postReadyResyncRequested;
           try {
             // Preserve event/snapshot ordering by sharing the same serial queue
-            // used for SSE event detail fetches and mutations.
-            await enqueue(resync);
+            // used for SSE event detail fetches and mutations. Currentness is
+            // installed in a SECOND queued task: every SSE event enqueued while
+            // the snapshot request was in flight therefore drains before this
+            // generation can become usable.
+            const stagedResult: {
+              value?: Awaited<ReturnType<typeof stageCurrentGeneration>>;
+            } = {};
+            await enqueue(async () => {
+              stagedResult.value = await stageCurrentGeneration();
+            });
+            const staged = stagedResult.value;
+            if (staged === undefined) {
+              throw new BackendCurrentnessError(
+                "generation-superseded",
+                "snapshot staging stopped before producing a generation",
+              );
+            }
+            await enqueue(async () => {
+              try {
+                installCurrent(staged.health, staged.generation);
+              } catch (error) {
+                const failure = currentnessFailure(error);
+                setBlocked(failure.reason);
+                throw failure;
+              }
+            });
+          } catch (error) {
+            const failure = currentnessFailure(error);
+            if (
+              failure.reason !== "generation-superseded" ||
+              target >= postReadyResyncRequested
+            ) {
+              throw failure;
+            }
+            // A reconnect queued a newer generation while this snapshot was
+            // in flight. The latest coalesced iteration is the authoritative
+            // result; do not reject waiters on the intentionally stale one.
           } finally {
             // A failed attempt consumes its trigger; a later trigger may retry.
             postReadyResyncCompleted = target;
@@ -331,9 +631,14 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
   ): Promise<void> => {
     if (stopPromise) return stopPromise;
     stopped = true;
+    setBlocked("stopped");
     owner.abort(reason);
     const streamStopped = stream?.close() ?? Promise.resolve();
     if (resyncTimer) clearInterval(resyncTimer);
+    if (healthCheckTimer) clearInterval(healthCheckTimer);
+    if (healthExpiryTimer) clearTimeout(healthExpiryTimer);
+    healthCheckTimer = null;
+    healthExpiryTimer = null;
     if (sweepTimer) clearInterval(sweepTimer);
     if (readinessTimer) clearTimeout(readinessTimer);
     readinessTimer = null;
@@ -343,7 +648,12 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
       readySettled = true;
       rejectReady(reason);
     }
-    stopPromise = Promise.all([pending, streamStopped]).then(() => {});
+    stopPromise = Promise.all([
+      pending,
+      streamStopped,
+      healthCheckRunner?.catch(() => {}) ?? Promise.resolve(),
+      postReadyResyncRunner?.catch(() => {}) ?? Promise.resolve(),
+    ]).then(() => {});
     return stopPromise;
   };
 
@@ -360,7 +670,16 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
     const attempt = enqueue(async () => {
       for (;;) {
         const snapshotGeneration = streamOpenGeneration;
-        await resync();
+        let health: CurrentBackendSyncHealth;
+        try {
+          const loaded = await loadCurrentSnapshot(snapshotGeneration, true);
+          health = loaded.health;
+          applySnapshot(loaded.offers);
+        } catch (error) {
+          const failure = currentnessFailure(error);
+          setBlocked(failure.reason);
+          throw failure;
+        }
         if (stopped) return;
 
         // A reconnect while this snapshot was in flight creates an uncovered
@@ -419,6 +738,15 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
           continue;
         }
 
+        try {
+          // A long buffered detail drain can outlive the health observation.
+          // Recheck its local freshness before this generation becomes usable.
+          installCurrent(health, snapshotGeneration);
+        } catch (error) {
+          const failure = currentnessFailure(error);
+          setBlocked(failure.reason);
+          throw failure;
+        }
         buffering = false;
         readySettled = true;
         if (readinessTimer) clearTimeout(readinessTimer);
@@ -492,12 +820,14 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
           void ensureInitialSync().catch(() => {});
           return;
         }
+        setBlocked("stream-generation-changed");
         log("[solver] SSE (re)connected — resyncing");
         void schedulePostReadyResync().catch(() => {});
       },
       onDisconnect: () => {
         streamConnected = false;
         streamOpenGeneration++;
+        setBlocked("stream-disconnected");
         if (buffering) {
           buffered.length = 0;
           bufferedBytes = 0;
@@ -507,6 +837,45 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
       onError: reportError,
     },
   );
+
+  const scheduleHealthCheck = (): Promise<void> => {
+    if (stopped || !streamConnected) return Promise.resolve();
+    if (buffering) return ensureInitialSync();
+    // A complete resync ends with its own generation-bound health verdict.
+    if (postReadyResyncRunner) return postReadyResyncRunner;
+    if (healthCheckRunner) return healthCheckRunner;
+
+    const generation = streamOpenGeneration;
+    let requestSnapshotRecovery = false;
+    const runner = (async () => {
+      try {
+        const health = await readFreshHealth(generation);
+        if (currentness.kind === "current") {
+          installCurrent(health, generation);
+        } else {
+          // Health recovery alone cannot authorize the existing book. Close
+          // the outage gap with one full snapshot in this same SSE generation.
+          requestSnapshotRecovery = true;
+        }
+      } catch (error) {
+        const failure = currentnessFailure(error);
+        // A late health response from an old connection must never revoke a
+        // newer generation that has already completed recovery.
+        if (generation === streamOpenGeneration) setBlocked(failure.reason);
+      }
+    })().finally(() => {
+      if (healthCheckRunner === runner) healthCheckRunner = null;
+      if (requestSnapshotRecovery && !stopped && generation === streamOpenGeneration) {
+        void schedulePostReadyResync().catch(() => {});
+      }
+    });
+    healthCheckRunner = runner;
+    return runner;
+  };
+
+  requestCurrentnessRecovery = (): void => {
+    void scheduleHealthCheck().catch(reportError);
+  };
 
   readinessTimer = setTimeout(() => {
     const error = new Error(
@@ -526,6 +895,11 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
   }, resyncIntervalMs);
   resyncTimer.unref?.();
 
+  healthCheckTimer = setInterval(() => {
+    if (!stopped) void scheduleHealthCheck().catch(reportError);
+  }, backendHealthCheckIntervalMs);
+  healthCheckTimer.unref?.();
+
   sweepTimer = setInterval(() => {
     if (stopped) return;
     for (const offerHash of book.sweepExpired(Date.now(), expiryMarginSeconds)) {
@@ -537,6 +911,8 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
   return {
     book,
     ready,
+    isCurrent: () => currentness.kind === "current" && !stopped,
+    currentness: () => currentness,
     resync: () => {
       if (buffering) return ensureInitialSync();
       return schedulePostReadyResync();

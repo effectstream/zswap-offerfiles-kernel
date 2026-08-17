@@ -27,13 +27,10 @@ import {
   insertNullifierWithTx,
   markNullifierMatched,
   findUnmatchedNullifier,
-  isNullifierSpent,
   insertCreatedUnshielded,
   deleteCreatedUnshielded,
-  isUnshieldedCreated,
   upsertKnownRootWithFirstSeen,
   getEarliestRootFirstSeen,
-  isKnownRootLive,
   pruneKnownRoots,
 } from "@zswap-da/database";
 
@@ -65,6 +62,7 @@ import { grammar } from "./grammar.ts";
 import { extractMidnightLedgerSnapshot } from "./zswap-logic.ts";
 import { queueAppEvent } from "./event-bus.ts";
 import { failStopAppInput } from "./app-input-savepoint.ts";
+import { evaluateOfferLivenessInStateMachine } from "./offer-liveness.ts";
 import {
   CELESTIA_PRIMITIVE_NAME,
   MIDNIGHT_NETWORK_ID,
@@ -545,58 +543,22 @@ addTransition("celestia-zswap", function* (data) {
     return;
   }
 
-  // ── Liveness: drop offers whose coins are already spent on chain ──
-  // The midnight-* handlers ingest every consumed nullifier / unshielded UTXO
-  // into the permanent spent_* sets, so these are a plain existence check. We
-  // do NOT compare heights across chains (Midnight height ≠ Celestia height);
-  // determinism comes from the rollup's fixed input ordering. An already-spent
-  // coin means the offer can never settle, so it must not be indexed.
-  for (const nullifier of nullifierStrs) {
-    const spent = yield* World.resolve(isNullifierSpent, { nullifier });
-    if (spent.length > 0) {
-      yield* rejectOffer(
-        "NULLIFIER_SPENT",
-        `nullifier already spent: ${nullifier}`,
-        { offerHash },
-      );
-      return;
-    }
-  }
-  // ── Existence + liveness for unshielded UTXOs ──
-  // created_unshielded is a live-set: midnight-unshielded-create inserts,
-  // midnight-unshielded-spend deletes. A missing row means either the UTXO
-  // was never created OR it has already been spent — both mean reject.
-  for (const s of unshieldedSpends) {
-    const created = yield* World.resolve(isUnshieldedCreated, s);
-    if (created.length === 0) {
-      yield* rejectOffer(
-        "UTXO_NOT_LIVE",
-        `unshielded UTXO not live (spent or never created): ${s.owner}/${s.intent_hash}/${s.output_no}`,
-        { offerHash },
-      );
-      return;
-    }
-  }
-
-  // ── Root-known: drop offers whose shielded input proves against a root the
-  // chain never held / that has aged out (midnight-zswap-root populates
-  // known_roots). inputRoots are canonical hex == the indexer's root form.
-  // The window is enforced HERE, at read time, with this block's own
-  // timestamp as the cutoff — pruning is event-driven and stops on a quiet
-  // chain, so presence in known_roots alone is not recency. ──
-  for (const root of result.inputRoots ?? []) {
-    const known = yield* World.resolve(isKnownRootLive, {
-      root,
-      cutoff_ms: data.blockTimestamp - ROOT_WINDOW_SECONDS * 1000,
-    });
-    if (known.length === 0) {
-      yield* rejectOffer(
-        "ROOT_UNKNOWN",
-        `input merkle root not a known recent chain root: ${root}`,
-        { offerHash },
-      );
-      return;
-    }
+  // ── Indexed liveness ──
+  // Consume the shared nullifier → unshielded live-set → recent-root
+  // descriptors through the generator DB adapter. The STM retains its own
+  // deterministic clock: this L2 block timestamp, not wall time and not the
+  // API's latest-processed-block query. No heights are compared across chains.
+  const liveness = yield* evaluateOfferLivenessInStateMachine(
+    result,
+    data.blockTimestamp - ROOT_WINDOW_SECONDS * 1000,
+  );
+  if (!liveness.ok) {
+    yield* rejectOffer(
+      liveness.code,
+      liveness.reason,
+      { offerHash },
+    );
+    return;
   }
 
   // ── Cryptographic verification — LAST, and mandatory ──

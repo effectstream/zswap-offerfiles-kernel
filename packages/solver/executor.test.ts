@@ -10,6 +10,7 @@ import {
   type WalletLike,
 } from "./src/executor.ts";
 import { Stock } from "./src/stock.ts";
+import type { ValidatedBookOffer } from "./src/validation-gate.ts";
 import { reconstructOffer } from "@zswap-da/solver-core/api-client";
 
 const A = "a".repeat(64);
@@ -144,6 +145,35 @@ const exactPair = (first: string, second: string): [BookOffer, BookOffer] => [
   offer(first),
   reverseOffer(second),
 ];
+
+const validated = (value: BookOffer, generation = 1): ValidatedBookOffer => ({
+  ...value,
+  blob: value.blob!,
+  validation: Object.freeze({
+    streamGeneration: generation,
+    backendBlockL2: "7",
+    offerHash: value.offerHash,
+    blobHash: value.offerHash,
+    projection: `projection-${value.offerHash}`,
+    computed: Object.freeze({
+      gives: Object.freeze(value.gives.map((leg) => Object.freeze({
+        token: leg.token,
+        amount: leg.amount.toString(),
+        kind: leg.kind,
+      }))),
+      wants: Object.freeze(value.wants.map((leg) => Object.freeze({
+        token: leg.token,
+        amount: leg.amount.toString(),
+        kind: leg.kind,
+      }))),
+      inputNullifiers: Object.freeze([...value.inputNullifiers]),
+      expiresAt: new Date(value.expiresAt!).toISOString(),
+    }) as any,
+    stateVersion: "7",
+    validatedAt: "2026-08-14T00:00:00.000Z",
+    expiresAt: value.expiresAt!,
+  }),
+});
 
 /** Forward 1000 A -> 900 B plus reverse 800 B -> 800 A leaves the solver
  * +200 A / -100 B, matching the residual-path assertions below. */
@@ -1334,4 +1364,198 @@ test("an unreadable imbalance guard blocks settlement rather than passing", asyn
   expect(outcome.reason).toContain("imbalance guard could not run");
   expect(batcher.settleCalls).toBe(0);
   batcher.imbalanceThrows = null;
+});
+
+test("Path A validation rejection at dequeue releases with zero wallet mutation", async () => {
+  const candidate = validated(offer("validation-negative"));
+  statusByHash.set(candidate.offerHash, ["live"]);
+  const { wallet, calls } = walletStub();
+  let validationCalls = 0;
+  const executor = new Executor({
+    wallet,
+    keys: {},
+    stock: fundedStock(),
+    apiClient,
+    statusPollMs: 1,
+    confirmTimeoutMs: 20,
+    revalidateOfferForExecution: async () => {
+      validationCalls++;
+      throw new Error("NOT_LIVE");
+    },
+    isValidationEvidenceCurrent: (evidence) => evidence !== undefined,
+  });
+
+  const outcome = await executor.fill(candidate, payout());
+  expect(outcome.kind).toBe("skipped");
+  expect(outcome.claimDisposition).toBe("release");
+  expect(validationCalls).toBe(1);
+  expect(calls.balanced).toBe(0);
+  expect(calls.submitted).toBe(0);
+});
+
+test("superseded validation evidence is rejected before Stock reservation or endpoint IO", async () => {
+  const candidate = validated(offer("validation-stale"));
+  const stock = fundedStock();
+  const before = stock.available(B);
+  const { wallet, calls } = walletStub();
+  let validationCalls = 0;
+  const executor = new Executor({
+    wallet,
+    keys: {},
+    stock,
+    apiClient,
+    revalidateOfferForExecution: async (value) => {
+      validationCalls++;
+      return value;
+    },
+    isValidationEvidenceCurrent: () => false,
+  });
+
+  const outcome = await executor.fill(candidate, payout());
+  expect(outcome.kind).toBe("skipped");
+  expect(validationCalls).toBe(0);
+  expect(calls.balanced).toBe(0);
+  expect(calls.submitted).toBe(0);
+  expect(stock.available(B)).toBe(before);
+  expect(stock.isOfferClaimed(candidate)).toBe(false);
+});
+
+test("a same-stream floor race at the wallet task boundary still performs zero wallet work", async () => {
+  const candidate = validated(offer("validation-race"));
+  statusByHash.set(candidate.offerHash, ["live"]);
+  const { wallet, calls } = walletStub();
+  let executionChecks = 0;
+  const executor = new Executor({
+    wallet,
+    keys: {},
+    stock: fundedStock(),
+    apiClient,
+    statusPollMs: 1,
+    revalidateOfferForExecution: async (value) => value,
+    // A monotonic same-stream height advance does not revoke admission, but a
+    // dequeue verdict that fell behind that newer floor cannot authorize the
+    // immediately following wallet boundary.
+    isValidationEvidenceCurrent: () => true,
+    isExecutionValidationEvidenceCurrent: () => ++executionChecks < 3,
+  });
+
+  const outcome = await executor.fill(candidate, payout());
+  expect(outcome.kind).toBe("skipped");
+  expect(outcome.reason).toContain("fell below");
+  expect(executionChecks).toBe(3);
+  expect(calls.balanced).toBe(0);
+  expect(calls.submitted).toBe(0);
+});
+
+test("Path B revalidates every member in deterministic order immediately before batcher admission", async () => {
+  const [rawFirst, rawSecond] = exactPair("validation-pair-a", "validation-pair-b");
+  const pair = [validated(rawFirst), validated(rawSecond)] as const;
+  statusByHash.set(pair[0].offerHash, ["live", "consumed"]);
+  statusByHash.set(pair[1].offerHash, ["live", "consumed"]);
+  const events: string[] = [];
+  const scopedApi = {
+    ...apiClient,
+    settleViaBatcher: async () => {
+      events.push("batcher");
+      return { ok: true, status: 200, body: { success: true } };
+    },
+  } as ExecutorApiClient;
+  const executor = new Executor({
+    wallet: walletStub().wallet,
+    keys: {},
+    stock: fundedStock(),
+    apiClient: scopedApi,
+    statusPollMs: 1,
+    confirmTimeoutMs: 20,
+    revalidateOfferForExecution: async (value) => {
+      events.push(`validate:${value.offerHash}`);
+      return value;
+    },
+    isValidationEvidenceCurrent: (evidence) => evidence !== undefined,
+  });
+
+  const outcome = await executor.settleMatch([...pair], new Map());
+  expect(outcome.kind).toBe("settled");
+  expect(events).toEqual([
+    `validate:${pair[0].offerHash}`,
+    `validate:${pair[1].offerHash}`,
+    `validate:${pair[0].offerHash}`,
+    `validate:${pair[1].offerHash}`,
+    "batcher",
+  ]);
+});
+
+test("a same-stream floor race at the batcher task boundary submits nothing", async () => {
+  const [rawFirst, rawSecond] = exactPair("validation-floor-a", "validation-floor-b");
+  const pair = [validated(rawFirst), validated(rawSecond)] as const;
+  statusByHash.set(pair[0].offerHash, ["live"]);
+  statusByHash.set(pair[1].offerHash, ["live"]);
+  let batcherCalls = 0;
+  let executionChecks = 0;
+  const scopedApi = {
+    ...apiClient,
+    settleViaBatcher: async () => {
+      batcherCalls++;
+      return { ok: true, status: 200, body: { success: true } };
+    },
+  } as ExecutorApiClient;
+  const executor = new Executor({
+    wallet: walletStub().wallet,
+    keys: {},
+    stock: fundedStock(),
+    apiClient: scopedApi,
+    statusPollMs: 1,
+    revalidateOfferForExecution: async (value) => value,
+    isValidationEvidenceCurrent: () => true,
+    // Four post-verdict checks plus the two synchronous pre-batcher checks
+    // pass. The callback-local check then observes the newer floor before the
+    // external batcher function can be invoked.
+    isExecutionValidationEvidenceCurrent: () => ++executionChecks < 7,
+  });
+
+  const outcome = await executor.settleMatch([...pair], new Map());
+  expect(outcome.kind).toBe("skipped");
+  expect(outcome.reason).toContain("fell below");
+  expect(executionChecks).toBe(7);
+  expect(batcherCalls).toBe(0);
+});
+
+test("one Path B member rejection prevents top-up and batcher work", async () => {
+  const [rawFirst, rawSecond] = exactPair("validation-set-a", "validation-set-b");
+  const pair = [validated(rawFirst), validated(rawSecond)] as const;
+  statusByHash.set(pair[0].offerHash, ["live"]);
+  statusByHash.set(pair[1].offerHash, ["live"]);
+  let validationCalls = 0;
+  let batcherCalls = 0;
+  let topUps = 0;
+  const scopedApi = {
+    ...apiClient,
+    settleViaBatcher: async () => {
+      batcherCalls++;
+      return { ok: true, status: 200, body: { success: true } };
+    },
+  } as ExecutorApiClient;
+  const executor = new Executor({
+    wallet: walletStub().wallet,
+    keys: {},
+    stock: fundedStock(),
+    apiClient: scopedApi,
+    statusPollMs: 1,
+    revalidateOfferForExecution: async (value) => {
+      validationCalls++;
+      if (validationCalls === 2) throw new Error("member invalid");
+      return value;
+    },
+    isValidationEvidenceCurrent: (evidence) => evidence !== undefined,
+    buildTopUp: async () => {
+      topUps++;
+      return {};
+    },
+  });
+
+  const outcome = await executor.settleMatch([...pair], new Map());
+  expect(outcome.kind).toBe("skipped");
+  expect(validationCalls).toBe(2);
+  expect(topUps).toBe(0);
+  expect(batcherCalls).toBe(0);
 });

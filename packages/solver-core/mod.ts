@@ -4,5 +4,7 @@
 export * from "./api-client.ts";
 export * from "./batcher.ts";
 export * from "./ladder-schema.ts";
+export * from "./liquidity-contract.ts";
 export * from "./wallet.ts";
 export * from "./offer-files.ts";
+export * from "./validation-contract.ts";

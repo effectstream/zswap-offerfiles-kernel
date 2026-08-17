@@ -73,8 +73,12 @@ OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
 SOLVER_LEVELS_AUTH_KEYS='{"maker-a":"replace-with-long-random-secret"}'
                                         # preferred: server-side solver id → bearer secret map;
-                                        # publication is disabled when neither auth var is set
+                                        # publication AND validate-for-use are disabled when
+                                        # neither auth var is set
 # SOLVER_LEVELS_AUTH_SECRET=             # single-solver alternative; server derives its identity
+SOLVER_LIQUIDITY_READ_AUTH_SECRET=       # dedicated grouped-liquidity read bearer, >=32 chars;
+                                        # must differ from every levels-write secret
+OFFER_VALIDATION_TIMEOUT_MS=15000        # validate-for-use decision budget; max 60000
 SOLVER_LEVELS_TTL_SECONDS=60             # expire pair data; last version remains as a replay tombstone
 SOLVER_LEVELS_QUOTE_ENABLED=false        # strict opt-in: let indicative ladders override /v1/quote
 # POST_COMMIT_EVENT_BRIDGE_ENABLED=true  # default true; disable only when no runtime MQTT broker exists
@@ -98,7 +102,8 @@ SOLVER_ENABLE_CYCLES=false               # experimental; also requires PATH_B=tr
 SOLVER_ENABLE_RESIDUAL_TOPUPS=false      # experimental inventory spend; also requires PATH_B=true
 SOLVER_ENABLE_LEVELS_PUBLICATION=false   # independent explicit opt-in; dry-run always suppresses it
 # SOLVER_LEVELS_AUTH_TOKEN=              # matching bearer secret, >=16 non-whitespace characters
-                                        # required only for enabled, non-dry-run publication
+                                        # required for validate-for-use in every solver mode;
+                                        # levels publication remains a separate non-dry-run opt-in
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -366,6 +371,97 @@ Lookups resolve via the offer's content hash (an indexed probe). A blob that doe
 
 ---
 
+#### `POST /v1/offers/validate`
+
+Authenticated, side-effect-free validation of an **already indexed** candidate
+for solver use. This is not the submission route: exact indexed presence is
+required evidence and is never returned as a duplicate error. The route never
+calls the batcher, publishes to Celestia, schedules input, or changes offer
+lifecycle state.
+
+Use a bearer secret from `SOLVER_LEVELS_AUTH_KEYS` or
+`SOLVER_LEVELS_AUTH_SECRET`. This route remains enabled independently of
+`SOLVER_ENABLE_LEVELS_PUBLICATION` and `SOLVER_LEVELS_QUOTE_ENABLED`.
+
+```bash
+curl -X POST http://host:9999/v1/offers/validate \
+  -H 'Authorization: Bearer replace-with-long-random-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "schemaVersion": 1,
+    "profile": "offer-files-solver-v1",
+    "offerId": "9f2c4a...e1",
+    "offer": "swapoffer1..."
+  }'
+```
+
+The body is closed: all four fields are required and extra fields return
+`400`. `offerId` is exactly 64 lowercase hex characters and must equal SHA-256
+of the decoded raw transaction bytes.
+
+**Domain response `200`**
+
+```json
+{
+  "schemaVersion": 1,
+  "profile": "offer-files-solver-v1",
+  "valid": true,
+  "live": true,
+  "claimedOfferId": "9f2c4a...e1",
+  "computedOfferId": "9f2c4a...e1",
+  "stateVersion": "42",
+  "validatedAt": "2026-08-14T12:34:56.000Z",
+  "status": "live",
+  "code": "VALID",
+  "computed": {
+    "gives": [ { "token": "00...00", "amount": "1000000", "kind": "SHIELDED" } ],
+    "wants": [ { "token": "ff...ff", "amount": "5000000", "kind": "SHIELDED" } ],
+    "inputNullifiers": ["7c1d9b..."],
+    "expiresAt": "2026-08-14T13:34:56.000Z"
+  }
+}
+```
+
+`valid`, current `live`, and stored lifecycle `status` are separate facts. An
+indexed live but unsupported shape can be `status:"live"` and `live:true` while
+`valid:false`; a spent input or stale root can retain stored
+`status:"live"` while current `live:false`. Expiry may also become current
+before the cleanup transition runs, producing `code:"EXPIRED"`,
+`status:"live"`, and `live:false`. Any non-live stored status must have
+`live:false`.
+
+Stable domain-negative codes include `UNSUPPORTED_PROFILE`, `HASH_MISMATCH`,
+`NOT_INDEXED`, `NOT_LIVE`, `EXPIRED`, `UNSUPPORTED_SHAPE`, and the canonical
+structure/crypto/liveness codes documented for submission. All domain outcomes
+use `200`; malformed envelopes and transport size use `400`/`413`. Missing or
+bad credentials use `401`, absent/malformed credential configuration uses
+`503`, and unsynchronized state, an already-active credential, deadline,
+cancellation, or internal read failure uses `503`. `429` is the router-wide
+rate limit. None of these non-200 responses is a validation verdict.
+
+The backend checks currentness, validates structure and indexed liveness, and
+rejects unsupported transaction economics before native proof work. Supported
+shapes run canonical proof verification, re-fetch both external chain tips,
+then perform a fresh committed status/liveness read bound to the same L2
+anchor. `stateVersion` and `validatedAt` identify that final backend state. The
+result is indicative and point-in-time only: it is not a reservation or fill
+promise.
+
+Authentication and the router-wide rate limiter run before JSON parsing. The
+decision timer is observed at async yields and between validation/read stages.
+The ledger's native proof verifier is synchronous and cannot be interrupted—or
+even let the event-loop timer fire—after it has started, so the deadline is not
+a hard wall-clock latency cap while proof verification runs. Only one physical
+validation operation may be active per solver credential. If an HTTP deadline
+wins while a database read is still settling, that credential's slot remains
+occupied until the underlying read-only operation actually finishes. These
+bounds complement transport size, rate limiting, and the cheap indexed-state
+rejection ladder. An incomplete request-body abort or a response-socket close
+also cancels at the next cooperative boundary; the retained slot still prevents
+the disconnected caller from accumulating unfinished driver work.
+
+---
+
 #### `GET /v1/pairs`
 
 All known trading pairs, combining historical fill data from `pair_stats` with live open-offer counts. Use this to populate a pair picker or market list. Pairs are keyed by **token color only** — resolve display names separately via `GET /v1/known-tokens`.
@@ -602,6 +698,55 @@ The in-memory declaration expires after
 prevent replay after expiry.
 
 `GET /v1/solver/levels` returns only currently fresh pair declarations.
+
+#### `GET /v1/solver/liquidity?solver_id=<solver-id>`
+
+Read one solver's complete grouped declaration for the Offer Files data-only
+relay. This endpoint is additive: unlike the legacy flattened levels route, it
+preserves the source identity, version, update time, immutable expiry, and an
+explicit withdrawal/expiry tombstone.
+
+```bash
+curl "http://host:9999/v1/solver/liquidity?solver_id=maker-a" \
+  -H "Authorization: Bearer $OFFER_FILES_LIQUIDITY_AUTH_TOKEN"
+```
+
+The node configures the matching value as
+`SOLVER_LIQUIDITY_READ_AUTH_SECRET`. It must contain at least 32
+non-whitespace characters and must differ from every
+`SOLVER_LEVELS_AUTH_KEYS`/`SOLVER_LEVELS_AUTH_SECRET` write credential. The
+server compares the bearer in constant time. Missing or malformed server
+configuration returns `503 LIQUIDITY_DISABLED`; missing or bad authentication
+returns `401 UNAUTHORIZED` with `WWW-Authenticate: Bearer`.
+
+The request accepts exactly one `solver_id`, using
+`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`, and no other query key or request body.
+A success is `application/json`, `Cache-Control: no-store`, and at most
+1,048,576 bytes:
+
+```json
+{
+  "schemaVersion": 1,
+  "source": "offer-files-solver",
+  "generatedAt": "2026-08-14T12:00:10.000Z",
+  "snapshots": [{
+    "solverId": "maker-a",
+    "version": "9007199254740993",
+    "updatedAt": "2026-08-14T12:00:00.000Z",
+    "expiresAt": "2026-08-14T12:01:00.000Z",
+    "pairs": []
+  }]
+}
+```
+
+`generatedAt` is only the request observation time; polling never refreshes
+`updatedAt` or `expiresAt`. A live declaration carries its complete, stably
+sorted pairs. A known explicit withdrawal or expired declaration retains its
+identity/version/times with `pairs:[]`. An identity never published by this
+backend returns `snapshots:[]`. Either empty form tells the relay to withdraw
+data atomically. A source serialization/boundary failure returns
+`503 LIQUIDITY_UNAVAILABLE`; malformed query or body framing returns `400
+VALIDATION`.
 
 ---
 

@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "source": "offer-files-solver",
+  "generatedAt": "2026-08-14T12:00:10.000Z",
+  "snapshots": [
+    {
+      "solverId": "offer-files-solver-fixture-01",
+      "version": "9007199254740993",
+      "updatedAt": "2026-08-14T12:00:00.000Z",
+      "expiresAt": "2026-08-14T12:01:00.000Z",
+      "pairs": [
+        {
+          "tokenIn": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "tokenOut": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "levels": [
+            {
+              "input": "1000",
+              "output": "900"
+            },
+            {
+              "input": "2000",
+              "output": "1700"
+            },
+            {
+              "input": "4000",
+              "output": "3000"
+            }
+          ]
+        },
+        {
+          "tokenIn": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "tokenOut": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "levels": [
+            {
+              "input": "1000",
+              "output": "2000"
+            },
+            {
+              "input": "2000",
+              "output": "3900"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

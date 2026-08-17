@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "profile": "future-profile-v2",
+  "valid": false,
+  "live": false,
+  "claimedOfferId": "abababababababababababababababababababababababababababababababab",
+  "computedOfferId": null,
+  "stateVersion": "42",
+  "validatedAt": "2026-08-14T12:34:56.000Z",
+  "status": "unknown",
+  "code": "UNSUPPORTED_PROFILE",
+  "reason": "unsupported validation profile"
+}

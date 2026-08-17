@@ -9,7 +9,9 @@
     "./batcher": "./batcher.ts",
     "./wallet": "./wallet.ts",
     "./offer-files": "./offer-files.ts",
-    "./ladder-schema": "./ladder-schema.ts"
+    "./ladder-schema": "./ladder-schema.ts",
+    "./liquidity-contract": "./liquidity-contract.ts",
+    "./validation-contract": "./validation-contract.ts"
   },
   "scripts": {
     "test": "bun test"

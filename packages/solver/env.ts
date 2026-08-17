@@ -56,6 +56,8 @@ export function parseBooleanEnv(
 export interface SolverRuntimeEnv {
   maxCycleLen: number;
   resyncIntervalMs: number;
+  backendHealthCheckIntervalMs: number;
+  backendHealthMaxAgeMs: number;
   expiryMarginSeconds: number;
   offerTtlSeconds: number;
   settleTtlMinutes: number;
@@ -73,6 +75,20 @@ export function loadSolverRuntimeEnv(read: EnvReader = getEnv): SolverRuntimeEnv
       300_000,
       1_000,
       86_400_000,
+    ),
+    backendHealthCheckIntervalMs: parseBoundedIntegerEnv(
+      "SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS",
+      read("SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS"),
+      5_000,
+      250,
+      3_600_000,
+    ),
+    backendHealthMaxAgeMs: parseBoundedIntegerEnv(
+      "SOLVER_BACKEND_HEALTH_MAX_AGE_MS",
+      read("SOLVER_BACKEND_HEALTH_MAX_AGE_MS"),
+      15_000,
+      1_000,
+      3_600_000,
     ),
     expiryMarginSeconds: parseBoundedIntegerEnv(
       "SOLVER_EXPIRY_MARGIN_SECONDS",
@@ -130,6 +146,12 @@ export function loadSolverRuntimeEnv(read: EnvReader = getEnv): SolverRuntimeEnv
         `SOLVER_LEVELS_TTL_SECONDS (${env.levelsTtlSeconds})`,
     );
   }
+  if (env.backendHealthCheckIntervalMs >= env.backendHealthMaxAgeMs) {
+    throw new Error(
+      `SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS (${env.backendHealthCheckIntervalMs}) must be less than ` +
+        `SOLVER_BACKEND_HEALTH_MAX_AGE_MS (${env.backendHealthMaxAgeMs})`,
+    );
+  }
   return env;
 }
 
@@ -139,6 +161,8 @@ const runtime = loadSolverRuntimeEnv();
 export const SOLVER_MAX_CYCLE_LEN = runtime.maxCycleLen;
 /** The stream has no replay, so periodically rebuild the complete book. */
 export const SOLVER_RESYNC_INTERVAL_MS = runtime.resyncIntervalMs;
+export const SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS = runtime.backendHealthCheckIntervalMs;
+export const SOLVER_BACKEND_HEALTH_MAX_AGE_MS = runtime.backendHealthMaxAgeMs;
 export const SOLVER_EXPIRY_MARGIN_SECONDS = runtime.expiryMarginSeconds;
 export const SOLVER_OFFER_TTL_SECONDS = runtime.offerTtlSeconds;
 export const SOLVER_SETTLE_TTL_MINUTES = runtime.settleTtlMinutes;

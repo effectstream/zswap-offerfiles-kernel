@@ -11,6 +11,8 @@ import {
   isLevelsPublicationEnabled,
   isPathBEnabled,
   isResidualTopUpsEnabled,
+  SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS,
+  SOLVER_BACKEND_HEALTH_MAX_AGE_MS,
   SOLVER_EXPIRY_MARGIN_SECONDS,
   SOLVER_LADDER_CONFIG,
   SOLVER_LEVELS_AUTH_TOKEN,
@@ -32,8 +34,36 @@ import {
   type LevelsPushHandle,
   validateLevelsAuthToken,
 } from "./levels-push.ts";
-import { startBookSync, type BookChange, type SyncHandle } from "./sse-sync.ts";
+import {
+  startBookSync,
+  type BookChange,
+  type SyncDependencies,
+  type SyncHandle,
+} from "./sse-sync.ts";
 import { Stock } from "./stock.ts";
+import {
+  startValidationGate,
+  type ValidatedBookOffer,
+  type ValidationAvailabilityState,
+  type ValidationGateDependencies,
+  type ValidationGateHandle,
+  type ValidationGeneration,
+  type ValidationGateTrace,
+} from "./validation-gate.ts";
+
+export interface SolverWalletDependencies {
+  buildWallet: typeof buildWallet;
+  waitForSync: typeof waitForSync;
+  shieldedBalances: typeof shieldedBalances;
+  shieldedKeys: typeof shieldedKeys;
+}
+
+const DEFAULT_WALLET_DEPENDENCIES: SolverWalletDependencies = {
+  buildWallet,
+  waitForSync,
+  shieldedBalances,
+  shieldedKeys,
+};
 
 export interface SolverOptions {
   /** Cancels startup acquisition. Once a handle is returned, callers own
@@ -49,16 +79,27 @@ export interface SolverOptions {
   dryRun?: boolean;
   seed?: string;
   resyncIntervalMs?: number;
+  backendHealthCheckIntervalMs?: number;
+  backendHealthMaxAgeMs?: number;
   expiryMarginSeconds?: number;
   maxCycleLen?: number;
   enableCycles?: boolean;
   enablePathB?: boolean;
   enableResidualTopUps?: boolean;
   /** Authenticated quote publication is independent from execution and
-   * defaults off. Enabling it requires levelsAuthToken. */
+   * defaults off. The shared solver bearer remains mandatory because every
+   * candidate uses validate-for-use even when publication is disabled. */
   enableLevelsPublication?: boolean;
   levelsAuthToken?: string;
   levelsPushIntervalMs?: number;
+  /** Deterministic boundary seams for lifecycle/integration tests. Production
+   * entrypoints never provide these. */
+  syncDependencies?: SyncDependencies;
+  validationDependencies?: Partial<ValidationGateDependencies>;
+  walletDependencies?: SolverWalletDependencies;
+  /** Diagnostic-only validation ordering seam. Observer failures are contained
+   * by the gate and never participate in readiness or execution authority. */
+  onValidationTrace?: (event: ValidationGateTrace) => void;
   /** Deadline applied to wallet build/sync/first balance and, separately, to
    * the initial authoritative book snapshot plus buffered SSE drain. */
   startupTimeoutMs?: number;
@@ -76,9 +117,16 @@ export interface SolverOptions {
 export interface SolverHandle {
   readonly ladders: LoadedLadders;
   readonly book: Book;
+  /** Ephemeral generation-bound projection used by Engine. Raw REST/SSE rows
+   * never enter this book without a closed validate-for-use verdict. */
+  readonly validatedBook: Book<ValidatedBookOffer>;
   readonly stock: Stock;
-  /** Resolves once the first full page-through and buffered gap are applied;
-   * rejects at the configured terminal startup deadline. */
+  /** Resolves only after a fresh backend-current generation has closed the
+   * snapshot/SSE gap, validate-for-use has drained that raw generation, and
+   * (outside dry-run) authoritative inventory has refreshed. With an
+   * initially empty raw book it intentionally remains pending (the POST-only
+   * contract has no capability probe) while the live process waits for the
+   * first real offer; stop still rejects and owns every pending operation. */
   ready: Promise<void>;
   /** Resolves when nothing is queued or in flight — for tests that must not
    *  race a settlement. */
@@ -138,6 +186,9 @@ type Balances = Record<string, bigint> | Map<string, bigint>;
 
 export interface InventoryRefreshController {
   refresh: (signal?: AbortSignal) => Promise<void>;
+  /** Immediately revoke executable/published balance authority and supersede
+   * an in-flight read. Retained late reads remain observed but cannot install. */
+  invalidate: (reason?: unknown) => void;
   isReady: () => boolean;
   isRefreshing: () => boolean;
   /** Balance reads that ignored supersession/stop and are still observed in
@@ -169,6 +220,7 @@ export function createInventoryRefreshController(
   const retainedReads = new Set<Promise<Balances>>();
 
   const notify = (next: boolean): void => {
+    if (ready === next) return;
     ready = next;
     try {
       opts.onReadinessChange?.(next);
@@ -185,6 +237,13 @@ export function createInventoryRefreshController(
     isReady: () => ready && !stopped,
     isRefreshing: () => active !== null,
     retainedOperations: () => retainedReads.size,
+    invalidate: (reason = new Error("inventory authority invalidated")): void => {
+      if (stopped) return;
+      generation++;
+      active?.abort(reason);
+      active = null;
+      withdraw();
+    },
     refresh: async (outerSignal?: AbortSignal): Promise<void> => {
       if (stopped) throw new Error("inventory refresh controller is stopped");
 
@@ -375,6 +434,7 @@ export function armBookReadyDecisionGate(
 }
 
 export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle> {
+  const walletDependencies = opts.walletDependencies ?? DEFAULT_WALLET_DEPENDENCIES;
   const api = opts.api ?? ZSWAP_API;
   const dryRun = opts.dryRun ?? isDryRun();
   const enableCycles = opts.enableCycles ?? isCyclesEnabled();
@@ -398,7 +458,10 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     }
   }
   const publishLevels = shouldPublishLevels(dryRun, enableLevelsPublication);
-  if (publishLevels) validateLevelsAuthToken(levelsAuthToken);
+  // This bearer now protects validate-for-use as well as optional levels
+  // publication. Candidate validation is mandatory in live and dry-run modes,
+  // so publication being disabled does not make an absent credential safe.
+  validateLevelsAuthToken(levelsAuthToken);
   const rawLog = opts.log ?? ((msg: string) => console.log(msg));
   const log = (message: string): void => {
     try {
@@ -430,12 +493,18 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     );
   }
 
-  type SolverWallet = Awaited<ReturnType<typeof buildWallet>>;
+  type SolverWallet = Awaited<ReturnType<typeof walletDependencies.buildWallet>>;
   let wallet: SolverWallet | null = null;
   let balanceWallet: SolverWallet | null = null;
   let executor: Executor | null = null;
+  let levels: LevelsPushHandle | null = null;
+  let backendCurrent = false;
+  let backendGeneration: ValidationGeneration | null = null;
+  let validationAvailable = false;
   let inventoryChanged = (_ready: boolean): void => {};
+  let validationChanged = (_state: ValidationAvailabilityState): void => {};
   let withdrawalBarrier: Promise<void> = Promise.resolve();
+  const book = new Book();
   const inventory = createInventoryRefreshController({
     stock,
     readBalances: async (signal) => {
@@ -446,19 +515,37 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       await withdrawalBarrier;
       if (signal.aborted) throw asError(signal.reason, "inventory refresh aborted");
       if (!balanceWallet) throw new Error("wallet is unavailable for inventory refresh");
-      return shieldedBalances(balanceWallet);
+      return walletDependencies.shieldedBalances(balanceWallet);
     },
     onReadinessChange: (ready) => inventoryChanged(ready),
   });
-  const refreshBalances = (signal: AbortSignal): Promise<void> => inventory.refresh(signal);
+  const refreshBalances = async (signal: AbortSignal): Promise<void> => {
+    if (!backendCurrent || !validationAvailable) {
+      throw new Error("combined backend/validation authority is unavailable");
+    }
+    await inventory.refresh(signal);
+  };
+  const validationGate: ValidationGateHandle = startValidationGate({
+    rawBook: book,
+    api,
+    authToken: levelsAuthToken,
+    expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
+    onAvailabilityChange: (state) => validationChanged(state),
+    onValidatedBookChange: () => requestDecision(),
+    onError: (error) => log(
+      `[solver] validation error: ${error instanceof Error ? error.message : String(error)}`,
+    ),
+    ...(opts.onValidationTrace ? { onTrace: opts.onValidationTrace } : {}),
+    ...(opts.validationDependencies ? { dependencies: opts.validationDependencies } : {}),
+  });
 
   if (!dryRun) {
     try {
       wallet = await initializeOwnedResource<SolverWallet>({
-        build: () => buildWallet(opts.seed ?? SOLVER_SEED),
+        build: () => walletDependencies.buildWallet(opts.seed ?? SOLVER_SEED),
         initialize: async (owned, signal) => {
           balanceWallet = owned;
-          await waitForSync(owned, { timeoutMs: startupTimeoutMs });
+          await walletDependencies.waitForSync(owned, { timeoutMs: startupTimeoutMs });
           if (signal.aborted) throw asError(signal.reason, "wallet startup aborted");
           await inventory.refresh(signal);
         },
@@ -472,6 +559,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       });
     } catch (err) {
       inventory.stop();
+      await validationGate.stop();
       balanceWallet = null;
       throw err;
     }
@@ -502,7 +590,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
                 })),
               },
             ],
-        shieldedKeys(solverWallet),
+        walletDependencies.shieldedKeys(solverWallet),
         { ttl: new Date(Date.now() + SOLVER_SETTLE_TTL_MINUTES * 60_000), payFees: false },
       );
       return (solverWallet.wallet as any).finalizeTransaction(recipe.transaction);
@@ -510,7 +598,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
 
     executor = new Executor({
       wallet: wallet.wallet as any,
-      keys: shieldedKeys(wallet),
+      keys: walletDependencies.shieldedKeys(wallet),
       stock,
       ...(opts.api ? { api: opts.api } : {}),
       settleTtlMinutes: SOLVER_SETTLE_TTL_MINUTES,
@@ -519,7 +607,10 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       readinessTimeoutMs: startupTimeoutMs,
       walletOperationTimeoutMs,
       refreshBalances,
-      isReady: inventory.isReady,
+      isReady: () => backendCurrent && validationAvailable && inventory.isReady(),
+      revalidateOfferForExecution: validationGate.revalidateForExecution,
+      isValidationEvidenceCurrent: validationGate.isEvidenceCurrent,
+      isExecutionValidationEvidenceCurrent: validationGate.isExecutionEvidenceCurrent,
       ...(enableResidualTopUps ? { buildTopUp } : {}),
       log,
       onOutcome: (outcome) => {
@@ -559,9 +650,8 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   }
 
   const pending = new Set<Promise<unknown>>();
-  // Owned here rather than left to startBookSync, so `decide` can read it
-  // without closing over a binding declared later.
-  const book = new Book();
+  // Owned here rather than left to startBookSync, so `decide` can read the
+  // separately admitted generation without touching the raw mirror.
   const engineConfig = (): EngineConfig => ({
     ladders: ladders.ladders,
     refPricesUsd: ladders.refPricesUsd,
@@ -573,7 +663,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     enableResidualTopUps,
   });
 
-  const describeCandidate = (candidate: Candidate): string =>
+  const describeCandidate = (candidate: Candidate<ValidatedBookOffer>): string =>
     candidate.kind === "pathA"
       ? `(A) ${candidate.offers[0].offerHash.slice(0, 10)} at posted ${candidate.maxPay}`
       : `(B) ${candidate.offers.map((o) => o.offerHash.slice(0, 10)).join(" + ")}` +
@@ -591,7 +681,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
    *  in memory, and it keeps a new arrival from being judged in isolation when
    *  it could cross with something already sitting there. */
   const decide = (): void => {
-    const candidates = findCandidates(book, engineConfig(), Date.now());
+    const candidates = findCandidates(validationGate.book, engineConfig(), Date.now());
     for (const candidate of candidates) {
       if (dryRun) {
         log(`[solver]     WOULD FILL ${describeCandidate(candidate)}`);
@@ -608,7 +698,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
 
   const decisionGate = createBookReadyDecisionGate(
     decide,
-    () => dryRun || inventory.isReady(),
+    () => backendCurrent && validationAvailable && (dryRun || inventory.isReady()),
   );
 
   // Events and terminal executor callbacks can arrive in the same turn. The
@@ -621,29 +711,183 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     if (change.kind === "removed") {
       log(`[solver] − ${change.offerHash.slice(0, 10)} (${change.reason})`);
       if (change.reason === "consumed") executor?.notifyConsumed(change.offerHash);
-      // A removal can unblock a lower-ranked candidate or dissolve a claimed
-      // crossing choice. Re-evaluate the whole current book for every removal;
-      // the gate coalesces duplicate/nullifier fan-out and pre-ready changes.
-      requestDecision();
+      validationGate.rawBookChanged(change.offerHash);
       return;
     }
     log(`[solver] + ${describeOffer(change.offer)}`);
-    requestDecision();
+    validationGate.rawBookChanged(change.offer.offerHash);
   };
 
-  let sync!: SyncHandle;
-  let levels: LevelsPushHandle | null = null;
+  let sync: SyncHandle | null = null;
+  let recoveryRunning = false;
+  let recoveryRequested = false;
+  let initialSyncReady = false;
+  let solverReadySettled = false;
+  let resolveSolverReady!: () => void;
+  let rejectSolverReady!: (error: unknown) => void;
+  const solverReady = new Promise<void>((resolve, reject) => {
+    resolveSolverReady = resolve;
+    rejectSolverReady = reject;
+  });
+  observe(solverReady);
+
+  const maybeResolveSolverReady = (): void => {
+    if (
+      !solverReadySettled &&
+      initialSyncReady &&
+      backendCurrent &&
+      validationAvailable &&
+      (dryRun || inventory.isReady())
+    ) {
+      solverReadySettled = true;
+      resolveSolverReady();
+    }
+  };
+
+  // A failed/started refresh empties Stock, causing an immediate authenticated
+  // withdrawal. A successful newer generation republishes and re-decides over
+  // the current complete book. Both callbacks are non-authoritative.
+  inventoryChanged = (ready): void => {
+    if (ready && (!backendCurrent || !validationAvailable)) {
+      inventory.invalidate(new Error("inventory read completed outside combined readiness"));
+      return;
+    }
+    if (levels) {
+      const publication = levels.push();
+      observe(publication);
+      if (!ready) withdrawalBarrier = publication;
+    }
+    if (ready && backendCurrent && validationAvailable) {
+      maybeResolveSolverReady();
+      requestDecision();
+    }
+  };
+
+  const retryInventory = async (): Promise<void> => {
+    if (dryRun || !backendCurrent || !validationAvailable || inventory.isReady()) return;
+    if (recoveryRunning) {
+      recoveryRequested = true;
+      return;
+    }
+    if (inventory.isRefreshing()) return;
+    recoveryRunning = true;
+    recoveryRequested = false;
+    const owner = new AbortController();
+    const timer = setTimeout(() => {
+      owner.abort(
+        new Error(`balance refresh timed out after ${walletOperationTimeoutMs} ms`),
+      );
+    }, walletOperationTimeoutMs);
+    try {
+      await inventory.refresh(owner.signal);
+      if (backendCurrent && validationAvailable) {
+        log("[solver] authoritative inventory readiness restored");
+      }
+    } catch (err) {
+      log(`[solver] inventory reconciliation failed: ${asError(err, "unknown error").message}`);
+    } finally {
+      clearTimeout(timer);
+      recoveryRunning = false;
+      if (recoveryRequested && backendCurrent && validationAvailable && !inventory.isReady()) {
+        observe(retryInventory());
+      }
+    }
+  };
+
+  validationChanged = (state): void => {
+    const belongsToBackend = state.kind === "ready" && backendGeneration !== null &&
+      state.streamGeneration === backendGeneration.streamGeneration &&
+      state.backendBlockL2 === backendGeneration.backendBlockL2;
+    validationAvailable = belongsToBackend;
+    if (!validationAvailable) {
+      if (!dryRun) {
+        inventory.invalidate(new Error(
+          `validate-for-use unavailable: ${state.kind === "blocked" ? state.reason : "generation mismatch"}`,
+        ));
+      }
+      log(
+        `[solver] validate-for-use blocked` +
+          (state.kind === "blocked" ? ` — ${state.reason}` : " — generation mismatch"),
+      );
+      return;
+    }
+    log(
+      `[solver] validate-for-use ready at L2 ${state.backendBlockL2} ` +
+        `(stream generation ${state.streamGeneration}, ${validationGate.book.size} offer(s))`,
+    );
+    if (dryRun) {
+      maybeResolveSolverReady();
+      requestDecision();
+    } else {
+      recoveryRequested = true;
+      observe(retryInventory());
+    }
+  };
+
+  const onCurrentnessChange = (state: ReturnType<SyncHandle["currentness"]>): void => {
+    if (state.kind !== "current") {
+      backendCurrent = false;
+      backendGeneration = null;
+      validationAvailable = false;
+      validationGate.invalidate(`backend projection unavailable: ${state.reason}`);
+      if (!dryRun) {
+        inventory.invalidate(
+          new Error(`backend projection unavailable: ${state.reason}`),
+        );
+      }
+      log(`[solver] backend projection blocked — ${state.reason}`);
+      return;
+    }
+    const nextGeneration: ValidationGeneration = {
+      streamGeneration: state.streamGeneration,
+      backendBlockL2: state.backendBlockL2,
+    };
+    if (
+      backendCurrent && backendGeneration !== null &&
+      backendGeneration.streamGeneration === nextGeneration.streamGeneration &&
+      backendGeneration.backendBlockL2 === nextGeneration.backendBlockL2
+    ) return;
+    const sameConnectedStream = backendCurrent && backendGeneration !== null &&
+      backendGeneration.streamGeneration === nextGeneration.streamGeneration;
+    backendCurrent = true;
+    backendGeneration = nextGeneration;
+    // A monotonic health-height advance within one continuously connected SSE
+    // epoch is a newer execution floor, not a missed-event generation. Keep
+    // already validated offers admitted; the gate publishes the new floor and
+    // Executor revalidates against it before wallet/batcher mutation. A new
+    // stream epoch still clears everything and requires a complete drain.
+    if (!sameConnectedStream) validationAvailable = false;
+    if (!dryRun) {
+      inventory.invalidate(new Error(
+        sameConnectedStream
+          ? "backend L2 advanced; refreshing authoritative inventory"
+          : "awaiting validate-for-use generation drain",
+      ));
+    }
+    log(
+      `[solver] backend projection current at L2 ${state.backendBlockL2} ` +
+        `(stream generation ${state.streamGeneration})`,
+    );
+    validationGate.beginGeneration(nextGeneration);
+  };
+
+  armBookReadyDecisionGate(solverReady, decisionGate);
   try {
     sync = startBookSync({
       book,
       ...(opts.api ? { api: opts.api } : {}),
       resyncIntervalMs: opts.resyncIntervalMs ?? SOLVER_RESYNC_INTERVAL_MS,
+      backendHealthCheckIntervalMs:
+        opts.backendHealthCheckIntervalMs ?? SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS,
+      backendHealthMaxAgeMs:
+        opts.backendHealthMaxAgeMs ?? SOLVER_BACKEND_HEALTH_MAX_AGE_MS,
       expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
       onChange,
+      onCurrentnessChange,
+      ...(opts.syncDependencies ? { dependencies: opts.syncDependencies } : {}),
       onError: (err) => log(`[solver] sync error: ${err instanceof Error ? err.message : String(err)}`),
       log,
     });
-    armBookReadyDecisionGate(sync.ready, decisionGate);
 
     // A dry run must not advertise prices it will not honour.
     levels = publishLevels
@@ -656,10 +900,27 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
           log,
         })
       : null;
+    void sync.ready.then(
+      () => {
+        initialSyncReady = true;
+        maybeResolveSolverReady();
+      },
+      (error) => {
+        if (!solverReadySettled) {
+          solverReadySettled = true;
+          rejectSolverReady(error);
+        }
+      },
+    );
   } catch (err) {
     decisionGate.stop();
+    if (!solverReadySettled) {
+      solverReadySettled = true;
+      rejectSolverReady(err);
+    }
     inventory.stop();
     const cleanups: Promise<boolean>[] = [];
+    cleanups.push(cleanupWithin(validationGate, stopTimeoutMs, (owned) => owned.stop()));
     if (levels) cleanups.push(cleanupWithin(levels, stopTimeoutMs, (owned) => owned.stop()));
     if (sync) cleanups.push(cleanupWithin(sync, stopTimeoutMs, (owned) => owned.stop()));
     if (executor) {
@@ -676,47 +937,21 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     balanceWallet = null;
     throw err;
   }
-
-  // A failed/started refresh empties Stock, causing an immediate authenticated
-  // withdrawal. A successful newer generation republishes and re-decides over
-  // the current complete book. Both callbacks are non-authoritative.
-  inventoryChanged = (ready): void => {
-    if (levels) {
-      const publication = levels.push();
-      observe(publication);
-      if (!ready) withdrawalBarrier = publication;
-    }
-    if (ready) requestDecision();
-  };
-
-  let recoveryRunning = false;
-  const retryInventory = async (): Promise<void> => {
-    if (dryRun || inventory.isReady() || inventory.isRefreshing() || recoveryRunning) return;
-    recoveryRunning = true;
-    const owner = new AbortController();
-    const timer = setTimeout(() => {
-      owner.abort(
-        new Error(`balance refresh timed out after ${walletOperationTimeoutMs} ms`),
-      );
-    }, walletOperationTimeoutMs);
-    try {
-      await inventory.refresh(owner.signal);
-      log("[solver] authoritative inventory readiness restored");
-    } catch (err) {
-      log(`[solver] inventory reconciliation failed: ${asError(err, "unknown error").message}`);
-    } finally {
-      clearTimeout(timer);
-      recoveryRunning = false;
-    }
-  };
+  if (!sync) throw new Error("book synchronization failed to initialize");
+  const activeSync = sync;
   const balanceRetryTimer = dryRun
     ? null
     : setInterval(() => {
-        if (!inventory.isReady() && !inventory.isRefreshing()) observe(retryInventory());
-      }, balanceRefreshRetryMs);
+      if (backendCurrent && !inventory.isReady() && !inventory.isRefreshing()) {
+        if (!validationAvailable) return;
+        recoveryRequested = true;
+        observe(retryInventory());
+      }
+    }, balanceRefreshRetryMs);
   balanceRetryTimer?.unref?.();
 
   const idle = async (): Promise<void> => {
+    await validationGate.idle();
     while (pending.size > 0) await Promise.allSettled([...pending]);
   };
 
@@ -724,13 +959,21 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
 
   return {
     ladders,
-    book: sync.book,
+    book: activeSync.book,
+    validatedBook: validationGate.book,
     stock,
-    ready: sync.ready,
+    ready: solverReady,
     idle,
     stop(): Promise<void> {
       if (stopPromise) return stopPromise;
       decisionGate.stop();
+      backendCurrent = false;
+      backendGeneration = null;
+      validationAvailable = false;
+      if (!solverReadySettled) {
+        solverReadySettled = true;
+        rejectSolverReady(new Error("solver stopped before combined readiness"));
+      }
       if (balanceRetryTimer) clearInterval(balanceRetryTimer);
       inventory.stop();
       const retainedInventoryOperations = inventory.retainedOperations();
@@ -745,7 +988,8 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       const ownedWallet = wallet;
       const ownedExecutor = executor;
       const tasks: Promise<unknown>[] = [
-        Promise.resolve().then(() => sync.stop()),
+        Promise.resolve().then(() => activeSync.stop()),
+        Promise.resolve().then(() => validationGate.stop()),
         Promise.resolve().then(() => ownedLevels?.stop()),
         Promise.resolve().then(async () => {
           const result = await ownedExecutor?.stop(stopTimeoutMs);

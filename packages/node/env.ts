@@ -134,6 +134,19 @@ export const apiSseMaxConnections = (): number => {
   return Number.isSafeInteger(parsed) && parsed <= 10_000 ? parsed : 100;
 };
 
+// Decision budget for one solver validate-for-use request. Keep a hard upper
+// bound so an operator typo cannot silently permit unbounded async read work.
+// The endpoint observes it at async yields and between validation stages. The
+// ledger's synchronous native proof call blocks the event loop and therefore
+// cannot be preempted (or notice an elapsed timer) mid-call. The route retains
+// its per-solver active slot until any post-deadline read really settles.
+export const offerValidationTimeoutMs = (): number => {
+  const raw = getEnv("OFFER_VALIDATION_TIMEOUT_MS") ?? "15000";
+  if (!/^[1-9][0-9]*$/.test(raw)) return 15_000;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 60_000 ? parsed : 15_000;
+};
+
 export interface SolverLevelsCredential {
   solverId: string;
   secret: string;
@@ -214,6 +227,44 @@ export function authenticateSolverLevelsToken(
     }
   }
   return authenticated;
+}
+
+/** Dedicated read-only credential for the grouped solver-liquidity source.
+ * It is intentionally not part of the levels-write registry: the relay may
+ * read indicative data but must never gain publication authority. */
+export function solverLiquidityReadAuthSecret(): string {
+  const secret = getEnv("SOLVER_LIQUIDITY_READ_AUTH_SECRET");
+  if (secret === undefined || secret === "" || secret.length < 32 || /\s/.test(secret)) {
+    throw new Error(
+      "SOLVER_LIQUIDITY_READ_AUTH_SECRET must contain at least 32 non-whitespace characters",
+    );
+  }
+
+  // Parsing the write registry is part of the read boundary's fail-closed
+  // configuration check: if it cannot be understood, credential separation
+  // cannot be established safely.
+  const writeCredentials = solverLevelsCredentials();
+  const configuredSingleWriteSecret = getEnv("SOLVER_LEVELS_AUTH_SECRET");
+  if (
+    writeCredentials.some((credential) => credential.secret === secret) ||
+    (configuredSingleWriteSecret !== undefined && configuredSingleWriteSecret === secret)
+  ) {
+    throw new Error(
+      "SOLVER_LIQUIDITY_READ_AUTH_SECRET must differ from every levels-write credential",
+    );
+  }
+  return secret;
+}
+
+/** Compare fixed-size digests so correct, wrong, and differently sized bearer
+ * values use the same timing-safe equality primitive. */
+export function authenticateSolverLiquidityReadToken(
+  token: string,
+  expectedSecret: string,
+): boolean {
+  const suppliedDigest = createHash("sha256").update(token).digest();
+  const expectedDigest = createHash("sha256").update(expectedSecret).digest();
+  return timingSafeEqual(suppliedDigest, expectedDigest);
 }
 
 /** Solver-backed precedence changes the established /v1/quote contract and is

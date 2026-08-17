@@ -33,6 +33,7 @@ import {
 import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
 
 import type { BookOffer } from "./book.ts";
+import type { ValidatedBookOffer, ValidationEvidence } from "./validation-gate.ts";
 import { claimFor, Stock, type Claim } from "./stock.ts";
 
 type FillDecision =
@@ -102,6 +103,13 @@ class OperationBoundaryError extends Error {
   }
 }
 
+class ValidationAuthorityChangedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ValidationAuthorityChangedError";
+  }
+}
+
 const BATCHER_ATTEMPTS = 3;
 
 /** Take ownership of every mutable collection at admission. Callers are free
@@ -115,6 +123,13 @@ const snapshotOffer = (offer: BookOffer): BookOffer => ({
   firstSeenAt: offer.firstSeenAt,
   inputNullifiers: [...offer.inputNullifiers],
   ...(offer.blob !== undefined ? { blob: offer.blob } : {}),
+  ...((offer as Partial<ValidatedBookOffer>).validation !== undefined
+    ? {
+        validation: Object.freeze({
+          ...(offer as ValidatedBookOffer).validation,
+        }),
+      }
+    : {}),
 });
 
 export interface WalletLike {
@@ -189,6 +204,21 @@ export interface ExecutorOptions {
   /** Global inventory-readiness gate. False refuses both Path A and Path B,
    * including exact crossings that do not otherwise reserve a payout. */
   isReady?: () => boolean;
+  /** Production validate-for-use owner. When configured, both admission and
+   * every dequeue fail closed on immutable generation-bound evidence. The
+   * optional seam preserves isolated legacy Executor unit tests; runSolver
+   * always supplies the pair. */
+  revalidateOfferForExecution?: (
+    offer: ValidatedBookOffer,
+    signal: AbortSignal,
+  ) => Promise<ValidatedBookOffer>;
+  /** Admission evidence remains usable across monotonic height advances in one
+   * connected stream; this stronger callback proves a just-returned dequeue
+   * verdict covers the latest observed backend floor before mutation. */
+  isExecutionValidationEvidenceCurrent?: (
+    evidence: ValidationEvidence | undefined,
+  ) => boolean;
+  isValidationEvidenceCurrent?: (evidence: ValidationEvidence | undefined) => boolean;
   /** Build the solver's own half of a merge — supplying `gives`, receiving
    *  `wants` — already proven and finalized, ready to merge. Only called when a
    *  set does not cross exactly. Without it, only exact crossings can settle. */
@@ -246,6 +276,14 @@ export class Executor {
   #stopPromise: Promise<ExecutorStopResult> | null = null;
 
   constructor(opts: ExecutorOptions) {
+    if (
+      (opts.revalidateOfferForExecution === undefined) !==
+        (opts.isValidationEvidenceCurrent === undefined)
+    ) {
+      throw new Error(
+        "executor validation callbacks must be configured together",
+      );
+    }
     this.#opts = {
       settleTtlMinutes: 30,
       statusPollMs: 5000,
@@ -255,6 +293,12 @@ export class Executor {
       batcherTimeoutMs: 240_000,
       walletOperationTimeoutMs: 240_000,
       ...opts,
+      ...(opts.revalidateOfferForExecution
+        ? {
+            isExecutionValidationEvidenceCurrent:
+              opts.isExecutionValidationEvidenceCurrent ?? opts.isValidationEvidenceCurrent,
+          }
+        : {}),
     };
     this.#stock = opts.stock;
     this.#apiClient = opts.apiClient ?? {
@@ -315,6 +359,75 @@ export class Executor {
       for (const leg of offer.wants) add(leg.token, -leg.amount);
     }
     return net;
+  }
+
+  static #sameOfferProjection(left: BookOffer, right: BookOffer): boolean {
+    const legs = (values: BookOffer["gives"]): string[] => values
+      .map((leg) => `${leg.kind}:${leg.token.toLowerCase()}:${leg.amount}`)
+      .sort();
+    const same = (leftValues: string[], rightValues: string[]): boolean =>
+      leftValues.length === rightValues.length &&
+      leftValues.every((value, index) => value === rightValues[index]);
+    return left.offerHash.toLowerCase() === right.offerHash.toLowerCase() &&
+      same(legs(left.gives), legs(right.gives)) &&
+      same(legs(left.wants), legs(right.wants)) &&
+      left.expiresAt === right.expiresAt &&
+      same(
+        left.inputNullifiers.map((value) => value.toLowerCase()).sort(),
+        right.inputNullifiers.map((value) => value.toLowerCase()).sort(),
+      );
+  }
+
+  #admissionValidationCurrent(offer: BookOffer): boolean {
+    if (!this.#opts.revalidateOfferForExecution) return true;
+    return this.#opts.isValidationEvidenceCurrent!(
+      (offer as Partial<ValidatedBookOffer>).validation,
+    );
+  }
+
+  async #revalidate(
+    admitted: BookOffer,
+  ): Promise<{ ok: true; offer: BookOffer } | { ok: false; reason: string }> {
+    if (!this.#opts.revalidateOfferForExecution) return { ok: true, offer: admitted };
+    try {
+      const checked = await this.#bounded(
+        `validate offer ${admitted.offerHash.slice(0, 10)}`,
+        this.#opts.requestTimeoutMs,
+        (signal) => this.#opts.revalidateOfferForExecution!(
+          admitted as ValidatedBookOffer,
+          signal,
+        ),
+      );
+      if (!Executor.#sameOfferProjection(admitted, checked)) {
+        return { ok: false, reason: "fresh validation changed admitted offer economics" };
+      }
+      if (!this.#opts.isExecutionValidationEvidenceCurrent!(checked.validation)) {
+        return { ok: false, reason: "fresh validation evidence was superseded before mutation" };
+      }
+      return { ok: true, offer: snapshotOffer(checked) };
+    } catch (error) {
+      return { ok: false, reason: `validate-for-use failed: ${Executor.#reason(error)}` };
+    }
+  }
+
+  #allValidationCurrent(offers: readonly BookOffer[]): boolean {
+    if (!this.#opts.revalidateOfferForExecution) return true;
+    return offers.every((offer) => this.#opts.isExecutionValidationEvidenceCurrent!(
+      (offer as Partial<ValidatedBookOffer>).validation,
+    ));
+  }
+
+  #assertMutationAuthority(offers: readonly BookOffer[]): void {
+    if (this.#opts.isReady?.() === false) {
+      throw new ValidationAuthorityChangedError(
+        "combined backend/validation/inventory authority changed before mutation",
+      );
+    }
+    if (!this.#allValidationCurrent(offers)) {
+      throw new ValidationAuthorityChangedError(
+        "validation state fell below the backend floor before mutation",
+      );
+    }
   }
 
   /** Bind the REST/indexed economics used for pricing and reservation to the
@@ -663,6 +776,14 @@ export class Executor {
         claimDisposition: "release",
       });
     }
+    if (!this.#admissionValidationCurrent(admitted)) {
+      return Promise.resolve({
+        kind: "skipped",
+        offerHash: admitted.offerHash,
+        reason: "offer has no current generation-bound validation evidence",
+        claimDisposition: "release",
+      });
+    }
     if (
       admitted.gives.length !== 1 ||
       admitted.wants.length !== 1 ||
@@ -719,6 +840,14 @@ export class Executor {
         kind: "skipped",
         offerHashes,
         reason: this.#stopping ? "executor is stopping" : "solver inventory is unready",
+        claimDisposition: "release",
+      });
+    }
+    if (!admitted.every((offer) => this.#admissionValidationCurrent(offer))) {
+      return Promise.resolve({
+        kind: "skipped",
+        offerHashes,
+        reason: "a member has no current generation-bound validation evidence",
         claimDisposition: "release",
       });
     }
@@ -807,12 +936,23 @@ export class Executor {
     }
 
     const txs = [];
+    const executionOffers: BookOffer[] = [];
     try {
       for (const offer of offers) {
-        const blob = offer.blob ?? (await this.#getOfferBlob(offer.offerHash));
+        const revalidated = await this.#revalidate(offer);
+        if (!revalidated.ok) {
+          return {
+            kind: "skipped",
+            offerHashes,
+            reason: `${offer.offerHash.slice(0, 10)} ${revalidated.reason}`,
+          };
+        }
+        const executionOffer = revalidated.offer;
+        executionOffers.push(executionOffer);
+        const blob = executionOffer.blob ?? (await this.#getOfferBlob(executionOffer.offerHash));
         this.#assertOfferBlobIdentity(blob, offer.offerHash);
         const tx = this.#apiClient.reconstructOffer(blob);
-        const mismatch = this.#validateOfferSemantics(offer, tx);
+        const mismatch = this.#validateOfferSemantics(executionOffer, tx);
         if (mismatch !== null) {
           return {
             kind: "failed",
@@ -849,15 +989,32 @@ export class Executor {
           reason: "set does not cross exactly and no top-up builder is configured",
         };
       }
+      if (!this.#allValidationCurrent(executionOffers)) {
+        return {
+          kind: "skipped",
+          offerHashes,
+          reason: "validation generation changed before wallet top-up construction",
+        };
+      }
       try {
         txs.push(
           await this.#bounded(
             "wallet top-up construction",
             this.#opts.walletOperationTimeoutMs,
-            () => this.#opts.buildTopUp!(gives, wants),
+            () => {
+              this.#assertMutationAuthority(executionOffers);
+              return this.#opts.buildTopUp!(gives, wants);
+            },
           ),
         );
       } catch (err) {
+        if (err instanceof ValidationAuthorityChangedError) {
+          return {
+            kind: "skipped",
+            offerHashes,
+            reason: err.message,
+          };
+        }
         // The wallet-backed builder does not expose a rollback handle here. A
         // throw may therefore have stranded local inputs; retain the claim.
         return quarantined({
@@ -897,19 +1054,55 @@ export class Executor {
 
     let lastReason = "";
     for (let attempt = 1; attempt <= BATCHER_ATTEMPTS; attempt++) {
-      const res = await this.#bounded(
-        "batcher settlement",
-        this.#opts.batcherTimeoutMs,
-        () => this.#settleViaBatcher(merged as any, {
-          level: "wait-receipt",
-          timeoutMs: this.#opts.batcherTimeoutMs,
-          serverTimeoutMs: this.#opts.batcherTimeoutMs,
-        }),
-      ).catch((err) => ({
-        ok: false,
-        status: 0,
-        body: Executor.#reason(err),
-      }));
+      // Top-up construction and a rate-limit backoff are asynchronous gaps.
+      // Obtain a new endpoint verdict for every member immediately before each
+      // safely retryable batcher admission attempt.
+      for (let index = 0; index < executionOffers.length; index++) {
+        const revalidated = await this.#revalidate(executionOffers[index]);
+        if (!revalidated.ok) {
+          return {
+            kind: "skipped",
+            offerHashes,
+            reason: `${executionOffers[index].offerHash.slice(0, 10)} ${revalidated.reason}`,
+          };
+        }
+        executionOffers[index] = revalidated.offer;
+      }
+      if (!this.#allValidationCurrent(executionOffers)) {
+        return {
+          kind: "skipped",
+          offerHashes,
+          reason: "validation generation changed before batcher admission",
+        };
+      }
+      let res;
+      try {
+        res = await this.#bounded(
+          "batcher settlement",
+          this.#opts.batcherTimeoutMs,
+          () => {
+            this.#assertMutationAuthority(executionOffers);
+            return this.#settleViaBatcher(merged as any, {
+              level: "wait-receipt",
+              timeoutMs: this.#opts.batcherTimeoutMs,
+              serverTimeoutMs: this.#opts.batcherTimeoutMs,
+            });
+          },
+        );
+      } catch (err) {
+        if (err instanceof ValidationAuthorityChangedError) {
+          return {
+            kind: "skipped",
+            offerHashes,
+            reason: err.message,
+          };
+        }
+        res = {
+          ok: false,
+          status: 0,
+          body: Executor.#reason(err),
+        };
+      }
       if (res.ok) break;
 
       lastReason = `batcher ${res.status}: ${JSON.stringify(res.body).slice(0, 200)}`;
@@ -1052,9 +1245,19 @@ export class Executor {
         return { kind: "skipped", offerHash, reason: `no longer live (${observed.status})` };
       }
 
+      const revalidated = await this.#revalidate(offer);
+      if (!revalidated.ok) {
+        return {
+          kind: "skipped",
+          offerHash,
+          reason: revalidated.reason,
+        };
+      }
+
       let offerTx: unknown;
       try {
-        const blob = offer.blob ?? (await this.#getOfferBlob(offerHash));
+        const executionOffer = revalidated.offer;
+        const blob = executionOffer.blob ?? (await this.#getOfferBlob(offerHash));
         this.#assertOfferBlobIdentity(blob, offerHash);
         offerTx = this.#apiClient.reconstructOffer(blob);
       } catch (err) {
@@ -1064,12 +1267,20 @@ export class Executor {
           reason: `offer reconstruction failed before wallet mutation: ${Executor.#reason(err)}`,
         };
       }
-      const mismatch = this.#validateOfferSemantics(offer, offerTx);
+      const mismatch = this.#validateOfferSemantics(revalidated.offer, offerTx);
       if (mismatch !== null) {
         return {
           kind: "failed",
           offerHash,
           reason: `reconstructed offer does not match listed economics: ${mismatch}`,
+        };
+      }
+
+      if (!this.#allValidationCurrent([revalidated.offer])) {
+        return {
+          kind: "skipped",
+          offerHash,
+          reason: "validation state fell below the backend floor before wallet mutation",
         };
       }
 
@@ -1079,14 +1290,20 @@ export class Executor {
         recipe = await this.#bounded(
           "wallet balance transaction",
           this.#opts.walletOperationTimeoutMs,
-          () => this.#opts.wallet.balanceFinalizedTransaction(offerTx, this.#opts.keys, {
-            ttl: new Date(Date.now() + this.#opts.settleTtlMinutes * 60_000),
-          }),
+          () => {
+            this.#assertMutationAuthority([revalidated.offer]);
+            return this.#opts.wallet.balanceFinalizedTransaction(offerTx, this.#opts.keys, {
+              ttl: new Date(Date.now() + this.#opts.settleTtlMinutes * 60_000),
+            });
+          },
         );
         const settleTx = await this.#bounded(
           "wallet finalize recipe",
           this.#opts.walletOperationTimeoutMs,
-          () => this.#opts.wallet.finalizeRecipe(recipe),
+          () => {
+            this.#assertMutationAuthority([revalidated.offer]);
+            return this.#opts.wallet.finalizeRecipe(recipe);
+          },
         );
         let imbalance;
         try {
@@ -1119,11 +1336,14 @@ export class Executor {
         // Once this call starts, a thrown transport response is ambiguous: the
         // ledger may have accepted the transaction. Never rebuild/re-submit the
         // same offer without first observing a terminal state.
-        submitStarted = true;
         await this.#bounded(
           "wallet submit transaction",
           this.#opts.walletOperationTimeoutMs,
-          () => this.#opts.wallet.submitTransaction(settleTx),
+          () => {
+            this.#assertMutationAuthority([revalidated.offer]);
+            submitStarted = true;
+            return this.#opts.wallet.submitTransaction(settleTx);
+          },
         );
       } catch (err) {
         const reason = Executor.#reason(err);
@@ -1142,6 +1362,10 @@ export class Executor {
               `${reason}; submission outcome remains unknown (${reconciliationReason}); ` +
               "refusing duplicate submission",
           });
+        }
+
+        if (err instanceof ValidationAuthorityChangedError && recipe === undefined) {
+          return { kind: "skipped", offerHash, reason };
         }
 
         if (err instanceof OperationBoundaryError) {

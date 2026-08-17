@@ -38,12 +38,22 @@ test("runtime config validates expiry and publication cross-field bounds", () =>
       reader({ SOLVER_LEVELS_PUSH_INTERVAL_MS: "60000", SOLVER_LEVELS_TTL_SECONDS: "60" }),
     ),
   ).toThrow(/SOLVER_LEVELS_PUSH_INTERVAL_MS.*SOLVER_LEVELS_TTL_SECONDS/);
+  expect(() =>
+    loadSolverRuntimeEnv(
+      reader({
+        SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS: "15000",
+        SOLVER_BACKEND_HEALTH_MAX_AGE_MS: "15000",
+      }),
+    ),
+  ).toThrow(/SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS.*SOLVER_BACKEND_HEALTH_MAX_AGE_MS/);
 });
 
 test("runtime config accepts the bounded defaults", () => {
   expect(loadSolverRuntimeEnv(reader({}))).toMatchObject({
     maxCycleLen: 3,
     resyncIntervalMs: 300_000,
+    backendHealthCheckIntervalMs: 5_000,
+    backendHealthMaxAgeMs: 15_000,
     expiryMarginSeconds: 120,
     levelsPushIntervalMs: 5_000,
     levelsTtlSeconds: 60,
@@ -54,6 +64,8 @@ test("every bounded runtime variable rejects malformed startup input by name", (
   for (const name of [
     "SOLVER_MAX_CYCLE_LEN",
     "SOLVER_RESYNC_INTERVAL_MS",
+    "SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS",
+    "SOLVER_BACKEND_HEALTH_MAX_AGE_MS",
     "SOLVER_EXPIRY_MARGIN_SECONDS",
     "OFFER_TTL_SECONDS",
     "SOLVER_SETTLE_TTL_MINUTES",

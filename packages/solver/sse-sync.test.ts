@@ -23,6 +23,17 @@ let pageLoader: ((params: { after_hash?: string }) => Promise<StubPage>) | null 
 let detailLoader: ((hash: string) => Promise<unknown>) | null = null;
 let closeStream: () => Promise<void> = async () => {};
 let openImmediately = true;
+let healthRequests = 0;
+let healthLoader: (() => Promise<any>) | null = null;
+
+const healthySync = () => ({
+  ts: Date.now(),
+  status: "ok" as const,
+  blockL2: { height: "1" },
+  ntp: { current: 1, tip: 1, pct: 100, lagBlocks: 0, lagSeconds: 0 },
+  midnight: { current: 1, fetched: 1, tip: 1, pct: 100, lagBlocks: 0 },
+  celestia: { current: 1, fetched: 1, tip: 1, pct: 100, lagBlocks: 0 },
+});
 
 const dependencies = {
   getZswapsPage: async (params: { after_hash?: string }) => {
@@ -36,6 +47,10 @@ const dependencies = {
   },
   getZswapByHash: async (hash: string) =>
     detailLoader ? detailLoader(hash) : detailByHash.get(hash),
+  getBackendSyncHealth: async () => {
+    healthRequests++;
+    return healthLoader ? healthLoader() : healthySync();
+  },
   openSseStream: (
     onEvent: (ev: unknown) => void,
     opts: { onOpen?: () => void; onDisconnect?: () => void },
@@ -90,9 +105,19 @@ const reset = () => {
   detailLoader = null;
   closeStream = async () => {};
   openImmediately = true;
+  healthRequests = 0;
+  healthLoader = null;
 };
 
 const settle = () => new Promise((r) => setTimeout(r, 5));
+
+const waitUntil = async (predicate: () => boolean, label: string): Promise<void> => {
+  const deadline = Date.now() + 1_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+};
 
 test("fetchWholeBook follows the cursor across every page", async () => {
   reset();
@@ -535,6 +560,56 @@ test("a reconnect triggers a full resync, picking up what the gap missed", async
   expect(sync.book.hashes()).toEqual([id("h2")]);
   expect(changes).toContain(`-${id("h1")}`);
   expect(changes).toContain(`+${id("h2")}`);
+  await sync.stop();
+});
+
+test("post-ready recovery drains events queued during the snapshot before restoring currentness", async () => {
+  reset();
+  pagesByCursor.set("", { offers: [], nextCursor: null });
+  const states: string[] = [];
+  const sync = startBookSync({
+    resyncIntervalMs: 60_000,
+    dependencies,
+    onCurrentnessChange: (state) => states.push(state.kind),
+  });
+  await sync.ready;
+  expect(sync.isCurrent()).toBe(true);
+
+  let releaseSnapshot!: () => void;
+  let snapshotStarted!: () => void;
+  const snapshotHeld = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+  const sawSnapshot = new Promise<void>((resolve) => { snapshotStarted = resolve; });
+  pageLoader = async () => {
+    snapshotStarted();
+    await snapshotHeld;
+    return { offers: [], nextCursor: null };
+  };
+
+  let releaseDetail!: (value: unknown) => void;
+  let detailStarted!: () => void;
+  const detailHeld = new Promise<unknown>((resolve) => { releaseDetail = resolve; });
+  const sawDetail = new Promise<void>((resolve) => { detailStarted = resolve; });
+  detailLoader = async () => {
+    detailStarted();
+    return detailHeld;
+  };
+
+  sseHandlers!.onOpen!();
+  await sawSnapshot;
+  sseHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("h2") });
+  releaseSnapshot();
+  await sawDetail;
+
+  // The snapshot has completed and its health response is current, but the SSE
+  // mutation that raced it is still waiting for detail. Recovery must remain
+  // blocked until that queued gap is fully applied.
+  expect(sync.isCurrent()).toBe(false);
+  expect(states).toEqual(["blocked", "current", "blocked"]);
+
+  releaseDetail(row("h2"));
+  await waitUntil(() => sync.isCurrent(), "post-snapshot event drain");
+  expect(sync.book.hashes()).toEqual([id("h2")]);
+  expect(states).toEqual(["blocked", "current", "blocked", "current"]);
   await sync.stop();
 });
 

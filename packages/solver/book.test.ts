@@ -134,6 +134,7 @@ test("resync reports the diff and evicts offers the node no longer lists", () =>
   const diff = book.resync([offer("stays", A, B, ["n1"]), offer("arrives", B, C, ["n3"])]);
   expect(diff.added).toEqual(["arrives"]);
   expect(diff.removed).toEqual(["goes"]);
+  expect(diff.updated).toEqual([]);
   expect(book.hashes().sort()).toEqual(["arrives", "stays"]);
   // The evicted offer's nullifier index went with it.
   expect(book.removeByNullifier("n2")).toEqual([]);
@@ -144,6 +145,16 @@ test("resync keeps a cached blob the blob-free list cannot resupply", () => {
   book.upsert({ ...offer("h1", A, B), blob: "swapoffer1cached" });
   book.resync([offer("h1", A, B)]);
   expect(book.get("h1")!.blob).toBe("swapoffer1cached");
+});
+
+test("resync surfaces an impossible same-hash projection mutation", () => {
+  const book = new Book();
+  book.upsert(offer("h1", A, B));
+  const changed = offer("h1", A, B);
+  changed.wants[0].amount = 91n;
+  const diff = book.resync([changed]);
+  expect(diff).toEqual({ added: [], removed: [], updated: ["h1"] });
+  expect(book.get("h1")!.wants[0].amount).toBe(91n);
 });
 
 test("an unknown leg kind or malformed amount rejects the complete external row", () => {

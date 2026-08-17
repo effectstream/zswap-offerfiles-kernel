@@ -7,6 +7,13 @@ import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { createHash } from "node:crypto";
 
+import {
+  OFFER_VALIDATION_PROFILE,
+  OFFER_VALIDATION_SCHEMA_VERSION,
+  parseOfferValidationVerdict,
+  type OfferValidationVerdict,
+} from "./validation-contract.ts";
+
 const API = process.env["ZSWAP_API"] ?? "http://127.0.0.1:9999";
 
 const resolveApi = (override?: string): string => override ?? API;
@@ -15,6 +22,12 @@ const resolveApi = (override?: string): string => override ?? API;
  * here, rather than at individual call sites, so a new API helper cannot
  * accidentally introduce an unbounded fetch. */
 export const DEFAULT_API_TIMEOUT_MS = 15_000;
+
+/** The sync-health response is a small control-plane document. Bound its
+ * complete decoded body so a faulty endpoint cannot make the solver retain an
+ * arbitrarily large response while deciding whether trading is safe. */
+export const MAX_SYNC_HEALTH_BODY_BYTES = 1024 * 1024;
+export const MAX_OFFER_VALIDATION_RESPONSE_BYTES = 64 * 1024;
 
 export type ApiFailureKind = "timeout" | "aborted" | "network" | "http" | "malformed";
 
@@ -51,6 +64,12 @@ export interface ApiRequestOptions {
 }
 
 export type ApiTarget = string | ApiRequestOptions | undefined;
+
+export interface OfferValidationApiOptions extends ApiRequestOptions {
+  /** Existing solver bearer credential. Validation is authenticated even when
+   * optional levels publication is disabled. */
+  authToken: string;
+}
 
 const requestOptions = (target: ApiTarget): Required<Pick<ApiRequestOptions, "timeoutMs">> & ApiRequestOptions => {
   const opts = typeof target === "string" ? { api: target } : (target ?? {});
@@ -139,6 +158,79 @@ async function parseJson(response: Response, operation: string): Promise<unknown
     throw new ApiRequestError("malformed", operation, "response body is not valid JSON", {
       cause: err,
     });
+  }
+}
+
+async function parseBoundedJson(
+  response: Response,
+  operation: string,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const malformed = (message: string, cause?: unknown): ApiRequestError =>
+    new ApiRequestError("malformed", operation, message, { cause });
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    if (!/^(0|[1-9][0-9]*)$/.test(contentLength)) {
+      throw malformed("response Content-Length is not a canonical non-negative integer");
+    }
+    // Compare decimal tokens before converting them: even a hostile, very long
+    // header remains bounded work and cannot overflow Number or BigInt parsing.
+    const maximum = String(maxBytes);
+    if (
+      contentLength.length > maximum.length ||
+      (contentLength.length === maximum.length && contentLength > maximum)
+    ) {
+      throw malformed(`response body exceeds the ${maxBytes}-byte limit`);
+    }
+  }
+
+  const body = response.body;
+  if (body === null) throw malformed("response body is not valid JSON");
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let complete = false;
+  const cancelReader = (): void => {
+    void reader.cancel(signal.reason).catch(() => {});
+  };
+  signal.addEventListener("abort", cancelReader, { once: true });
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (signal.aborted) throw signal.reason;
+      if (part.done) {
+        complete = true;
+        break;
+      }
+      total += part.value.byteLength;
+      if (total > maxBytes) {
+        cancelReader();
+        throw malformed(`response body exceeds the ${maxBytes}-byte limit`);
+      }
+      chunks.push(part.value);
+    }
+  } catch (err) {
+    if (err instanceof ApiRequestError) throw err;
+    if (signal.aborted) throw signal.reason;
+    throw malformed("response body could not be read", err);
+  } finally {
+    signal.removeEventListener("abort", cancelReader);
+    if (!complete) cancelReader();
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return JSON.parse(text);
+  } catch (err) {
+    throw malformed("response body is not valid JSON", err);
   }
 }
 
@@ -389,6 +481,371 @@ export async function postOffersStatus(
     out.push(...statuses);
   }
   return out;
+}
+
+// ── Backend projection currentness ────────────────────────────────────────
+
+/** The current `/v1/health/sync` wire contract has no body-level schema
+ * version. The `/v1` route is therefore the only version discriminator. Keep
+ * this parser strict for every field the solver consumes and return a
+ * projected value so diagnostic fields added by the backend cannot silently
+ * enter the solver's trusted state. */
+export type BackendSyncStatus = "ok" | "syncing" | "error";
+
+export interface BackendNtpSyncPosition {
+  current: number;
+  tip: number;
+  pct: number | null;
+  lagBlocks: number;
+  lagSeconds: number;
+}
+
+export interface BackendChainSyncPosition {
+  current: number | null;
+  fetched: number | null;
+  tip: number | null;
+  pct: number | null;
+  lagBlocks: number | null;
+}
+
+/** Canonical decimal generation token for the latest merged Effectstream/L2
+ * block. The backend can serialize its DB integer as a JSON number or string;
+ * the client normalizes both without a lossy Number coercion. */
+export interface BackendL2Generation {
+  height: string;
+}
+
+export interface BackendSyncHealth {
+  ts: number;
+  status: BackendSyncStatus;
+  blockL2: BackendL2Generation | null;
+  ntp: BackendNtpSyncPosition;
+  midnight: BackendChainSyncPosition;
+  celestia: BackendChainSyncPosition;
+}
+
+export type CurrentBackendSyncHealth = BackendSyncHealth & {
+  status: "ok";
+  blockL2: BackendL2Generation;
+  midnight: BackendChainSyncPosition & {
+    current: number;
+    tip: number;
+    lagBlocks: number;
+  };
+  celestia: BackendChainSyncPosition & {
+    current: number;
+    tip: number;
+    lagBlocks: number;
+  };
+};
+
+const malformedField = (operation: string, field: string, expected: string): never => {
+  throw new ApiRequestError("malformed", operation, `${field} must be ${expected}`);
+};
+
+const assertKnownKeys = (
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  operation: string,
+  field: string,
+): void => {
+  const unknown = Object.keys(value).find((key) => !allowed.has(key));
+  if (unknown !== undefined) {
+    malformedField(operation, `${field}.${unknown}`, "a known contract field");
+  }
+};
+
+const nonNegativeSafeInteger = (
+  value: unknown,
+  operation: string,
+  field: string,
+): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    return malformedField(operation, field, "a non-negative safe integer");
+  }
+  return value as number;
+};
+
+const nullableNonNegativeSafeInteger = (
+  value: unknown,
+  operation: string,
+  field: string,
+): number | null => {
+  if (value === null) return null;
+  return nonNegativeSafeInteger(value, operation, field);
+};
+
+const positiveIntegerToken = (
+  value: unknown,
+  operation: string,
+  field: string,
+): string => {
+  if (typeof value === "number") {
+    if (Number.isSafeInteger(value) && value > 0) return String(value);
+  } else if (typeof value === "string") {
+    // The persisted generation is a SQLite INTEGER/u64 protocol value. Check
+    // length before syntax/value so an unbounded digit token never reaches a
+    // numeric parser, then compare the only possible 20-digit case directly.
+    const maxU64 = "18446744073709551615";
+    if (
+      value.length > 0 &&
+      value.length <= maxU64.length &&
+      /^[1-9][0-9]*$/.test(value) &&
+      (value.length < maxU64.length || value <= maxU64)
+    ) {
+      return value;
+    }
+  }
+  return malformedField(operation, field, "a positive canonical decimal u64 integer");
+};
+
+const nullableNonNegativeFiniteNumber = (
+  value: unknown,
+  operation: string,
+  field: string,
+): number | null => {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return malformedField(operation, field, "null or a non-negative finite number");
+  }
+  return value;
+};
+
+function parseNtpSyncPosition(value: unknown, operation: string): BackendNtpSyncPosition {
+  if (!record(value)) return malformedField(operation, "ntp", "an object");
+  assertKnownKeys(
+    value,
+    new Set(["current", "tip", "pct", "lag_blocks", "lag_seconds"]),
+    operation,
+    "ntp",
+  );
+  const current = nonNegativeSafeInteger(value.current, operation, "ntp.current");
+  const tip = nonNegativeSafeInteger(value.tip, operation, "ntp.tip");
+  const pct = nullableNonNegativeFiniteNumber(value.pct, operation, "ntp.pct");
+  const lagBlocks = nonNegativeSafeInteger(value.lag_blocks, operation, "ntp.lag_blocks");
+  const lagSeconds = nullableNonNegativeFiniteNumber(
+    value.lag_seconds,
+    operation,
+    "ntp.lag_seconds",
+  );
+  if (lagSeconds === null) {
+    return malformedField(operation, "ntp.lag_seconds", "a non-negative finite number");
+  }
+  return { current, tip, pct, lagBlocks, lagSeconds };
+}
+
+function parseChainSyncPosition(
+  value: unknown,
+  operation: string,
+  field: "midnight" | "celestia",
+): BackendChainSyncPosition {
+  if (!record(value)) return malformedField(operation, field, "an object");
+  assertKnownKeys(
+    value,
+    new Set(["current", "fetched", "tip", "pct", "lag_blocks"]),
+    operation,
+    field,
+  );
+  const current = nullableNonNegativeSafeInteger(value.current, operation, `${field}.current`);
+  const fetched = nullableNonNegativeSafeInteger(value.fetched, operation, `${field}.fetched`);
+  const tip = nullableNonNegativeSafeInteger(value.tip, operation, `${field}.tip`);
+  const pct = nullableNonNegativeFiniteNumber(value.pct, operation, `${field}.pct`);
+  const lagBlocks = nullableNonNegativeSafeInteger(
+    value.lag_blocks,
+    operation,
+    `${field}.lag_blocks`,
+  );
+
+  return { current, fetched, tip, pct, lagBlocks };
+}
+
+function parseBlockL2Generation(
+  value: unknown,
+  operation: string,
+): BackendL2Generation | null {
+  if (value === null) return null;
+  if (!record(value)) return malformedField(operation, "blockL2", "null or an object");
+  assertKnownKeys(
+    value,
+    new Set([
+      "height",
+      "timestamp",
+      "block_hash",
+      "main_chain_block_hash",
+      "block_time",
+      "lag",
+    ]),
+    operation,
+    "blockL2",
+  );
+  return { height: positiveIntegerToken(value.height, operation, "blockL2.height") };
+}
+
+function parseBackendSyncHealth(body: unknown, operation: string): BackendSyncHealth {
+  if (!record(body)) return malformedField(operation, "response", "an object");
+  assertKnownKeys(
+    body,
+    new Set([
+      "ts",
+      "now",
+      "status",
+      "blockL2",
+      "ntp",
+      "midnight",
+      "celestia",
+      "sets",
+      "recent_rejections",
+    ]),
+    operation,
+    "response",
+  );
+  const ts = nonNegativeSafeInteger(body.ts, operation, "ts");
+  if (body.status !== "ok" && body.status !== "syncing" && body.status !== "error") {
+    return malformedField(operation, "status", 'one of "ok", "syncing", or "error"');
+  }
+  const blockL2 = parseBlockL2Generation(body.blockL2, operation);
+  const ntp = parseNtpSyncPosition(body.ntp, operation);
+  const midnight = parseChainSyncPosition(body.midnight, operation, "midnight");
+  const celestia = parseChainSyncPosition(body.celestia, operation, "celestia");
+
+  // `ok` is authority to use the backend's current-offer projection. Refuse an
+  // internally incomplete success even if the status token itself parses. Lag
+  // thresholds remain server policy; the client validates exact types and
+  // presence rather than maintaining a second threshold table.
+  if (
+    body.status === "ok" &&
+    (blockL2 === null || [
+      midnight.current, midnight.tip, midnight.lagBlocks,
+      celestia.current, celestia.tip, celestia.lagBlocks,
+    ].some((part) => part === null))
+  ) {
+    return malformedField(
+      operation,
+      "status",
+      'a positive blockL2 generation and complete chain positions when "ok"',
+    );
+  }
+
+  return { ts, status: body.status, blockL2, ntp, midnight, celestia };
+}
+
+/** Read the backend's aggregate protocol-currentness verdict. Transport and
+ * grammar failures reject as ApiRequestError; `syncing` and `error` remain
+ * explicit domain states for the readiness owner to fail closed on. */
+export async function getBackendSyncHealth(target?: ApiTarget): Promise<BackendSyncHealth> {
+  const operation = "GET /v1/health/sync";
+  return withRequestDeadline(operation, target, async (signal, api) => {
+    const response = await fetch(`${api}/v1/health/sync`, {
+      headers: { accept: "application/json" },
+      signal,
+    });
+    if (!response.ok) throw httpError(operation, response.status);
+    return parseBackendSyncHealth(
+      await parseBoundedJson(response, operation, MAX_SYNC_HEALTH_BODY_BYTES, signal),
+      operation,
+    );
+  });
+}
+
+/** This only reports what one parsed response says. The readiness integration
+ * must additionally bind it to the active stream/snapshot generation and its
+ * own freshness policy before restoring matching. */
+export const reportsBackendProjectionCurrent = (
+  health: BackendSyncHealth,
+): health is CurrentBackendSyncHealth =>
+  health.status === "ok" &&
+  health.blockL2 !== null &&
+  health.midnight.current !== null &&
+  health.midnight.tip !== null &&
+  health.midnight.lagBlocks !== null &&
+  health.celestia.current !== null &&
+  health.celestia.tip !== null &&
+  health.celestia.lagBlocks !== null;
+
+/** Ask the Offer Files backend whether these exact content-addressed bytes are
+ * usable by the approved solver profile now. Local identity binding happens
+ * before authentication or network IO; only a strict HTTP-200 v1 verdict is a
+ * domain result. Every other response remains boundary unavailability. */
+export async function validateOfferForUse(
+  offerId: string,
+  offer: string,
+  options: OfferValidationApiOptions,
+): Promise<OfferValidationVerdict> {
+  const operation = "POST /v1/offers/validate";
+  const canonical = canonicalOfferHash(offerId, operation);
+  assertOfferBlobIdentity(offer, canonical, operation);
+  if (
+    typeof options.authToken !== "string" ||
+    options.authToken.length < 16 ||
+    /\s/.test(options.authToken)
+  ) {
+    throw new ApiRequestError(
+      "malformed",
+      operation,
+      "solver bearer credential must contain at least 16 non-whitespace characters",
+    );
+  }
+
+  const request = {
+    schemaVersion: OFFER_VALIDATION_SCHEMA_VERSION,
+    profile: OFFER_VALIDATION_PROFILE,
+    offerId: canonical,
+    offer,
+  };
+  return withRequestDeadline(operation, options, async (signal, api) => {
+    const response = await fetch(`${api}/v1/offers/validate`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${options.authToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(request),
+      signal,
+    });
+    if (!response.ok) {
+      try {
+        void response.body?.cancel().catch(() => {});
+      } catch {
+        // The typed HTTP result already fails closed; cancellation only makes
+        // connection reuse best-effort for non-conforming response doubles.
+      }
+      throw httpError(operation, response.status);
+    }
+    const parsed = parseOfferValidationVerdict(
+      await parseBoundedJson(
+        response,
+        operation,
+        MAX_OFFER_VALIDATION_RESPONSE_BYTES,
+        signal,
+      ),
+    );
+    if (parsed === null) {
+      throw new ApiRequestError(
+        "malformed",
+        operation,
+        "response body is not a canonical validate-for-use v1 verdict",
+      );
+    }
+    if (parsed.profile !== OFFER_VALIDATION_PROFILE) {
+      throw new ApiRequestError("malformed", operation, "verdict profile is not bound to request");
+    }
+    if (parsed.claimedOfferId !== canonical) {
+      throw new ApiRequestError(
+        "malformed",
+        operation,
+        "verdict claimedOfferId is not bound to request",
+      );
+    }
+    if (parsed.computedOfferId !== null && parsed.computedOfferId !== canonical) {
+      throw new ApiRequestError(
+        "malformed",
+        operation,
+        "verdict computedOfferId is not bound to request bytes",
+      );
+    }
+    return parsed;
+  });
 }
 
 /** Rebuild a finalized offer tx from the blob the API serves (the same blob

@@ -35,9 +35,9 @@ export interface EngineConfig {
   enableResidualTopUps: boolean;
 }
 
-export type Candidate =
-  | { kind: "pathA"; offers: [BookOffer]; payouts: Map<string, bigint>; maxPay: bigint }
-  | { kind: "pathB"; offers: BookOffer[]; net: Map<string, bigint>; payouts: Map<string, bigint> };
+export type Candidate<T extends BookOffer = BookOffer> =
+  | { kind: "pathA"; offers: [T]; payouts: Map<string, bigint>; maxPay: bigint }
+  | { kind: "pathB"; offers: T[]; net: Map<string, bigint>; payouts: Map<string, bigint> };
 
 /** Per-token net across a set, from the solver's side. Zero entries are
  *  dropped, so an exactly-crossing set nets to an empty map. */
@@ -226,13 +226,13 @@ export function evaluatePathA(
  *  both tokens. Enumerated by walking one direction's bucket and looking up
  *  the mirrored (amount, token) in the reverse bucket, so this stays linear in
  *  book size rather than quadratic. */
-export function findExactCrossings(
-  book: Book,
+export function findExactCrossings<T extends BookOffer>(
+  book: Book<T>,
   cfg: EngineConfig,
   nowMs: number,
-): Candidate[] {
+): Candidate<T>[] {
   if (!cfg.enablePathB) return [];
-  const found: Candidate[] = [];
+  const found: Candidate<T>[] = [];
   const paired = new Set<string>();
 
   for (const { giveToken, wantToken } of book.pairs()) {
@@ -245,7 +245,7 @@ export function findExactCrossings(
 
     // Reverse offers indexed by what they give and want, so a forward offer
     // finds its exact mirror in one lookup.
-    const mirror = new Map<string, BookOffer[]>();
+    const mirror = new Map<string, T[]>();
     for (const offer of reverse) {
       const key = `${offer.gives[0].amount}|${offer.wants[0].amount}`;
       const bucket = mirror.get(key);
@@ -295,15 +295,15 @@ const generosity = (offer: BookOffer): bigint => {
  *  is worth it. Only the most generous offer on each edge is considered: a
  *  worse-priced offer on the same edge can only lower the residual, so if the
  *  best one fails the predicate none of the others would pass it. */
-export function findCycleCrossings(
-  book: Book,
+export function findCycleCrossings<T extends BookOffer>(
+  book: Book<T>,
   cfg: EngineConfig,
   nowMs: number,
   exclude: Set<string> = new Set(),
-): Candidate[] {
+): Candidate<T>[] {
   if (!cfg.enablePathB || !cfg.enableCycles) return [];
   // Best available offer per directed edge.
-  const bestOnEdge = new Map<string, BookOffer>();
+  const bestOnEdge = new Map<string, T>();
   const outgoing = new Map<string, string[]>();
   for (const { giveToken, wantToken } of book.pairs()) {
     const usable = book
@@ -317,13 +317,13 @@ export function findCycleCrossings(
     else outgoing.set(giveToken, [wantToken]);
   }
 
-  const found: Candidate[] = [];
+  const found: Candidate<T>[] = [];
   const used = new Set(exclude);
 
   // `giveToken` is what the solver receives on that edge, so a cycle walks
   // give → want → give → … back to the token it started from.
   for (const start of outgoing.keys()) {
-    const walk = (token: string, path: BookOffer[]): void => {
+    const walk = (token: string, path: T[]): void => {
       if (found.length > 0 && path.length === 0) return;
       for (const next of outgoing.get(token) ?? []) {
         const offer = bestOnEdge.get(pairKeyOf(token, next));
@@ -364,7 +364,11 @@ const pairKeyOf = (giveToken: string, wantToken: string): string => `${giveToken
  *  no inventory at all, a residual cycle costs only the shortfall, and Path A
  *  funds the whole other side. Taking an offer onto the books when it could
  *  have been matched spends capacity for nothing. */
-export function findCandidates(book: Book, cfg: EngineConfig, nowMs: number): Candidate[] {
+export function findCandidates<T extends BookOffer>(
+  book: Book<T>,
+  cfg: EngineConfig,
+  nowMs: number,
+): Candidate<T>[] {
   const exact = cfg.enablePathB ? findExactCrossings(book, cfg, nowMs) : [];
   const spokenFor = new Set(exact.flatMap((c) => c.offers.map((o) => o.offerHash)));
 
@@ -373,7 +377,7 @@ export function findCandidates(book: Book, cfg: EngineConfig, nowMs: number): Ca
     for (const offer of candidate.offers) spokenFor.add(offer.offerHash);
   }
 
-  const pathA: Candidate[] = [];
+  const pathA: Candidate<T>[] = [];
   for (const offer of book.all()) {
     if (spokenFor.has(offer.offerHash)) continue;
     const verdict = evaluatePathA(offer, cfg, nowMs);

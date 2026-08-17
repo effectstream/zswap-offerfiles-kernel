@@ -73,8 +73,8 @@ export async function fetchJsonWithDeadline(
   }
 }
 
-async function fetchMidnightTip(): Promise<number | null> {
-  return cachedFetch("midnight", async () => {
+async function fetchMidnightTip(fresh = false): Promise<number | null> {
+  const load = async () => {
     const json = await fetchJsonWithDeadline(fetch, midnightNetworkConfig.indexer, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -82,11 +82,13 @@ async function fetchMidnightTip(): Promise<number | null> {
     });
     const h = json?.data?.block?.height;
     return typeof h === "number" ? h : null;
-  });
+  };
+  if (!fresh) return cachedFetch("midnight", load);
+  try { return await load(); } catch { return null; }
 }
 
-async function fetchCelestiaTip(): Promise<number | null> {
-  return cachedFetch("celestia", async () => {
+async function fetchCelestiaTip(fresh = false): Promise<number | null> {
+  const load = async () => {
     const json = await fetchJsonWithDeadline(fetch, CELESTIA_RPC_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -94,7 +96,9 @@ async function fetchCelestiaTip(): Promise<number | null> {
     });
     const h = parseInt(json?.result?.header?.height, 10);
     return Number.isFinite(h) ? h : null;
-  });
+  };
+  if (!fresh) return cachedFetch("celestia", load);
+  try { return await load(); } catch { return null; }
 }
 
 function pct(current: number, tip: number | null): number | null {
@@ -260,8 +264,11 @@ export async function runSequentially<
   return values as any;
 }
 
-async function computeSyncStatus(dbConn: any) {
-  const tips = Promise.all([fetchMidnightTip(), fetchCelestiaTip()]);
+async function computeSyncStatus(dbConn: any, freshTips = false) {
+  const tips = Promise.all([
+    fetchMidnightTip(freshTips),
+    fetchCelestiaTip(freshTips),
+  ]);
   // If a DB query fails before tips are consumed, their late failure must not
   // become an unhandled rejection. The original promise is still awaited on
   // the successful path, so tip failures remain fail-closed.
@@ -384,6 +391,13 @@ async function computeSyncStatus(dbConn: any) {
  * batch of DB/external work rather than one batch per caller. */
 export async function getSyncStatus(dbConn: any) {
   return statusResponseCache.get(dbConn as object, () => computeSyncStatus(dbConn));
+}
+
+/** Validation runs this after proof verification. Unlike the public health
+ * cache, it re-reads both external chain tips so a tip that advanced during
+ * proof work cannot be hidden behind a previously healthy cached response. */
+export async function getFreshSyncStatus(dbConn: any) {
+  return computeSyncStatus(dbConn, true);
 }
 
 export function resetSyncHealthCacheForTest(): void {

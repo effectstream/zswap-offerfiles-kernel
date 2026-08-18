@@ -3067,11 +3067,33 @@ async function assertRealE1RuntimeHardening(
         `test -s '${path}' && printf '${path}\\t%s\\n' "$(${REAL_E1_PROOF_STAT} -c %s '${path}')"`
       )
       .join(" && ");
-    const cache = await runCommand(
+    // READINESS ONLY. The proof server fetches this SRS/prover material from
+    // srs.midnight.network asynchronously at startup, so the files appear some
+    // time after the container is up. This probe used to be point-in-time and
+    // passed by luck: the 3s Celestia cadence (E1-Q4) reshuffled the wall-clock
+    // ordering of the bootstrap and it began firing before the download
+    // finished. Waiting for presence is the fix; NOTHING below is relaxed —
+    // the same five paths must exist, be non-empty, and match their exact
+    // pinned byte counts, and the count equality still holds.
+    const cacheDeadline = Date.now() + 240_000;
+    let cache = await runCommand(
       "docker",
       ["exec", serviceIds.get("proof-server")!, REAL_E1_PROOF_ENTRYPOINT, "-c", cacheScript],
       session.children,
-      { timeoutMs: 30_000, maxOutputBytes: 16 * 1024 },
+      { timeoutMs: 30_000, maxOutputBytes: 16 * 1024, allowFailure: true },
+    );
+    while (cache.code !== 0 && Date.now() < cacheDeadline) {
+      await sleep(3_000);
+      cache = await runCommand(
+        "docker",
+        ["exec", serviceIds.get("proof-server")!, REAL_E1_PROOF_ENTRYPOINT, "-c", cacheScript],
+        session.children,
+        { timeoutMs: 30_000, maxOutputBytes: 16 * 1024, allowFailure: true },
+      );
+    }
+    assert(
+      cache.code === 0,
+      "proof-server: pinned SRS cache did not become complete within the readiness window",
     );
     for (const line of lines(cache.stdout)) {
       const [path, rawBytes] = line.split("\t");

@@ -560,7 +560,11 @@ describe("real fixture lifecycle seams", () => {
         "binding-run",
         "undeployed",
         candidate,
-        { hash: "funding-tx", identifiers: ["other", nullifier] },
+        // The funding transaction's own consumed input nullifiers — NOT its
+        // identifiers(), which carry value/binding commitments and can never
+        // contain a nullifier (E1-Q1). The unrelated entry proves the binder
+        // matches on membership rather than on the set being a singleton.
+        { hash: "funding-tx", inputNullifiers: ["ee".repeat(32), nullifier] },
         "2029-01-02T03:05:00.000Z",
       );
       if (artifact.consumingFundingTxHash !== "funding-tx") {
@@ -577,7 +581,7 @@ describe("real fixture lifecycle seams", () => {
           "binding-run",
           "undeployed",
           candidate,
-          { hash: "unrelated-tx", identifiers: ["other"] },
+          { hash: "unrelated-tx", inputNullifiers: ["ee".repeat(32)] },
         );
       } catch (error) {
         missingRejected = /did not consume all/.test(String(error));

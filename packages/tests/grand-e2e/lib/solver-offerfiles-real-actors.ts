@@ -43,6 +43,7 @@ import {
   waitForUnshielded,
 } from "@zswap-da/solver-core/wallet";
 import {
+  collectNullifiers,
   collectOutputCommitments,
   getBlankRefState,
   validateZswapOffer,
@@ -162,6 +163,46 @@ function txIdentifiers(transaction: unknown): string[] {
     throw new Error("real Midnight transaction returned no identifiers");
   }
   return identifiers.map(String).sort();
+}
+
+/**
+ * The shielded input nullifiers a finalized transaction actually consumes.
+ *
+ * NOT `identifiers()`. ledger-v8's `Transaction::identifiers()`
+ * (`structure.rs:1454`) returns the Pedersen VALUE commitments of inputs,
+ * outputs and transients plus the intent binding commitments — a different
+ * cryptographic domain from a nullifier, so a nullifier can never appear in
+ * it. Binding pre-spent liveness to that list could not pass against a real
+ * chain, and no coin-selection change would have fixed it (e2e plan, open
+ * question E1-Q1).
+ *
+ * `collectNullifiers` is the production traversal the validator and the node's
+ * state machine already share: guaranteed offer plus every fallible segment,
+ * across both `inputs` and `transients`, normalized to lowercase hex. Reusing
+ * it — rather than restating the walk here — is what makes the candidate's
+ * `validation.nullifiers` and this set comparable byte-for-byte, since the
+ * candidate side is produced by exactly the same function.
+ *
+ * An empty result is returned, not thrown on: an unshielded-only transfer
+ * legitimately consumes no zswap input. The fail-closed judgement belongs to
+ * `bindRealPreSpentLivenessArtifact`, which still rejects an empty or
+ * incomplete match.
+ */
+function txInputNullifiers(transaction: unknown): string[] {
+  if (!transaction || typeof transaction !== "object") {
+    throw new Error("real Midnight transaction is not an object");
+  }
+  return collectNullifiers(transaction as never).map(String).sort();
+}
+
+/** The manifest's transaction oracle shape — hash plus genuine transaction
+ * identifiers. Deliberately drops the input nullifiers that `submitTransfer`
+ * also returns: those are pre-spent liveness evidence, and the actor manifest
+ * schema is exact-keyed (`hash`, `identifiers`) by the publisher. */
+function manifestTransactionOracle(
+  transfer: { hash: string; identifiers: string[] },
+): { hash: string; identifiers: string[] } {
+  return { hash: transfer.hash, identifiers: transfer.identifiers };
 }
 
 function txHash(transaction: unknown): string {
@@ -555,11 +596,15 @@ export function bindRealPreSpentLivenessArtifact(
   runId: string,
   networkId: string,
   candidate: RealPreSpentOfferCandidate,
-  fundingTransaction: { hash: string; identifiers: readonly string[] },
+  // The funding transaction's own consumed shielded inputs, from
+  // `txInputNullifiers`. Named for what it carries: this is deliberately NOT
+  // `identifiers()`, which returns value/binding commitments and therefore can
+  // never contain a nullifier (e2e plan, open question E1-Q1).
+  fundingTransaction: { hash: string; inputNullifiers: readonly string[] },
   createdAt = nowIso(),
 ): RealPreSpentLivenessArtifact {
-  const fundingIdentifiers = new Set(fundingTransaction.identifiers.map(String));
-  const missing = candidate.inputNullifiers.filter((nullifier) => !fundingIdentifiers.has(nullifier));
+  const fundingNullifiers = new Set(fundingTransaction.inputNullifiers.map(String));
+  const missing = candidate.inputNullifiers.filter((nullifier) => !fundingNullifiers.has(nullifier));
   if (candidate.inputNullifiers.length === 0 || missing.length > 0) {
     throw new Error(
       `token-A funding transaction did not consume all pre-spent offer nullifiers: ` +
@@ -930,7 +975,7 @@ async function submitTransfer(
   layer: "shielded" | "unshielded",
   outputs: Array<{ type: string; amount: bigint; receiverAddress: unknown }>,
   ttlMs: number,
-): Promise<{ hash: string; identifiers: string[] }> {
+): Promise<{ hash: string; identifiers: string[]; inputNullifiers: string[] }> {
   const recipe = await from.wallet.transferTransaction(
     [{ type: layer, outputs } as never],
     shieldedKeys(from),
@@ -949,7 +994,11 @@ async function submitTransfer(
     await (from.wallet as any).revert(finalized ?? recipe).catch(() => undefined);
     throw error;
   }
-  return { hash: txHash(finalized), identifiers: txIdentifiers(finalized) };
+  return {
+    hash: txHash(finalized),
+    identifiers: txIdentifiers(finalized),
+    inputNullifiers: txInputNullifiers(finalized),
+  };
 }
 
 async function waitForExactTokenBalances(
@@ -1528,7 +1577,7 @@ export async function provisionRealActors(
     );
     tokenFundingTransactions.push({
       token: "A",
-      ...tokenAFundingTransaction,
+      ...manifestTransactionOracle(tokenAFundingTransaction),
     });
     const preSpentLiveness = bindRealPreSpentLivenessArtifact(
       config.runId,
@@ -1538,12 +1587,12 @@ export async function provisionRealActors(
     );
     tokenFundingTransactions.push({
       token: "B",
-      ...await submitTransfer(
+      ...manifestTransactionOracle(await submitTransfer(
         genesis,
         "shielded",
         [{ type: tokenB, amount: config.solverTokenBAmount, receiverAddress: solverShieldedAddress }],
         config.offerTtlMs,
-      ),
+      )),
     });
 
     const beforeSettlement = await waitForExactTokenBalances(
@@ -1644,7 +1693,7 @@ export async function provisionRealActors(
         solverTokenBAmount: config.solverTokenBAmount.toString(),
         nightPerUtxo: config.nightPerUtxo.toString(),
         nightUtxosPerActor: config.nightUtxosPerActor,
-        nightFundingTransaction,
+        nightFundingTransaction: manifestTransactionOracle(nightFundingTransaction),
         tokenFundingTransactions,
       },
       balances: {

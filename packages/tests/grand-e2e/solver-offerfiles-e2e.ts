@@ -1928,6 +1928,52 @@ async function assertRecorderAndFaultSeam(session: HarnessSession): Promise<{ co
   return { count: payload.events.length, channels };
 }
 
+/**
+ * The recorder's own view of fault attribution for one case — bounded and
+ * value-free. Diagnosis only; it changes no verdict.
+ *
+ * Reports the configured match spec next to every validate-route event the
+ * recorder saw in this case's slice, with the phase, the short request id, and
+ * the `fault` / `appliedFault` / `matchedOccurrence` the proxy stamped. That is
+ * exactly the pairing needed to tell "the fault never matched" from "it matched
+ * a different request than the one the case inspected".
+ */
+function summariseFaultAttribution(
+  slice: Array<Record<string, unknown>>,
+  caseName: string,
+  configuredFault: Record<string, unknown>,
+): string {
+  const match = (configuredFault["match"] ?? {}) as Record<string, unknown>;
+  const rows: string[] = [];
+  for (const event of slice) {
+    const path = String(event["path"] ?? "");
+    if (!path.startsWith("/v1/offers/validate")) continue;
+    if (rows.length >= 24) { rows.push("…truncated"); break; }
+    const id = String(event["requestId"] ?? "");
+    rows.push(
+      `${String(event["phase"] ?? "?")}#${eventSequence(event)}` +
+        ` id=${id.slice(0, 8)}` +
+        ` method=${String(event["method"] ?? "?")}` +
+        ` fault=${JSON.stringify(event["fault"] ?? null)}` +
+        ` applied=${JSON.stringify(event["appliedFault"] ?? null)}` +
+        ` occ=${JSON.stringify(event["matchedOccurrence"] ?? null)}` +
+        ` status=${JSON.stringify(event["status"] ?? null)}`,
+    );
+  }
+  return [
+    `case=${caseName}`,
+    `configuredMode=${JSON.stringify(configuredFault["mode"] ?? null)}`,
+    `configuredMatch=${JSON.stringify({
+      method: match["method"] ?? null,
+      path: match["path"] ?? null,
+      occurrence: match["occurrence"] ?? null,
+      fromOccurrence: match["fromOccurrence"] ?? null,
+    })}`,
+    `validateEvents=${rows.length}`,
+    ...rows,
+  ].join(" | ");
+}
+
 async function recorderEvents(session: HarnessSession): Promise<Array<Record<string, unknown>>> {
   const response = await fetch(`http://127.0.0.1:${session.recorderPort}/events`, {
     signal: AbortSignal.timeout(3_000),
@@ -5624,13 +5670,27 @@ async function runRealE1RefusalCase(
       `${descriptor.caseName}: occurrence 2 was not the first dequeue validation after exactly one admission request`,
     );
   }
-  assertConfiguredFaultResponse(
-    configuredFault,
-    faultedRequest,
-    matchingResponse(slice, faultedRequest)!,
-    descriptor.stage === "dequeue" ? 2 : 1,
-    descriptor.caseName,
-  );
+  try {
+    assertConfiguredFaultResponse(
+      configuredFault,
+      faultedRequest,
+      matchingResponse(slice, faultedRequest)!,
+      descriptor.stage === "dequeue" ? 2 : 1,
+      descriptor.caseName,
+    );
+  } catch (error) {
+    // E1-Q8 capture, diagnosis only — the case still fails. The proxy resets a
+    // channel's match counter to 0 on every fault PUT
+    // (solver-offerfiles-harness-service.mjs: `faults.set(..., { definition, matches: 0 })`),
+    // so `fromOccurrence` counts matches SINCE INSTALL, per case. When a case
+    // nevertheless sees no attribution, the question is which request consumed
+    // which occurrence, and that is only answerable from the recorder's own
+    // view — which the runner otherwise never prints.
+    throw new Error(
+      `${(error as Error).message} [E1-Q8 recorder view ${summariseFaultAttribution(slice, descriptor.caseName, configuredFault)}]`,
+      { cause: error },
+    );
+  }
   if (descriptor.stage === "dequeue") {
     assert(
       findPhase(slice, identity, "validation", "execution-valid") === undefined,

@@ -976,6 +976,77 @@ async function submitTransfer(
   outputs: Array<{ type: string; amount: bigint; receiverAddress: unknown }>,
   ttlMs: number,
 ): Promise<{ hash: string; identifiers: string[]; inputNullifiers: string[] }> {
+  // E1-Q7 policy. `Custom error: 170` is midnight-node's
+  // MalformedError::InvalidDustSpendProof — a Dust spend-PROOF validity
+  // refusal, not a balance problem — and the observed 1-in-5 rate with an
+  // immediately successful rerun is consistent with a proof-freshness race.
+  // At most TWO retries, scoped to exactly that code, and each attempt REBUILDS
+  // the transaction from scratch so the Dust proof is regenerated against
+  // current state. Resubmitting the same bytes would re-present the same stale
+  // proof and is never done. Any other rejection propagates untouched on the
+  // first attempt. This applies ONLY to provisioning; no retry exists anywhere
+  // in the refusal matrix or any system-under-test path.
+  let attempt = 0;
+  for (;;) {
+    attempt += 1;
+    try {
+      return await submitTransferOnce(from, layer, outputs, ttlMs, attempt);
+    } catch (error) {
+      if (attempt > DUST_PROOF_RETRY_LIMIT || !isInvalidDustSpendProofRejection(error)) throw error;
+      dustProofRetries.push({ layer, attempt, outputs: outputs.length });
+      console.log(
+        `[real-actors] E1-Q7 InvalidDustSpendProof (code 170) on ${layer} transfer attempt ${attempt}; ` +
+          `rebuilding the transaction for attempt ${attempt + 1} of ${DUST_PROOF_RETRY_LIMIT + 1}`,
+      );
+    }
+  }
+}
+
+/** At most two retries, i.e. three attempts total. */
+const DUST_PROOF_RETRY_LIMIT = 2;
+
+/** Every code-170 occurrence observed this run, surfaced in run evidence. */
+const dustProofRetries: Array<{ layer: string; attempt: number; outputs: number }> = [];
+
+export function realActorDustProofRetryEvidence(): {
+  occurrences: number;
+  attempts: Array<{ layer: string; attempt: number; outputs: number }>;
+} {
+  return { occurrences: dustProofRetries.length, attempts: dustProofRetries.map((entry) => ({ ...entry })) };
+}
+
+/**
+ * Match ONLY midnight-node's InvalidDustSpendProof. The code must be visible in
+ * the thrown error or its cause chain; if it is not, this returns false and the
+ * caller rethrows, so an unrecognised rejection can never be retried by
+ * accident.
+ */
+function isInvalidDustSpendProofRejection(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  const parts: string[] = [];
+  let current: unknown = error;
+  while (current !== null && current !== undefined && !seen.has(current) && parts.length < 8) {
+    seen.add(current);
+    if (current instanceof Error) {
+      parts.push(current.message);
+      current = (current as { cause?: unknown }).cause;
+      continue;
+    }
+    parts.push(String(current));
+    break;
+  }
+  const text = parts.join(" | ");
+  return /Custom error:\s*170\b/.test(text) || /InvalidDustSpendProof/.test(text);
+}
+
+async function submitTransferOnce(
+  from: WalletResult,
+  layer: "shielded" | "unshielded",
+  outputs: Array<{ type: string; amount: bigint; receiverAddress: unknown }>,
+  ttlMs: number,
+  attempt: number,
+): Promise<{ hash: string; identifiers: string[]; inputNullifiers: string[] }> {
+  void attempt;
   const recipe = await from.wallet.transferTransaction(
     [{ type: layer, outputs } as never],
     shieldedKeys(from),
@@ -1731,6 +1802,11 @@ export async function provisionRealActors(
       ladder: { path: config.ladderPath, sha256: sha256(ladderSource) },
     };
 
+    // E1-Q7 evidence: occurrences and attempt counts land in the provisioner
+    // log, which the runner captures into the acceptance diagnostics bundle.
+    console.log(
+      `[real-actors] E1-Q7 dust-proof retry evidence: ${JSON.stringify(realActorDustProofRetryEvidence())}`,
+    );
     await phase("provisioned");
     const fixture: RealActorFixture = {
       genesis,

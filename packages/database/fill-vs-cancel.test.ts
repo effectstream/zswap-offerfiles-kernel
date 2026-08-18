@@ -410,3 +410,67 @@ test("an archived-but-not-yet-adjudicated fill still reads as a trade", async ()
   expect(after.fills_24h).toBe(1);
   expect(Number(after.last_price)).toBeCloseTo(2, 9);
 });
+
+// ── Two routes to "last price" must pick the SAME fill ─────────────────────
+//
+// `archived_at` is the L2 block timestamp, so it quantises: several fills on a
+// pair routinely share one instant. /v1/pairs takes the newest per pair with a
+// DISTINCT ON, /v1/chart/stats takes it with ORDER BY ... LIMIT 1, and on a tie
+// each is free to pick a different row — so the two endpoints serve different
+// last prices for the same pair, from the same data, with nothing wrong in
+// either query on its own.
+//
+// The grand e2e caught it on a valid run (maxLagBlocks 79):
+//   /v1/pairs=1.5601503759398496  /v1/chart/stats=1.5012626262626263
+// Not reciprocals — two genuinely different trades.
+//
+// The tie-break must also be REPLICA-STABLE, which rules out the SERIAL id:
+// it is deployment-local, and p7a compares instance A against instance B.
+// offer_hash is the content address, so every replica breaks the tie the same
+// way.
+test("both last-price routes pick the same fill when archived_at ties", async () => {
+  // NOTE ON WHAT THIS CAN AND CANNOT DO. With no tie-break, either query is
+  // free to return either row, so a fixture cannot RELIABLY go red — it passes
+  // whenever the planner happens to pick alike, which it did here on the first
+  // attempt. The dependable red came from the e2e. So this asserts the RULE
+  // rather than the symptom: last_price is the fill with the greatest
+  // (archived_at, offer_hash), on both routes. That is unambiguous after the
+  // fix and is what makes the two agree by construction.
+  const { getPairs } = await import("@zswap-da/database");
+  const LO = "c".repeat(64);
+  const HI = "d".repeat(64);
+  // Same instant, deliberately different prices: 20/10 = 2 and 30/10 = 3.
+  const at = new Date(Date.now() - 10 * 60 * 1000);
+  for (const [id, wantAmt] of [[960, "20"], [961, "30"], [962, "25"]] as [number, string][]) {
+    await client.query(
+      `INSERT INTO offer_file_history
+         (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+       VALUES ($1, $2, $3, $4, $5, 3600, 'CONSUMED', $5, $5)`,
+      [id, 900 + id, `blob-${id}`, hashOf(id), at],
+    );
+    await client.query(
+      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+       VALUES ($1, $2, '10', 'GIVING',  'SHIELDED', $4),
+              ($1, $3, $5,   'WANTING', 'SHIELDED', $4)`,
+      [id, LO, HI, at, wantAmt],
+    );
+  }
+  await adjudicateAll();
+
+  // The winner by the rule: greatest offer_hash among the tied archived_at.
+  const expected = (await client.query(
+    `SELECT (quote_amount / NULLIF(base_amount, 0))::float8 AS p
+       FROM offer_file_history
+      WHERE settled AND base_color = $1 AND quote_color = $2
+      ORDER BY archived_at DESC, offer_hash DESC
+      LIMIT 1`, [LO, HI],
+  )).rows[0].p;
+
+  const pairs = await getPairs.run(undefined, client);
+  const row = pairs.find((p: any) => p.base_color === LO && p.quote_color === HI)!;
+  const stats = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0]!;
+
+  expect(Number(row.last_price)).toBeCloseTo(Number(expected), 9);
+  expect(Number(stats.last_price)).toBeCloseTo(Number(expected), 9);
+  expect(Number(row.last_price)).toBeCloseTo(Number(stats.last_price), 9);
+});

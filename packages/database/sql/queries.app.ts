@@ -326,12 +326,12 @@ NOT EXISTS (
  * is the handful of offers archived in the last few seconds.
  */
 const pricedFillsSql = `
-    SELECT h.id, h.archived_at, h.base_color, h.quote_color,
+    SELECT h.id, h.offer_hash, h.archived_at, h.base_color, h.quote_color,
            h.base_amount, h.quote_amount
       FROM offer_file_history h
      WHERE h.settled AND h.base_color IS NOT NULL
     UNION ALL
-    SELECT h.id, h.archived_at,
+    SELECT h.id, h.offer_hash, h.archived_at,
            LEAST(g.token_color, w.token_color),
            GREATEST(g.token_color, w.token_color),
            CASE WHEN g.token_color = LEAST(g.token_color, w.token_color)
@@ -594,7 +594,7 @@ export const getPairStats24h = prepared<IGetPairStats24hParams, IGetPairStats24h
       // to the version it replaces.
       `WITH priced AS (${pricedFillsSql}
        ), fills AS (
-         SELECT archived_at,
+         SELECT archived_at, offer_hash,
                 CASE WHEN :base! = base_color
                      THEN quote_amount / NULLIF(base_amount, 0)
                      ELSE base_amount / NULLIF(quote_amount, 0) END AS price,
@@ -605,13 +605,13 @@ export const getPairStats24h = prepared<IGetPairStats24hParams, IGetPairStats24h
            AND quote_color = GREATEST(:base!, :quote!)
        )
        SELECT
-         (SELECT price FROM fills ORDER BY archived_at DESC LIMIT 1)::text AS last_price,
+         (SELECT price FROM fills ORDER BY archived_at DESC, offer_hash DESC LIMIT 1)::text AS last_price,
          (SELECT price FROM fills
            WHERE archived_at <= :cutoff!
-           ORDER BY archived_at DESC LIMIT 1)::text AS ref_before_24h,
+           ORDER BY archived_at DESC, offer_hash DESC LIMIT 1)::text AS ref_before_24h,
          (SELECT price FROM fills
            WHERE archived_at > :cutoff!
-           ORDER BY archived_at ASC LIMIT 1)::text AS oldest_in_24h,
+           ORDER BY archived_at ASC, offer_hash ASC LIMIT 1)::text AS oldest_in_24h,
          (SELECT COUNT(*)::int FROM fills
            WHERE archived_at > :cutoff!) AS fills_24h,
          (SELECT MAX(price) FROM fills
@@ -653,7 +653,10 @@ export const getTradeHistory = prepared<IGetTradeHistoryParams, IGetTradeHistory
        FROM priced
        WHERE base_color = LEAST(:base!, :quote!)
          AND quote_color = GREATEST(:base!, :quote!)
-       ORDER BY archived_at DESC
+       -- Same tie-break as everywhere else: the newest row here is the trade
+       -- /v1/chart/stats calls last_price, and a list whose order changes
+       -- between identical requests is its own defect.
+       ORDER BY archived_at DESC, offer_hash DESC
        LIMIT 120`,
 );
 
@@ -866,7 +869,13 @@ export const getPairs = prepared<void, IGetPairsResult>(
                   base_color, quote_color,
                   quote_amount / NULLIF(base_amount, 0) AS last_price
            FROM priced
-           ORDER BY base_color, quote_color, archived_at DESC
+           -- archived_at is the L2 block time and quantises, so ties are
+           -- routine. offer_hash breaks them: content-addressed, therefore
+           -- identical on every replica, unlike the deployment-local SERIAL.
+           -- getPairStats24h orders the same way, which is what makes
+           -- /v1/pairs and /v1/chart/stats agree instead of each picking a
+           -- different trade from the same instant.
+           ORDER BY base_color, quote_color, archived_at DESC, offer_hash DESC
        ),
        hist AS (
            SELECT f.base_color || '|' || f.quote_color AS pair_key,

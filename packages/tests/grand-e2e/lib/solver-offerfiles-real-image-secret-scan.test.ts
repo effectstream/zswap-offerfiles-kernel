@@ -10,6 +10,15 @@ const IMAGE =
 const CELESTIA_IMAGE =
   "ubuntu@sha256:019e8eb29a85e74d64925745884f2ec79aa27e3feab36353d24656f4d6b89467";
 const SCANNER = fileURLToPath(new URL("./solver-offerfiles-real-image-secret-scan.sh", import.meta.url));
+// The scan's subject is an image filesystem, not an architecture, so the
+// default platform follows the HOST. It was pinned to linux/arm64 — correct on
+// the Apple Silicon box this was written on, and an `exec format error` on
+// GitHub's amd64 runners, which is what CI hit the first time
+// packages/tests/grand-e2e ran there. Both pinned digests are multi-arch
+// manifests (amd64 + arm64), so either selection resolves. Callers that pass
+// `platform` explicitly still override this — the celestia role does, on
+// purpose, to mirror the real image.
+const HOST_PLATFORM = process.arch === "arm64" ? "linux/arm64" : "linux/amd64";
 const SECRET = "scanner-secret-0123456789abcdef";
 const createdDirectories: string[] = [];
 
@@ -58,7 +67,7 @@ async function runScanner(input: {
     "none",
     "--read-only",
     "--platform",
-    input.platform ?? "linux/arm64",
+    input.platform ?? HOST_PLATFORM,
     "--volume",
     `${SCANNER}:/run/e1-image-secret-scan:ro`,
     "--volume",

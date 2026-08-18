@@ -141,7 +141,14 @@ export default {
       waitToExit: false,
       // Deliberately not a system-dependency: the stack is fully usable without
       // a solver, and a solver fault must never tear the stack down.
-      dependsOn: [...midnightDeps, "sync"],
+      //
+      // Waits on the mint bootstrap for the same reason the batcher does
+      // (52f104b): buildWallet() opens a wallet facade against the indexer and
+      // waitForSync() subscribes to its state stream, so an unsequenced solver
+      // adds a third wallet's subscriptions on top of the mint wallet's and can
+      // exhaust the packaged indexer's wallet DB pool mid-bootstrap. Upstream
+      // gated only the batcher because upstream has no solver.
+      dependsOn: [...midnightDeps, midnightMintTestTokens, "sync"],
     },
 
     // The frontend lives in paima-engine/templates/zswap-da — run it separately

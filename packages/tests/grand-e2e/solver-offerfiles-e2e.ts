@@ -1929,6 +1929,94 @@ async function assertRecorderAndFaultSeam(session: HarnessSession): Promise<{ co
 }
 
 /**
+ * Decode the offer identity a recorded validate body carries. Identity only —
+ * never any other field of the body — so this can be printed safely.
+ */
+function recordedOfferIdentity(event: Record<string, unknown>): string {
+  const base64 = event["bodyBase64"];
+  if (typeof base64 !== "string") {
+    return event["bodyTruncated"] === true ? "<truncated>" : "<absent>";
+  }
+  try {
+    const body = JSON.parse(Buffer.from(base64, "base64").toString("utf8")) as Record<string, unknown>;
+    const parts: string[] = [];
+    for (const key of ["offerId", "claimedOfferId", "computedOfferId"]) {
+      const value = body[key];
+      if (typeof value === "string") parts.push(`${key}=${value.slice(0, 12)}`);
+    }
+    for (const key of ["valid", "live", "code", "status"]) {
+      if (body[key] !== undefined) parts.push(`${key}=${JSON.stringify(body[key])}`);
+    }
+    return parts.length > 0 ? parts.join(",") : "<no-identity>";
+  } catch {
+    return "<unparseable>";
+  }
+}
+
+/**
+ * E1-Q9 discriminator: WHICH OFFER each event refers to.
+ *
+ * The proxy applies a `fromOccurrence` fault from occurrence N ONWARDS, so a
+ * later validate — a dequeue revalidation, or a call for a DIFFERENT offer —
+ * also receives the patched body that was built for the test offer. Our own
+ * admission contract classifies an identity-mismatched validation response as
+ * unavailable, fail-closed, which is CORRECT behaviour, not masking. So the
+ * question "did the solver mask a refusal?" is decided by whether the
+ * `unavailable` event and the domain refusal refer to the SAME offer.
+ *
+ * Prints, bounded and identity-only: every validate-route request/response with
+ * the identity it carried and the patch attribution it received, then the
+ * solver's own validation timeline with the offer each event names. No body
+ * values beyond identities, verdict codes and statuses.
+ */
+function summariseCaseIdentityTimeline(
+  slice: Array<Record<string, unknown>>,
+  identity: RealE1AcceptanceIdentity,
+  testOfferHash: string,
+  caseName: string,
+  configuredFault: Record<string, unknown>,
+): string {
+  const match = (configuredFault["match"] ?? {}) as Record<string, unknown>;
+  const wire: string[] = [];
+  const solver: string[] = [];
+  for (const event of slice) {
+    if (isSolverEvent(event, identity.runId)) {
+      if (solver.length >= 24) continue;
+      const offer = event["offerId"];
+      solver.push(
+        `#${eventSequence(event)} ${String(event["phase"] ?? "?")}/${String(event["event"] ?? "?")}` +
+          ` offer=${typeof offer === "string" ? offer.slice(0, 12) : JSON.stringify(offer ?? null)}` +
+          (event["code"] === undefined ? "" : ` code=${JSON.stringify(event["code"])}`) +
+          (event["valid"] === undefined ? "" : ` valid=${JSON.stringify(event["valid"])}`),
+      );
+      continue;
+    }
+    const path = String(event["path"] ?? "");
+    if (!path.startsWith("/v1/offers/validate")) continue;
+    if (wire.length >= 24) continue;
+    const id = String(event["requestId"] ?? "");
+    wire.push(
+      `#${eventSequence(event)} ${String(event["phase"] ?? "?")}` +
+        ` id=${id.slice(0, 8)}` +
+        ` fault=${JSON.stringify(event["fault"] ?? null)}` +
+        ` occ=${JSON.stringify(event["matchedOccurrence"] ?? null)}` +
+        ` status=${JSON.stringify(event["status"] ?? null)}` +
+        ` identity[${recordedOfferIdentity(event)}]`,
+    );
+  }
+  return [
+    `case=${caseName}`,
+    `testOffer=${testOfferHash.slice(0, 12)}`,
+    `configuredMatch=${JSON.stringify({
+      occurrence: match["occurrence"] ?? null,
+      fromOccurrence: match["fromOccurrence"] ?? null,
+    })}`,
+    `wire(${wire.length}): ${wire.join(" ;; ")}`,
+    `solver(${solver.length}): ${solver.join(" ;; ")}`,
+  ].join(" | ");
+}
+
+/**
  * The recorder's own view of fault attribution for one case — bounded and
  * value-free. Diagnosis only; it changes no verdict.
  *
@@ -5703,10 +5791,17 @@ async function runRealE1RefusalCase(
         event.valid === false && event.code === "ROOT_UNKNOWN",
     );
     assert(negative !== undefined, `${descriptor.caseName}: canonical ROOT_UNKNOWN negative verdict was not observed`);
-    assert(
-      findPhase(slice, identity, "validation", "unavailable") === undefined,
-      `${descriptor.caseName}: canonical domain refusal was masked as validation unavailable`,
-    );
+    // The masking assertion is the SC-005 property and is NOT relaxed. On
+    // failure it now carries the identity timeline that decides whether the
+    // `unavailable` refers to the same offer as the refusal (a candidate solver
+    // defect) or to a different one / an identity-mismatched patched response
+    // (fault bleed, a harness fault-selection problem) — see E1-Q9.
+    if (findPhase(slice, identity, "validation", "unavailable") !== undefined) {
+      throw new Error(
+        `${descriptor.caseName}: canonical domain refusal was masked as validation unavailable ` +
+          `[E1-Q9 ${summariseCaseIdentityTimeline(slice, identity, offer.offerHash, descriptor.caseName, configuredFault)}]`,
+      );
+    }
   }
   if (descriptor.caseName === "stale-state-version") {
     const generation = slice.find(

@@ -120,7 +120,7 @@ function checkedVerdict(
   return parsed;
 }
 
-function canonicalValidatorCode(validation: OfferValidation): OfferValidationCode {
+export function canonicalValidatorCode(validation: OfferValidation): OfferValidationCode {
   switch (validation.code) {
     case "BAD_ENCODING":
     case "TOO_LARGE":
@@ -136,6 +136,17 @@ function canonicalValidatorCode(validation: OfferValidation): OfferValidationCod
     case "PROOF_INVALID":
     case "SIGNATURE_INVALID":
       return validation.code;
+    // 259bb9c added CROSS_LAYER, returned at the leg-shape stage — i.e. exactly
+    // where this endpoint calls the validator, and before the UNSUPPORTED_SHAPE
+    // check below. Left in `default:` it would throw, turning a domain verdict
+    // into an "unavailable" transport failure: fail-closed (FR-011 safe) but a
+    // breach of FR-006's stable machine-readable reason code. The v1 profile
+    // authorizes only shielded <-> shielded, so an offer spanning both layers is
+    // precisely an unsupported shape for it; mapping keeps OfferValidationCode a
+    // closed enum, so the pinned v1 fixtures stay byte-immutable. The caller
+    // forwards `structural.reason`, which already carries layerSummary()'s text.
+    case "CROSS_LAYER":
+      return "UNSUPPORTED_SHAPE";
     default:
       throw new OfferValidationUnavailableError(
         `validator returned an unsupported boundary code: ${String(validation.code)}`,

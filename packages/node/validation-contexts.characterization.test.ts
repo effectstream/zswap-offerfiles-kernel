@@ -18,7 +18,7 @@ process.env["POST_COMMIT_EVENT_BRIDGE_ENABLED"] = "false";
 const {
   createAppInputSavepoint,
   deleteRejectedAccountingRow,
-  getEarliestRootFirstSeen,
+  getOfferRootTiming,
   getOfferStatusByHash,
   insertOfferFileWithHash,
   isKnownRootLive,
@@ -28,6 +28,11 @@ const {
   releaseAppInputSavepoint,
 } = await import("@zswap-da/database");
 const { closeTestPglite } = await import("../database/test-pglite.ts");
+const {
+  eventBus,
+  markBlockCommitted,
+  __resetEventGateForTests,
+} = await import("./event-bus.ts");
 const { getBlankRefState, validateZswapOffer } = await import("@zswap-da/validator");
 const {
   bytesToLatin1,
@@ -161,21 +166,27 @@ type StmObservation = {
 /** Drive the real production STM generator while supplying deterministic DB
  * results at its World.resolve boundary. This observes the actual transition
  * ordering without copying its validation ladder into the test. */
+const STM_BLOCK_HEIGHT = 77;
+
 function driveStm(rawBytes: Uint8Array, state: StmState): StmObservation {
   const events: Array<Record<string, unknown>> = [];
   const queries: Array<{ queryIR: unknown; params: unknown }> = [];
+  // Post-merge the STM publishes via emitAppEvent, which HOLDS each event until
+  // its block is observed committed (0358d9e). Record off the bus and release
+  // the block below; `data.emit` no longer sees lifecycle events.
+  __resetEventGateForTests();
+  const onAppEvent = (event: any) => { events.push(event); };
+  eventBus.on("app_event", onAppEvent);
   const generator = gameStateTransitions(1, {
-    blockHeight: 77,
+    blockHeight: STM_BLOCK_HEIGHT,
     blockTimestamp: BLOCK_TIME_MS,
     conciseInput: JSON.stringify([
       "celestia-zswap",
       { suppliedValue: bytesToLatin1(rawBytes) },
     ]),
     randomGenerator: {} as any,
-    emit: (_event: unknown, payload: { eventJson?: string }) => {
-      if (typeof payload?.eventJson === "string") {
-        events.push(JSON.parse(payload.eventJson));
-      }
+    emit: () => {
+      throw new Error("lifecycle events must go through the event gate, not data.emit");
     },
   } as any);
 
@@ -197,14 +208,22 @@ function driveStm(rawBytes: Uint8Array, state: StmState): StmObservation {
       result = state === "spent" ? [{ spent: 1 }] : [];
     } else if (queryIR === (isKnownRootLive as any).queryIR) {
       result = state === "root-unknown" ? [] : [{ present: 1 }];
-    } else if (queryIR === (getEarliestRootFirstSeen as any).queryIR) {
-      result = [{ first_seen_ms: BLOCK_TIME_MS, last_seen_ms: BLOCK_TIME_MS }];
+    } else if (queryIR === (getOfferRootTiming as any).queryIR) {
+      // 774b363 renamed getEarliestRootFirstSeen -> getOfferRootTiming, added a
+      // required :block_ms! param, and replaced last_seen_ms with the
+      // per-root-resolved window_anchor_ms. Re-pinned against the new IR and
+      // the new result shape, not just the new name.
+      result = [{ first_seen_ms: BLOCK_TIME_MS, window_anchor_ms: BLOCK_TIME_MS }];
     } else if (queryIR === (insertOfferFileWithHash as any).queryIR) {
       result = [{ id: 92 }];
     }
     next = generator.next(result);
   }
 
+  // The block committed: release everything the gate buffered for it.
+  markBlockCommitted(STM_BLOCK_HEIGHT);
+  eventBus.off("app_event", onAppEvent);
+  __resetEventGateForTests();
   return { queries, events };
 }
 

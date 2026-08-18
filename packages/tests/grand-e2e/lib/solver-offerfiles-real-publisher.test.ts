@@ -337,4 +337,61 @@ describe("real direct-Celestia publisher", () => {
     await expect(stat(evidencePath)).rejects.toMatchObject({ code: "ENOENT" });
     expect((await readdir(directory)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
   }, 10_000);
+
+  // Coverage for the refusal instrumentation. These paths still REFUSE — the
+  // point is only that a refusal now reports what it observed, because a
+  // verdict with no observation is what made E1-Q2 undecidable on the real
+  // stack. Both cases assert the original refusal text is intact AND that the
+  // status/content-type/body evidence rides along.
+  test("a non-JSON 200 is still refused, now carrying the observed evidence", async () => {
+    const directory = await fixtureDirectory();
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        return new Response("not json at all\n", {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      },
+    });
+    servers.push(server);
+    const config = await configFor(directory, server.url.toString(), "offer");
+    const failure = await publishRealCelestiaBlob(config).then(
+      () => new Error("publication unexpectedly succeeded"),
+      (error: unknown) => error,
+    );
+    const message = String(failure);
+    expect(message).toContain("returned non-JSON content type");
+    expect(message).toContain("status=200");
+    expect(message).toContain('content-type="text/plain; charset=utf-8"');
+    expect(message).toContain("not json at all");
+    // The newline must be escaped rather than emitted raw.
+    expect(message).toContain("\\u{a}");
+    await expect(stat(config.evidencePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("a missing content-type and a non-200 are both refused with evidence", async () => {
+    const directory = await fixtureDirectory();
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        // Explicitly strip content-type to reproduce the "upstream sent none"
+        // hypothesis, and answer 503 so the status gate fires first.
+        return new Response("upstream unavailable", { status: 503, headers: {} });
+      },
+    });
+    servers.push(server);
+    const config = await configFor(directory, server.url.toString(), "offer");
+    const failure = await publishRealCelestiaBlob(config).then(
+      () => new Error("publication unexpectedly succeeded"),
+      (error: unknown) => error,
+    );
+    const message = String(failure);
+    expect(message).toContain("returned HTTP 503, expected 200");
+    expect(message).toContain("status=503");
+    expect(message).toContain("upstream unavailable");
+    await expect(stat(config.evidencePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });

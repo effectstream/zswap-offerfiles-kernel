@@ -52,6 +52,8 @@ const EVIDENCE_SCHEMA = "zswap-offer-files-real-celestia-publication/v1";
 const NIGHT = "0".repeat(64);
 const MAX_CONFIGURED_DEADLINE_MS = 10 * 60_000;
 const MAX_CONFIGURED_BODY_BYTES = 8 * 1024 * 1024;
+/** Hard cap on the body prefix a refusal may quote back. Diagnosis only. */
+const REFUSAL_EVIDENCE_BYTES = 512;
 const HARD_MAX_OFFER_BYTES = 1024 * 1024;
 const HARD_MAX_GARBAGE_BYTES = 1024 * 1024;
 const COMMITMENT_BYTES = 32;
@@ -1005,6 +1007,76 @@ class StrictCelestiaRpc {
     this.fetchImpl = fetchImpl;
   }
 
+  /**
+   * Bounded, scrubbed evidence for a refusal — diagnosis only.
+   *
+   * Both refusal paths above still refuse; this only makes them say WHAT they
+   * saw. Without it a refusal reports a verdict with no observation, which is
+   * what left E1-Q2 undecidable: the media-type gate fired before anything read
+   * the body, so neither the header value nor the payload was ever captured.
+   *
+   * Bounded by construction: at most REFUSAL_EVIDENCE_BYTES are pulled off the
+   * stream and the remainder is cancelled, so a hostile or huge body cannot be
+   * used to exhaust memory through the failure path. The excerpt is scrubbed
+   * before it can reach a log — the configured bearer token is replaced, and
+   * every byte outside printable ASCII is escaped — so no credential and no raw
+   * control sequence is emitted.
+   */
+  private async refusalEvidence(response: Response): Promise<string> {
+    const rawContentType = response.headers.get("content-type");
+    const contentLength = response.headers.get("content-length");
+    const parts = [
+      `status=${response.status}`,
+      `content-type=${rawContentType === null ? "<absent>" : JSON.stringify(rawContentType)}`,
+      `content-length=${contentLength === null ? "<absent>" : JSON.stringify(contentLength)}`,
+    ];
+    let excerpt = "<unread>";
+    const body = response.body;
+    if (!body) {
+      excerpt = "<no body>";
+    } else {
+      const reader = body.getReader();
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      try {
+        while (length < REFUSAL_EVIDENCE_BYTES) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          chunks.push(chunk.value);
+          length += chunk.value.length;
+        }
+        const joined = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) {
+          joined.set(chunk, offset);
+          offset += chunk.length;
+        }
+        excerpt = this.scrubExcerpt(joined.slice(0, REFUSAL_EVIDENCE_BYTES));
+        if (length > REFUSAL_EVIDENCE_BYTES) excerpt += "…";
+      } catch (error) {
+        excerpt = `<body read failed: ${errorMessage(error)}>`;
+      } finally {
+        await reader.cancel("refusal evidence captured").catch(() => undefined);
+        reader.releaseLock();
+      }
+    }
+    parts.push(`body=${excerpt}`);
+    return parts.join(" ");
+  }
+
+  /** Replace the configured bearer token and escape every non-printable byte. */
+  private scrubExcerpt(bytes: Uint8Array): string {
+    let text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    if (this.authToken) text = text.split(this.authToken).join("<redacted-auth-token>");
+    const escaped = [...text]
+      .map((character) => {
+        const code = character.codePointAt(0) ?? 0;
+        return code >= 0x20 && code <= 0x7e ? character : `\\u{${code.toString(16)}}`;
+      })
+      .join("");
+    return JSON.stringify(escaped);
+  }
+
   async call(method: string, params: unknown[]): Promise<unknown> {
     const id = this.nextId++;
     const requestBody = JSON.stringify({ jsonrpc: "2.0", id, method, params });
@@ -1030,13 +1102,16 @@ class StrictCelestiaRpc {
         throw new Error(`Celestia ${method} transport failed: ${errorMessage(error)}`, { cause: error });
       }
       if (response.status !== 200) {
-        await response.body?.cancel("unexpected HTTP status").catch(() => undefined);
-        throw new Error(`Celestia ${method} returned HTTP ${response.status}, expected 200`);
+        const evidence = await this.refusalEvidence(response);
+        throw new Error(
+          `Celestia ${method} returned HTTP ${response.status}, expected 200 [${evidence}]`,
+        );
       }
-      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      const rawContentType = response.headers.get("content-type");
+      const contentType = rawContentType?.toLowerCase() ?? "";
       if (!contentType.startsWith("application/json")) {
-        await response.body?.cancel("unexpected content type").catch(() => undefined);
-        throw new Error(`Celestia ${method} returned non-JSON content type`);
+        const evidence = await this.refusalEvidence(response);
+        throw new Error(`Celestia ${method} returned non-JSON content type [${evidence}]`);
       }
       const bytes = await boundedResponseBytes(response, this.maximumResponseBytes);
       let decoded: unknown;

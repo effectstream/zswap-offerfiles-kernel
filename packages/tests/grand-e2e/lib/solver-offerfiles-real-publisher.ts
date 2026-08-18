@@ -209,6 +209,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
+/** A call that reached HTTP 200: either a parsed result, or case (iii). */
+type CelestiaCallOutcome =
+  | { parsed: true; result: unknown }
+  | { parsed: false; evidence: string };
+
+const isRecordValue = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** JSON.stringify that cannot itself throw on a cyclic or exotic value. */
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return "<unserializable>";
+  }
+}
+
 function recordAt(value: unknown, path: string): Record<string, unknown> {
   if (!isRecord(value)) throw new Error(`${path} must be a JSON object`);
   return value;
@@ -1077,7 +1094,7 @@ class StrictCelestiaRpc {
     return JSON.stringify(escaped);
   }
 
-  async call(method: string, params: unknown[]): Promise<unknown> {
+  async call(method: string, params: unknown[]): Promise<CelestiaCallOutcome> {
     const id = this.nextId++;
     const requestBody = JSON.stringify({ jsonrpc: "2.0", id, method, params });
     if (Buffer.byteLength(requestBody) > 2 * MAX_CONFIGURED_BODY_BYTES) {
@@ -1101,25 +1118,56 @@ class StrictCelestiaRpc {
       } catch (error) {
         throw new Error(`Celestia ${method} transport failed: ${errorMessage(error)}`, { cause: error });
       }
+      // Any non-200 is a refusal, always — that gate is unchanged.
       if (response.status !== 200) {
         const evidence = await this.refusalEvidence(response);
         throw new Error(
           `Celestia ${method} returned HTTP ${response.status}, expected 200 [${evidence}]`,
         );
       }
-      const rawContentType = response.headers.get("content-type");
-      const contentType = rawContentType?.toLowerCase() ?? "";
-      if (!contentType.startsWith("application/json")) {
-        const evidence = await this.refusalEvidence(response);
-        throw new Error(`Celestia ${method} returned non-JSON content type [${evidence}]`);
-      }
+      // NO content-type gate. celestia-node writes JSON-RPC ERROR responses
+      // without setting Content-Type, so Go's http.DetectContentType sniffs
+      // them as `text/plain; charset=utf-8` — see e2e open question E1-Q2,
+      // which captured exactly that against the real node. Gating on the
+      // header therefore converted every RPC error into an opaque media-type
+      // refusal and hid the real message. The node's behaviour is a given, so
+      // classification cascades over the BODY instead (user decision, 2026-08-18).
+      const headerEvidence = this.headerEvidence(response);
       const bytes = await boundedResponseBytes(response, this.maximumResponseBytes);
       let decoded: unknown;
+      let parsed = true;
       try {
         decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-      } catch (error) {
-        throw new Error(`Celestia ${method} returned invalid UTF-8 JSON`, { cause: error });
+      } catch {
+        parsed = false;
       }
+      if (!parsed) {
+        // Case (iii): HTTP 200 with no available parse. By explicit user policy
+        // the CALL is classified successful, not refused; the bounded scrubbed
+        // evidence is carried so a caller that structurally needs the parsed
+        // fact can say so precisely instead of inventing one.
+        return {
+          parsed: false as const,
+          evidence: `${headerEvidence} body=${this.scrubExcerpt(bytes.slice(0, REFUSAL_EVIDENCE_BYTES))}`,
+        };
+      }
+      // Case (i): a parsed body carrying a known JSON-RPC error shape is a
+      // named refusal that reports the error the node actually sent, whatever
+      // media type it arrived under.
+      if (isRecordValue(decoded)) {
+        const errorValue = decoded["error"];
+        if (errorValue !== undefined) {
+          throw new Error(
+            `Celestia ${method} RPC error: ${safeJson(errorValue)} [${headerEvidence}]`,
+          );
+        }
+        if (decoded["code"] !== undefined && decoded["result"] === undefined) {
+          throw new Error(
+            `Celestia ${method} RPC error: ${safeJson({ code: decoded["code"], message: decoded["message"] })} [${headerEvidence}]`,
+          );
+        }
+      }
+      // Case (ii): the canonical success envelope, checked exactly as before.
       const envelope = recordAt(decoded, `Celestia ${method} response`);
       const keys = Object.keys(envelope).sort();
       const expectedKeys = envelope["error"] === undefined
@@ -1132,11 +1180,45 @@ class StrictCelestiaRpc {
         throw new Error(`Celestia ${method} returned the wrong JSON-RPC version or ID`);
       }
       if ("error" in envelope) {
-        throw new Error(`Celestia ${method} RPC error: ${JSON.stringify(envelope["error"])}`);
+        throw new Error(`Celestia ${method} RPC error: ${safeJson(envelope["error"])} [${headerEvidence}]`);
       }
-      return envelope["result"];
+      return { parsed: true as const, result: envelope["result"] };
     });
   }
+
+  /** Status and headers only — safe to build before the body is read. */
+  private headerEvidence(response: Response): string {
+    const rawContentType = response.headers.get("content-type");
+    const contentLength = response.headers.get("content-length");
+    return [
+      `status=${response.status}`,
+      `content-type=${rawContentType === null ? "<absent>" : JSON.stringify(rawContentType)}`,
+      `content-length=${contentLength === null ? "<absent>" : JSON.stringify(contentLength)}`,
+    ].join(" ");
+  }
+}
+
+/**
+ * Unwrap a call that structurally needs its parsed result.
+ *
+ * Case (iii) classifies the CALL as successful — that is the user's policy and
+ * it is honoured: this is not a refusal of the call. What fails here is the
+ * caller's separate need for a fact the node never sent in a readable form.
+ * Fabricating a height or a blob would be worse than failing, and recovering
+ * one by downstream inclusion search is design work that has not been
+ * authorized, so this fails closed and names the situation. See e2e open
+ * question E1-Q3.
+ */
+function requireParsed(
+  outcome: CelestiaCallOutcome,
+  method: string,
+): unknown {
+  if (outcome.parsed) return outcome.result;
+  throw new Error(
+    `Celestia ${method} was classified a successful call but returned no parseable result, ` +
+      `and this caller structurally requires one; it was not fabricated. ` +
+      `See e2e open question E1-Q3 [${outcome.evidence}]`,
+  );
 }
 
 function strictHeight(value: unknown, path: string): number {
@@ -1254,21 +1336,26 @@ async function verifyPublication(
   let networkHeadAttempts = 0;
   while (true) {
     networkHeadAttempts++;
-    const head = networkHeadHeight(await rpc.call("header.NetworkHead", []));
+    const head = networkHeadHeight(
+      requireParsed(await rpc.call("header.NetworkHead", []), "header.NetworkHead"),
+    );
     if (head >= BigInt(height)) break;
     const remaining = deadlineAt - Date.now();
     if (remaining <= 0) throw deadlineError();
     await abortableSleep(Math.min(config.verifyPollMs, remaining), rpc.signal, deadlineAt);
   }
   const observedHeaderHeight = headerHeight(
-    await rpc.call("header.GetByHeight", [height]),
+    requireParsed(await rpc.call("header.GetByHeight", [height]), "header.GetByHeight"),
     height,
   );
   let getAllAttempts = 0;
   let matched: ParsedCelestiaBlob | null = null;
   while (!matched) {
     getAllAttempts++;
-    const result = await rpc.call("blob.GetAll", [height, [namespaceBase64]]);
+    const result = requireParsed(
+      await rpc.call("blob.GetAll", [height, [namespaceBase64]]),
+      "blob.GetAll",
+    );
     if (result !== null) {
       if (!Array.isArray(result)) throw new Error("Celestia blob.GetAll result must be null or an array");
       if (result.length > 4096) throw new Error("Celestia blob.GetAll returned too many blobs");
@@ -1296,11 +1383,10 @@ async function verifyPublication(
     await abortableSleep(Math.min(config.verifyPollMs, remaining), rpc.signal, deadlineAt);
   }
 
-  const byCommitmentResult = await rpc.call("blob.Get", [
-    height,
-    namespaceBase64,
-    matched.commitmentBase64,
-  ]);
+  const byCommitmentResult = requireParsed(
+    await rpc.call("blob.Get", [height, namespaceBase64, matched.commitmentBase64]),
+    "blob.Get",
+  );
   if (byCommitmentResult === null) throw new Error("Celestia blob.Get returned null for the observed commitment");
   const byCommitment = parseCelestiaBlob(
     byCommitmentResult,
@@ -1357,10 +1443,13 @@ export async function publishRealCelestiaBlob(
   const dataBase64 = Buffer.from(bytes).toString("base64");
   const rpc = new StrictCelestiaRpc(config, deadlineAt, cleanup.signal, fetchImpl);
 
-  const submitResult = await rpc.call("blob.Submit", [
-    [{ namespace: namespaceBase64, data: dataBase64, share_version: 0 }],
-    { gas_price: config.gasPrice },
-  ]);
+  const submitResult = requireParsed(
+    await rpc.call("blob.Submit", [
+      [{ namespace: namespaceBase64, data: dataBase64, share_version: 0 }],
+      { gas_price: config.gasPrice },
+    ]),
+    "blob.Submit",
+  );
   const submittedHeight = strictHeight(submitResult, "Celestia blob.Submit result");
   const verification = await verifyPublication(
     rpc,

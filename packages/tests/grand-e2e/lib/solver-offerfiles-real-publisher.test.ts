@@ -343,13 +343,22 @@ describe("real direct-Celestia publisher", () => {
   // verdict with no observation is what made E1-Q2 undecidable on the real
   // stack. Both cases assert the original refusal text is intact AND that the
   // status/content-type/body evidence rides along.
-  test("a non-JSON 200 is still refused, now carrying the observed evidence", async () => {
+  // Classification cascade (E1-Q2, user decision 2026-08-18): the media type is
+  // NOT consulted. celestia-node writes JSON-RPC errors with no Content-Type,
+  // which Go sniffs as text/plain, so classification reads the BODY. These four
+  // cases enumerate the paths the real node is known to take.
+  test("a text/plain-sniffed JSON-RPC error is reported as the RPC error it is", async () => {
     const directory = await fixtureDirectory();
+    // Byte-for-byte the body captured from the real bridge node in E1-Q2.
+    const captured =
+      '{"error":{"code":1,"message":"account for signer ' +
+      "celestia1t353fekw55xyx9fwz9ulephas5g59za3hwh2ld not found\"}," +
+      '"id":1,"jsonrpc":"2.0"}\n';
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       fetch() {
-        return new Response("not json at all\n", {
+        return new Response(captured, {
           status: 200,
           headers: { "content-type": "text/plain; charset=utf-8" },
         });
@@ -362,12 +371,67 @@ describe("real direct-Celestia publisher", () => {
       (error: unknown) => error,
     );
     const message = String(failure);
-    expect(message).toContain("returned non-JSON content type");
-    expect(message).toContain("status=200");
+    expect(message).toContain("RPC error");
+    expect(message).toContain("account for signer");
+    expect(message).not.toContain("non-JSON content type");
     expect(message).toContain('content-type="text/plain; charset=utf-8"');
-    expect(message).toContain("not json at all");
-    // The newline must be escaped rather than emitted raw.
+    await expect(stat(config.evidencePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("an unparseable body with HTTP 200 is a successful call, not a refusal", async () => {
+    const directory = await fixtureDirectory();
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        return new Response("<html><body>gateway</body></html>\n", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      },
+    });
+    servers.push(server);
+    const config = await configFor(directory, server.url.toString(), "offer");
+    const failure = await publishRealCelestiaBlob(config).then(
+      () => new Error("publication unexpectedly succeeded"),
+      (error: unknown) => error,
+    );
+    const message = String(failure);
+    // The CALL is classified successful — no refusal wording — but this caller
+    // structurally needs a height, which must never be fabricated.
+    expect(message).toContain("classified a successful call");
+    expect(message).toContain("structurally requires one");
+    expect(message).toContain("E1-Q3");
+    expect(message).not.toContain("RPC error");
+    expect(message).toContain('content-type="text/html"');
+    expect(message).toContain("gateway");
     expect(message).toContain("\\u{a}");
+    await expect(stat(config.evidencePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("a JSON-RPC error with no content-type at all is still the RPC error", async () => {
+    const directory = await fixtureDirectory();
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        // Strip Content-Type entirely: the header must not influence the verdict.
+        const body = '{"error":{"code":7,"message":"no header at all"},"id":1,"jsonrpc":"2.0"}';
+        const headers = new Headers();
+        headers.delete("content-type");
+        return new Response(body, { status: 200, headers });
+      },
+    });
+    servers.push(server);
+    const config = await configFor(directory, server.url.toString(), "offer");
+    const failure = await publishRealCelestiaBlob(config).then(
+      () => new Error("publication unexpectedly succeeded"),
+      (error: unknown) => error,
+    );
+    const message = String(failure);
+    expect(message).toContain("RPC error");
+    expect(message).toContain("no header at all");
+    expect(message).not.toContain("non-JSON content type");
     await expect(stat(config.evidencePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 

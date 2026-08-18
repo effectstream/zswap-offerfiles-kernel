@@ -516,12 +516,20 @@ describe("real E1 bounded NTP responder", () => {
     expect(result.precision).toBeLessThan(500);
 
     await waitFor(async () => (await ntpStats(harness)).backendSent === 8, "eight backend NTP responses");
-    const backendPermits = harness.recorder.events.filter((event) =>
-      event.phase === "ntp-permit" && event.selfTest === false
+    // /ntp-stats and the recorder are SEPARATE channels: the first is an HTTP
+    // counter read from the harness, the second a locally observed event
+    // stream. The counter reaching 8 does not mean all 8 events have been
+    // observed here, and the assertions below are about the stream — so wait
+    // for the stream as well. Without this the filters could sample mid-flight
+    // (CI run 32129355719 saw 6 of 8).
+    const backendEvents = (phase: string) =>
+      harness.recorder.events.filter((event) => event.phase === phase && event.selfTest === false);
+    await waitFor(
+      () => backendEvents("ntp-permit").length === 8 && backendEvents("ntp-sent").length === 8,
+      "eight backend NTP permit/sent events observed by the recorder",
     );
-    const backendSends = harness.recorder.events.filter((event) =>
-      event.phase === "ntp-sent" && event.selfTest === false
-    );
+    const backendPermits = backendEvents("ntp-permit");
+    const backendSends = backendEvents("ntp-sent");
     expect(backendPermits).toHaveLength(8);
     expect(backendSends).toHaveLength(8);
     expect(new Set(backendPermits.map((event) => event.requestId)).size).toBe(8);

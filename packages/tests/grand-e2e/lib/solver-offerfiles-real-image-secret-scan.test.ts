@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { chmod, link as hardLink, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,6 +29,23 @@ interface ScannerResult {
   containerName: string;
   containerTmp: string;
 }
+
+// Pull both pinned images ONCE, up front. `docker run` writes pull progress
+// ("Pull complete", "Digest: ...", "Status: Downloaded newer image") to
+// STDERR, and expectClean asserts stderr is empty — the scanner writing
+// nothing to stderr is the actual subject. On a warm developer machine the
+// image is already local and stderr stays empty, so this only ever failed on a
+// cold runner: CI run 32129355719 saw 32 lines of pull chatter. Pre-pulling
+// keeps the assertion strict instead of teaching it to ignore noise.
+beforeAll(async () => {
+  for (const image of [IMAGE, CELESTIA_IMAGE]) {
+    const pull = Bun.spawn(["docker", "pull", "--quiet", image], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await pull.exited;
+  }
+}, 300_000);
 
 async function fixtureDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "zswap-e1-image-scan-test-"));

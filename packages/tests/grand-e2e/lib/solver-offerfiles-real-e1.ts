@@ -36,6 +36,14 @@ export const REAL_E1_PINS = Object.freeze({
   celestiaPackageJsonSha256: "29fc59516ac8964dddf80f6e0967f595d88e9c484c7afa82366f46da6706e09d",
   celestiaLockSha256: "7d7b02c122053cefbeaec904ffca20855c9b6313c41386fa8d3076ac95f22c3a",
   compactVersion: "0.30.0",
+  // Acceptance devnet block cadence, matching current Celestia mainnet.
+  // celestia-app 6.4.10's ONLY working block-time control is
+  // `--delayed-precommit-timeout`; `timeout_commit` in config.toml is
+  // deprecated and inert (measured on the pinned binary: flag 1s + config 3s
+  // still produced 20 blocks in 20s, while flag 3s produced 7). At 1s the
+  // ~1 block/s indexer could never stay inside the production threshold
+  // MAX_CELESTIA_LAG_BLOCKS = 4 — see e2e open question E1-Q4.
+  celestiaBlockTime: "3s",
   celestiaPackageVersion: "0.103.1",
   celestiaAppVersion: "6.4.10",
   celestiaNodeVersion: "0.28.4",
@@ -192,6 +200,23 @@ RUN set -eux; \\
     tar -xzf /tmp/celestia-node.tar.gz -C /opt/celestia/node_modules/@effectstream/celestia/vendor celestia; \\
     echo '${REAL_E1_PINS.celestiaAppSha256}  /opt/celestia/node_modules/@effectstream/celestia/vendor/celestia-appd' | sha256sum -c -; \\
     echo '${REAL_E1_PINS.celestiaNodeSha256}  /opt/celestia/node_modules/@effectstream/celestia/vendor/celestia' | sha256sum -c -; \\
+    vendor=/opt/celestia/node_modules/@effectstream/celestia/vendor; \\
+    mv "$vendor/celestia-appd" "$vendor/celestia-appd.real"; \\
+    { \\
+      echo '#!/bin/sh'; \\
+      echo '# Pass-through shim over the content-pinned celestia-appd.'; \\
+      echo '# @effectstream/celestia starts the node with a hardcoded'; \\
+      echo '# --delayed-precommit-timeout 1s. On 6.4.10 that flag is the ONLY'; \\
+      echo '# working block-time control (timeout_commit is deprecated and'; \\
+      echo '# inert, measured). pflag keeps the LAST occurrence, so appending'; \\
+      echo '# ours on the start subcommand wins without editing the dep.'; \\
+      echo '# Every other subcommand passes through untouched.'; \\
+      echo 'if [ "$1" = "start" ]; then'; \\
+      echo '  exec "$0.real" "$@" --delayed-precommit-timeout ${REAL_E1_PINS.celestiaBlockTime}'; \\
+      echo 'fi'; \\
+      echo 'exec "$0.real" "$@"'; \\
+    } > "$vendor/celestia-appd"; \\
+    chmod 0755 "$vendor/celestia-appd"; \\
     /opt/celestia/node_modules/@effectstream/celestia/vendor/celestia-appd version | grep -F '${REAL_E1_PINS.celestiaAppVersion}'; \\
     /opt/celestia/node_modules/@effectstream/celestia/vendor/celestia version | grep -F '${REAL_E1_PINS.celestiaNodeVersion}'; \\
     ldd --version 2>&1 | grep -F '2.39'; \\

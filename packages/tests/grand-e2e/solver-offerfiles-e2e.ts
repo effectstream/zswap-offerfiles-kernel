@@ -370,6 +370,16 @@ interface RealE1DatabaseBootstrapEvidence {
   stableNoDuplicateCheck: true;
 }
 
+/** Observed block cadence of the acceptance Celestia devnet. */
+interface RealE1CelestiaCadenceEvidence {
+  configured: string;
+  observedMeanMs: number;
+  sampledBlocks: number;
+  sampleWindowMs: number;
+  fromHeight: number;
+  toHeight: number;
+}
+
 /** Proof that the Celestia bridge signer exists on chain and can pay. */
 interface RealE1CelestiaSignerEvidence {
   signerAddress: string;
@@ -484,6 +494,7 @@ interface RealE1ServiceBootResult {
   backendHealth: Record<string, unknown>;
   ntpBoundary: RealE1NtpBoundaryEvidence;
   databaseBootstrap: RealE1DatabaseBootstrapEvidence;
+  celestiaCadence: RealE1CelestiaCadenceEvidence;
   celestiaSigner: RealE1CelestiaSignerEvidence;
   actor: { offerHash: string; manifestSha256: string; ladderSha256: string };
   publication: { evidenceSha256: string };
@@ -527,6 +538,7 @@ interface RealE1AcceptanceResult {
   packageManifestHashes: { app: string; celestia: string };
   ntpBoundary: RealE1NtpBoundaryEvidence;
   databaseBootstrap: RealE1DatabaseBootstrapEvidence;
+  celestiaCadence: RealE1CelestiaCadenceEvidence;
   celestiaSigner: RealE1CelestiaSignerEvidence;
   offerHash: string;
   invalidCorpus: Array<{ label: string; payloadSha256: string; evidenceSha256: string }>;
@@ -4365,6 +4377,66 @@ async function assertRealE1DatabaseBootstrap(
 }
 
 /**
+ * Prove the acceptance devnet actually runs at the configured cadence.
+ *
+ * The config value is not the evidence — the OBSERVED interval is. celestia-app
+ * 6.4.10 ignores `timeout_commit` (deprecated) and honours only
+ * `--delayed-precommit-timeout`, which the packaged wrapper hardcodes to 1s;
+ * the image therefore installs a pass-through shim that appends
+ * REAL_E1_PINS.celestiaBlockTime on `start`. If that shim ever stopped taking
+ * effect the chain would silently return to ~1s blocks and the backend could
+ * never stay inside MAX_CELESTIA_LAG_BLOCKS = 4 — the exact condition E1-Q4
+ * measured — so this asserts the cadence rather than trusting it.
+ *
+ * Band, not a point: block production is not a metronome and the sample is
+ * short, so this accepts 2.0-4.5s around the 3s target. That is wide enough not
+ * to be flaky and narrow enough to catch a regression to 1s, which is the
+ * failure this guards.
+ */
+async function assertRealE1CelestiaCadence(
+  session: RealE1Session,
+): Promise<RealE1CelestiaCadenceEvidence> {
+  const readTip = async (): Promise<{ height: number; atMs: number }> => {
+    const result = await runCompose(
+      session,
+      [
+        "exec", "--no-TTY", "celestia", "curl", "-fsS",
+        "http://127.0.0.1:26657/status",
+      ],
+      { timeoutMs: 30_000, maxOutputBytes: 128 * 1024 },
+    );
+    const parsed = JSON.parse(result.stdout.trim()) as {
+      result?: { sync_info?: { latest_block_height?: unknown } };
+    };
+    const height = Number(parsed.result?.sync_info?.latest_block_height);
+    assert(Number.isSafeInteger(height) && height > 0, "celestia status returned no usable block height");
+    return { height, atMs: Date.now() };
+  };
+
+  const first = await readTip();
+  await sleep(30_000);
+  const second = await readTip();
+  const blocks = second.height - first.height;
+  const elapsedMs = second.atMs - first.atMs;
+  assert(blocks > 0, "celestia produced no blocks during the cadence sample");
+  const meanMs = Math.round(elapsedMs / blocks);
+  assert(
+    meanMs >= 2_000 && meanMs <= 4_500,
+    `celestia mean block interval ${meanMs}ms is outside the 2000-4500ms band for ` +
+      `configured cadence ${REAL_E1_PINS.celestiaBlockTime} ` +
+      `(${blocks} blocks over ${elapsedMs}ms, heights ${first.height}->${second.height})`,
+  );
+  return {
+    configured: REAL_E1_PINS.celestiaBlockTime,
+    observedMeanMs: meanMs,
+    sampledBlocks: blocks,
+    sampleWindowMs: elapsedMs,
+    fromHeight: first.height,
+    toHeight: second.height,
+  };
+}
+
+/**
  * Fund the Celestia bridge node's signing account, deterministically, before
  * anything tries to publish a blob.
  *
@@ -6450,6 +6522,7 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
     const databaseBootstrap = await assertRealE1DatabaseBootstrap(session);
     // Before any publication path runs: the Celestia signer must exist and hold
     // a balance, or blob.Submit fails with `account for signer … not found`.
+    const celestiaCadence = await assertRealE1CelestiaCadence(session);
     const celestiaSigner = await fundRealE1CelestiaSigner(session);
 
     await runAcceptanceOneShot(
@@ -6616,6 +6689,7 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
         backendHealth,
         ntpBoundary,
         databaseBootstrap,
+      celestiaCadence,
       celestiaSigner,
         indexedOffer,
         validationVerdict,
@@ -6658,6 +6732,7 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
       backendHealth,
       ntpBoundary,
       databaseBootstrap,
+      celestiaCadence,
       celestiaSigner,
       actor: {
         offerHash,
@@ -6840,6 +6915,7 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
     const databaseBootstrap = await assertRealE1DatabaseBootstrap(session);
     // Before any publication path runs: the Celestia signer must exist and hold
     // a balance, or blob.Submit fails with `account for signer … not found`.
+    const celestiaCadence = await assertRealE1CelestiaCadence(session);
     const celestiaSigner = await fundRealE1CelestiaSigner(session);
 
     await runAcceptanceOneShot(
@@ -7004,6 +7080,7 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
       backendHealth,
       ntpBoundary,
       databaseBootstrap,
+      celestiaCadence,
       celestiaSigner,
       offerHash,
       invalidCorpus: invalidCorpus.evidence,
@@ -7045,6 +7122,7 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
       },
       ntpBoundary,
       databaseBootstrap,
+      celestiaCadence,
       celestiaSigner,
       offerHash,
       invalidCorpus: invalidCorpus.evidence,

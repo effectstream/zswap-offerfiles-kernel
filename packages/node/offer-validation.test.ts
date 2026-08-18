@@ -15,7 +15,6 @@ import { OFFER_HRP, OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
-process.env["POST_COMMIT_EVENT_BRIDGE_ENABLED"] = "false";
 // This file asserts EXACT query counts on the API's connection, so upstream's
 // 1 s event-gate poll (0358d9e) must not issue queries underneath it.
 process.env["EVENT_GATE_POLL_ENABLED"] = "false";

@@ -273,13 +273,8 @@ export function authenticateSolverLiquidityReadToken(
 export const isSolverLevelsQuoteEnabled = (): boolean =>
   (getEnv("SOLVER_LEVELS_QUOTE_ENABLED") ?? "false") === "true";
 
-// Unit tests can disable the MQTT subscriber explicitly; deployed nodes keep
-// it on by default because SSE/pair projections must observe committed events.
-export const isPostCommitEventBridgeEnabled = (): boolean =>
-  (getEnv("POST_COMMIT_EVENT_BRIDGE_ENABLED") ?? "true") === "true";
-
-// Same escape hatch, same reason, for upstream's post-commit event gate poll
-// (0358d9e). Its 1 s tick issues a getLatestEffectstreamBlock on the API's own
+// Unit tests can disable upstream's post-commit event gate poll (0358d9e)
+// explicitly. Its 1 s tick issues a getLatestEffectstreamBlock on the API's own
 // connection, which is indistinguishable from validation-path work to a test
 // that counts queries on that connection — and could even be the query a test
 // intends to hold. Deployed nodes keep it on: without the poll nothing the

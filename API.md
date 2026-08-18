@@ -81,7 +81,6 @@ SOLVER_LIQUIDITY_READ_AUTH_SECRET=       # dedicated grouped-liquidity read bear
 OFFER_VALIDATION_TIMEOUT_MS=15000        # validate-for-use decision budget; max 60000
 SOLVER_LEVELS_TTL_SECONDS=60             # expire pair data; last version remains as a replay tombstone
 SOLVER_LEVELS_QUOTE_ENABLED=false        # strict opt-in: let indicative ladders override /v1/quote
-# POST_COMMIT_EVENT_BRIDGE_ENABLED=true  # default true; disable only when no runtime MQTT broker exists
 ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
                                         # 3600 (1 h) on all currently deployed networks;
                                         # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —

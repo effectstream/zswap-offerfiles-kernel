@@ -1,7 +1,4 @@
 import { EventEmitter } from "node:events";
-import { EventManager } from "@effectstream/event-client";
-
-import { ZswapAppEvents } from "./app-events.ts";
 
 // App events, published to in-process consumers ONLY AFTER the block that
 // produced them has committed.
@@ -46,10 +43,8 @@ import { ZswapAppEvents } from "./app-events.ts";
 // `data.emit` is the follow-up, and the two compose: the gate below becomes
 // redundant the moment every consumer reads from the runtime's feed.
 //
-// PORT NOTE (merge of 8244283): both sides solved this. Upstream's in-process
-// height gate is below, verbatim; our `queueAppEvent` MQTT path — the
-// `data.emit` follow-up the paragraph above describes — is kept alongside it,
-// exactly as that paragraph says the two compose.
+// PORT NOTE (merge of 8244283): upstream's in-process height gate is below,
+// verbatim, and is the only transport this module provides.
 
 export type StateMachineAppEvent =
   | { type: "offer_indexed"; offerId: number; offerHash: string; gives: unknown[]; wants: unknown[] }
@@ -167,150 +162,4 @@ export function pendingEventCount(): number {
 export function __resetEventGateForTests(): void {
   pending.length = 0;
   committedHeight = -1;
-}
-
-/** Buffer an event in Effectstream's per-input event buffer. The runtime
- * publishes it only after block COMMIT and drops it when the input fails. SQL
- * rollback for JavaScript failures is owned by withAppInputSavepoint. */
-export function queueAppEvent(
-  data: { emit: (topic: any, payload: any) => void },
-  event: StateMachineAppEvent,
-): void {
-  data.emit(ZswapAppEvents.Lifecycle, { eventJson: JSON.stringify(event) });
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-const isOfferId = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && Number(value) >= 0;
-const optionalString = (value: unknown): boolean =>
-  value === undefined || typeof value === "string";
-const isOfferHash = (value: unknown): value is string =>
-  typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-const optionalOfferHash = (value: unknown): boolean =>
-  value === undefined || isOfferHash(value);
-
-/** Reject malformed/injected broker payloads before they reach the SSE bus. */
-export function parseStateMachineAppEvent(value: unknown): StateMachineAppEvent | null {
-  if (!isRecord(value) || typeof value.type !== "string") return null;
-  switch (value.type) {
-    case "offer_indexed":
-      return isOfferId(value.offerId) &&
-          isOfferHash(value.offerHash) &&
-          Array.isArray(value.gives) && Array.isArray(value.wants)
-        ? {
-            type: "offer_indexed",
-            offerId: value.offerId,
-            offerHash: value.offerHash,
-            gives: value.gives,
-            wants: value.wants,
-          }
-        : null;
-    case "offer_consumed": {
-      if (!isOfferId(value.offerId) || !optionalOfferHash(value.offerHash) ||
-          !optionalString(value.nullifier)) return null;
-      const spend = value.unshieldedSpend;
-      if (spend !== undefined &&
-          (!isRecord(spend) || typeof spend.owner !== "string" ||
-            typeof spend.intentHash !== "string" || !isOfferId(spend.outputNo))) return null;
-      const hasNullifier = typeof value.nullifier === "string";
-      const hasUnshieldedSpend = isRecord(spend);
-      // Consumption has exactly one stable spend discriminator. Accepting
-      // neither makes the event impossible to reconcile; accepting both makes
-      // its identity ambiguous across the shielded and unshielded paths.
-      if (hasNullifier === hasUnshieldedSpend) return null;
-      return {
-        type: "offer_consumed",
-        offerId: value.offerId,
-        ...(isOfferHash(value.offerHash) ? { offerHash: value.offerHash } : {}),
-        ...(typeof value.nullifier === "string" ? { nullifier: value.nullifier } : {}),
-        ...(isRecord(spend)
-          ? {
-              unshieldedSpend: {
-                owner: spend.owner as string,
-                intentHash: spend.intentHash as string,
-                outputNo: spend.outputNo as number,
-              },
-            }
-          : {}),
-      };
-    }
-    case "offer_expired":
-      return isOfferId(value.offerId) && optionalOfferHash(value.offerHash)
-        ? {
-            type: "offer_expired",
-            offerId: value.offerId,
-            ...(isOfferHash(value.offerHash) ? { offerHash: value.offerHash } : {}),
-          }
-        : null;
-    case "offer_rejected":
-      return optionalString(value.code) && optionalString(value.reason) &&
-          optionalOfferHash(value.offerHash)
-        ? {
-            type: "offer_rejected",
-            ...(typeof value.code === "string" ? { code: value.code } : {}),
-            ...(typeof value.reason === "string" ? { reason: value.reason } : {}),
-            ...(isOfferHash(value.offerHash) ? { offerHash: value.offerHash } : {}),
-          }
-        : null;
-    default:
-      return null;
-  }
-}
-
-/** Bridge a committed MQTT lifecycle payload into the process-local SSE bus.
- * Exported for a focused ordering test without opening a broker connection. */
-export function deliverCommittedAppEvent(
-  event: StateMachineAppEvent,
-  blockHeight: number | string,
-): void {
-  if (event.type === "offer_indexed" || event.type === "offer_rejected") {
-    emitAppEvent({ ...event, blockHeight });
-    return;
-  }
-  emitAppEvent(event);
-}
-
-/** Subscribe this API process to the runtime's post-COMMIT event channel. */
-export async function startPostCommitEventBridge(
-  manager: Pick<EventManager, "subscribe" | "unsubscribe" | "symbolToSubscription"> =
-    EventManager.Instance,
-): Promise<() => Promise<void>> {
-  const subscription = await manager.subscribe(
-    {
-      topic: ZswapAppEvents.Lifecycle,
-      filter: { blockHeight: undefined },
-    },
-    (payload: any) => {
-      const { eventJson, blockHeight } = payload as {
-        eventJson: unknown;
-        blockHeight: number | string;
-      };
-      const validBlockHeight =
-        (typeof blockHeight === "number" && Number.isSafeInteger(blockHeight) && blockHeight >= 0) ||
-        (typeof blockHeight === "string" && /^(?:0|[1-9][0-9]*)$/.test(blockHeight));
-      if (typeof eventJson !== "string" || !validBlockHeight) return;
-      let decoded: unknown;
-      try {
-        decoded = JSON.parse(eventJson);
-      } catch {
-        return;
-      }
-      const event = parseStateMachineAppEvent(decoded);
-      if (event) deliverCommittedAppEvent(event, blockHeight);
-    },
-  );
-  let stopped = false;
-  return async () => {
-    if (stopped) return;
-    // event-client returns an unregistered `Symbol("noop")` when its broker is
-    // disabled. Its unsubscribe currently destructures a missing map entry,
-    // so recognize that documented no-client path here.
-    if (!manager.symbolToSubscription[subscription]) {
-      stopped = true;
-      return;
-    }
-    await manager.unsubscribe(subscription);
-    stopped = true;
-  };
 }

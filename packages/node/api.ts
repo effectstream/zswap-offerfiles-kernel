@@ -26,7 +26,6 @@ import {
   apiSseMaxConnections,
   authenticateSolverLiquidityReadToken,
   authenticateSolverLevelsToken,
-  isPostCommitEventBridgeEnabled,
   isEventGatePollEnabled,
   isSolverLevelsQuoteEnabled,
   isTokenRegistryEnabled,
@@ -44,7 +43,6 @@ import {
   eventBus,
   emitAppEvent,
   markBlockCommitted,
-  startPostCommitEventBridge,
   type AppEvent,
 } from "./event-bus.ts";
 import { quoteWithPrices, priceOf } from "./market-mock.ts";
@@ -322,11 +320,6 @@ export const apiRouter: StartConfigApiRouter = async function (
       }
     }
   };
-  // Establish the external subscription before retaining process-local state.
-  // If broker startup fails, apiRouter rejects without leaking onAppEvent.
-  const stopPostCommitBridge = isPostCommitEventBridgeEnabled()
-    ? await startPostCommitEventBridge()
-    : async () => {};
   eventBus.on("app_event", onAppEvent);
   const sseMaxConnections = apiSseMaxConnections();
   // The emitter warning threshold should reflect the explicit connection cap,
@@ -337,8 +330,7 @@ export const apiRouter: StartConfigApiRouter = async function (
   let activeSseConnections = 0;
   const activeSseResponses = new Set<any>();
   // Fastify's preClose hook runs before it waits for active requests. Without
-  // this, persistent streams can prevent server.close() and therefore delay
-  // the post-commit broker unsubscribe indefinitely.
+  // this, persistent streams can prevent server.close() from settling.
   server.addHook("preClose", async () => {
     for (const raw of activeSseResponses) {
       try { raw.destroy(); } catch { /* already closed */ }
@@ -347,7 +339,6 @@ export const apiRouter: StartConfigApiRouter = async function (
   server.addHook("onClose", async () => {
     eventBus.off("app_event", onAppEvent);
     eventBus.setMaxListeners(priorEventBusMaxListeners);
-    await stopPostCommitBridge();
   });
 
   // GET /v1/offers — list open offers, newest first, with optional filtering

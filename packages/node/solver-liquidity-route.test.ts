@@ -18,7 +18,6 @@ const TRACKED_ENV = [
   "DB_NAME",
   "DB_USER",
   "PGLITE_DATA_DIR",
-  "POST_COMMIT_EVENT_BRIDGE_ENABLED",
   "SOLVER_LEVELS_AUTH_KEYS",
   "SOLVER_LEVELS_AUTH_SECRET",
   "SOLVER_LEVELS_QUOTE_ENABLED",
@@ -71,7 +70,6 @@ const withdrawnFixture = JSON.parse(readFileSync(
 process.env["DB_USER"] = "postgres";
 process.env["DB_NAME"] = "postgres";
 process.env["PGLITE_DATA_DIR"] = "memory://";
-process.env["POST_COMMIT_EVENT_BRIDGE_ENABLED"] = "false";
 process.env["API_RATE_LIMIT_MAX"] = "10000";
 process.env["API_RATE_LIMIT_ALLOWLIST"] = "127.0.0.1";
 

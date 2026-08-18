@@ -12,7 +12,6 @@ import { closeTestPglite } from "../database/test-pglite.ts";
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
-process.env["POST_COMMIT_EVENT_BRIDGE_ENABLED"] = "false";
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;

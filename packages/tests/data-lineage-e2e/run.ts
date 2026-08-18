@@ -379,7 +379,6 @@ async function writeCompose(
       SOLVER_LEVELS_AUTH_KEYS: ${yaml(credentials)}
       SOLVER_LIQUIDITY_READ_AUTH_SECRET: ${yaml(secrets.read)}
       SOLVER_LEVELS_TTL_SECONDS: "2"
-      POST_COMMIT_EVENT_BRIDGE_ENABLED: "false"
       API_RATE_LIMIT_MAX: "10000"
     volumes:
       - ${yaml(`${OFFER_FILES_ROOT}:/src/offer:ro`)}

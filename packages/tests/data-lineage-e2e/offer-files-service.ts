@@ -19,7 +19,6 @@ if (!Number.isSafeInteger(HTTP_PORT) || HTTP_PORT <= 0 || HTTP_PORT > 65_535) {
 process.env["DB_USER"] = "postgres";
 process.env["DB_NAME"] = "postgres";
 process.env["PGLITE_DATA_DIR"] = "memory://";
-process.env["POST_COMMIT_EVENT_BRIDGE_ENABLED"] = "false";
 process.env["API_RATE_LIMIT_MAX"] = "10000";
 process.env["API_RATE_LIMIT_ALLOWLIST"] = "127.0.0.1";
 

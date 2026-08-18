@@ -82,6 +82,7 @@ what did not:
 | T-E4 loser arrives after the winner settled | ✅ `p3b`, both doors, by code |
 | T-E5 two takers, one coin | ✅ barrier proves both requests in flight; one chain winner, one transaction-specific double-spend loser, one trade |
 | T-E6 same-block byte-identical duplicates | ✅ `p4` |
+| T-E7 same-intent wrappers (marker dedup, rule ii) | ✅ `p4` §4.9 — one intent wrapped twice, refused at BOTH doors with `DUPLICATE_MARKERS`, original untouched; unit coverage in `packages/database/marker-dedup.test.ts` and `packages/node/marker-dedup.test.ts` |
 | T-F1 cancel shapes, unshielded | ✅ green, PR-B merged |
 | T-F2 `UTXO_NOT_LIVE` | ✅ via T-E4's unshielded arm |
 | T-F3 unshielded `expiresAt` + unreachable fallback | ✅ `p3` |

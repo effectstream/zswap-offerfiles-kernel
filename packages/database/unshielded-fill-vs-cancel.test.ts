@@ -230,10 +230,14 @@ beforeAll(async () => {
   await spent(13, 0, TX(12));
   await createdExact("payout-intent-12", 0, TX(12), "20", MAKER, WANT2);
 
-  // t2: X and Y share ONE input — two offers over the same UTXO, deliberately
-  // (byte-identical dedup, ruled 2026-08-12). They are alternatives: only one
-  // can settle, and one payout is the CORRECT supply, not a shortfall. Exactly
-  // one must read `consumed`; today both do.
+  // t2: X and Y share ONE input — two offers over the same UTXO, and they
+  // remain legal after the 2026-08-18 marker-dedup ruling. That rule keys on
+  // declared OUTPUTS, and these two declare DIFFERENT payouts
+  // (payout-intent-14 vs -15): the maker offering one coin for either of two
+  // things, which the schema has always allowed. Only one can settle, and one
+  // payout is the CORRECT supply rather than a shortfall, so exactly one must
+  // read `consumed` — and the classifier alone decides that, with no help from
+  // the deleted projection collapse.
   await seedOffer(14, [{ outputNo: 0 }], { give: GIVE2, want: WANT2, spendTag: "shared-input-a" });
   await seedOffer(15, [{ outputNo: 0 }], { give: GIVE2, want: WANT2, spendTag: "shared-input-a" });
   await spent("shared-input-a", 0, TX(14));
@@ -477,39 +481,87 @@ test("t4: an alternative declaring an uncreated identity is cancelled", async ()
   expect(await statusOf(19)).toBe("consumed");
 });
 
-// ── Phase (d): the write-side projection must count SETTLEMENTS, not rows ───
+// ── t5a, MIGRATED 2026-08-18: the duplicate never reaches the projection ────
 //
-// Measured on a live chain (2026-08-17): after five settlement transactions,
-// pair_stats.trade_count read SEVEN. The difference was two `same-intent
-// wrapper` pairs — two byte-different offers wrapping ONE intent, which is
-// deliberate (byte-identical dedup, ruled 2026-08-12). They share an input AND
-// a declared payout identity, so one on-chain create archived both and the
-// projection, which increments once per archived offer, counted one settlement
-// twice.
+// The original case: on a live chain (2026-08-17) five settlement transactions
+// left pair_stats.trade_count = SEVEN. The surplus was two `same-intent
+// wrapper` pairs — two byte-different offers wrapping ONE intent, legal under
+// the 2026-08-12 byte-identical-only ruling. They shared an input AND a
+// declared payout identity, so one on-chain create archived both and every
+// fill-counting surface counted the settlement twice. It was answered in the
+// PROJECTION, by supersededByDuplicatePredicate.
 //
-// The read-side classifier is not wrong to call both `consumed` — the intent
-// did settle. The collapse has to happen in the projection.
+// The marker-dedup ruling (2026-08-18) removes the defect instead of collapsing
+// its consequence: the second wrapper is REJECTED at both doors, because its
+// declared markers overlap an active offer's. So the coexisting pair is no
+// longer a state this system can reach, the projection has nothing left to
+// collapse, and the predicate is deleted.
+//
+// Both halves are asserted below, because only asserting the first would leave
+// the counting rule untested and only asserting the second would leave the
+// reader thinking the projection still defends itself.
 
-test("t5a: duplicate wrappers of one intent count as ONE trade", async () => {
-  const { getPairStats24h } = await import("@zswap-da/database");
+test("t5a: ingestion refuses the second wrapper, so one settlement is one trade", async () => {
+  const { getPairStats24h, findActiveOfferByUnshieldedOutput } = await import("@zswap-da/database");
   const GIVE3 = "5".repeat(64);
   const WANT3 = "6".repeat(64);
-  // Two offers, same declared payout identity, same input — alternatives.
-  const shared = [{ intentHash: "wrapper-intent", outputNo: 0 }];
-  await seedOffer(20, [{ outputNo: 0 }], {
-    give: GIVE3, want: WANT3, spendTag: "wrapper-input", payouts: shared,
-  });
-  await seedOffer(21, [{ outputNo: 0 }], {
-    give: GIVE3, want: WANT3, spendTag: "wrapper-input", payouts: shared,
-  });
+
+  // The first wrapper is LIVE and has declared its payout identity.
+  await client.query(
+    `INSERT INTO offer_file (id, celestia_height, transaction_hex, offer_hash,
+       created_at, first_seen_at, ttl_seconds)
+     VALUES (20, 720, 'blob-20', $1, NOW(), NOW(), 3600)`,
+    [hashOf(20)],
+  );
+  await client.query(
+    `INSERT INTO offer_file_unshielded_outputs
+       (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
+     VALUES (20, $1, 'wrapper-intent', 0, $2, '20', 1)`,
+    [MAKER, WANT3],
+  );
+
+  // The second wrapper arrives. Byte-different, so rule (i) — the offer_hash PK
+  // — sees nothing. Rule (ii) asks the live book about its declared marker and
+  // finds offer 20, which is the rejection: it never gets indexed, never gets
+  // archived, and never reaches adjudication.
+  const claimed = await findActiveOfferByUnshieldedOutput.run(
+    { owner: MAKER, intent_hash: "wrapper-intent", output_no: 0 },
+    client,
+  );
+  expect(claimed).toHaveLength(1);
+  expect(claimed[0]!.offer_hash).toBe(hashOf(20));
+
+  // So exactly ONE offer exists to settle. Archive and adjudicate it as the
+  // product does.
+  await client.query(
+    `INSERT INTO offer_file_history (id, celestia_height, transaction_hex, offer_hash,
+       created_at, first_seen_at, ttl_seconds, archive_reason, archived_at)
+     VALUES (20, 720, 'blob-20', $1, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour',
+             3600, 'CONSUMED', NOW() - INTERVAL '30 minutes')`,
+    [hashOf(20)],
+  );
+  await client.query(`DELETE FROM offer_file WHERE id = 20`);
+  await client.query(
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+     VALUES (20, $1, '10', 'GIVING', 'UNSHIELDED', NOW() - INTERVAL '30 minutes'),
+            (20, $2, '20', 'WANTING', 'UNSHIELDED', NOW() - INTERVAL '30 minutes')`,
+    [GIVE3, WANT3],
+  );
+  await client.query(
+    `INSERT INTO offer_file_unshielded_spends_history (offer_file_id, owner, intent_hash, output_no, archived_at)
+     VALUES (20, $1, 'wrapper-input', 0, NOW() - INTERVAL '30 minutes')`,
+    [MAKER],
+  );
+  await client.query(
+    `INSERT INTO offer_file_unshielded_outputs_history
+       (offer_file_id, owner, intent_hash, output_no, token_type, value, count)
+     VALUES (20, $1, 'wrapper-intent', 0, $2, '20', 1)`,
+    [MAKER, WANT3],
+  );
   await spent("wrapper-input", 0, TX(20));
   await createdExact("wrapper-intent", 0, TX(20), "20", MAKER, WANT3);
 
-  // Both are consumed — the intent settled, and each offer declared it.
   expect(await statusOf(20)).toBe("consumed");
-  expect(await statusOf(21)).toBe("consumed");
-
-  // The projection runs once per archived offer, as it does in api.ts.
   await adjudicateAll();
 
   const s = (await getPairStats24h.run({ base: GIVE3, quote: WANT3, cutoff: DAY_AGO }, client))[0];
@@ -518,8 +570,46 @@ test("t5a: duplicate wrappers of one intent count as ONE trade", async () => {
       WHERE settled AND base_color = $1 AND quote_color = $2`,
     [GIVE3 < WANT3 ? GIVE3 : WANT3, GIVE3 < WANT3 ? WANT3 : GIVE3],
   )).rows[0]!.trade_count;
-  expect(counted).toBe(1); // ONE settlement, not two offers
+  expect(counted).toBe(1);
   expect(s?.fills_24h ?? 0).toBe(1);
+});
+
+test("t5a-b: MEASURED — the projection alone no longer collapses duplicates", async () => {
+  // What the deletion of supersededByDuplicatePredicate costs, asserted rather
+  // than assumed. Two duplicate wrappers forced STRAIGHT INTO history — a state
+  // ingestion now refuses, so this can only be produced by writing to the DB
+  // behind both doors — are counted TWICE.
+  //
+  // That is the correct reading of the new design and the reason it is recorded
+  // here: correctness now rests entirely on ingestion. If a future change lets
+  // duplicates coexist through any other path, market counts inflate again and
+  // nothing downstream will notice. This is the same tripwire shape as t6, and
+  // it fails the day someone re-adds a collapse (making the number 1) or the
+  // day a new path lets duplicates in (making the e2e's totals wrong).
+  const GIVE5 = "9".repeat(64);
+  const WANT5 = "a".repeat(64);
+  const shared = [{ intentHash: "forced-wrapper-intent", outputNo: 0 }];
+  await seedOffer(24, [{ outputNo: 0 }], {
+    give: GIVE5, want: WANT5, spendTag: "forced-wrapper-input", payouts: shared,
+  });
+  await seedOffer(25, [{ outputNo: 0 }], {
+    give: GIVE5, want: WANT5, spendTag: "forced-wrapper-input", payouts: shared,
+  });
+  await spent("forced-wrapper-input", 0, TX(24));
+  await createdExact("forced-wrapper-intent", 0, TX(24), "20", MAKER, WANT5);
+
+  // Both read consumed, and that is right: the intent settled and each declared
+  // it. The classifier was never the wrong place to look.
+  expect(await statusOf(24)).toBe("consumed");
+  expect(await statusOf(25)).toBe("consumed");
+
+  await adjudicateAll();
+  const counted = (await client.query(
+    `SELECT COUNT(*)::int AS trade_count FROM offer_file_history
+      WHERE settled AND base_color = $1 AND quote_color = $2`,
+    [GIVE5 < WANT5 ? GIVE5 : WANT5, GIVE5 < WANT5 ? WANT5 : GIVE5],
+  )).rows[0]!.trade_count;
+  expect(counted).toBe(2);
 });
 
 // ── t6: the shielded twin — a MEASUREMENT, recorded either way ──────────────
@@ -586,15 +676,20 @@ test("t6: shielded same-input duplicates — measured behaviour", async () => {
     [GIVE4, WANT4],
   )).rows[0]?.trade_count;
 
-  // MEASURED: the shielded side over-counts. supersededByDuplicatePredicate
-  // keys on offer_file_unshielded_outputs_history, which a pure shielded offer
-  // has no rows in, so the collapse is inert here and one settlement is counted
-  // twice. The shape is NOT immune — the shielded half is real and OWED.
+  // MEASURED: the shielded side counts this settlement twice.
   //
-  // It is left unbuilt deliberately rather than guessed at: the shielded
-  // equivalent keys on the declared COMMITMENT, and commitments are globally
-  // unique per coin, so the predicate is a direct analogue — but it needs its
-  // own live evidence before shipping, and phase (c) produced none for the
-  // shielded layer. Tracked in the sub-plan under Questions.
+  // It always did — the projection-side collapse keyed on
+  // offer_file_unshielded_outputs_history, which a pure shielded offer has no
+  // rows in, so it was inert here. That collapse is now DELETED, so nothing
+  // downstream defends either layer; the defence moved to ingestion, where the
+  // commitment probe refuses the second offer declaring 'twin-commitment'
+  // (packages/database/marker-dedup.test.ts pins that directly).
+  //
+  // This fixture writes both offers straight into HISTORY, behind both doors,
+  // so it still produces the pair and still measures 2 — which is exactly its
+  // job. Ruled 2026-08-18: executed shielded offers are known by commitment, so
+  // under marker dedup they are unique and this state is unreachable through
+  // ingestion. If this number ever changes, that fact changed and the tripwire
+  // has done its work.
   expect(counted).toBe(2);
 });

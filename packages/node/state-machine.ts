@@ -44,7 +44,10 @@ import {
   getOfferRootTiming,
   isKnownRootLive,
   pruneKnownRoots,
+  findActiveOfferByCommitment,
+  findActiveOfferByUnshieldedOutput,
 } from "@zswap-da/database";
+import { declaredMarkers, duplicateMarkerReason, DUPLICATE_MARKERS } from "./marker-dedup.ts";
 
 // ─── Indexer scope and known limitations ─────────────────────────────────────
 //
@@ -493,10 +496,12 @@ addTransition("celestia-zswap", function* (data) {
   const gives = result.gives ?? [];
   const wants = result.wants ?? [];
 
-  // ── Dedup (MIP-0006: duplicates SHOULD be rejected) ── FIRST of the DB
-  // checks: one indexed probe on a hash we already have to compute, and the
-  // single most likely rejection under attack (replaying a valid blob is the
-  // cheapest way to make an indexer work). Never let a replay reach crypto.
+  // ── Dedup rule (i): BYTE-IDENTICAL (MIP-0006: duplicates SHOULD be
+  // rejected) ── FIRST of the DB checks: one indexed probe on a hash we already
+  // have to compute, and the single most likely rejection under attack
+  // (replaying a valid blob is the cheapest way to make an indexer work).
+  // Never let a replay reach crypto. Rule (ii), marker dedup, runs AFTER
+  // crypto — see the block below verifyOfferCrypto.
   //
   // offer_hash is content-addressed (sha256 of the raw tx bytes), so the same
   // offer re-published — same maker retrying, or a relay replaying the blob —
@@ -581,6 +586,41 @@ addTransition("celestia-zswap", function* (data) {
   if (!crypto.ok) {
     yield* rejectOffer(crypto.code, crypto.reason, { offerHash });
     return;
+  }
+
+  // ── Dedup rule (ii): MARKER OVERLAP — the authoritative door ──
+  //
+  // Same predicate as the API gate (packages/node/marker-dedup.ts, same two
+  // queries, same order); this is the copy that decides, because the API can
+  // only advise a maker while the DA namespace is permissionless and a blob can
+  // arrive without ever passing through it.
+  //
+  // AFTER crypto, deliberately: accepting a marker claim from an unverified
+  // blob would let anyone block a victim's real offer by declaring the victim's
+  // markers. Byte-identical dedup runs first for the opposite reason.
+  //
+  // DETERMINISTIC WINNER, first-wins: this probe runs inside the block
+  // transaction and the rollup's input ordering is fixed, so if two duplicates
+  // land in one block, blob 2 sees blob 1's rows on every replica and the same
+  // one loses everywhere. Nothing deployment-local is consulted — the probe
+  // orders candidates by offer_hash, never the SERIAL id — which is what keeps
+  // p7a's A-vs-B replay comparison honest rather than accidentally green.
+  for (const marker of declaredMarkers(result.tx!)) {
+    const claimed = marker.kind === "commitment"
+      ? yield* World.resolve(findActiveOfferByCommitment, { commitment: marker.commitment })
+      : yield* World.resolve(findActiveOfferByUnshieldedOutput, {
+          owner: marker.owner,
+          intent_hash: marker.intentHash,
+          output_no: marker.outputNo,
+        });
+    if (claimed.length > 0) {
+      yield* rejectOffer(
+        DUPLICATE_MARKERS,
+        duplicateMarkerReason(marker, claimed[0]!.offer_hash),
+        { offerHash, activeOfferHash: claimed[0]!.offer_hash },
+      );
+      return;
+    }
   }
 
   // ── Derive expires_at (MIP-0006) ──

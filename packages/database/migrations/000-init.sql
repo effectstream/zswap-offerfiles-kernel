@@ -188,6 +188,19 @@ CREATE TABLE offer_file_commitments (
     PRIMARY KEY (offer_file_id, commitment)
 );
 
+-- The MARKER DEDUP probe (ruled 2026-08-18), and it must not lead with
+-- offer_file_id. findActiveOfferByCommitment asks "does an ACTIVE offer already
+-- claim this commitment", with no offer known in advance — the opposite
+-- direction from the primary key above, which cannot serve it. Without this
+-- index every accepted offer pays a sequential scan of the live book per
+-- declared commitment, at BOTH doors.
+--
+-- Non-unique deliberately: it is the ingestion check that enforces uniqueness,
+-- and a UNIQUE constraint here would turn a rejected duplicate into a failed
+-- INSERT inside the block transaction — a crash where a reject code belongs.
+CREATE INDEX idx_offer_file_commitments_commitment
+    ON offer_file_commitments (commitment);
+
 -- ── Archived offers ───────────────────────────────────────────────────────
 --
 -- Archival is destructive: the live row is DELETEd. If the consuming block is
@@ -412,14 +425,15 @@ CREATE TABLE unshielded_creates (
     height      BIGINT  NOT NULL,
     PRIMARY KEY (owner, intent_hash, output_no)
 );
--- Phase (d) LANDED: the fill-marker match is now the exact primary key above
+-- DROPPED 2026-08-18. The fill-marker match is the exact primary key above
 -- (owner, intent_hash, output_no), so branch 3 of unshieldedCancelledPredicate
--- is a PK probe and needs no separate index. This shape index served the old
--- (owner, token_type, value) grouping and no query reads it any more; it is
--- kept only so a rollback of the read-path change does not fall off a cliff,
--- and should be dropped once Phase (d) is merged.
-CREATE INDEX idx_unshielded_creates_marker
-    ON unshielded_creates (tx_hash, owner, token_type, value);
+-- is a PK probe. idx_unshielded_creates_marker indexed
+-- (tx_hash, owner, token_type, value) for the superseded SHAPE grouping and no
+-- query has read it since Phase (d); it was kept only as a rollback cushion for
+-- the read-path change. Phase (d) ships in the same PR that closes this
+-- project, so the cushion is a retro-compatibility shim with nothing to roll
+-- back to — and nothing is deployed. Removed rather than carried: every insert
+-- into unshielded_creates was maintaining it for no reader.
 
 -- The offer's OWN declared unshielded outputs — its fill markers, the
 -- unshielded counterpart of offer_file_commitments. A settling transaction must
@@ -448,6 +462,13 @@ CREATE TABLE offer_file_unshielded_outputs (
     PRIMARY KEY (offer_file_id, owner, intent_hash, output_no)
 );
 
+-- The unshielded half of the MARKER DEDUP probe, same argument as
+-- idx_offer_file_commitments_commitment: findActiveOfferByUnshieldedOutput
+-- looks the live book up BY IDENTITY, and the primary key above leads with
+-- offer_file_id, so it cannot serve that direction.
+CREATE INDEX idx_offer_file_unshielded_outputs_identity
+    ON offer_file_unshielded_outputs (owner, intent_hash, output_no);
+
 CREATE TABLE offer_file_unshielded_outputs_history (
     offer_file_id INTEGER NOT NULL,
     owner         TEXT    NOT NULL,
@@ -458,20 +479,16 @@ CREATE TABLE offer_file_unshielded_outputs_history (
     count         INTEGER NOT NULL,
     PRIMARY KEY (offer_file_id, owner, intent_hash, output_no)
 );
--- The DUPLICATE probe, and it must not lead with offer_file_id.
---
--- supersededByDuplicatePredicate asks "does ANOTHER offer declare this exact
--- identity", i.e. it looks the table up by (owner, intent_hash, output_no)
--- with no offer known in advance. The primary key above leads with
--- offer_file_id and cannot serve that, so the join degrades to a scan — once
--- per candidate row, which is quadratic in archived offers.
---
--- Measured on PGlite before this index existed: a full pair-stats derivation
--- took 0.9 s at 500 archived offers, 13.8 s at 2 000, and 461 s at 10 000 —
--- 4x the rows for 15x the time, then 5x for 33x. Neither the e2e (60 offers)
--- nor the unit fixtures are large enough to show it.
-CREATE INDEX idx_offer_file_unshielded_outputs_history_identity
-    ON offer_file_unshielded_outputs_history (owner, intent_hash, output_no);
+-- DROPPED 2026-08-18 with supersededByDuplicatePredicate, the only reader of
+-- this direction on the HISTORY table. It indexed
+-- (owner, intent_hash, output_no) so the projection-side duplicate collapse
+-- could ask "does ANOTHER archived offer declare this identity" without a scan
+-- (measured before it existed: a pair-stats derivation took 0.9 s at 500
+-- archived offers, 13.8 s at 2 000 and 461 s at 10 000). Marker dedup moved
+-- that question to INGESTION, where it is asked of the LIVE tables instead —
+-- see idx_offer_file_unshielded_outputs_identity above. Branch 3 of
+-- unshieldedCancelledPredicate reads this table by offer_file_id, which the
+-- primary key already serves.
 
 -- cancelledPredicate correlates on offer_file_id five times per candidate row,
 -- and these history tables otherwise carry only a SERIAL primary key.

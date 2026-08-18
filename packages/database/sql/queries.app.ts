@@ -219,52 +219,26 @@ const unshieldedCancelledPredicate = (idExpr: string) => `(
 // safe to leave layer-independent. If §2.4 were ever relaxed, this is the
 // weakness that would come back.
 /*
- * One SETTLEMENT is one trade, even when two offers declared it.
+ * REMOVED 2026-08-18: supersededByDuplicatePredicate.
  *
- * Byte-identical dedup (ruled 2026-08-12) means two offers may wrap ONE intent
- * deliberately. They then share an input AND a declared payout identity, so a
- * single on-chain create archives both, and the read-side classifier calls both
- * consumed — correctly, the intent settled. Counting one row per archived offer
- * therefore counted one settlement twice.
+ * It existed to make one SETTLEMENT count as one trade when two offers wrapped
+ * one intent — measured on a live chain, five settlements read as seven trades.
+ * That collapse was a PROJECTION-side repair of an INGESTION-side defect, and
+ * the marker-dedup ruling removes the defect: two offers declaring the same
+ * markers can no longer coexist in the live book, because the second is
+ * rejected at both doors (packages/node/marker-dedup.ts). With nothing left to
+ * collapse, keeping the predicate would mean carrying a quadratic self-join
+ * over the archive on every market read to defend against a state the system
+ * can no longer reach.
  *
- * Measured, not argued: on a live chain (2026-08-17) five settlement
- * transactions left pair_stats.trade_count = 7, the surplus being exactly the
- * two same-intent wrapper pairs.
- *
- * Sharing a payout identity IS the duplicate relation. Identities are
- * per-intent, so disjoint offers can never collide here and only alternatives
- * over one intent can. The earliest such offer counts; the rest defer to it.
- *
- * Ordered by (archived_at, offer_hash), NEVER by id: archived_at is the
- * chain-derived L2 block time and offer_hash is the content address, so every
- * replica picks the same winner. The SERIAL id is deployment-local and would
- * diverge across instance A and B, which the determinism phase checks.
- *
- * This is deliberately NOT applied to the per-offer status: an offer whose
- * intent settled IS consumed, and saying otherwise would make the API deny a
- * settlement that happened. It applies to the surfaces that COUNT fills —
- * trade history, the 24 h aggregate, and the pair_stats projection — which is
- * what keeps the read side and the write side telling the same story.
- *
- * Block comments throughout: the IR compiler mangles a statement containing a
- * "--" comment inside its WHERE clause, dropping conditions after it.
+ * Recorded rather than silently deleted because the reasoning is the load-
+ * bearing part: identities are per-intent, so only alternatives over ONE intent
+ * could ever collide here — which is exactly the set that ingestion now
+ * refuses. The shielded twin (t6 in unshielded-fill-vs-cancel.test.ts) was
+ * never covered by this predicate at all and is likewise closed at ingestion,
+ * by the commitment probe; t6 stays as the tripwire that fails the day that
+ * stops being true.
  */
-const supersededByDuplicatePredicate = (idExpr: string) => `EXISTS (
-    SELECT 1
-      FROM offer_file_unshielded_outputs_history mine
-      JOIN offer_file_history mh ON mh.id = mine.offer_file_id
-      JOIN offer_file_unshielded_outputs_history other
-        ON  other.owner         = mine.owner
-        AND other.intent_hash   = mine.intent_hash
-        AND other.output_no     = mine.output_no
-        AND other.offer_file_id <> mine.offer_file_id
-      JOIN offer_file_history oh ON oh.id = other.offer_file_id
-     WHERE mine.offer_file_id = ${idExpr}
-       AND oh.archive_reason = 'CONSUMED'
-       AND (oh.archived_at < mh.archived_at
-            OR (oh.archived_at = mh.archived_at
-                AND oh.offer_hash < mh.offer_hash))
-)`;
 
 const cancelledPredicate = (idExpr: string) =>
   `(${shieldedCancelledPredicate(idExpr)} OR ${unshieldedCancelledPredicate(idExpr)})`;
@@ -373,8 +347,7 @@ const pricedFillsSql = `
        AND h.archive_reason = 'CONSUMED'
        AND g.amount > 0 AND w.amount > 0
        AND ${notABasketPredicate("h.id", "offer_file_tokens_history")}
-       AND NOT ${cancelledPredicate("h.id")}
-       AND NOT ${supersededByDuplicatePredicate("h.id")}`;
+       AND NOT ${cancelledPredicate("h.id")}`;
 
 
 // Status of an archived row: expired (TTL) / cancelled / consumed.
@@ -790,16 +763,15 @@ export const adjudicateOfferFill = prepared<IAdjudicateOfferFillParams, IAdjudic
                           THEN g.amount ELSE w.amount END AS base_amount,
                      CASE WHEN g.token_color = LEAST(g.token_color, w.token_color)
                           THEN w.amount ELSE g.amount END AS quote_amount,
-                     -- A PRICE OBSERVATION requires all four. Note what is NOT
-                     -- required: being the only offer that declared this
-                     -- settlement. A duplicate wrapper DID settle, so it is
-                     -- settled = true, but it is not a second trade — it
-                     -- lands here with NULL colours exactly like a basket,
-                     -- which is how one settlement stays one trade.
+                     -- A PRICE OBSERVATION requires all four. A settled offer
+                     -- that is not a price (a basket, or a cancel) is stored
+                     -- settled = true with NULL colours — "it happened, it was
+                     -- not a price". The duplicate-wrapper case used to land
+                     -- here too; it cannot arise any more, because marker dedup
+                     -- refuses the second wrapper at ingestion.
                      (g.amount > 0 AND w.amount > 0
                       AND ${notABasketPredicate("g.offer_file_id", "offer_file_tokens_history")}
-                      AND NOT ${cancelledPredicate("g.offer_file_id")}
-                      AND NOT ${supersededByDuplicatePredicate("g.offer_file_id")}) AS ok
+                      AND NOT ${cancelledPredicate("g.offer_file_id")}) AS ok
                  FROM (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
                        FROM offer_file_tokens_history
                        WHERE direction = 'GIVING' AND offer_file_id = :offer_id!
@@ -1174,6 +1146,59 @@ export const insertOfferFileUnshieldedOutput = prepared<IInsertOfferFileUnshield
        VALUES (:offer_file_id!, :owner!, :intent_hash!, :output_no!, :token_type!, :value!, 1)
        ON CONFLICT (offer_file_id, owner, intent_hash, output_no)
        DO UPDATE SET count = offer_file_unshielded_outputs.count + 1`,
+);
+
+// ── Marker dedup, rule (ii) — ruled 2026-08-18 ──────────────────────────────
+//
+// "Does an ACTIVE offer already claim this marker?", asked once per declared
+// marker at BOTH doors. The rule, its placement after crypto and the
+// first-wins argument live in packages/node/marker-dedup.ts; these are the two
+// probes it is made of, one per layer.
+//
+// ACTIVE needs no predicate. Archival DELETEs the live row and the marker rows
+// cascade, so presence in these tables IS the live book — which is also what
+// keeps this O(live book) instead of O(history).
+//
+// ORDER BY offer_hash, never the SERIAL id: the id is deployment-local and p7a
+// compares instance A against B, so an id-keyed choice of incumbent would swap
+// a dedup answer for a determinism failure. LIMIT 1 because the caller needs
+// one name for the reason string, not the set.
+//
+// Both probes are index-served — see the two indexes added for exactly this
+// direction of lookup in 000-init.sql. Without them each accepted offer costs a
+// sequential scan of the live book per declared marker, at both doors.
+export interface IFindActiveOfferByCommitmentParams { commitment: string }
+export interface IFindActiveOfferByCommitmentResult {
+  offer_file_id: number;
+  offer_hash: string | null;
+}
+export const findActiveOfferByCommitment = prepared<IFindActiveOfferByCommitmentParams, IFindActiveOfferByCommitmentResult>(
+      `SELECT c.offer_file_id, o.offer_hash
+         FROM offer_file_commitments c
+         JOIN offer_file o ON o.id = c.offer_file_id
+        WHERE c.commitment = :commitment!
+        ORDER BY o.offer_hash
+        LIMIT 1`,
+);
+
+export interface IFindActiveOfferByUnshieldedOutputParams {
+  owner: string;
+  intent_hash: string;
+  output_no: number;
+}
+export interface IFindActiveOfferByUnshieldedOutputResult {
+  offer_file_id: number;
+  offer_hash: string | null;
+}
+export const findActiveOfferByUnshieldedOutput = prepared<IFindActiveOfferByUnshieldedOutputParams, IFindActiveOfferByUnshieldedOutputResult>(
+      `SELECT u.offer_file_id, o.offer_hash
+         FROM offer_file_unshielded_outputs u
+         JOIN offer_file o ON o.id = u.offer_file_id
+        WHERE u.owner = :owner!
+          AND u.intent_hash = :intent_hash!
+          AND u.output_no = :output_no!
+        ORDER BY o.offer_hash
+        LIMIT 1`,
 );
 
 // Batched nullifiers for a page of offers — computed.inputNullifiers in the

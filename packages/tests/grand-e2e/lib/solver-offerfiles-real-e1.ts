@@ -405,7 +405,7 @@ services:
       - bash
       - -c
       - >-
-        test "$$(bun --version)" = "1.3.3" &&
+        test "$$(bun --version)" = "${REAL_E1_PINS.appRuntimeBunVersion}" &&
         test "$$(/root/.local/bin/compact --version)" = "compact 0.5.1" &&
         test "$$(/root/.local/bin/compact compile +${REAL_E1_PINS.compactVersion} --version)" = "${REAL_E1_PINS.compactVersion}" &&
         bunx orchestrator list --config packages/tests/start.test.ts &&

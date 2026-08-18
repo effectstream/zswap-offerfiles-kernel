@@ -6197,11 +6197,20 @@ async function prepareRealInvalidCorpus(
   } | undefined;
   const tokenAFundingRows = funding?.tokenFundingTransactions?.filter((row) => row.token === "A") ?? [];
   const tokenAFunding = tokenAFundingRows[0];
+  // Consumption is NOT re-checked here. `bindRealPreSpentLivenessArtifact`
+  // already refused to mint this artifact unless every candidate input
+  // nullifier appeared in the funding transaction's own consumed-nullifier set
+  // (E1-Q1 fix, verified twice on the real chain), and it stamped that
+  // transaction's hash into `consumingFundingTxHash`. What remains for this
+  // site is the LAST link — that the manifest names that same transaction, once
+  // — which the hash equality below establishes. The former nullifiers-in-
+  // `identifiers` clause was impossible by construction: ledger-v8's
+  // `Transaction::identifiers()` returns value and intent-binding commitments,
+  // never nullifiers (e2e open questions E1-Q1 and E1-Q6).
   assert(
     tokenAFundingRows.length === 1 && tokenAFunding?.hash === preSpent.consumingFundingTxHash &&
-      Array.isArray(tokenAFunding.identifiers) &&
-      (preSpent.inputNullifiers as unknown[]).every((value) => tokenAFunding.identifiers!.includes(value)),
-    "pre-spent offer is not bound to the exact consuming token-A funding transaction",
+      Array.isArray(tokenAFunding.identifiers) && tokenAFunding.identifiers.length > 0,
+    "pre-spent offer is not bound to a single well-formed token-A funding manifest row",
   );
   const inputs = [
     {

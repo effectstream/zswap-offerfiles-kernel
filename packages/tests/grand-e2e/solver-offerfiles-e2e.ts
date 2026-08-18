@@ -378,23 +378,22 @@ const REAL_E1_NTP_ALIASES = Object.freeze([
   "2.pool.ntp.org",
   "3.pool.ntp.org",
 ]);
+// Re-derived from packages/database/migration-order.ts after the port onto
+// upstream main (#45): the 000..013 chain was collapsed into ONE from-zero
+// schema file, so migrationTable now declares exactly two entries. The assert
+// below still compares this list against that source, so a future chain change
+// fails loudly instead of silently drifting.
 const REAL_E1_MIGRATION_NAMES = Object.freeze([
   "000-init.sql",
-  "001-spent-sets.sql",
-  "002-liveness-sets.sql",
-  "003-token-prices.sql",
-  "004-pair-stats.sql",
-  "005-offer-hash.sql",
-  "006-offer-rejections.sql",
-  "007-cursor-pagination.sql",
-  "008-nullifier-tx-hash.sql",
-  "009-leg-kind.sql",
-  "010-drop-auth-and-note.sql",
-  "011-root-first-seen.sql",
-  "012-first-seen-at.sql",
-  "013-commitments.sql",
   "local-migration.sql",
 ]);
+// Re-derived from the ported packages/database/migrations/000-init.sql (plus
+// local-migration.sql, which declares no tables). The collapsed schema adds
+// four relations the 000..013 chain never created — unshielded_creates,
+// unshielded_spends and the offer_file_unshielded_outputs pair — taking the
+// application schema from 18 to 22. No relation was dropped. Every entry is a
+// plain CREATE TABLE in `public`: the file declares no view and no
+// partitioning, so `relkind IN ('r','p')` sees exactly this set.
 const REAL_E1_REQUIRED_DATABASE_RELATIONS = Object.freeze([
   "commitments",
   "created_unshielded",
@@ -409,11 +408,15 @@ const REAL_E1_REQUIRED_DATABASE_RELATIONS = Object.freeze([
   "offer_file_nullifiers_history",
   "offer_file_tokens",
   "offer_file_tokens_history",
+  "offer_file_unshielded_outputs",
+  "offer_file_unshielded_outputs_history",
   "offer_file_unshielded_spends",
   "offer_file_unshielded_spends_history",
   "offer_rejections",
   "pair_stats",
   "token_prices",
+  "unshielded_creates",
+  "unshielded_spends",
 ].sort());
 const E1_CASE_NAMES = Object.freeze([
   "boot",
@@ -4244,7 +4247,7 @@ async function queryRealE1DatabaseBootstrapSnapshot(
   const declaredMigrationNames = [...migrationOrderSource.matchAll(/\bname:\s*"([a-z0-9_.-]+)"/g)]
     .map((match) => match[1]!);
   assert(
-    REAL_E1_MIGRATION_NAMES.length === 15 && new Set(REAL_E1_MIGRATION_NAMES).size === 15 &&
+    REAL_E1_MIGRATION_NAMES.length === 2 && new Set(REAL_E1_MIGRATION_NAMES).size === 2 &&
       JSON.stringify(declaredMigrationNames) === JSON.stringify(REAL_E1_MIGRATION_NAMES),
     "real E1 expected migrations do not exactly match migrationTable source order",
   );

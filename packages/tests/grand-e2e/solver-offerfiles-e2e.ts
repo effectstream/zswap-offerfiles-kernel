@@ -4459,6 +4459,123 @@ async function fundRealE1CelestiaSigner(
   };
 }
 
+/**
+ * Diagnose a VALIDATION_UNAVAILABLE refusal — capture only, no retry, no
+ * tolerance. The acceptance step still fails on the 503; this rides the failure
+ * path so the refusal stops being a verdict with no observation.
+ *
+ * WHAT IT MEASURES AND WHY. `requireCurrentBackend`
+ * (packages/node/offer-validation.ts:195-223) accepts only when the sync-health
+ * `blockL2.height` equals the committed state anchor version, and it reads
+ * health BEFORE the anchor on every attempt. Two race variants exist by
+ * construction: attempt 0 uses `getSyncStatus`, which may serve a CACHED
+ * snapshot (a stale-cache mismatch can exceed 1), while every attempt's
+ * health-then-anchor ordering means a block committing between the two reads
+ * gives a mismatch of exactly ±1. Which inner condition fired and how large the
+ * mismatch runs are the two facts that separate a bounded retry from a change
+ * at the source, so this records the health body, the anchor, and a rapid
+ * sequence of paired reads with their observed heights, equality and the gap
+ * between them.
+ *
+ * HONEST BOUND ON THE MEASUREMENT: each pair here costs two `docker compose
+ * exec` round trips, so the window between our health and anchor reads is far
+ * WIDER than production's in-process gap. Our mismatch rate is therefore an
+ * UPPER bound on the real one — useful for magnitude and for proving the race
+ * exists, not as production's actual failure probability.
+ *
+ * This is harness-only: production code is untouched.
+ */
+async function captureRealE1ValidationCurrentness(
+  session: RealE1Session,
+): Promise<string> {
+  const readHealth = async (): Promise<{ atMs: number; status: unknown; height: string | null; body: string }> => {
+    const result = await runCompose(
+      session,
+      [
+        "exec",
+        "--no-TTY",
+        "telemetry-relay",
+        "node",
+        "-e",
+        `fetch('http://backend-proxy:8080/v1/health/sync',{signal:AbortSignal.timeout(15000)})` +
+          `.then(r=>r.text()).then(t=>console.log(t)).catch(e=>{console.error(String(e));process.exit(1)})`,
+      ],
+      { timeoutMs: 30_000, maxOutputBytes: 64 * 1024 },
+    );
+    const body = result.stdout.trim();
+    let status: unknown = null;
+    let height: string | null = null;
+    try {
+      const parsed = JSON.parse(body) as { status?: unknown; blockL2?: { height?: unknown } | null };
+      status = parsed.status ?? null;
+      height = parsed.blockL2?.height === undefined || parsed.blockL2?.height === null
+        ? null
+        : String(parsed.blockL2.height);
+    } catch { /* recorded verbatim below */ }
+    return { atMs: Date.now(), status, height, body };
+  };
+
+  // The exact fact getLatestEffectstreamBlock reads (queries.app.ts:411).
+  const readAnchor = async (): Promise<{ atMs: number; height: string | null }> => {
+    const result = await runCompose(
+      session,
+      [
+        "exec", "--no-TTY", "postgres", "psql",
+        "--username=postgres", "--dbname=postgres", "--no-align", "--tuples-only",
+        "--set=ON_ERROR_STOP=1", "--command",
+        `SELECT block_height FROM effectstream.effectstream_blocks ` +
+          `WHERE ms_timestamp IS NOT NULL ORDER BY block_height DESC LIMIT 1;`,
+      ],
+      { timeoutMs: 30_000, maxOutputBytes: 16 * 1024 },
+    );
+    const height = result.stdout.trim();
+    return { atMs: Date.now(), height: /^[0-9]+$/.test(height) ? height : null };
+  };
+
+  const firstHealth = await readHealth();
+  const firstAnchor = await readAnchor();
+
+  // Health BEFORE anchor on every pair, mirroring production's own ordering.
+  const pairs: string[] = [];
+  let agreed = 0;
+  const deltas: bigint[] = [];
+  for (let index = 0; index < 10; index++) {
+    const health = await readHealth();
+    const anchorRead = await readAnchor();
+    const equal = health.height !== null && anchorRead.height === health.height;
+    if (equal) agreed++;
+    let delta = "n/a";
+    if (health.height !== null && anchorRead.height !== null) {
+      const value = BigInt(anchorRead.height) - BigInt(health.height);
+      deltas.push(value);
+      delta = value.toString();
+    }
+    pairs.push(
+      `#${index} health=${health.height ?? "<none>"}@${health.atMs} ` +
+        `anchor=${anchorRead.height ?? "<none>"}@${anchorRead.atMs} ` +
+        `gapMs=${anchorRead.atMs - health.atMs} equal=${equal} anchorMinusHealth=${delta}`,
+    );
+  }
+  const magnitudes = deltas.map((value) => (value < 0n ? -value : value));
+  const maxMagnitude = magnitudes.reduce((left, right) => (right > left ? right : left), 0n);
+
+  const summary = [
+    `firstHealthStatus=${JSON.stringify(firstHealth.status)}`,
+    `firstHealthHeight=${firstHealth.height ?? "<none>"}`,
+    `firstAnchorHeight=${firstAnchor.height ?? "<none>"}`,
+    `pairsAgreed=${agreed}/10`,
+    `maxAnchorMinusHealthMagnitude=${maxMagnitude.toString()}`,
+    `healthBody=${JSON.stringify(firstHealth.body.slice(0, 512))}`,
+    ...pairs,
+  ].join(" | ");
+  assertNoGeneratedSecrets(
+    "real E1 validation currentness capture",
+    summary,
+    session.files.generatedSecrets ?? [],
+  );
+  return summary;
+}
+
 async function assertRealE1DatabaseBootstrapStillExact(
   session: RealE1Session,
   initial: RealE1DatabaseBootstrapEvidence,
@@ -6395,11 +6512,22 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
       330_000,
     );
 
-    const validationVerdict = await execAcceptanceJson(
-      session,
-      `(async()=>{const fs=await import('node:fs/promises');const a=JSON.parse(await fs.readFile('/inputs/actor/actor-manifest.json','utf8'));const token=(await fs.readFile('/run/e1-control/boot-solver-token','utf8')).trim();if(!token)throw new Error('validation credential missing');const url='http://backend-proxy:8080/v1/offers/validate';const body=JSON.stringify({schemaVersion:1,profile:'offer-files-solver-v1',offerId:a.offer.offerHash,offer:a.offer.offerBlob});const end=Date.now()+300000;for(;;){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','accept':'application/json','authorization':'Bearer '+token},body,signal:AbortSignal.timeout(45000)});if(r.status!==200)throw new Error('validate returned '+r.status+' '+await r.text());const v=await r.json();if(v.valid===true&&v.live===true&&v.code==='VALID'&&v.claimedOfferId===a.offer.offerHash&&v.computedOfferId===a.offer.offerHash){console.log(JSON.stringify(v));return}if(Date.now()>=end)throw new Error('offer did not become valid before deadline '+JSON.stringify(v));await new Promise(resolve=>setTimeout(resolve,2000))}})().catch(e=>{console.error(e);process.exit(1)})`,
-      360_000,
-    );
+    // The 503 is NOT retried and NOT tolerated: one VALIDATION_UNAVAILABLE
+    // still fails this gate. The capture rides the failure path only, so a
+    // refusal reports the currentness handshake it refused on (E1-Q4).
+    let validationVerdict: Record<string, unknown>;
+    try {
+      validationVerdict = await execAcceptanceJson(
+        session,
+        `(async()=>{const fs=await import('node:fs/promises');const a=JSON.parse(await fs.readFile('/inputs/actor/actor-manifest.json','utf8'));const token=(await fs.readFile('/run/e1-control/boot-solver-token','utf8')).trim();if(!token)throw new Error('validation credential missing');const url='http://backend-proxy:8080/v1/offers/validate';const body=JSON.stringify({schemaVersion:1,profile:'offer-files-solver-v1',offerId:a.offer.offerHash,offer:a.offer.offerBlob});const end=Date.now()+300000;for(;;){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','accept':'application/json','authorization':'Bearer '+token},body,signal:AbortSignal.timeout(45000)});if(r.status!==200)throw new Error('validate returned '+r.status+' '+await r.text());const v=await r.json();if(v.valid===true&&v.live===true&&v.code==='VALID'&&v.claimedOfferId===a.offer.offerHash&&v.computedOfferId===a.offer.offerHash){console.log(JSON.stringify(v));return}if(Date.now()>=end)throw new Error('offer did not become valid before deadline '+JSON.stringify(v));await new Promise(resolve=>setTimeout(resolve,2000))}})().catch(e=>{console.error(e);process.exit(1)})`,
+        360_000,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("VALIDATION_UNAVAILABLE")) throw error;
+      const currentness = await captureRealE1ValidationCurrentness(session);
+      throw new Error(`${message} [validation-currentness ${currentness}]`, { cause: error });
+    }
     await rm(join(session.files.runtimeDirectory, "control", "boot-solver-token"));
 
     assert(

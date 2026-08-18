@@ -324,6 +324,28 @@ NOT EXISTS (
  * wrong. The fallback is bounded by the partial index on
  * (archive_reason = 'CONSUMED' AND settled IS NULL): in steady state that set
  * is the handful of offers archived in the last few seconds.
+ *
+ * WHY LATERAL, AND NOT A GROUPED SUBQUERY. That bound is a property of HOW the
+ * legs are fetched, not merely of the WHERE clause. Written as
+ * `JOIN (SELECT offer_file_id, ... GROUP BY 1, 2) g ON g.offer_file_id = h.id`
+ * the aggregate is uncorrelated, so Postgres must materialise it over the WHOLE
+ * of offer_file_tokens_history before the join can discard anything — the
+ * `settled IS NULL` restriction reaches h, never the aggregate. Measured on
+ * PGlite (market-read-cost.bench.ts, 50 fills on the read pair and 5 rows owed
+ * a verdict at every point): two HashAggregates over 16 110 token rows,
+ * 884 kB of sorts and 8 000 rows discarded by the join filter, to produce five
+ * rows — and a read cost that tracked BACKGROUND archive size, 4.7x-9.0x
+ * across a 16x growth in offers on pairs the query never returns.
+ *
+ * LATERAL correlates the aggregate to h.id, which forces h to be the outer
+ * relation: the partial index picks the few unadjudicated rows and each one
+ * costs a single indexed lookup of its own legs. Same rows, same order, and the
+ * only difference is that the work is now proportional to what is MISSING
+ * rather than to what has been archived since the process started — which is
+ * what the sweep's index was designed for, and what the verdict design exists
+ * to buy. On single-backend PGlite this is not a micro-optimisation: the
+ * aggregation contends with the STM's own writes, and STM lag is the metric
+ * that shows it.
  */
 const pricedFillsSql = `
     SELECT h.id, h.offer_hash, h.archived_at, h.base_color, h.quote_color,
@@ -339,12 +361,14 @@ const pricedFillsSql = `
            CASE WHEN g.token_color = LEAST(g.token_color, w.token_color)
                 THEN w.amount ELSE g.amount END
       FROM offer_file_history h
-      JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
-              FROM offer_file_tokens_history WHERE direction = 'GIVING'
-             GROUP BY 1, 2) g ON g.offer_file_id = h.id
-      JOIN (SELECT offer_file_id, token_color, SUM(amount::numeric) AS amount
-              FROM offer_file_tokens_history WHERE direction = 'WANTING'
-             GROUP BY 1, 2) w ON w.offer_file_id = h.id
+      JOIN LATERAL (SELECT t.token_color, SUM(t.amount::numeric) AS amount
+                      FROM offer_file_tokens_history t
+                     WHERE t.offer_file_id = h.id AND t.direction = 'GIVING'
+                     GROUP BY t.token_color) g ON TRUE
+      JOIN LATERAL (SELECT t.token_color, SUM(t.amount::numeric) AS amount
+                      FROM offer_file_tokens_history t
+                     WHERE t.offer_file_id = h.id AND t.direction = 'WANTING'
+                     GROUP BY t.token_color) w ON TRUE
      WHERE h.settled IS NULL
        AND h.archive_reason = 'CONSUMED'
        AND g.amount > 0 AND w.amount > 0

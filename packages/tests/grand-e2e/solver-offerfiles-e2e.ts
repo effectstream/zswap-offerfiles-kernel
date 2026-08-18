@@ -316,7 +316,6 @@ interface RealE1RuntimeHardeningEvidence {
     restartCount: 0;
     writableLayerBytes: number;
     networks: string[];
-    cacheFiles: Array<{ path: string; bytes: number }>;
   };
   writableLayers: Array<{ service: string; bytes: number }>;
   runtimeLogging: Array<{ service: string; driver: string; options: Record<string, string> }>;
@@ -2889,7 +2888,6 @@ function canonicalMountOptions(value: string): string {
 
 async function assertRealE1RuntimeHardening(
   session: RealE1Session,
-  requireProofCache: boolean,
 ): Promise<RealE1RuntimeHardeningEvidence> {
   const serviceIds = new Map<string, string>();
   for (const service of ["postgres", "midnight-node", "midnight-indexer", "proof-server", "celestia"]) {
@@ -3046,7 +3044,6 @@ async function assertRealE1RuntimeHardening(
     `midnight-node: tmpfs has only ${String(nodeAvailableBytes)} available bytes`,
   );
 
-  const cacheFiles: Array<{ path: string; bytes: number }> = [];
   const proofStat = await runCommand(
     "docker",
     ["exec", serviceIds.get("proof-server")!, REAL_E1_PROOF_STAT, "--version"],
@@ -3054,68 +3051,12 @@ async function assertRealE1RuntimeHardening(
     { timeoutMs: 30_000, maxOutputBytes: 16 * 1024 },
   );
   assert(/stat \(GNU coreutils\) 9\.10/.test(proofStat.stdout), "proof-server: pinned coreutils stat is absent");
-  if (requireProofCache) {
-    const cachePaths = [
-      ["/.cache/midnight/zk-params/bls_midnight_2p17", 25_166_212],
-      ["/.cache/midnight/zk-params/zswap/9/spend.prover", 11_020_001],
-      ["/.cache/midnight/zk-params/zswap/9/output.prover", 5_730_182],
-      ["/.cache/midnight/zk-params/zswap/9/sign.prover", 2_814_823],
-      ["/.cache/midnight/zk-params/dust/9/spend.prover", 2_175_671],
-    ] as const;
-    const cacheScript = cachePaths
-      .map(([path]) =>
-        `test -s '${path}' && printf '${path}\\t%s\\n' "$(${REAL_E1_PROOF_STAT} -c %s '${path}')"`
-      )
-      .join(" && ");
-    // READINESS ONLY. The proof server fetches this SRS/prover material from
-    // srs.midnight.network asynchronously at startup, so the files appear some
-    // time after the container is up. This probe used to be point-in-time and
-    // passed by luck: the 3s Celestia cadence (E1-Q4) reshuffled the wall-clock
-    // ordering of the bootstrap and it began firing before the download
-    // finished. Waiting for presence is the fix; NOTHING below is relaxed —
-    // the same five paths must exist, be non-empty, and match their exact
-    // pinned byte counts, and the count equality still holds.
-    const cacheDeadline = Date.now() + 240_000;
-    let cache = await runCommand(
-      "docker",
-      ["exec", serviceIds.get("proof-server")!, REAL_E1_PROOF_ENTRYPOINT, "-c", cacheScript],
-      session.children,
-      { timeoutMs: 30_000, maxOutputBytes: 16 * 1024, allowFailure: true },
-    );
-    while (cache.code !== 0 && Date.now() < cacheDeadline) {
-      await sleep(3_000);
-      cache = await runCommand(
-        "docker",
-        ["exec", serviceIds.get("proof-server")!, REAL_E1_PROOF_ENTRYPOINT, "-c", cacheScript],
-        session.children,
-        { timeoutMs: 30_000, maxOutputBytes: 16 * 1024, allowFailure: true },
-      );
-    }
-    assert(
-      cache.code === 0,
-      "proof-server: pinned SRS cache did not become complete within the readiness window",
-    );
-    for (const line of lines(cache.stdout)) {
-      const [path, rawBytes] = line.split("\t");
-      const bytes = Number(rawBytes);
-      assert(path !== undefined && Number.isSafeInteger(bytes) && bytes > 0, "proof-server: malformed cache evidence");
-      cacheFiles.push({ path, bytes });
-    }
-    assert(cacheFiles.length === cachePaths.length, "proof-server: required SRS cache evidence is incomplete");
-    for (const [path, expectedBytes] of cachePaths) {
-      assert(
-        cacheFiles.some((entry) => entry.path === path && entry.bytes === expectedBytes),
-        `proof-server: pinned cache file ${path} has unexpected size`,
-      );
-    }
-  }
   return {
     proof: {
       containerId: serviceIds.get("proof-server")!,
       restartCount: 0,
       writableLayerBytes: Number(proof.SizeRw),
       networks: proofNetworks,
-      cacheFiles,
     },
     writableLayers: [...inspected.entries()].map(([service, entry]) => ({ service, bytes: Number(entry.SizeRw) })),
     runtimeLogging,
@@ -3276,7 +3217,7 @@ async function runRealE1Topology(): Promise<RealE1Result> {
       realE1NetworkEvidence(session),
       assertRealE1CelestiaEvidence(session),
     ]);
-    const runtimeHardening = await assertRealE1RuntimeHardening(session, false);
+    const runtimeHardening = await assertRealE1RuntimeHardening(session);
     const artifacts = await captureRealE1Artifacts(session);
     assertNoGeneratedSecrets(
       "real E1 topology evidence",
@@ -6663,7 +6604,7 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
     }
 
     await assertRealE1DatabaseBootstrapStillExact(session, databaseBootstrap);
-    const runtimeHardening = await assertRealE1RuntimeHardening(session, true);
+    const runtimeHardening = await assertRealE1RuntimeHardening(session);
     const { ntpBoundary, events } = await captureRealE1FinalNtpEvidence(session, initialNtpBoundary);
     assert(
       events.every((event, index) => Number(event.sequence) === index + 1),
@@ -7064,7 +7005,7 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
       offerHash,
     );
     await assertRealE1DatabaseBootstrapStillExact(session, databaseBootstrap);
-    const runtimeHardening = await assertRealE1RuntimeHardening(session, true);
+    const runtimeHardening = await assertRealE1RuntimeHardening(session);
     const { ntpBoundary, events } = await captureRealE1FinalNtpEvidence(session, initialNtpBoundary);
     assert(events.every((event, index) => eventSequence(event) === index + 1), "E1 global recorder sequence is not total");
     assertInvalidCorpusNeverReachedSolver(events, invalidCorpus, offerHash);

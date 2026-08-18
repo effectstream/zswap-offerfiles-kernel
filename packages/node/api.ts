@@ -27,6 +27,7 @@ import {
   authenticateSolverLiquidityReadToken,
   authenticateSolverLevelsToken,
   isPostCommitEventBridgeEnabled,
+  isEventGatePollEnabled,
   isSolverLevelsQuoteEnabled,
   isTokenRegistryEnabled,
   MIDNIGHT_NETWORK_ID,
@@ -293,17 +294,21 @@ export const apiRouter: StartConfigApiRouter = async function (
   // Without this poll nothing is ever published; with it, nothing is published
   // early. 1 s against a ~1 s block time — a tick of latency, never a lost
   // event, since the buffer holds until the height is seen.
-  const gatePoll = setInterval(() => {
-    void getLatestEffectstreamBlock
-      .run(undefined, dbConn)
-      .then((rows) => {
-        const h = rows[0]?.block_height;
-        if (h != null) markBlockCommitted(h as any);
-      })
-      .catch(() => { /* transient; the next tick retries and the buffer waits */ });
-  }, 1000);
-  (gatePoll as any).unref?.();
-  server.addHook("onClose", async () => clearInterval(gatePoll));
+  const gatePoll = isEventGatePollEnabled()
+    ? setInterval(() => {
+      void getLatestEffectstreamBlock
+        .run(undefined, dbConn)
+        .then((rows) => {
+          const h = rows[0]?.block_height;
+          if (h != null) markBlockCommitted(h as any);
+        })
+        .catch(() => { /* transient; the next tick retries and the buffer waits */ });
+    }, 1000)
+    : null;
+  if (gatePoll !== null) (gatePoll as any).unref?.();
+  server.addHook("onClose", async () => {
+    if (gatePoll !== null) clearInterval(gatePoll);
+  });
 
   // Update pair_stats after each CONSUMED archive. The event is released only
   // after its block commits (see the gate above), so this listener's SEPARATE

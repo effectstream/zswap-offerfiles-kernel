@@ -16,6 +16,9 @@ process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
 process.env["POST_COMMIT_EVENT_BRIDGE_ENABLED"] = "false";
+// This file asserts EXACT query counts on the API's connection, so upstream's
+// 1 s event-gate poll (0358d9e) must not issue queries underneath it.
+process.env["EVENT_GATE_POLL_ENABLED"] = "false";
 
 const AUTH_SECRET = "validation-fixture-secret-00001";
 const priorAuthSecret = process.env["SOLVER_LEVELS_AUTH_SECRET"];
@@ -826,8 +829,13 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
     const release = holdNextApiQuery();
     const first = postValidation(requestFor());
     try {
-      for (let attempt = 0; attempt < 100 && heldQueryEntries === entriesBefore; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 1));
+      // Readiness wait, not a speed assertion: the `expect` below is what
+      // proves the query registered. The old 100 ms budget was sized for this
+      // file running alone; the eight-path suite now runs it alongside
+      // packages/tests/grand-e2e (upstream added it to the CI list), and a
+      // loaded container needs longer to get the in-flight request that far.
+      for (let attempt = 0; attempt < 1000 && heldQueryEntries === entriesBefore; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
       }
       expect(heldQueryEntries).toBe(entriesBefore + 1);
       const countWithPhysicalReadHeld = proxiedQueryCount;
@@ -860,10 +868,10 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
     }
 
     let recovered: any;
-    for (let attempt = 0; attempt < 100; attempt++) {
+    for (let attempt = 0; attempt < 200; attempt++) {
       recovered = await postValidation(requestFor());
       if (recovered.statusCode === 200) break;
-      await new Promise((resolve) => setTimeout(resolve, 2));
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
     expect(expectCanonicalVerdict(recovered).code).toBe("VALID");
     expect(await databaseSnapshot()).toEqual(before);
@@ -898,8 +906,22 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
     ], { stdout: "ignore", stderr: "ignore" });
 
     try {
-      for (let attempt = 0; attempt < 100 && heldQueryEntries === entriesBefore; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 2));
+      // Same readiness wait as above, and this one additionally covers a
+      // `bun` subprocess spawn plus a TCP connect — 200 ms never had margin
+      // for that under load.
+      //
+      // Both conditions, not just the held entry: the connection hook that
+      // assigns latestApiSocket and the query hold are separate events with no
+      // guaranteed order, so waiting only for the hold left the socket
+      // assertion below racing the hook. That is what actually flaked once
+      // packages/tests/grand-e2e joined the suite — it failed in ~150 ms,
+      // nowhere near any budget.
+      for (
+        let attempt = 0;
+        attempt < 1000 && (heldQueryEntries === entriesBefore || latestApiSocket === null);
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
       }
       expect(heldQueryEntries).toBe(entriesBefore + 1);
       expect(latestApiSocket).not.toBeNull();
@@ -933,10 +955,10 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
     }
 
     let recovered: any;
-    for (let attempt = 0; attempt < 100; attempt++) {
+    for (let attempt = 0; attempt < 200; attempt++) {
       recovered = await postValidation(requestFor());
       if (recovered.statusCode === 200) break;
-      await new Promise((resolve) => setTimeout(resolve, 2));
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
     expect(expectCanonicalVerdict(recovered).code).toBe("VALID");
   });

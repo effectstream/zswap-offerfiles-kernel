@@ -278,6 +278,15 @@ export const isSolverLevelsQuoteEnabled = (): boolean =>
 export const isPostCommitEventBridgeEnabled = (): boolean =>
   (getEnv("POST_COMMIT_EVENT_BRIDGE_ENABLED") ?? "true") === "true";
 
+// Same escape hatch, same reason, for upstream's post-commit event gate poll
+// (0358d9e). Its 1 s tick issues a getLatestEffectstreamBlock on the API's own
+// connection, which is indistinguishable from validation-path work to a test
+// that counts queries on that connection — and could even be the query a test
+// intends to hold. Deployed nodes keep it on: without the poll nothing the
+// state machine emits is ever published.
+export const isEventGatePollEnabled = (): boolean =>
+  (getEnv("EVENT_GATE_POLL_ENABLED") ?? "true") === "true";
+
 // Demo token registry (POST /api/known-tokens). known_tokens is a manually
 // curated convenience table: the Midnight token-metadata standard is not live,
 // so any name written here is unverified and any operator can claim any name

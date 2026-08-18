@@ -3926,10 +3926,21 @@ async function assertRealE1NtpBoundary(
       JSON.stringify(["backend_egress", "backend_ntp", "midnight_backend_clients", "offerfiles_private"]),
     `offerfiles-backend: runtime networks differ from exact allowlist: ${backendNetworks.join(",")}`,
   );
+  // The daemon normalizes capability names before echoing them back: engine
+  // 29.1.3 reports `CAP_NET_BIND_SERVICE` for the compose source's
+  // `cap_add: [NET_BIND_SERVICE]`, and older engines echoed the bare name.
+  // `ALL` is a keyword the engine never prefixes. Strip the optional prefix so
+  // this asserts the POLICY rather than one engine's spelling of it; the
+  // compose-source check above still pins the exact literal we author.
+  const normalizedCapabilities = (values: string[] | undefined): string[] =>
+    [...(values ?? [])]
+      .map((value) => value.trim().toUpperCase().replace(/^CAP_/, ""))
+      .sort();
   assert(
     responder.HostConfig?.ReadonlyRootfs === true &&
-      JSON.stringify([...(responder.HostConfig.CapDrop ?? [])].sort()) === JSON.stringify(["ALL"]) &&
-      JSON.stringify([...(responder.HostConfig.CapAdd ?? [])].sort()) === JSON.stringify(["NET_BIND_SERVICE"]) &&
+      JSON.stringify(normalizedCapabilities(responder.HostConfig.CapDrop)) === JSON.stringify(["ALL"]) &&
+      JSON.stringify(normalizedCapabilities(responder.HostConfig.CapAdd)) ===
+        JSON.stringify(["NET_BIND_SERVICE"]) &&
       (responder.HostConfig.SecurityOpt ?? []).length === 1 &&
       /^no-new-privileges(?::true)?$/.test(responder.HostConfig.SecurityOpt?.[0] ?? ""),
     "ntp-responder: runtime rootfs/capability/security policy drifted",

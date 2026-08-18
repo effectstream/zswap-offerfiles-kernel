@@ -66,7 +66,15 @@ storm.
 
 1. Read `maxLagBlocks` first. The clean calibration-sample band is 53–96;
    above roughly 150 makes a run VOID, not failed. The committed gate is
-   `95 × 1.2 = 114`.
+   `95 × 1.2 = 114`. Since 2026-08-18 it is computed over the samples OUTSIDE
+   the suite's own chaos windows (p6 marks them), because a killed process
+   makes lag climb at the chain's 1 block/s and the peak then measures restart
+   duration — measured twice at exactly 120 blocks, t+54.5 min, inside
+   `chaosSync`. The restart is gated instead by `recoveryLagBlocks` (10 × 1.2):
+   one sample interval after a chaos window the STM must be back at the chain
+   edge. `metrics.json` carries the windows and the full series, so the
+   excluded peak is auditable rather than merely absent —
+   `maxLagBlocksIncludingChaos` reports it directly.
 2. Grep the log for `not built (`. Cross-layer and basket fixtures skip
    loudly if construction fails; a green score alone is insufficient.
 3. Never reuse a chain. Specialists and expected fates rely on exact coin

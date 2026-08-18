@@ -370,6 +370,15 @@ interface RealE1DatabaseBootstrapEvidence {
   stableNoDuplicateCheck: true;
 }
 
+/** Proof that the Celestia bridge signer exists on chain and can pay. */
+interface RealE1CelestiaSignerEvidence {
+  signerAddress: string;
+  balanceBeforeUtia: string;
+  balanceAfterUtia: string;
+  fundingTxHash: string | null;
+  alreadyFunded: boolean;
+}
+
 const E1_GENESIS_SEED = "0000000000000000000000000000000000000000000000000000000000000001";
 const REAL_E1_NTP_ALIASES = Object.freeze([
   "e1-ntp-boundary",
@@ -475,6 +484,7 @@ interface RealE1ServiceBootResult {
   backendHealth: Record<string, unknown>;
   ntpBoundary: RealE1NtpBoundaryEvidence;
   databaseBootstrap: RealE1DatabaseBootstrapEvidence;
+  celestiaSigner: RealE1CelestiaSignerEvidence;
   actor: { offerHash: string; manifestSha256: string; ladderSha256: string };
   publication: { evidenceSha256: string };
   indexedOffer: Record<string, unknown>;
@@ -517,6 +527,7 @@ interface RealE1AcceptanceResult {
   packageManifestHashes: { app: string; celestia: string };
   ntpBoundary: RealE1NtpBoundaryEvidence;
   databaseBootstrap: RealE1DatabaseBootstrapEvidence;
+  celestiaSigner: RealE1CelestiaSignerEvidence;
   offerHash: string;
   invalidCorpus: Array<{ label: string; payloadSha256: string; evidenceSha256: string }>;
   cases: RealE1CaseEvidence[];
@@ -4353,6 +4364,101 @@ async function assertRealE1DatabaseBootstrap(
   return { ...first, stableNoDuplicateCheck: true };
 }
 
+/**
+ * Fund the Celestia bridge node's signing account, deterministically, before
+ * anything tries to publish a blob.
+ *
+ * WHY THIS EXISTS. `start-bridge` creates the bridge wallet and PRINTS the
+ * command to fund it, but never runs it (@effectstream/celestia index.js:295).
+ * Reads never touch that account, which is why the topology gate, the container
+ * healthcheck and the backend's Celestia indexing were all green while
+ * `blob.Submit` failed with `account for signer celestia1… not found` — see
+ * e2e open question E1-Q2. The dev orchestration already funds it
+ * (`CelestiaNames.FUND`, a `sync` dependency in start.dev.ts) and the
+ * 2026-08-15 feasibility wrapper funded its bridge address; the acceptance
+ * bootstrap was the only place missing the step.
+ *
+ * Mirrors the packaged helper exactly rather than inventing a transfer: same
+ * key (`validator`), chain (`test`), keyring backend (`test`), amount and fee
+ * as `fund()` in that module. Runs inside the celestia container because the
+ * binary, the keyring and CELESTIA_HOME all live there.
+ *
+ * Idempotent: an account that already holds a balance is left alone, so a
+ * retry cannot double-spend the validator or change the evidence.
+ */
+async function fundRealE1CelestiaSigner(
+  session: RealE1Session,
+): Promise<RealE1CelestiaSignerEvidence> {
+  const appd = "/opt/celestia/node_modules/@effectstream/celestia/vendor/celestia-appd";
+  const home = "/tmp/celestia-e1-home";
+  const execCelestia = async (command: string, timeoutMs: number) =>
+    runCompose(
+      session,
+      ["exec", "--no-TTY", "celestia", "sh", "-c", command],
+      { timeoutMs, maxOutputBytes: 256 * 1024 },
+    );
+
+  const addressResult = await execCelestia(
+    `curl -fsS -X POST -H 'content-type: application/json' ` +
+      `--data '{"jsonrpc":"2.0","id":1,"method":"state.AccountAddress","params":[]}' ` +
+      `http://127.0.0.1:26658`,
+    60_000,
+  );
+  const addressEnvelope = JSON.parse(addressResult.stdout.trim()) as { result?: unknown };
+  const signerAddress = String(addressEnvelope.result ?? "");
+  assert(
+    /^celestia1[0-9a-z]{38,}$/.test(signerAddress),
+    "real E1 celestia signer address is not a bech32 celestia1 address",
+  );
+
+  const readBalance = async (): Promise<string> => {
+    const result = await execCelestia(
+      `${appd} query bank balances ${signerAddress} --home ${home} ` +
+        `--node tcp://127.0.0.1:26657 --output json`,
+      60_000,
+    );
+    const parsed = JSON.parse(result.stdout.trim()) as { balances?: Array<{ denom?: unknown; amount?: unknown }> };
+    const utia = (parsed.balances ?? []).find((entry) => entry.denom === "utia");
+    return String(utia?.amount ?? "0");
+  };
+
+  const balanceBefore = await readBalance();
+  let fundingTxHash: string | null = null;
+  if (BigInt(balanceBefore) <= 0n) {
+    const sendResult = await execCelestia(
+      `${appd} tx bank send validator ${signerAddress} 100000000utia ` +
+        `--fees 2000utia --chain-id test --keyring-backend=test --yes ` +
+        `--home ${home} --node tcp://127.0.0.1:26657 --output json`,
+      120_000,
+    );
+    const sent = JSON.parse(sendResult.stdout.trim()) as { txhash?: unknown; code?: unknown };
+    assert(
+      Number(sent.code ?? 0) === 0,
+      `real E1 celestia funding transaction was rejected with code ${String(sent.code)}`,
+    );
+    fundingTxHash = String(sent.txhash ?? "");
+    assert(/^[0-9A-F]{64}$/.test(fundingTxHash), "real E1 celestia funding tx hash is not a 64-hex digest");
+  }
+
+  // The account must actually EXIST on chain before the publisher runs, not
+  // merely have been sent to: a queued transfer is not a funded signer.
+  const deadline = Date.now() + 120_000;
+  let balanceAfter = balanceBefore;
+  while (BigInt(balanceAfter) <= 0n) {
+    assert(Date.now() < deadline, "real E1 celestia signer account was not funded before the deadline");
+    await sleep(2_000);
+    balanceAfter = await readBalance();
+  }
+
+  return {
+    signerAddress,
+    balanceBeforeUtia: balanceBefore,
+    balanceAfterUtia: balanceAfter,
+    fundingTxHash,
+    alreadyFunded: fundingTxHash === null,
+  };
+}
+
 async function assertRealE1DatabaseBootstrapStillExact(
   session: RealE1Session,
   initial: RealE1DatabaseBootstrapEvidence,
@@ -6225,6 +6331,9 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
     );
     const initialNtpBoundary = await assertRealE1NtpBoundary(session);
     const databaseBootstrap = await assertRealE1DatabaseBootstrap(session);
+    // Before any publication path runs: the Celestia signer must exist and hold
+    // a balance, or blob.Submit fails with `account for signer … not found`.
+    const celestiaSigner = await fundRealE1CelestiaSigner(session);
 
     await runAcceptanceOneShot(
       session,
@@ -6379,6 +6488,7 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
         backendHealth,
         ntpBoundary,
         databaseBootstrap,
+      celestiaSigner,
         indexedOffer,
         validationVerdict,
         runtimeHardening,
@@ -6420,6 +6530,7 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
       backendHealth,
       ntpBoundary,
       databaseBootstrap,
+      celestiaSigner,
       actor: {
         offerHash,
         manifestSha256: createHash("sha256").update(actorManifestBytes).digest("hex"),
@@ -6599,6 +6710,9 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
     );
     const initialNtpBoundary = await assertRealE1NtpBoundary(session);
     const databaseBootstrap = await assertRealE1DatabaseBootstrap(session);
+    // Before any publication path runs: the Celestia signer must exist and hold
+    // a balance, or blob.Submit fails with `account for signer … not found`.
+    const celestiaSigner = await fundRealE1CelestiaSigner(session);
 
     await runAcceptanceOneShot(
       session,
@@ -6762,6 +6876,7 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
       backendHealth,
       ntpBoundary,
       databaseBootstrap,
+      celestiaSigner,
       offerHash,
       invalidCorpus: invalidCorpus.evidence,
       cases,
@@ -6802,6 +6917,7 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
       },
       ntpBoundary,
       databaseBootstrap,
+      celestiaSigner,
       offerHash,
       invalidCorpus: invalidCorpus.evidence,
       cases,

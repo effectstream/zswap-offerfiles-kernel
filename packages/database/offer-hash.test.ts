@@ -73,6 +73,8 @@ async function insertExpiringOffer(
       offer_hash: hash,
       metadata_created_at: new Date("2026-01-01T00:00:00Z"),
       metadata_expires_at: expiresAt,
+      // NOT NULL as of upstream's 000-init.sql (000-init collapse, 8244283).
+      first_seen_at: new Date("2026-01-01T00:00:00Z"),
       ttl_seconds: 3600,
     },
     client,

@@ -361,8 +361,9 @@ describe("V0 shared validation-context matrix", () => {
     expect(batcherSubmissions).toBe(1);
 
     await client!.query(
-      `INSERT INTO offer_file(celestia_height, transaction_hex, offer_hash, ttl_seconds)
-       VALUES (77, $1, $2, 3600)`,
+      // first_seen_at is NOT NULL as of upstream's collapsed 000-init.sql.
+      `INSERT INTO offer_file(celestia_height, transaction_hex, offer_hash, ttl_seconds, first_seen_at)
+       VALUES (77, $1, $2, 3600, NOW())`,
       [VALID_OFFER, OFFER_ID],
     );
     response = await inject(VALID_OFFER);

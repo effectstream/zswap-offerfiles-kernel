@@ -15,5 +15,6 @@ Use:
 The retired analysis remains available in git history. Do not add new work to
 this file or copy the old `(owner, token_type, value)` marker model back into
 current documentation: PR #45 persists exact unshielded marker identities
-`(owner, intent_hash, output_no)`. The still-deferred Phase-(d) classifier
-switch is called out explicitly in the maintained files above.
+`(owner, intent_hash, output_no)`, and Phase (d) has now switched the
+classifier onto them, so the shape model is dead on both the write and the
+read side.

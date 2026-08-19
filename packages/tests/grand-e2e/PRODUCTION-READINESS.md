@@ -82,6 +82,7 @@ what did not:
 | T-E4 loser arrives after the winner settled | ✅ `p3b`, both doors, by code |
 | T-E5 two takers, one coin | ✅ barrier proves both requests in flight; one chain winner, one transaction-specific double-spend loser, one trade |
 | T-E6 same-block byte-identical duplicates | ✅ `p4` |
+| T-E7 same-intent wrappers (marker dedup, rule ii) | ✅ `p4` §4.9 — one intent wrapped twice, refused at BOTH doors with `DUPLICATE_MARKERS`, original untouched; unit coverage in `packages/database/marker-dedup.test.ts` and `packages/node/marker-dedup.test.ts` |
 | T-F1 cancel shapes, unshielded | ✅ green, PR-B merged |
 | T-F2 `UTXO_NOT_LIVE` | ✅ via T-E4's unshielded arm |
 | T-F3 unshielded `expiresAt` + unreachable fallback | ✅ `p3` |
@@ -231,11 +232,22 @@ made every declared unshielded marker an exact ledger identity
 `(owner, intent_hash, output_no)` derived from the offer's own intent, with
 `token_type` and `value` retained only for display/audit.
 
-One deliberately separate step remains: `unshieldedCancelledPredicate` still
-groups its missing-marker comparison by `(owner, token_type, value)`. Phase (d)
-will switch that lookup to the already-persisted exact identity and close the
-cross-offer same-shape bypass. This closeout does not implement or claim that
-separate workstream.
+That separate step is now **DONE** (phase (d)):
+`unshieldedCancelledPredicate` branch 3 no longer groups by
+`(owner, token_type, value)` — it is "cancelled unless every declared identity
+exists in `unshielded_creates`", keyed on
+`(owner, intent_hash, output_no)`. This closes the cross-offer same-shape
+bypass, where one payout of the right shape satisfied two disjoint offers'
+marker checks and both read `consumed`.
+
+The settling transaction is no longer part of the key. It does not need to be:
+`UtxoState::apply_offer` stamps outputs with `parent.intent_hash(segment_id)`,
+so only a transaction carrying that intent can create that identity, and replay
+protection admits an intent once — the create comes from the settling
+transaction necessarily. Correlating on `tx_hash` re-derived what the identity
+already carries. The multiplicity `SUM(count)` arithmetic went with it: N
+identical declared payouts are N distinct identities, and an uncreated one
+fails the existence check by itself.
 
 ### 2.2 `pair_stats.last_price` was inverted for half of all trades → **PR-C — FIXED**
 

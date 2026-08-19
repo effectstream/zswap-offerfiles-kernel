@@ -169,7 +169,7 @@ export async function p2Api(db: Client, art: P1Artifacts): Promise<void> {
   // then; it just has not been projected yet.
   await check("pairs endpoint reflects the p1 fill", async () =>
     waitUntil(
-      "pair_stats projected",
+      "fill adjudicated",
       async () => {
         const r = await getPairs();
         if (r.status !== 200 || !Array.isArray(r.body)) return false;

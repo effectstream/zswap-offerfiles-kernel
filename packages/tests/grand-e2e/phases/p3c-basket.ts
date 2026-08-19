@@ -228,8 +228,15 @@ export async function p3cBasket(db: Client, actors: Actors): Promise<void> {
     );
   }
 
-  await check("the settled basket contributes no pair_stats row for its own pairs", async () => {
-    const q = await db.query(`SELECT pair_key FROM pair_stats WHERE pair_key LIKE $1`, [`%${tc}%`]);
+  await check("the settled basket is priced on no pair of its own", async () => {
+    // The basket DID settle, so it is stored settled = true; what it must not
+    // have is a pair. Asserting on the verdict columns rather than on a
+    // projection table means this cannot pass merely because a projection
+    // forgot to write — a settled basket with colours attached would fail here.
+    const q = await db.query(
+      `SELECT id FROM offer_file_history
+        WHERE settled AND (base_color = $1 OR quote_color = $1)`, [tc],
+    );
     return q.rows.length === 0;
   });
 

@@ -12,7 +12,7 @@ import { getHealth, getHealthSync } from "../lib/api2.ts";
 import { getBlobsAt, networkHeadHeight } from "../lib/celestia.ts";
 import { tableCount } from "../lib/db2.ts";
 import { check, note, pgrepF, sleep, waitUntil } from "../lib/util.ts";
-import { refreshPids } from "../metrics.ts";
+import { beginChaosWindow, endChaosWindow, refreshPids } from "../metrics.ts";
 
 const REPO_ROOT = resolve(new URL("../../../..", import.meta.url).pathname);
 
@@ -57,9 +57,35 @@ async function offerSetSnapshot(db: Client): Promise<{ total: number; hashes: Se
   return { total: clientQuery.rows.length, hashes };
 }
 
+/**
+ * Bracket a deliberate outage so the lag gate can tell it apart from a slow STM.
+ *
+ * `finally`, not a trailing call: a chaos routine that returns early (restart
+ * refused) or throws must still close its window, because an OPEN window is
+ * closed at snapshot time and would swallow the rest of the run's samples.
+ *
+ * What this costs is real and is reported, not hidden: samples inside a window
+ * stop feeding `maxLagBlocks`, and the indexer window in particular spans a
+ * full re-index while the storm is running. `baselineViolations` therefore
+ * notes how many samples were excluded, and every window is gated on its own
+ * recovery — see summarizeStmLag.
+ */
+async function withChaosWindow(name: string, body: () => Promise<void>): Promise<void> {
+  beginChaosWindow(name);
+  try {
+    await body();
+  } finally {
+    endChaosWindow(name);
+  }
+}
+
 /** Kill + relaunch the Midnight indexer; assert full deterministic re-index
  *  loses/duplicates nothing. */
 export async function chaosIndexer(db: Client): Promise<void> {
+  await withChaosWindow("indexer", () => chaosIndexerBody(db));
+}
+
+async function chaosIndexerBody(db: Client): Promise<void> {
   note("chaos", "killing the Midnight indexer…");
   const before = await offerSetSnapshot(db);
 
@@ -115,6 +141,14 @@ export async function chaosIndexer(db: Client): Promise<void> {
  *  published twice. `submitJustBefore` posts blobs to the API and returns
  *  their bech32 strings. */
 export async function chaosBatcher(
+  db: Client,
+  submitJustBefore: () => Promise<string[]>,
+  waitIndexed: (hash: string) => Promise<boolean>,
+): Promise<void> {
+  await withChaosWindow("batcher", () => chaosBatcherBody(db, submitJustBefore, waitIndexed));
+}
+
+async function chaosBatcherBody(
   db: Client,
   submitJustBefore: () => Promise<string[]>,
   waitIndexed: (hash: string) => Promise<boolean>,
@@ -195,6 +229,10 @@ export async function chaosBatcher(
 
 /** Restart the STM/sync process; verify recovery without state loss. */
 export async function chaosSync(db: Client): Promise<void> {
+  await withChaosWindow("sync", () => chaosSyncBody(db));
+}
+
+async function chaosSyncBody(db: Client): Promise<void> {
   note("chaos", "restarting the sync/STM process via the orchestrator…");
   const beforeOffers = (await tableCount(db, "offer_file")) + (await tableCount(db, "offer_file_history"));
   const beforeNullifiers = await tableCount(db, "nullifiers");

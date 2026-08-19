@@ -454,15 +454,18 @@ export async function p7bAudit(db: Client, sse: SseRecorder): Promise<void> {
       }
     }
     await check(
-      "pair_stats.trade_count == genuine fills per pair",
+      "/v1/pairs trade_count == genuine fills per pair",
       async () => countMismatch.length === 0,
       countMismatch.slice(0, 4).join("; "),
     );
 
-    // last_price is computed TWICE by unrelated code — upsertPairStatsByOfferId
-    // (event bus) and getPairStats24h (SQL) — and nothing had ever compared
-    // them. They can disagree indefinitely, serving two different last prices
-    // depending on which route the client calls.
+    // last_price used to be computed TWICE by unrelated code — the pair_stats
+    // upsert (event bus) and getPairStats24h (SQL) — and nothing compared them,
+    // so they could disagree indefinitely and serve two different last prices
+    // depending on which route the client called. Both now read the same stored
+    // verdict, so this check guards a property that is structural rather than
+    // coincidental — and it stays, because "they agree by construction" is a
+    // claim worth re-proving on every run.
     //
     // §2.2 is FIXED (PR-C), so this now gates on FULL agreement.
     //

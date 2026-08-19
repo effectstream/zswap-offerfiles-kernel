@@ -7,5 +7,7 @@
   "bookReadP95Ms": 20,
   "sseDeliveryLagP50Ms": 2254,
   "sseDeliveryLagP95Ms": 10008,
-  "maxStmLagBlocks": 95
+  "maxStmLagBlocks": 95,
+  "_noteRecovery": "recoveryLagBlocks added 2026-08-18 with the chaos-window exclusion (ruling (c)). maxStmLagBlocks is UNCHANGED at 95 and deliberately so: recalibrating it to fit a restart duration was the rejected option (d). What changed is which samples it sees. The recovery bound is not invented: the largest lag either recorded run reached OUTSIDE the chaos ramp is 10 blocks (phase-d run 5, t+19.5 min; run 6's is 7), and the suite already calls <= 10 s 'back at the chain edge' in p7b's end-of-audit check, so 10 is this suite's established small-lag bound in two independent places. Enforcement adds the usual x1.2 -> 12. The measured recoveries are 1 (run 5) and 2 (run 6) blocks: 120 blocks absorbed inside one 30 s sample interval, twice.",
+  "recoveryLagBlocks": 10
 }

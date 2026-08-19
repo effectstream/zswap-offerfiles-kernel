@@ -13,7 +13,8 @@ import {
   checkTokenNameExists,
   getTokenByColor,
   getPairs,
-  upsertPairStatsByOfferId,
+  adjudicateOfferFill,
+  findUnadjudicatedFills,
   getOpenOffersPage,
   getOfferTokensForOffers,
   getOfferNullifiersForOffers,
@@ -21,6 +22,8 @@ import {
   getOfferStatusByHash,
   getOfferTokensAny,
   resolveOfferCursor,
+  findActiveOfferByCommitment,
+  findActiveOfferByUnshieldedOutput,
 } from "@zswap-da/database";
 
 import { isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WINDOW_SECONDS, midnightContract } from "./env.ts";
@@ -34,6 +37,7 @@ import { getSyncStatus } from "./sync-health.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
+import { declaredMarkers, duplicateMarkerReason, DUPLICATE_MARKERS } from "./marker-dedup.ts";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
 
@@ -113,19 +117,54 @@ export const apiRouter: StartConfigApiRouter = async function (
   (gatePoll as any).unref?.();
   server.addHook("onClose", async () => clearInterval(gatePoll));
 
-  // Update pair_stats after each CONSUMED archive. The event is released only
-  // after its block commits (see the gate above), so this listener's SEPARATE
-  // pool is guaranteed to see the archive and the same-block create rows.
+  // Adjudicate the fill verdict after each CONSUMED archive. The event is
+  // released only after its block commits (see the gate above), so this
+  // listener's SEPARATE pool is guaranteed to see the archive and the
+  // same-block create rows — which is exactly what the verdict depends on.
+  //
+  // This used to increment pair_stats. The difference that matters is not the
+  // shape of the write but its recoverability: an increment lost to the catch
+  // below was permanent drift with nothing recording that it was owed, whereas
+  // a missing verdict leaves `settled IS NULL` and the sweep below finds it.
   const onAppEvent = async (event: AppEvent) => {
     if (event.type === "offer_consumed") {
       try {
-        await upsertPairStatsByOfferId.run({ offer_id: event.offerId }, dbConn);
+        await adjudicateOfferFill.run({ offer_id: event.offerId }, dbConn);
       } catch (e) {
-        console.error("[PAIR_STATS] Failed to update pair stats for offer", event.offerId, e);
+        // Deliberately not fatal, and deliberately not the only line of
+        // defence: the sweep repairs whatever this drops.
+        console.error("[FILL] Failed to adjudicate offer", event.offerId, e);
       }
     }
   };
   eventBus.on("app_event", onAppEvent);
+
+  // The repair sweep. Every archived CONSUMED offer owes exactly one verdict;
+  // this finds the ones that never got it — a crash between COMMIT and the
+  // listener, a transient error above, or a block processed before this
+  // process started — and adjudicates them.
+  //
+  // It is cheap because of the partial index on (archive_reason = 'CONSUMED'
+  // AND settled IS NULL): it costs O(missing), not O(history), so it can run
+  // on a short interval without being a load source. An unadjudicated offer is
+  // ABSENT from market data until repaired, never counted as a cancel.
+  const fillSweep = setInterval(() => {
+    void (async () => {
+      try {
+        const owed = await findUnadjudicatedFills.run({ limit: 200 }, dbConn);
+        for (const row of owed) {
+          await adjudicateOfferFill.run({ offer_id: row.id }, dbConn);
+        }
+        if (owed.length > 0) {
+          console.log(`[FILL] Repaired ${owed.length} unadjudicated fill(s)`);
+        }
+      } catch {
+        /* transient; the next tick retries — the rows stay marked as owed */
+      }
+    })();
+  }, 15_000);
+  (fillSweep as any).unref?.();
+  server.addHook("onClose", async () => clearInterval(fillSweep));
 
   // GET /v1/offers — list open offers, newest first, with optional filtering
   // & keyset pagination. Deliberately does NOT include the offer blob: a
@@ -605,29 +644,22 @@ export const apiRouter: StartConfigApiRouter = async function (
           .send({ error: validation.code, reason: validation.reason });
       }
 
-      // Dedup before paying a Celestia fee (MIP-0006: duplicates SHOULD be
-      // rejected). The STM would drop the replayed blob at index time anyway;
-      // rejecting here saves the maker the publication cost.
+      // Dedup rule (i) — BYTE-IDENTICAL, before paying a Celestia fee
+      // (MIP-0006: duplicates SHOULD be rejected). The STM would drop the
+      // replayed blob at index time anyway; rejecting here saves the maker the
+      // publication cost.
       //
-      // DEDUP IS BYTE-IDENTICAL, DELIBERATELY. Ruled 2026-08-12.
+      // Ruled 2026-08-12 as the ONLY dedup rule, on the reasoning that
+      // re-wrapping one intent costs a Celestia fee per copy and copies compete
+      // for the same inputs. SUPERSEDED 2026-08-18 by measurement: markers are
+      // root-independent (`coin.rs:626`), so re-proving one offer against a
+      // fresh root in the root window yields a byte-different blob with a new
+      // offer_hash and IDENTICAL markers — evasion at the price of one proof,
+      // and the copies then coexist in the book rather than competing.
       //
-      // The same intent can be wrapped in two transactions at different segment
-      // keys (Transaction.fromParts pins segment 1, fromPartsRandomized picks
-      // another). Same spends, same payouts, different bytes, therefore a
-      // different offer_hash — so this check does not relate them, and no
-      // intent-level dedup is planned. Fixtures exist that demonstrate the pair
-      // (same-intent-wrapper-a/b in @zswap-da/validator's shapes testkit).
-      //
-      // The reason not to chase it is economic, not technical: publishing costs
-      // a real Celestia fee, paid per blob. Flooding the namespace with
-      // re-wrapped copies of one intent is an attack the attacker funds, and
-      // each copy still has to survive the full ladder and settle against the
-      // same inputs — the first settlement spends them and the rest become
-      // unfillable. Content addressing on raw bytes stays simple, cheap and
-      // deterministic across replicas; an intent-level rule would need a
-      // canonical form for "the same intent" that the wire does not define.
-      //
-      // Revisit only if publication ever becomes free or subsidised.
+      // So this rule stays exactly as it is, and stays FIRST — one indexed
+      // probe on a hash already computed, against the cheapest attack there is
+      // — and rule (ii), marker dedup, runs after crypto below.
       const offerHash = offerHashFromBlob(blob);
       const existing = await getOfferStatusByHash.run(
         { offer_hash: offerHash },
@@ -716,6 +748,31 @@ export const apiRouter: StartConfigApiRouter = async function (
       });
       if (!crypto.ok) {
         return reply.code(400).send({ error: crypto.code, reason: crypto.reason });
+      }
+
+      // Dedup rule (ii) — MARKER OVERLAP, and it must run HERE: after crypto,
+      // before the side effect. The full rule, the after-crypto security
+      // argument and the first-wins ordering are in marker-dedup.ts; this is
+      // the API half of the one predicate, and the STM half in
+      // state-machine.ts asks the same two queries in the same order.
+      //
+      // Same door behaviour as DUPLICATE_OFFER (409) under its own code, so a
+      // client can tell a replay from an evasion without parsing prose.
+      for (const marker of declaredMarkers(validation.tx!)) {
+        const claimed = marker.kind === "commitment"
+          ? await findActiveOfferByCommitment.run({ commitment: marker.commitment }, dbConn)
+          : await findActiveOfferByUnshieldedOutput.run(
+              { owner: marker.owner, intent_hash: marker.intentHash, output_no: marker.outputNo },
+              dbConn,
+            );
+        if (claimed.length > 0) {
+          return reply.code(409).send({
+            error: DUPLICATE_MARKERS,
+            reason: duplicateMarkerReason(marker, claimed[0]!.offer_hash),
+            offerId: offerHash,
+            activeOfferId: claimed[0]!.offer_hash,
+          });
+        }
       }
 
       const result = await submitBlobViaBatcher(blob);

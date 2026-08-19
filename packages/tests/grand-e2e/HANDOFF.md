@@ -64,17 +64,30 @@ storm.
 
 ## Verdict rules
 
-1. Read `maxLagBlocks` first. The clean calibration-sample band is 53–96;
-   above roughly 150 makes a run VOID, not failed. The committed gate is
-   `95 × 1.2 = 114`. Since 2026-08-18 it is computed over the samples OUTSIDE
-   the suite's own chaos windows (p6 marks them), because a killed process
-   makes lag climb at the chain's 1 block/s and the peak then measures restart
-   duration — measured twice at exactly 120 blocks, t+54.5 min, inside
+1. Read the lag numbers first — since 2026-08-18 there are **two**, and they
+   answer different questions. Confusing them is the trap this rule exists to
+   prevent.
+
+   - **`maxLagBlocksIncludingChaos`** is the old number, unchanged in meaning.
+     The historical clean band 53–96 and the "above roughly 150 makes a run
+     VOID, not failed" rule both belong to THIS one. Read it for run validity /
+     box contention.
+   - **`maxLagBlocks`** is now STM throughput: the max over samples OUTSIDE the
+     suite's own chaos windows (p6 marks them). It is what `maxStmLagBlocks`
+     (95 × 1.2 = 114) gates. Do not compare it against the 53–96 band — that
+     band was measured on the chaos-inclusive number. Calibration on the first
+     run under the new semantics (2026-08-18, `9f1f479`): **`maxLagBlocks` 4**
+     against `maxLagBlocksIncludingChaos` 84, median 1, p95 2, 8 of 146 samples
+     excluded.
+
+   Why they were split: a killed process makes lag climb at the chain's own
+   1 block/s, so the peak inside a deliberate window measures restart duration,
+   not throughput — measured twice at exactly 120 blocks, t+54.5 min, inside
    `chaosSync`. The restart is gated instead by `recoveryLagBlocks` (10 × 1.2):
-   one sample interval after a chaos window the STM must be back at the chain
-   edge. `metrics.json` carries the windows and the full series, so the
-   excluded peak is auditable rather than merely absent —
-   `maxLagBlocksIncludingChaos` reports it directly.
+   one sample interval after each chaos window the STM must be back at the chain
+   edge. Run 7 observed 1, 1 and 2 blocks after the indexer, batcher and sync
+   windows. `metrics.json` carries the windows and the full series, so an
+   excluded peak is auditable rather than merely absent.
 2. Grep the log for `not built (`. Cross-layer and basket fixtures skip
    loudly if construction fails; a green score alone is insufficient.
 3. Never reuse a chain. Specialists and expected fates rely on exact coin

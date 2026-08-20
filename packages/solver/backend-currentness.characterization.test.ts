@@ -4,7 +4,7 @@ import {
   getBackendSyncHealth,
   reportsBackendProjectionCurrent,
 } from "@zswap-da/solver-core/api-client";
-import { startBookSync } from "./src/sse-sync.ts";
+import { startBookSync } from "./src/book-sync.ts";
 
 const originalFetch = globalThis.fetch;
 
@@ -12,7 +12,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-test("REST/SSE book readiness remains blocked while the backend reports syncing", async () => {
+test("REST/stream book readiness remains blocked while the backend reports syncing", async () => {
   globalThis.fetch = mock(async () => new Response(JSON.stringify({
     ts: 1_750_800_000_000,
     status: "syncing",
@@ -46,11 +46,11 @@ test("REST/SSE book readiness remains blocked while the backend reports syncing"
       throw new Error("empty snapshot must not fetch detail");
     },
     getBackendSyncHealth,
-    openSseStream: (
+    openUpdatesStream: (
       _onEvent: (event: unknown) => void,
-      options: { onOpen?: () => void },
+      options: { onOpen?: (subscription: unknown) => void },
     ) => {
-      options.onOpen?.();
+      options.onOpen?.({ streamId: "0".repeat(32), blockL2Height: null });
       return { close: async () => {} };
     },
   } as any;

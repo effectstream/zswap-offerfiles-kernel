@@ -3,21 +3,34 @@ import { expect, test } from "bun:test";
 // Two paths that only bite in production: a book bigger than one page, and a
 // dropped stream. Both are invisible in a small, stable dev book — the mirror
 // just looks right — so they are pinned here rather than left to a live run.
+//
+// The stream here is the websocket update stream. Its client is stubbed at the
+// dependency seam, so these cases pin the MIRROR's behaviour: which triggers
+// authorize a snapshot, what a drop does to currentness, and how the
+// subscription's L2 anchor gates it. The transport itself (frames, sequence
+// gaps, reconnects) is pinned in solver-core's api-client tests, and the two
+// halves are exercised together against a real backend in the node package's
+// offer-updates-mirror suite.
 
 interface StubPage {
   offers: unknown[];
   nextCursor: string | null;
 }
 
+/** One stub subscription announcement — the `ready` frame's payload. */
+const STUB_STREAM_ID = "0".repeat(32);
+
 const pagesByCursor = new Map<string, StubPage>();
 const detailByHash = new Map<string, unknown>();
 let pageRequests: Array<string | undefined> = [];
-let sseHandlers: {
+let streamHandlers: {
   onEvent: (ev: unknown) => void;
-  onOpen?: () => void;
+  onOpen?: (subscription: { streamId: string; blockL2Height: string | null }) => void;
   onDisconnect?: () => void;
 } | null = null;
-let sseOpens = 0;
+let streamOpens = 0;
+/** Anchor the stub subscription reports at `ready`. */
+let subscriptionAnchor: string | null = null;
 let pageFailures = 0;
 let pageLoader: ((params: { after_hash?: string }) => Promise<StubPage>) | null = null;
 let detailLoader: ((hash: string) => Promise<unknown>) | null = null;
@@ -25,6 +38,11 @@ let closeStream: () => Promise<void> = async () => {};
 let openImmediately = true;
 let healthRequests = 0;
 let healthLoader: (() => Promise<any>) | null = null;
+
+const subscription = (): { streamId: string; blockL2Height: string | null } => ({
+  streamId: STUB_STREAM_ID,
+  blockL2Height: subscriptionAnchor,
+});
 
 const healthySync = () => ({
   ts: Date.now(),
@@ -51,24 +69,27 @@ const dependencies = {
     healthRequests++;
     return healthLoader ? healthLoader() : healthySync();
   },
-  openSseStream: (
+  openUpdatesStream: (
     onEvent: (ev: unknown) => void,
-    opts: { onOpen?: () => void; onDisconnect?: () => void },
+    opts: {
+      onOpen?: (subscription: { streamId: string; blockL2Height: string | null }) => void;
+      onDisconnect?: () => void;
+    },
   ) => {
-    sseHandlers = {
+    streamHandlers = {
       onEvent,
       ...(opts.onOpen ? { onOpen: opts.onOpen } : {}),
       ...(opts.onDisconnect ? { onDisconnect: opts.onDisconnect } : {}),
     };
-    sseOpens++;
-    // Most tests model the real client's first successful connection. A few
+    streamOpens++;
+    // Most tests model the real client's first successful subscription. A few
     // hold this callback to prove REST readiness cannot outrun subscription.
-    if (openImmediately) opts.onOpen?.();
+    if (openImmediately) opts.onOpen?.(subscription());
     return { close: () => closeStream() };
   },
 } as any;
 
-const { startBookSync, fetchWholeBook } = await import("./src/sse-sync.ts");
+const { startBookSync, fetchWholeBook } = await import("./src/book-sync.ts");
 
 const A = "a".repeat(64);
 const B = "b".repeat(64);
@@ -98,8 +119,9 @@ const reset = () => {
   pagesByCursor.clear();
   detailByHash.clear();
   pageRequests = [];
-  sseHandlers = null;
-  sseOpens = 0;
+  streamHandlers = null;
+  streamOpens = 0;
+  subscriptionAnchor = null;
   pageFailures = 0;
   pageLoader = null;
   detailLoader = null;
@@ -177,7 +199,7 @@ test("startBookSync rejects a non-positive resync interval before opening a stre
   expect(() => startBookSync({ resyncIntervalMs: 0, dependencies })).toThrow(
     "resyncIntervalMs must be a positive safe integer",
   );
-  expect(sseOpens).toBe(0);
+  expect(streamOpens).toBe(0);
 });
 
 test("the initial page-through seeds the book before ready resolves", async () => {
@@ -190,7 +212,7 @@ test("the initial page-through seeds the book before ready resolves", async () =
   await sync.stop();
 });
 
-test("readiness cannot outrun the first confirmed SSE subscription", async () => {
+test("readiness cannot outrun the first confirmed subscription", async () => {
   reset();
   openImmediately = false;
   pagesByCursor.set("", { offers: [row("after-open")], nextCursor: null });
@@ -208,7 +230,7 @@ test("readiness cannot outrun the first confirmed SSE subscription", async () =>
   expect(ready).toBe(false);
   expect(pageRequests).toEqual([]);
 
-  sseHandlers!.onOpen!();
+  streamHandlers!.onOpen!(subscription());
   await sync.ready;
   expect(sync.book.hashes()).toEqual([id("after-open")]);
   await sync.stop();
@@ -241,7 +263,7 @@ test("a reconnect during the initial snapshot forces a post-reconnect snapshot",
     dependencies,
   });
   await started;
-  sseHandlers!.onOpen!();
+  streamHandlers!.onOpen!(subscription());
   releaseFirst();
 
   await sync.ready;
@@ -277,7 +299,7 @@ test("clean disconnect during the initial snapshot cannot resolve readiness in t
     dependencies,
   });
   await started;
-  sseHandlers!.onDisconnect!();
+  streamHandlers!.onDisconnect!();
   releaseFirst();
   let ready = false;
   void sync.ready.then(() => {
@@ -287,7 +309,7 @@ test("clean disconnect during the initial snapshot cannot resolve readiness in t
   expect(ready).toBe(false);
   expect(snapshots).toBe(1);
 
-  sseHandlers!.onOpen!();
+  streamHandlers!.onOpen!(subscription());
   await sync.ready;
   expect(snapshots).toBe(2);
   expect(sync.book.hashes()).toEqual([id("authoritative-after-reconnect")]);
@@ -326,7 +348,7 @@ test("ready waits until events buffered during page-through are applied", async 
   const sync = startBookSync({ resyncIntervalMs: 60_000, dependencies });
   // Fired before the page-through completes — the real stream opens first
   // precisely so this window is covered.
-  sseHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("h2") });
+  streamHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("h2") });
 
   await sync.ready;
   expect(sync.book.hashes().sort()).toEqual([id("h1"), id("h2")].sort());
@@ -353,11 +375,11 @@ test("ready drains an event that arrives during a slow buffered detail fetch", a
   };
 
   const sync = startBookSync({ resyncIntervalMs: 60_000, dependencies });
-  sseHandlers!.onEvent({ type: "offer_indexed", offerId: 1, offerHash: id("h1") });
+  streamHandlers!.onEvent({ type: "offer_indexed", offerId: 1, offerHash: id("h1") });
   await firstStarted;
   // This arrives while h1's buffered event is awaiting its detail. It must
   // remain part of the startup barrier rather than being queued behind ready.
-  sseHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("h2") });
+  streamHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("h2") });
   releaseFirst();
 
   await sync.ready;
@@ -394,8 +416,8 @@ test("startup buffer overflow stays bounded and forces a newer snapshot", async 
     onError: (err) => errors.push(err instanceof Error ? err.message : String(err)),
   });
   await started;
-  sseHandlers!.onEvent({ type: "offer_indexed", offerId: 1, offerHash: id("discarded-1") });
-  sseHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("discarded-2") });
+  streamHandlers!.onEvent({ type: "offer_indexed", offerId: 1, offerHash: id("discarded-1") });
+  streamHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("discarded-2") });
   releaseFirst();
 
   await sync.ready;
@@ -434,7 +456,7 @@ test("startup buffer has a cumulative byte budget independent of event count", a
     onError: (err) => errors.push(String(err)),
   });
   await started;
-  sseHandlers!.onEvent({
+  streamHandlers!.onEvent({
     type: "offer_rejected",
     reason: "x".repeat(128),
     blockHeight: 1,
@@ -463,7 +485,7 @@ test("an initial snapshot failure is recoverable on reconnect", async () => {
   await settle();
   expect(errors.length).toBe(1);
 
-  sseHandlers!.onOpen!();
+  streamHandlers!.onOpen!(subscription());
   await sync.ready;
   expect(sync.book.hashes()).toEqual([id("h1")]);
   await sync.stop();
@@ -506,7 +528,7 @@ test("stop drains an in-flight detail fetch and suppresses its late change", asy
     onChange: (change) => changes.push(change.kind),
   });
   await sync.ready;
-  sseHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("h2") });
+  streamHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("h2") });
   await Promise.resolve();
 
   const stopped = sync.stop();
@@ -516,7 +538,7 @@ test("stop drains an in-flight detail fetch and suppresses its late change", asy
   expect(sync.book.hashes()).toEqual([]);
 });
 
-test("stop awaits the underlying SSE lifecycle barrier", async () => {
+test("stop awaits the underlying stream lifecycle barrier", async () => {
   reset();
   pagesByCursor.set("", { offers: [], nextCursor: null });
   let releaseClose!: () => void;
@@ -549,12 +571,12 @@ test("a reconnect triggers a full resync, picking up what the gap missed", async
   });
   await sync.ready;
   expect(sync.book.hashes()).toEqual([id("h1")]);
-  expect(sseOpens).toBe(1);
+  expect(streamOpens).toBe(1);
 
   // While the stream was down: h1 was consumed and h2 appeared. No events for
   // either — the stream has no replay, so only a resync can recover them.
   pagesByCursor.set("", { offers: [row("h2")], nextCursor: null });
-  sseHandlers!.onOpen!();
+  streamHandlers!.onOpen!(subscription());
   await settle();
 
   expect(sync.book.hashes()).toEqual([id("h2")]);
@@ -594,13 +616,13 @@ test("post-ready recovery drains events queued during the snapshot before restor
     return detailHeld;
   };
 
-  sseHandlers!.onOpen!();
+  streamHandlers!.onOpen!(subscription());
   await sawSnapshot;
-  sseHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("h2") });
+  streamHandlers!.onEvent({ type: "offer_indexed", offerId: 2, offerHash: id("h2") });
   releaseSnapshot();
   await sawDetail;
 
-  // The snapshot has completed and its health response is current, but the SSE
+  // The snapshot has completed and its health response is current, but the
   // mutation that raced it is still waiting for detail. Recovery must remain
   // blocked until that queued gap is fully applied.
   expect(sync.isCurrent()).toBe(false);
@@ -637,9 +659,9 @@ test("post-ready reconnect storms coalesce to one active and one latest snapshot
     return { offers: [], nextCursor: null };
   };
 
-  sseHandlers!.onOpen!();
+  streamHandlers!.onOpen!(subscription());
   await active;
-  for (let i = 0; i < 100; i++) sseHandlers!.onOpen!();
+  for (let i = 0; i < 100; i++) streamHandlers!.onOpen!(subscription());
   const manual = sync.resync();
   release();
   await manual;
@@ -684,7 +706,7 @@ test("a nullifier-only consumed event removes every conflicting offer", async ()
     },
   });
   await sync.ready;
-  sseHandlers!.onEvent({
+  streamHandlers!.onEvent({
     type: "offer_consumed",
     offerId: 1,
     offerHash: id("h1"),
@@ -694,5 +716,101 @@ test("a nullifier-only consumed event removes every conflicting offer", async ()
 
   expect(sync.book.hashes()).toEqual([]);
   expect(removed.sort()).toEqual([id("h1"), id("h2")].sort());
+  await sync.stop();
+});
+
+// ── the subscription's rewind anchor ─────────────────────────────────────────
+//
+// The `ready` frame reports the committed L2 height the backend had when the
+// subscription was registered. Heights only advance, so a later health verdict
+// BELOW that floor is proof the backend's projection moved backwards — a
+// restore, or a lagging replica behind a load balancer. No snapshot can repair
+// that: every row such a backend serves is consistent with a past the solver
+// has already left, so the cache must stop being treated as current.
+
+test("a backend that reports a height below the subscription anchor is not current", async () => {
+  reset();
+  subscriptionAnchor = "100";
+  healthLoader = async () => ({ ...healthySync(), blockL2: { height: "99" } });
+  const states: any[] = [];
+
+  const sync = startBookSync({
+    resyncIntervalMs: 60_000,
+    readinessTimeoutMs: 300,
+    dependencies,
+    onCurrentnessChange: (state) => states.push(state),
+  });
+  await expect(sync.ready).rejects.toThrow();
+  expect(sync.isCurrent()).toBe(false);
+  expect(states.some((state) => state.reason === "backend-rewound")).toBe(true);
+  await sync.stop();
+});
+
+test("an anchor the backend has reached or passed is current", async () => {
+  reset();
+  subscriptionAnchor = "100";
+  healthLoader = async () => ({ ...healthySync(), blockL2: { height: "100" } });
+  const equal = startBookSync({ resyncIntervalMs: 60_000, dependencies });
+  await equal.ready;
+  expect(equal.isCurrent()).toBe(true);
+  await equal.stop();
+
+  reset();
+  subscriptionAnchor = "100";
+  healthLoader = async () => ({ ...healthySync(), blockL2: { height: "101" } });
+  const ahead = startBookSync({ resyncIntervalMs: 60_000, dependencies });
+  await ahead.ready;
+  expect(ahead.isCurrent()).toBe(true);
+  await ahead.stop();
+});
+
+test("anchors are compared as u64 tokens, not as doubles", async () => {
+  reset();
+  // These two are the same number once either becomes a JavaScript double.
+  subscriptionAnchor = "9007199254740993";
+  healthLoader = async () => ({ ...healthySync(), blockL2: { height: "9007199254740992" } });
+  const sync = startBookSync({
+    resyncIntervalMs: 60_000,
+    readinessTimeoutMs: 300,
+    dependencies,
+  });
+  await expect(sync.ready).rejects.toThrow();
+  expect(sync.currentness()).toMatchObject({ kind: "blocked" });
+  await sync.stop();
+});
+
+test("a subscription that reports no anchor imposes no rewind constraint", async () => {
+  reset();
+  subscriptionAnchor = null;
+  healthLoader = async () => ({ ...healthySync(), blockL2: { height: "1" } });
+  const sync = startBookSync({ resyncIntervalMs: 60_000, dependencies });
+  await sync.ready;
+  expect(sync.isCurrent()).toBe(true);
+  await sync.stop();
+});
+
+test("a resubscription installs its own anchor rather than inheriting the old one", async () => {
+  reset();
+  subscriptionAnchor = "10";
+  healthLoader = async () => ({ ...healthySync(), blockL2: { height: "10" } });
+  const sync = startBookSync({ resyncIntervalMs: 60_000, dependencies });
+  await sync.ready;
+  expect(sync.isCurrent()).toBe(true);
+
+  // The backend advanced, then the stream dropped and came back with a newer
+  // floor. The old, lower anchor must not keep authorizing it.
+  streamHandlers!.onDisconnect!();
+  subscriptionAnchor = "20";
+  healthLoader = async () => ({ ...healthySync(), blockL2: { height: "15" } });
+  streamHandlers!.onOpen!(subscription());
+  await waitUntil(
+    () => sync.currentness().kind === "blocked" &&
+      (sync.currentness() as any).reason === "backend-rewound",
+    "the new anchor to refuse a stale height",
+  );
+
+  healthLoader = async () => ({ ...healthySync(), blockL2: { height: "20" } });
+  await sync.resync();
+  expect(sync.isCurrent()).toBe(true);
   await sync.stop();
 });

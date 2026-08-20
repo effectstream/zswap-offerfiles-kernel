@@ -1,24 +1,46 @@
-// Keeps the Book in step with the node.
+// Keeps the Book in step with the node — the solver's BOOK MIRROR.
 //
-// Ordering matters on startup: open the stream FIRST and buffer, then page
-// through the list, then replay the buffer. Opening second would lose every
-// event between the last page and the subscription.
+// PULL-ONLY, AND ITS OWN PROCESS (FR-003/004/005). Every connection here is
+// opened by the solver: a full-book REST read plus a websocket update stream
+// (`GET /v1/offers/updates`). The backend never pushes to us and keeps no
+// state about us. Nothing in this file knows the relay exists — the mirror and
+// the relay client are independent, and neither one's failure is allowed to
+// become the other's.
 //
-// The stream has no replay and no Last-Event-ID, so a dropped connection means
-// permanently missed events. Every (re)connection therefore triggers a full
-// page-through, and a periodic one runs regardless.
+// Ordering matters on startup: subscribe to the stream FIRST and buffer, then
+// page through the list, then replay the buffer. Reading first would lose
+// every mutation between the last page and the subscription. The backend
+// attaches its event listener before it writes the `ready` frame, so `ready`
+// — which is what `onOpen` below reports — is an honest "from here on you
+// miss nothing" marker.
+//
+// The stream has no replay and no resume cursor, so a dropped connection means
+// permanently missed events. Every (re)subscription therefore triggers a full
+// page-through, and a periodic one runs regardless. What the websocket adds
+// over SSE is that a gap is DETECTABLE rather than invisible: frames are
+// sequenced per subscription, the client refuses the first frame that does not
+// follow its predecessor, and that refusal arrives here as a disconnect — the
+// state this file already fails closed on.
+//
+// Currentness is never inferred from "the stream is quiet". It requires a live
+// subscription generation, a completed snapshot in that same generation, and a
+// fresh `/v1/health/sync` verdict — and, when the subscription reported one, a
+// committed L2 height at or above the subscription's own anchor, so a backend
+// that has REWOUND cannot be mistaken for one that is merely current.
 
 import {
   ApiRequestError,
   getBackendSyncHealth,
   getZswapByHash,
   getZswapsPage,
-  openSseStream,
+  openOfferUpdatesStream,
   reportsBackendProjectionCurrent,
   type CurrentBackendSyncHealth,
+  type OfferUpdatesStreamHandle,
+  type OfferUpdatesSubscription,
   type SseEvent,
-  type SseStreamHandle,
 } from "@zswap-da/solver-core/api-client";
+import { heightAtLeast } from "@zswap-da/solver-core/offer-updates-contract";
 
 import { Book, bookOfferFromApi, type BookOffer } from "./book.ts";
 
@@ -30,14 +52,14 @@ export interface SyncDependencies {
   getZswapsPage: typeof getZswapsPage;
   getZswapByHash: typeof getZswapByHash;
   getBackendSyncHealth: typeof getBackendSyncHealth;
-  openSseStream: typeof openSseStream;
+  openUpdatesStream: typeof openOfferUpdatesStream;
 }
 
 const DEFAULT_DEPENDENCIES: SyncDependencies = {
   getZswapsPage,
   getZswapByHash,
   getBackendSyncHealth,
-  openSseStream,
+  openUpdatesStream: openOfferUpdatesStream,
 };
 
 export type BackendCurrentnessBlockedReason =
@@ -46,6 +68,7 @@ export type BackendCurrentnessBlockedReason =
   | "stream-generation-changed"
   | "backend-syncing"
   | "backend-error"
+  | "backend-rewound"
   | "health-unavailable"
   | "health-malformed"
   | "health-stale"
@@ -85,8 +108,8 @@ export interface SyncOptions {
   /** Bounds a malformed/cyclic or unexpectedly huge REST pagination walk. */
   maxSnapshotPages?: number;
   maxSnapshotOffers?: number;
-  /** Terminal deadline for the first authoritative snapshot plus buffered SSE
-   * gap. Recoverable failures may retry until this deadline; afterward the
+  /** Terminal deadline for the first authoritative snapshot plus the buffered
+   * update gap. Recoverable failures may retry until this deadline; afterward the
    * synchronization owner closes and readiness rejects fail-closed. */
   readinessTimeoutMs?: number;
   /** Cadence for the bounded health probe. A blocked solver first probes health
@@ -103,11 +126,11 @@ export interface SyncOptions {
 
 export interface SyncHandle {
   readonly book: Book;
-  /** Resolves once the first full page-through and every SSE event buffered
+  /** Resolves once the first full page-through and every stream event buffered
    * during it have been applied. Initial snapshot failures are recoverable. */
   ready: Promise<void>;
   /** True only after one complete snapshot/buffered gap and a fresh health
-   * verdict for the currently connected SSE generation. */
+   * verdict for the currently connected subscription generation. */
   isCurrent: () => boolean;
   currentness: () => BackendCurrentnessState;
   resync: () => Promise<void>;
@@ -249,7 +272,7 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
   const buffered: SseEvent[] = [];
   let bufferedBytes = 0;
   let bufferOverflowed = false;
-  let stream: SseStreamHandle | null = null;
+  let stream: OfferUpdatesStreamHandle | null = null;
   let resyncTimer: ReturnType<typeof setInterval> | null = null;
   let healthCheckTimer: ReturnType<typeof setInterval> | null = null;
   let healthExpiryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -259,6 +282,11 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
   let retryInitialAfterAttempt = false;
   let streamOpenGeneration = 0;
   let streamConnected = false;
+  /** The committed L2 height the CURRENT subscription reported at `ready`, or
+   * null when the backend could not read one. It is a floor, never a target:
+   * heights only advance, so a later health verdict below it is proof the
+   * backend's projection moved backwards. */
+  let subscriptionAnchor: string | null = null;
   let postReadyResyncRunner: Promise<void> | null = null;
   let postReadyResyncRequested = 0;
   let postReadyResyncCompleted = 0;
@@ -333,7 +361,18 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
     if (!streamConnected || generation !== streamOpenGeneration) {
       throw new BackendCurrentnessError(
         "generation-superseded",
-        "backend health belongs to a superseded SSE generation",
+        "backend health belongs to a superseded stream generation",
+      );
+    }
+    // A snapshot repairs missed mutations. It cannot repair a backend that has
+    // gone BACKWARDS — a restore, or a lagging replica behind a load balancer
+    // — because every row it serves is consistent with a past the solver has
+    // already left. Refuse to call that current.
+    if (subscriptionAnchor !== null && !heightAtLeast(health.blockL2.height, subscriptionAnchor)) {
+      throw new BackendCurrentnessError(
+        "backend-rewound",
+        `backend L2 height ${health.blockL2.height} is below the subscription anchor ` +
+          `${subscriptionAnchor}`,
       );
     }
 
@@ -386,7 +425,7 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
     if (stopped || !streamConnected || generation !== streamOpenGeneration) {
       throw new BackendCurrentnessError(
         "generation-superseded",
-        "backend health completed for a superseded SSE generation",
+        "backend health completed for a superseded stream generation",
       );
     }
     if (!reportsBackendProjectionCurrent(health)) {
@@ -508,7 +547,7 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
     if (!streamConnected || generation !== streamOpenGeneration) {
       throw new BackendCurrentnessError(
         "generation-superseded",
-        "cannot snapshot a disconnected or superseded SSE generation",
+        "cannot snapshot a disconnected or superseded stream generation",
       );
     }
     // Startup retries probe the cheap cached health boundary first; a backend
@@ -557,8 +596,8 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
           const target = postReadyResyncRequested;
           try {
             // Preserve event/snapshot ordering by sharing the same serial queue
-            // used for SSE event detail fetches and mutations. Currentness is
-            // installed in a SECOND queued task: every SSE event enqueued while
+            // used for stream event detail fetches and mutations. Currentness
+            // is installed in a SECOND queued task: every event enqueued while
             // the snapshot request was in flight therefore drains before this
             // generation can become usable.
             const stagedResult: {
@@ -662,8 +701,9 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
   const ensureInitialSync = (): Promise<void> => {
     if (readySettled || stopped) return Promise.resolve();
     // REST-first would recreate the exact snapshot/subscription gap this
-    // startup barrier exists to close. Only a confirmed onOpen generation may
-    // authorize the first snapshot, including periodic/manual retry paths.
+    // startup barrier exists to close. Only a confirmed subscription
+    // generation may authorize the first snapshot, including periodic/manual
+    // retry paths.
     if (!streamConnected || streamOpenGeneration === 0) return Promise.resolve();
     if (initialAttempt) return initialAttempt;
 
@@ -775,7 +815,7 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
     return attempt;
   };
 
-  stream = dependencies.openSseStream(
+  stream = dependencies.openUpdatesStream(
     (ev) => {
       if (buffering) {
         if (bufferOverflowed) return;
@@ -794,7 +834,7 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
           bufferedBytes = 0;
           reportError(
             new Error(
-              `startup SSE buffer exceeded ${maxBufferedEvents} events or ` +
+              `startup update buffer exceeded ${maxBufferedEvents} events or ` +
                 `${maxBufferedBytes} bytes; ` +
                 "discarding the gap and repeating the authoritative snapshot",
             ),
@@ -809,10 +849,14 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
     },
     {
       ...(api ? { api } : {}),
-      onOpen: () => {
+      onOpen: (subscription?: OfferUpdatesSubscription) => {
         streamConnected = true;
         streamOpenGeneration++;
-        // Also fires on the first connect. During startup it drives a
+        // The anchor belongs to THIS subscription only. A stream client that
+        // reports no subscription detail simply supplies no anchor, which is
+        // the pre-websocket behaviour rather than a silent pass.
+        subscriptionAnchor = subscription?.blockL2Height ?? null;
+        // Also fires on the first subscription. During startup it drives a
         // recoverable initial attempt; afterward it closes any missed-event
         // gap with a full resync.
         if (buffering) {
@@ -821,12 +865,13 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
           return;
         }
         setBlocked("stream-generation-changed");
-        log("[solver] SSE (re)connected — resyncing");
+        log("[solver] update stream (re)subscribed — resyncing");
         void schedulePostReadyResync().catch(() => {});
       },
       onDisconnect: () => {
         streamConnected = false;
         streamOpenGeneration++;
+        subscriptionAnchor = null;
         setBlocked("stream-disconnected");
         if (buffering) {
           buffered.length = 0;
@@ -854,7 +899,7 @@ export function startBookSync(opts: SyncOptions = {}): SyncHandle {
           installCurrent(health, generation);
         } else {
           // Health recovery alone cannot authorize the existing book. Close
-          // the outage gap with one full snapshot in this same SSE generation.
+          // the outage gap with one full snapshot in this same generation.
           requestSnapshotRecovery = true;
         }
       } catch (error) {

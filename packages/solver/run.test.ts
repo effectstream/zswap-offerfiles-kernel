@@ -10,7 +10,7 @@ import {
   initializeOwnedResource,
   runSolver,
 } from "./src/run.ts";
-import type { SyncDependencies } from "./src/sse-sync.ts";
+import type { SyncDependencies } from "./src/book-sync.ts";
 import { Stock } from "./src/stock.ts";
 
 const TOKEN = "a".repeat(64);
@@ -368,9 +368,9 @@ function runtimeHarness(options: {
         celestia: { current: 7, fetched: 7, tip: 7, pct: 100, lagBlocks: 0 },
       };
     },
-    openSseStream: (handler, options) => {
+    openUpdatesStream: (handler, options) => {
       onEvent = handler;
-      queueMicrotask(() => options.onOpen?.());
+      queueMicrotask(() => options.onOpen?.({ streamId: "0".repeat(32), blockL2Height: null }));
       return {
         close: async () => { closeCalls++; },
       };

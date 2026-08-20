@@ -1,8 +1,9 @@
 // In-memory mirror of the node's live offer book.
 //
-// Pure state: no IO, no timers. `sse-sync.ts` drives it from the SSE stream and
-// the REST list. Offers are keyed by content hash — the node's numeric row id
-// is local to that deployment and appears in events only, never in REST.
+// Pure state: no IO, no timers. `book-sync.ts` drives it from the websocket
+// update stream and the REST list. Offers are keyed by content hash — the
+// node's numeric row id is local to that deployment and appears in events
+// only, never in REST.
 
 import type { ApiZswap } from "@zswap-da/solver-core/api-client";
 

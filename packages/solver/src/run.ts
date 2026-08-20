@@ -31,7 +31,7 @@ import {
   type BookChange,
   type SyncDependencies,
   type SyncHandle,
-} from "./sse-sync.ts";
+} from "./book-sync.ts";
 import { Stock } from "./stock.ts";
 import {
   startValidationGate,

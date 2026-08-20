@@ -9,7 +9,7 @@ import {
   startBookSync,
   type BackendCurrentnessState,
   type SyncDependencies,
-} from "./src/sse-sync.ts";
+} from "./src/book-sync.ts";
 import { Stock } from "./src/stock.ts";
 
 const TOKEN = "a".repeat(64);
@@ -56,9 +56,9 @@ function harness(
       throw new Error("empty book must not fetch offer detail");
     },
     getBackendSyncHealth: loadHealth,
-    openSseStream: (_onEvent, options) => {
+    openUpdatesStream: (_onEvent, options) => {
       handlers = options;
-      options.onOpen?.();
+      options.onOpen?.({ streamId: "0".repeat(32), blockL2Height: null });
       return { close: async () => {} };
     },
   };

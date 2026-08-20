@@ -36,7 +36,8 @@ const {
   insertCommitment,
   getPairStats24h,
   getTradeHistory,
-  upsertPairStatsByOfferId,
+  adjudicateOfferFill,
+  findUnadjudicatedFills,
 } = await import("@zswap-da/database");
 
 const PORT = 54343;
@@ -108,6 +109,18 @@ const statusOf = async (id: number) => {
   return rows[0].status;
 };
 
+/**
+ * Adjudicate every archived offer still owed a verdict.
+ *
+ * This is the product's OWN repair sweep, run verbatim — the same two queries
+ * api.ts uses. Fixtures deliberately do not hand-write the verdict columns:
+ * doing so would let a test agree with a broken adjudicator.
+ */
+async function adjudicateAll() {
+  const owed = await findUnadjudicatedFills.run({ limit: 10_000 }, client);
+  for (const row of owed) await adjudicateOfferFill.run({ offer_id: row.id }, client);
+}
+
 beforeAll(async () => {
   handle = await startPglite(PORT);
   client = new pg.Client({
@@ -171,6 +184,8 @@ beforeAll(async () => {
   await seedArchived(10, "CONSUMED", ["n10a"], ["c10a"], [BASE2, QUOTE2]);
   await spend("n10a", TX_B);
   await created("c10a", TX_A);
+
+  await adjudicateAll();
 });
 
 afterAll(async () => {
@@ -234,35 +249,44 @@ test("trade history hides cancels", async () => {
   expect(rows.length).toBe(3);
 });
 
-test("pair_stats.last_traded_at is the archived block time, not NOW()", async () => {
-  // The fixture archives rows with archived_at = NOW() - 30 minutes. If the
-  // upsert still stamped NOW() (the old bug: node-local wall clock, divergent
-  // across replicas and wrong after a resync), last_traded_at would be ~now.
-  await upsertPairStatsByOfferId.run({ offer_id: 1 }, client);
+test("the trade time is the archived block time, not NOW()", async () => {
+  // The fixture archives rows with archived_at = NOW() - 30 minutes. The old
+  // pair_stats upsert stamped NOW() here — node-local wall clock, divergent
+  // across replicas and wrong after a resync. Reading the archived row's own
+  // chain-derived timestamp makes that class of bug unrepresentable rather
+  // than merely fixed, and this pins it.
   const r = await client.query(
-    `SELECT (NOW() - last_traded_at) >= INTERVAL '29 minutes' AS chain_derived,
-            last_traded_at = (SELECT archived_at FROM offer_file_history WHERE id = 1) AS matches_archive
-     FROM pair_stats`,
+    `SELECT (NOW() - MAX(archived_at)) >= INTERVAL '29 minutes' AS chain_derived,
+            MAX(archived_at) = (SELECT archived_at FROM offer_file_history WHERE id = 1) AS matches_archive
+       FROM offer_file_history
+      WHERE settled AND base_color IS NOT NULL AND id = 1`,
   );
-  expect(r.rows.length).toBe(1);
   expect(r.rows[0].chain_derived).toBe(true);
   expect(r.rows[0].matches_archive).toBe(true);
-  await client.query("DELETE FROM pair_stats");
 });
 
-test("pair_stats writer refuses cancelled offers", async () => {
-  await upsertPairStatsByOfferId.run({ offer_id: 2 }, client); // cancelled
-  let r = await client.query("SELECT COUNT(*)::int AS n FROM pair_stats");
-  expect(r.rows[0].n).toBe(0);
-  await upsertPairStatsByOfferId.run({ offer_id: 1 }, client); // consumed
-  r = await client.query("SELECT trade_count FROM pair_stats");
-  expect(r.rows.length).toBe(1);
-  expect(r.rows[0].trade_count).toBe(1);
+test("adjudication records a cancel as settled = false, and it counts nothing", async () => {
+  // Offer 2 is a proven cancel, offer 1 a proven fill. Both are adjudicated;
+  // the difference is the verdict, not the presence of a row. That matters:
+  // a cancel that simply produced NO row would be indistinguishable from an
+  // offer that was never adjudicated at all, and the repair sweep would chase
+  // it forever.
+  const verdicts = await client.query(
+    `SELECT id, settled, base_color FROM offer_file_history WHERE id IN (1, 2) ORDER BY id`,
+  );
+  expect(verdicts.rows.map((r: any) => [r.id, r.settled])).toEqual([[1, true], [2, false]]);
+  expect(verdicts.rows[1].base_color).toBe(null);
+
+  const counted = await client.query(
+    `SELECT COUNT(*)::int AS n FROM offer_file_history
+      WHERE settled AND base_color IS NOT NULL AND id IN (1, 2)`,
+  );
+  expect(counted.rows[0].n).toBe(1);
 });
 
 // ── §2.2, FIXED in PR-C. Kept as a permanent regression guard ───────────────
 //
-// upsertPairStatsByOfferId assigns base_color/quote_color by LEAST/GREATEST of
+// adjudicateOfferFill assigns base_color/quote_color by LEAST/GREATEST of
 // the hex color, but computes last_price as `w.amount / g.amount` with no
 // reference to which of them became base:
 //
@@ -283,7 +307,7 @@ test("pair_stats writer refuses cancelled offers", async () => {
 // differ only in which side the maker took. Their recorded price must not.
 // Was verified to fail for the RIGHT reason before the fix: the forward
 // direction recorded 2 and the reverse 0.5 — same trade, reciprocal price.
-test("pair_stats.last_price is quote-per-base in BOTH trade directions", async () => {
+test("price is quote-per-base in BOTH trade directions", async () => {
   const LO = "1".repeat(64); // lexically lesser  → becomes base_color
   const HI = "9".repeat(64); // lexically greater → becomes quote_color
 
@@ -304,26 +328,148 @@ test("pair_stats.last_price is quote-per-base in BOTH trade directions", async (
     );
   };
 
-  await client.query("DELETE FROM pair_stats");
+  const priceOf = async (id: number) =>
+    Number((await client.query(
+      `SELECT (quote_amount / NULLIF(base_amount, 0))::float8 AS p
+         FROM offer_file_history WHERE id = $1`, [id],
+    )).rows[0].p);
+
   // Direction 1 — maker gives the lesser color. Price = 20/10 = 2.
   await seedDirected(901, LO, "10", HI, "20");
-  await upsertPairStatsByOfferId.run({ offer_id: 901 }, client);
-  const forward = await client.query(
-    `SELECT base_color, last_price::float8 AS p FROM pair_stats WHERE base_color = $1`, [LO],
-  );
-  expect(forward.rows[0].p).toBeCloseTo(2, 9); // passes today
-
   // Direction 2 — maker gives the greater color. Same trade, same pair, and
-  // the same quote-per-base price of 2. Today this records 0.5.
+  // the same quote-per-base price of 2. The original bug recorded 0.5 here,
+  // because base/quote are assigned by hex ordering and the old formula was a
+  // bare want/give with no reference to which of them became the base.
   await seedDirected(902, HI, "20", LO, "10");
-  await upsertPairStatsByOfferId.run({ offer_id: 902 }, client);
-  const reverse = await client.query(
-    `SELECT last_price::float8 AS p FROM pair_stats WHERE base_color = $1`, [LO],
-  );
-  expect(reverse.rows[0].p).toBeCloseTo(2, 9);
+  await adjudicateAll();
+
+  expect(await priceOf(901)).toBeCloseTo(2, 9);
+  expect(await priceOf(902)).toBeCloseTo(2, 9);
+
+  const base901 = (await client.query(
+    `SELECT base_color FROM offer_file_history WHERE id = 901`)).rows[0].base_color;
+  expect(base901).toBe(LO);
 
   // And the authoritative SQL aggregate must agree with the stored column —
   // the cross-route disagreement users actually see.
   const stats = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0];
-  expect(Number(stats!.last_price)).toBeCloseTo(Number(reverse.rows[0].p), 9);
+  expect(Number(stats!.last_price)).toBeCloseTo(2, 9);
+});
+
+// ── The verdict is a CACHE, not the source of truth ─────────────────────────
+//
+// Adjudication runs in an api.ts listener on the post-commit event, so there is
+// a window between an offer being archived and its verdict existing. Before
+// this case, market queries read ONLY the stored verdict, so inside that window
+// a settled offer was archived, reported `consumed` by /v1/offers/:hash/status,
+// and was simultaneously absent from /v1/chart/history — the read/write split
+// the verdict refactor exists to remove, reintroduced one layer down.
+//
+// It is not theoretical: the grand e2e caught it on a contended box, where
+// `maker self-fill: settled + archived CONSUMED + status consumed` passed and
+// `maker self-fill counts as a trade` failed in the same breath.
+//
+// So an unadjudicated row must fall back to computing the verdict, exactly as
+// the pre-refactor queries did. The stored column is an optimisation for the
+// rows that have one; it must never be the reason an answer is wrong.
+test("an archived-but-not-yet-adjudicated fill still reads as a trade", async () => {
+  const LO = "7".repeat(64);
+  const HI = "8".repeat(64);
+  const id = 950;
+  await client.query(
+    `INSERT INTO offer_file_history
+       (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+     VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', 3600, 'CONSUMED', NOW() - INTERVAL '5 minutes', NOW())`,
+    [id, 900 + id, `blob-${id}`, hashOf(id)],
+  );
+  await client.query(
+    `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+     VALUES ($1, $2, '10', 'GIVING',  'SHIELDED', NOW() - INTERVAL '5 minutes'),
+            ($1, $3, '20', 'WANTING', 'SHIELDED', NOW() - INTERVAL '5 minutes')`,
+    [id, LO, HI],
+  );
+
+  // Deliberately NOT adjudicated — this is the window.
+  const unadjudicated = await client.query(
+    `SELECT settled FROM offer_file_history WHERE id = $1`, [id],
+  );
+  expect(unadjudicated.rows[0].settled).toBe(null);
+
+  const stats = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0]!;
+  expect(stats.fills_24h).toBe(1);
+  expect(Number(stats.last_price)).toBeCloseTo(2, 9);
+
+  const hist = await getTradeHistory.run({ base: LO, quote: HI }, client);
+  expect(hist.length).toBe(1);
+
+  // And once adjudicated the answer is unchanged — the cache agrees with the
+  // computation rather than replacing it.
+  await adjudicateAll();
+  const after = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0]!;
+  expect(after.fills_24h).toBe(1);
+  expect(Number(after.last_price)).toBeCloseTo(2, 9);
+});
+
+// ── Two routes to "last price" must pick the SAME fill ─────────────────────
+//
+// `archived_at` is the L2 block timestamp, so it quantises: several fills on a
+// pair routinely share one instant. /v1/pairs takes the newest per pair with a
+// DISTINCT ON, /v1/chart/stats takes it with ORDER BY ... LIMIT 1, and on a tie
+// each is free to pick a different row — so the two endpoints serve different
+// last prices for the same pair, from the same data, with nothing wrong in
+// either query on its own.
+//
+// The grand e2e caught it on a valid run (maxLagBlocks 79):
+//   /v1/pairs=1.5601503759398496  /v1/chart/stats=1.5012626262626263
+// Not reciprocals — two genuinely different trades.
+//
+// The tie-break must also be REPLICA-STABLE, which rules out the SERIAL id:
+// it is deployment-local, and p7a compares instance A against instance B.
+// offer_hash is the content address, so every replica breaks the tie the same
+// way.
+test("both last-price routes pick the same fill when archived_at ties", async () => {
+  // NOTE ON WHAT THIS CAN AND CANNOT DO. With no tie-break, either query is
+  // free to return either row, so a fixture cannot RELIABLY go red — it passes
+  // whenever the planner happens to pick alike, which it did here on the first
+  // attempt. The dependable red came from the e2e. So this asserts the RULE
+  // rather than the symptom: last_price is the fill with the greatest
+  // (archived_at, offer_hash), on both routes. That is unambiguous after the
+  // fix and is what makes the two agree by construction.
+  const { getPairs } = await import("@zswap-da/database");
+  const LO = "c".repeat(64);
+  const HI = "d".repeat(64);
+  // Same instant, deliberately different prices: 20/10 = 2 and 30/10 = 3.
+  const at = new Date(Date.now() - 10 * 60 * 1000);
+  for (const [id, wantAmt] of [[960, "20"], [961, "30"], [962, "25"]] as [number, string][]) {
+    await client.query(
+      `INSERT INTO offer_file_history
+         (id, celestia_height, transaction_hex, offer_hash, created_at, ttl_seconds, archive_reason, archived_at, first_seen_at)
+       VALUES ($1, $2, $3, $4, $5, 3600, 'CONSUMED', $5, $5)`,
+      [id, 900 + id, `blob-${id}`, hashOf(id), at],
+    );
+    await client.query(
+      `INSERT INTO offer_file_tokens_history (offer_file_id, token_color, amount, direction, kind, archived_at)
+       VALUES ($1, $2, '10', 'GIVING',  'SHIELDED', $4),
+              ($1, $3, $5,   'WANTING', 'SHIELDED', $4)`,
+      [id, LO, HI, at, wantAmt],
+    );
+  }
+  await adjudicateAll();
+
+  // The winner by the rule: greatest offer_hash among the tied archived_at.
+  const expected = (await client.query(
+    `SELECT (quote_amount / NULLIF(base_amount, 0))::float8 AS p
+       FROM offer_file_history
+      WHERE settled AND base_color = $1 AND quote_color = $2
+      ORDER BY archived_at DESC, offer_hash DESC
+      LIMIT 1`, [LO, HI],
+  )).rows[0].p;
+
+  const pairs = await getPairs.run(undefined, client);
+  const row = pairs.find((p: any) => p.base_color === LO && p.quote_color === HI)!;
+  const stats = (await getPairStats24h.run({ base: LO, quote: HI, cutoff: DAY_AGO }, client))[0]!;
+
+  expect(Number(row.last_price)).toBeCloseTo(Number(expected), 9);
+  expect(Number(stats.last_price)).toBeCloseTo(Number(expected), 9);
+  expect(Number(row.last_price)).toBeCloseTo(Number(stats.last_price), 9);
 });

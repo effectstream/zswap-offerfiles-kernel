@@ -668,8 +668,48 @@ current HTTP route does not emit directly.
 
 API-gate and transport codes are deliberately separate from
 `OfferRejectCode`: `UTXO_NOT_LIVE` (`400`) folds the production live-set probe;
-`DUPLICATE_OFFER` (`409`) is byte-identical content dedup; `VALIDATION` (`400`)
+`DUPLICATE_OFFER` (`409`) is byte-identical content dedup;
+`DUPLICATE_MARKERS` (`409`) is marker dedup, below; `VALIDATION` (`400`)
 is a malformed JSON body; and `RATE_LIMITED` (`429`) is the HTTP limiter.
+
+### Dedup is two rules (`DUPLICATE_OFFER` and `DUPLICATE_MARKERS`)
+
+**BREAKING as of 2026-08-18** — a submission that previously succeeded can now
+be refused `409 DUPLICATE_MARKERS`.
+
+1. **`DUPLICATE_OFFER` — byte-identical**, unchanged, and still checked first:
+   the `offer_hash` (sha256 of the raw transaction bytes) is already indexed.
+   Cheap, and it catches replays.
+2. **`DUPLICATE_MARKERS` — marker overlap.** After proof and signature
+   verification, an offer is refused when any marker it DECLARES — a shielded
+   output commitment, or an unshielded output identity
+   `(owner, intent_hash, output_no)` — is already declared by an offer that is
+   **live** right now.
+
+Why the second rule exists: commitments and unshielded identities do not depend
+on the Merkle root an offer proves against, so re-proving one intent against a
+fresher root produces a different blob with a different `offer_hash` and exactly
+the same markers. Rule 1 cannot relate those; the two copies then coexist in the
+book, and one settlement is reported as two trades. Rule 2 keeps one intent to
+one live offer.
+
+What it does NOT do:
+
+- It never touches the existing offer. The original stays live and fillable;
+  only the newcomer is refused.
+- It compares against LIVE offers only. Once an offer is cancelled, filled or
+  expired it claims nothing, so republishing the same intent later is fine —
+  though if its inputs were spent it will be refused `NULLIFIER_SPENT` /
+  `UTXO_NOT_LIVE` instead.
+- It tests OVERLAP, not equality: sharing one declared output with a live offer
+  is enough. Adding an extra output does not evade it.
+
+The response body carries `offerId` (your blob's hash) and `activeOfferId` (the
+hash of the live offer that already claims the marker), so a UI can link to the
+offer that is already working. Both the HTTP submit gate and the DA/state-machine
+path apply the identical rule, so publishing straight to the Celestia namespace
+does not bypass it — it is refused at indexing time instead, and counted in
+`offer_rejections` under its own code.
 
 Non-`400` transport failures you may also see: a request body larger than
 twice `OFFER_MAX_BYTES` is refused by the HTTP layer as

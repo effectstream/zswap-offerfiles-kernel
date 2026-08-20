@@ -12,7 +12,8 @@ process.env["PGLITE_DATA_DIR"] ??= "memory://";
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
-const { migrationTable } = await import("@zswap-da/database");
+const { migrationTable, adjudicateOfferFill, findUnadjudicatedFills } =
+  await import("@zswap-da/database");
 const { realStats, realHistory } = await import("./trade-data.ts");
 
 const PORT = 54341;
@@ -81,6 +82,13 @@ async function seedFill(
   );
 }
 
+/** The product's own repair sweep, run verbatim — fixtures never hand-write
+ *  verdict columns, so a test cannot agree with a broken adjudicator. */
+async function adjudicateAll() {
+  const owed = await findUnadjudicatedFills.run({ limit: 10_000 }, client);
+  for (const row of owed) await adjudicateOfferFill.run({ offer_id: row.id }, client);
+}
+
 beforeAll(async () => {
   handle = await startPglite(PORT);
   client = new pg.Client({
@@ -120,6 +128,12 @@ beforeAll(async () => {
   await seedFill(10, 1000, 48 * 60); // absurd price 100, 48 h ago
   // A different pair inside the window — must not leak in.
   await seedFill(10, 999, 60, [BASE, OTHER]);
+
+  // ONE sweep at the end, not one per seed: adjudicating inside seedFill made
+  // the fixture quadratic and blew the hook budget. Mid-test seeds after this
+  // point deliberately go un-adjudicated — the read fallback covers them, and
+  // letting them exercise it is worth more than uniformity here.
+  await adjudicateAll();
 });
 
 afterAll(async () => {

@@ -7,7 +7,7 @@ import { EventEmitter } from "node:events";
 // which runs inside the runtime's block transaction (`BEGIN` … `COMMIT` in
 // process-blocks.ts). A synchronous `eventBus.emit` there published state that
 // was not yet committed — and the consumers act on a DIFFERENT connection:
-// api.ts's pair-stats listener runs `upsertPairStatsByOfferId` on its own pool,
+// api.ts's fill listener runs `adjudicateOfferFill` on its own pool,
 // and the SSE route forwards to clients immediately. So a consumer could read
 // through its own connection, see nothing (the archive and same-block create
 // rows are still invisible), write nothing, and never retry — while SSE
@@ -43,11 +43,23 @@ import { EventEmitter } from "node:events";
 // `data.emit` is the follow-up, and the two compose: the gate below becomes
 // redundant the moment every consumer reads from the runtime's feed.
 //
-// PORT NOTE (merge of 8244283): upstream's in-process height gate is below,
-// verbatim, and is the only transport this module provides.
+// PORT NOTE (merge of 6c5ebab / PR #47). The previous port carried a
+// `StateMachineAppEvent` helper union whose only job was to widen upstream's
+// `AppEvent` with our `offerHash` on `offer_consumed` / `offer_expired`.
+// Upstream now declares those exact fields itself (a5393b2, "key lifecycle
+// event de-duplication on the offer hash") and reorders `identity()` to prefer
+// the hash for the same reason we added it. The derived union was therefore
+// field-for-field equal to upstream's, so the indirection is DELETED and
+// upstream's declaration is taken verbatim — one definition, upstream's, with
+// nothing of ours lost.
 
-export type StateMachineAppEvent =
-  | { type: "offer_indexed"; offerId: number; offerHash: string; gives: unknown[]; wants: unknown[] }
+export type AppEvent =
+  | { type: "offer_indexed"; offerId: number; offerHash: string; blockHeight: number | string; gives: unknown[]; wants: unknown[] }
+  // `offerId` is the local SERIAL row id, which diverges across deployments and
+  // across a resync; `offerHash` is the content address the REST API exposes,
+  // and the only key with which a consumer can correlate an event to an offer.
+  // It is optional because rows inserted out-of-band carry no hash (migration
+  // 005), not because emitters may omit it — the archive queries return it.
   | {
       type: "offer_consumed";
       offerId: number;
@@ -56,22 +68,14 @@ export type StateMachineAppEvent =
       unshieldedSpend?: { owner: string; intentHash: string; outputNo: number };
     }
   | { type: "offer_expired"; offerId: number; offerHash?: string }
+  | { type: "token_minted"; name: string; color: string; kind?: string }
   | {
       type: "offer_rejected";
       code?: string;
       reason?: string;
       offerHash?: string;
+      blockHeight: number | string;
     };
-
-// Union of both field sets: upstream's shape plus our `offerHash` on
-// offer_consumed / offer_expired. `identity()` below already reads `offerHash`,
-// so widening it here is what lets the gate de-duplicate our events too.
-export type AppEvent =
-  | (Extract<StateMachineAppEvent, { type: "offer_indexed" }> & { blockHeight: number | string })
-  | Extract<StateMachineAppEvent, { type: "offer_consumed" }>
-  | Extract<StateMachineAppEvent, { type: "offer_expired" }>
-  | { type: "token_minted"; name: string; color: string; kind?: string }
-  | (Extract<StateMachineAppEvent, { type: "offer_rejected" }> & { blockHeight: number | string });
 
 export const eventBus = new EventEmitter();
 eventBus.setMaxListeners(50);
@@ -98,8 +102,13 @@ const pending: { atHeight: number; key: string; event: AppEvent }[] = [];
  * gate less than it deserves: it closes the uncommitted-read defect outright.
  */
 function identity(e: AppEvent): string {
-  const subject = "offerId" in e ? String(e.offerId)
-    : "offerHash" in e && e.offerHash ? e.offerHash
+  // The hash is preferred over the row id because a retry that RE-INSERTS the
+  // offer hands the same offer a different SERIAL, and an id-keyed identity
+  // would then read the two attempts as two settlements. The id remains the
+  // fallback for events that carry no hash — collapsing those onto one empty
+  // subject would de-duplicate unrelated offers into a single release.
+  const subject = "offerHash" in e && e.offerHash ? e.offerHash
+    : "offerId" in e ? String(e.offerId)
     : "color" in e ? String(e.color)
     : "";
   return `${e.type}:${subject}`;

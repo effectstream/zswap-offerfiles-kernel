@@ -27,7 +27,7 @@ import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { collectUnshieldedOutputs, getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
 import { offerHashFromBlob } from "@zswap-da/offer-guard";
 
@@ -964,6 +964,104 @@ export const CROSS_GIVE_SHIELDED = 311n;
 export const CROSS_GIVE_UNSHIELDED = 289n;
 export const BASKET_GIVE_TA = 337n;
 export const BASKET_GIVE_TC = 293n;
+export const WRAPPER_GIVE_UNSHIELDED = 271n;
+
+/**
+ * TWO offers wrapping ONE intent — the evasion marker dedup exists to stop.
+ *
+ * One `initSwap` recipe, one intent, wrapped twice:
+ * `Transaction.fromParts` pins the intent at physical segment 1 while
+ * `fromPartsRandomized` picks another, so the two transactions are byte-
+ * different and hash differently. What does NOT change is what they DECLARE:
+ * a guaranteed unshielded output's identity is `intentHash(0)`, which does not
+ * depend on the physical segment, so both offers claim exactly the same payout.
+ *
+ * That is the whole point. Byte-identical dedup — the `offer_hash` PK — relates
+ * them not at all, and before marker dedup both were indexed and one settlement
+ * printed two trades (measured live, 2026-08-17: seven trades for five
+ * settlements). Real offers, real proofs, real wallet: this is the shape a
+ * maker gets for free by re-proving against a fresher root, not a contrivance.
+ *
+ * UNSHIELDED deliberately. The pairs actually measured on chain were unshielded
+ * and carry no output commitments at all, so a fixture on the shielded layer
+ * would exercise the easier half of the rule and miss the case that motivated
+ * the ruling.
+ *
+ * The identity equality is ASSERTED here before either blob is returned. If the
+ * ledger ever stopped preserving it, this fixture would otherwise submit two
+ * genuinely different offers and the p4 assertion downstream would fail for a
+ * reason that has nothing to do with dedup — so it loud-skips with the measured
+ * difference instead.
+ *
+ * NEVER throws (see buildOneSidedOffer): a fixture builder that throws takes
+ * the whole run with it.
+ */
+export async function buildSameIntentWrapperPair(
+  pw: PoolWallet,
+  makerIdx: number,
+): Promise<{ first: string; second: string } | { skipped: string }> {
+  try {
+    return await pw.run(async () => {
+      const giveKey = makerUnshieldedKey(makerIdx);
+      const wantKey = oppositeKey(giveKey);
+      const recipe = await pw.wr.wallet.initSwap(
+        { unshielded: { [ledger.colors[giveKey]!]: WRAPPER_GIVE_UNSHIELDED } } as any,
+        [{
+          type: "unshielded",
+          outputs: [{
+            type: ledger.colors[wantKey]!,
+            amount: 293n,
+            receiverAddress: pw.unshieldedObj,
+          }],
+        } as any],
+        shieldedKeys(pw.wr),
+        { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
+      );
+      const intents = [...(recipe.transaction as any).intents.values()];
+      if (intents.length !== 1) {
+        await (pw.wr.wallet as any).revert(recipe).catch(() => {});
+        return { skipped: `wrapper source has ${intents.length} intents, expected 1` };
+      }
+      const fixed = Transaction.fromParts(net.id as any, undefined, undefined, intents[0]);
+      const randomized = Transaction.fromPartsRandomized(
+        net.id as any, undefined, undefined, intents[0],
+      );
+      // Measure the property before claiming it (standing probe rule): the
+      // identities must be equal on the wrappers themselves, not asserted of a
+      // detached copy that was never signed.
+      const idOf = (tx: any) =>
+        JSON.stringify(
+          collectUnshieldedOutputs(tx).map((o) => `${o.owner}/${o.intentHash}/${o.outputNo}`),
+        );
+      if (idOf(fixed) !== idOf(randomized)) {
+        await (pw.wr.wallet as any).revert(recipe).catch(() => {});
+        return {
+          skipped:
+            `the two wrappers declare DIFFERENT identities — ${idOf(fixed)} vs ${idOf(randomized)}; ` +
+            "the ledger no longer keeps intentHash(0) independent of the physical segment, " +
+            "which would refute the premise of marker dedup rather than test it",
+        };
+      }
+
+      const sign = async (tx: any) => {
+        const signed = await (pw.wr.wallet as any).signUnprovenTransaction(
+          tx, (data: Uint8Array) => pw.wr.unshieldedKeystore.signData(data),
+        );
+        return withProveSlot(() => pw.wr.wallet.finalizeTransaction(signed));
+      };
+      const a = await sign(fixed);
+      const b = await sign(randomized);
+      const first = OfferFiles.encode(a.serialize());
+      const second = OfferFiles.encode(b.serialize());
+      if (first === second) {
+        return { skipped: "the two wrappers serialized identically — rule (i) would catch this" };
+      }
+      return { first, second };
+    });
+  } catch (e) {
+    return { skipped: `wrapper pair build failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
 
 export async function buildBasketOffer(
   pw: PoolWallet,

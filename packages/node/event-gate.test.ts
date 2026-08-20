@@ -150,3 +150,46 @@ test("a re-entrant listener cannot see a half-drained buffer", () => {
   expect(seen).toEqual([1, 2]);
   eventBus.off("app_event", fn);
 });
+
+// ── Dedup key: content address, not row id (phase (d), ported from #38) ─────
+
+test("offer_consumed de-duplicates on the offer hash, not the row id", () => {
+  // `offerId` is a local SERIAL. A block RETRY that re-inserts the offer row
+  // gives the SAME offer a DIFFERENT id, so an id-keyed identity sees two
+  // distinct events and releases both — one settlement, two `trade_count`
+  // increments. The offer hash is the content address: it is stable across
+  // reprocessing, across resyncs, and across deployments, which is exactly
+  // what a de-duplication key has to be.
+  const r = recorder();
+  emitAppEvent({ type: "offer_consumed", offerId: 7, offerHash: "aa11" }, 4);
+  emitAppEvent({ type: "offer_consumed", offerId: 9, offerHash: "aa11" }, 4);
+  expect(pendingEventCount()).toBe(1);
+  markBlockCommitted(4);
+  expect(r.seen.length).toBe(1);
+  r.stop();
+});
+
+test("distinct offers in one block stay distinct even when hashes are present", () => {
+  // The guard on the case above: preferring the hash must not collapse two
+  // genuinely different offers that happen to share a block.
+  const r = recorder();
+  emitAppEvent({ type: "offer_consumed", offerId: 1, offerHash: "aa11" }, 6);
+  emitAppEvent({ type: "offer_consumed", offerId: 2, offerHash: "bb22" }, 6);
+  expect(pendingEventCount()).toBe(2);
+  markBlockCommitted(6);
+  expect(r.seen.map((e) => e.offerHash)).toEqual(["aa11", "bb22"]);
+  r.stop();
+});
+
+test("an offer without a hash still de-duplicates on the row id", () => {
+  // Rows inserted out-of-band before migration 005 carry no hash; the gate must
+  // fall back rather than collapse them all onto one empty-string identity.
+  const r = recorder();
+  emitAppEvent({ type: "offer_expired", offerId: 3 }, 8);
+  emitAppEvent({ type: "offer_expired", offerId: 3 }, 8);
+  emitAppEvent({ type: "offer_expired", offerId: 4 }, 8);
+  expect(pendingEventCount()).toBe(2);
+  markBlockCommitted(8);
+  expect(r.seen.map((e) => e.offerId)).toEqual([3, 4]);
+  r.stop();
+});

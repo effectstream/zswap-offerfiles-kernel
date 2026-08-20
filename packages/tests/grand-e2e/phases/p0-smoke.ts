@@ -20,7 +20,6 @@ const REQUIRED_TABLES = [
   "created_unshielded",
   "known_tokens",
   "offer_rejections",
-  "pair_stats",
   "token_prices",
 ];
 

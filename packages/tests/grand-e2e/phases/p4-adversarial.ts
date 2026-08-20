@@ -21,10 +21,15 @@ import {
 import {
   buildCrossLayerOffer,
   buildOneSidedOffer,
+  buildSameIntentWrapperPair,
   makerShieldedKey,
+  makerUnshieldedKey,
+  oppositeKey,
+  storeBlob,
+  WRAPPER_GIVE_UNSHIELDED,
   type Actors,
 } from "../actors/wallets.ts";
-import { getHealth, submitOffer2 } from "../lib/api2.ts";
+import { getHealth, getOfferStatus, submitOffer2 } from "../lib/api2.ts";
 import { submitBlobRaw } from "../lib/celestia.ts";
 import { offerRowByHash, rejectionRows, rejectionTotalsByCode, tableCount } from "../lib/db2.ts";
 import { offerHashFromBlob } from "@zswap-da/offer-guard";
@@ -35,6 +40,8 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
 
   const offersBefore = await tableCount(db, "offer_file");
   const historyBefore = await tableCount(db, "offer_file_history");
+  /** Legitimate offers this phase adds to the live book — see 4.9. */
+  let liveAdded = 0;
 
   // ── The MIP-0006 two-sided rule, at both doors ───────────────────────────
   // The most important semantic rule in the spec, and until now it had only
@@ -350,6 +357,141 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
     });
   }
 
+  // ── 4.9 marker dedup: ONE intent, TWO wrappers, both doors ───────────────
+  //
+  // The evasion byte-identical dedup cannot see. Markers are root-independent,
+  // so re-proving or re-wrapping one intent yields a different blob with a
+  // different offer_hash and the SAME declared outputs — measured live on
+  // 2026-08-17, where two such pairs turned five settlements into seven trades.
+  // Ruled 2026-08-18: after crypto verification, an offer whose declared
+  // markers overlap an ACTIVE offer's is rejected.
+  //
+  // Four things are asserted, and the last is the one that keeps the rule from
+  // being a denial-of-service: the ORIGINAL must be untouched. A dedup rule
+  // that lets a newcomer disturb the incumbent would be worse than none.
+  {
+    // MAKER_SEEDS is eight wallets, indices 0-7, so this must be one of them —
+    // `makers[9]!` would be a non-null assertion over undefined and would take
+    // the run down. 5, not 6 or 7: those two just built the CROSS_LAYER and
+    // NOT_A_SWAP fixtures and their coins are still settling back, and unlike
+    // those this offer is PUBLISHED, so its coin stays reserved for the rest of
+    // the run rather than being reverted.
+    const makerIdx = 5;
+    const maker = actors.makers[makerIdx]!;
+    const built = await buildSameIntentWrapperPair(maker, makerIdx);
+    if ("skipped" in built) {
+      note(
+        "marker dedup fixture",
+        `not built (${built.skipped}) — dedup rule (ii) is UNTESTED against a running ` +
+          "stack this run. The unit coverage still holds (packages/database/marker-dedup.test.ts, " +
+          "packages/node/marker-dedup.test.ts), but nothing here proves the two DOORS agree.",
+      );
+    } else {
+      const firstHash = offerHashFromBlob(built.first);
+      const secondHash = offerHashFromBlob(built.second);
+      storeBlob(firstHash, built.first);
+
+      // Registered BEFORE publishing: p7b's live-set audit treats an
+      // unrecognised offer_file row as a stray, and its classification audit
+      // compares fate against the served status. Fate `expired`, because that
+      // is what actually becomes of it — nothing settles this offer, and its
+      // TTL falls long before the audit runs.
+      const rec = ledger.addOffer({
+        index: -1,
+        fate: "expired",
+        layer: "uu",
+        makerSeed: maker.seed,
+        giveToken: makerUnshieldedKey(makerIdx),
+        wantToken: oppositeKey(makerUnshieldedKey(makerIdx)),
+        giveAmount: String(WRAPPER_GIVE_UNSHIELDED),
+        wantAmount: "293",
+        publishPath: "api",
+        phase: "p4-marker-dedup",
+        state: "planned",
+        offerHash: firstHash,
+        hasFillMarkers: false, // unshielded want: markers are identities, not commitments
+      });
+
+      await check("marker dedup: the FIRST wrapper is accepted", async () => {
+        const res = await submitOffer2(built.first);
+        return res.status === 200;
+      });
+      const indexed = await waitUntil(
+        "first wrapper indexed",
+        async () => (await offerRowByHash(db, firstHash)) !== null,
+        INDEX_WAIT_TRIES,
+        5000,
+      );
+      if (!indexed) {
+        ledger.markCasualty(rec, "first wrapper never indexed");
+        note("marker dedup fixture", "first wrapper never indexed — rule (ii) UNTESTED this run");
+      } else {
+        const firstRow = await offerRowByHash(db, firstHash);
+        rec.state = "indexed";
+        rec.indexedAt = Date.now();
+        rec.rowId = firstRow?.id;
+        liveAdded += 1;
+
+        // ── DOOR 1: the API submit gate ──
+        // 409 and its own code. Reusing DUPLICATE_OFFER would have been
+        // cheaper and would have hidden the evasion inside the replay counter.
+        const api = await submitOffer2(built.second);
+        await check(
+          "marker dedup: the API refuses the second wrapper 409 DUPLICATE_MARKERS",
+          async () =>
+            api.status === 409 &&
+            (api.body as any)?.error === "DUPLICATE_MARKERS" &&
+            (api.body as any)?.activeOfferId === firstHash,
+          `status=${api.status} body=${JSON.stringify(api.body).slice(0, 200)}`,
+        );
+
+        // ── DOOR 2: straight to Celestia, bypassing the API entirely ──
+        // The namespace is permissionless, so this is the door that decides.
+        // A rule that lives only at the HTTP gate is a rule with a bypass.
+        const before = await rejectionTotalsByCode(db);
+        const height = await submitBlobRaw(OfferFiles.decode(built.second));
+        ledger.addGarbage({
+          kind: "celestia:marker-duplicate",
+          via: "celestia",
+          expectedCodes: ["DUPLICATE_MARKERS"],
+          offerHash: secondHash,
+          celestiaHeight: height,
+          at: Date.now(),
+        });
+        await check("marker dedup: the DA door refuses it too", async () =>
+          waitUntil(
+            "marker-duplicate rejection",
+            async () => {
+              const now = await rejectionTotalsByCode(db);
+              return (now.DUPLICATE_MARKERS ?? 0) >= (before.DUPLICATE_MARKERS ?? 0) + 1;
+            },
+            INDEX_WAIT_TRIES,
+            5000,
+          ),
+        );
+        await check("marker dedup: the second wrapper is nowhere in the book", async () => {
+          const r = await db.query(
+            `SELECT (SELECT count(*) FROM offer_file WHERE offer_hash = $1)
+                  + (SELECT count(*) FROM offer_file_history WHERE offer_hash = $1) AS n`,
+            [secondHash],
+          );
+          return Number(r.rows[0].n) === 0;
+        });
+
+        // ── The incumbent is untouched ──
+        await check(
+          "marker dedup: the ORIGINAL offer is untouched and still served",
+          async () => {
+            const row = await offerRowByHash(db, firstHash);
+            if (!row || row.id !== firstRow?.id) return false;
+            const served = await getOfferStatus(firstHash);
+            return served.status === 200 && (served.body as any)?.status === "live";
+          },
+        );
+      }
+    }
+  }
+
   await check("zero offer_file rows for the garbage blobs", async () => {
     for (const g of ledger.garbage.filter((g) => g.via === "celestia" && g.offerHash)) {
       const row = await offerRowByHash(db, g.offerHash!);
@@ -357,6 +499,10 @@ export async function p4Adversarial(db: Client, art: P1Artifacts, actors: Actors
       // exist only as the ORIGINAL history row, never as a live row again.
       if (row) return false;
     }
-    return (await tableCount(db, "offer_file")) === offersBefore;
+    // `+ liveAdded`, not a bare equality: 4.9 deliberately indexes ONE
+    // legitimate offer — the incumbent its duplicate has to lose to — and a
+    // fixture that skipped adds nothing. Keeping the bare equality would have
+    // made this check fail for the one reason it is not about.
+    return (await tableCount(db, "offer_file")) === offersBefore + liveAdded;
   });
 }

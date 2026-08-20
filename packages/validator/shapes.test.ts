@@ -89,7 +89,12 @@ describe("phase (a) — the shapes are actually DIFFERENT from each other", () =
 
     // Same intent content — proven by the intent hash at a FIXED segment, which
     // is a function of the intent alone. This is the property byte-identical
-    // dedup cannot see, and the reason "duplicate" needs a stated rule.
+    // dedup cannot see, and the reason "duplicate" needed a second stated rule.
+    // It has one since 2026-08-18: marker dedup rejects the second wrapper at
+    // ingestion, because both declare the identity below
+    // (packages/node/marker-dedup.ts). This fixture is that rule's source of
+    // truth about the ledger — if the assertion below ever fails, the premise
+    // has changed and the rule needs re-deriving, not patching.
     const hashAt = (tx: any, seg: number) =>
       String([...(tx.intents as Map<number, any>).values()][0]!.intentHash(seg));
     expect(hashAt(a, 0)).toBe(hashAt(b, 0));

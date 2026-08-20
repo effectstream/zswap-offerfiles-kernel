@@ -9,10 +9,43 @@ import { readFileSync } from "node:fs";
 import { apiTimings, getHealthSync, realNtpLagSeconds } from "./lib/api2.ts";
 import { pgrepF, rssKb, summarizeLatencies, writeOut } from "./lib/util.ts";
 
+/** How often pollLag() samples. Also the recovery deadline — see summarizeStmLag. */
+export const LAG_SAMPLE_INTERVAL_MS = 30_000;
+
+/** A window in which the SUITE ITSELF took a stack process down. */
+export interface ChaosWindow {
+  name: string;
+  startedAt: number;
+  /** Set when the chaos routine's own recovery checks have completed. */
+  endedAt: number;
+}
+
+/** What the first lag sample after a chaos window's recovery deadline saw. */
+export interface ChaosRecovery {
+  name: string;
+  endedAt: number;
+  /** null when the run ended before a post-deadline sample existed. */
+  at: number | null;
+  lagBlocks: number | null;
+}
+
+export interface StmLagSummary {
+  /** Every sample taken, chaos windows included. */
+  samples: number;
+  /** Samples inside a chaos window + its one-interval recovery deadline. */
+  excludedSamples: number;
+  /** Max over the samples that are NOT excluded — STM throughput. */
+  maxLagBlocks: number;
+  /** Max over ALL samples, reported so the excluded peak stays visible. */
+  maxLagBlocksIncludingChaos: number;
+  lastLagBlocks: number;
+  recoveries: ChaosRecovery[];
+}
+
 export interface MetricsSnapshot {
   submit: { count: number; p50: number; p95: number; max: number };
   publishToIndexedMs: { count: number; p50: number; p95: number; max: number };
-  stmLag: { samples: number; maxLagBlocks: number; lastLagBlocks: number };
+  stmLag: StmLagSummary;
   sseDeliveryLagMs: { count: number; p50: number; p95: number; max: number };
   bookReadMs: { count: number; p50: number; p95: number; max: number };
   batcherQueueDepthMax: number;
@@ -28,6 +61,8 @@ export const bookReadLatencies: number[] = [];
 export const stormApiLatencies: number[] = [];
 
 const stmLagSamples: { at: number; lagBlocks: number }[] = [];
+const chaosWindows: ChaosWindow[] = [];
+const openChaos = new Map<string, number>();
 let batcherQueueDepthMax = 0;
 let syncPid: number | null = null;
 let indexerPid: number | null = null;
@@ -40,7 +75,89 @@ export async function initMetrics(): Promise<void> {
   indexerPid = await pgrepF("midnight-indexer");
   syncStartKb = syncPid ? await rssKb(syncPid) : 0;
   indexerStartKb = indexerPid ? await rssKb(indexerPid) : 0;
-  lagPollTimer = setInterval(() => void pollLag(), 30_000);
+  lagPollTimer = setInterval(() => void pollLag(), LAG_SAMPLE_INTERVAL_MS);
+}
+
+// ── Deliberate-chaos windows ─────────────────────────────────────────────────
+//
+// The suite kills stack processes on purpose (p6-chaos). While a process is
+// down the STM processes nothing and `lagBlocks` climbs at the chain's own rate
+// — 1 block/s — so the peak inside such a window measures RESTART DURATION, not
+// throughput. Measured twice, at `dc08d17` and its predecessor: exactly one
+// sample of ~146 exceeded the gate in each run, both at 120 blocks, both at
+// t+54.5 min, both inside `chaosSync`'s `orchestratorRestart("sync")` (the sync
+// log silent 103 s, same 43 s + 60 s split), with median lag 1 and p95 2–3 for
+// the rest of the run. Gating on that number compared restart duration against
+// a throughput baseline.
+//
+// So the suite marks the windows it creates — it initiates the restarts, so it
+// knows exactly when — and those samples do not feed `maxLagBlocks`. What
+// replaces them is not "nothing": every window is gated by the recovery
+// assertion below, which is the property that actually matters about a restart.
+// Ruled 2026-08-18 (option (c), both halves); recalibrating the 95 baseline to
+// fit restart duration was the rejected option (d).
+
+export function beginChaosWindow(name: string): void {
+  if (!openChaos.has(name)) openChaos.set(name, Date.now());
+}
+
+export function endChaosWindow(name: string): void {
+  const startedAt = openChaos.get(name);
+  if (startedAt === undefined) return;
+  openChaos.delete(name);
+  chaosWindows.push({ name, startedAt, endedAt: Date.now() });
+}
+
+export function getChaosWindows(): ChaosWindow[] {
+  // A window still open at snapshot time (a chaos routine that threw) is closed
+  // at "now" rather than dropped: dropping it would let its samples back into
+  // the gate and fail the run for a reason that is not throughput.
+  const now = Date.now();
+  const open = [...openChaos.entries()].map(([name, startedAt]) => ({ name, startedAt, endedAt: now }));
+  return [...chaosWindows, ...open].sort((a, b) => a.startedAt - b.startedAt);
+}
+
+/**
+ * Split the lag series into "what the STM did" and "what the suite did to it".
+ *
+ * A sample is EXCLUDED when it falls in `[startedAt, endedAt + intervalMs]` of
+ * any chaos window. The `+ intervalMs` tail is the ruling's recovery deadline
+ * and is load-bearing rather than slack: a process reports healthy the moment
+ * it is up, but the backlog it accrued while down is drained afterwards, so the
+ * sample immediately following `endedAt` still reads the full outage. Measured:
+ * the sync log resumed at 13:35:43 and the 13:35:58 sample still read 120.
+ *
+ * The FIRST sample after that deadline is the recovery observation — the run's
+ * evidence that the restart was absorbed, gated by `recoveryLagBlocks`. Both
+ * recorded runs put it at 1 and 2 blocks: 120 blocks absorbed inside one
+ * 30-second interval.
+ */
+export function summarizeStmLag(
+  samples: { at: number; lagBlocks: number }[],
+  windows: ChaosWindow[],
+  intervalMs: number = LAG_SAMPLE_INTERVAL_MS,
+): StmLagSummary {
+  const inChaos = (at: number) =>
+    windows.some((w) => at >= w.startedAt && at <= w.endedAt + intervalMs);
+  const gated = samples.filter((s) => !inChaos(s.at));
+  const recoveries: ChaosRecovery[] = windows.map((w) => {
+    const deadline = w.endedAt + intervalMs;
+    const first = samples.find((s) => s.at > deadline);
+    return {
+      name: w.name,
+      endedAt: w.endedAt,
+      at: first?.at ?? null,
+      lagBlocks: first?.lagBlocks ?? null,
+    };
+  });
+  return {
+    samples: samples.length,
+    excludedSamples: samples.length - gated.length,
+    maxLagBlocks: Math.max(0, ...gated.map((s) => s.lagBlocks)),
+    maxLagBlocksIncludingChaos: Math.max(0, ...samples.map((s) => s.lagBlocks)),
+    lastLagBlocks: samples[samples.length - 1]?.lagBlocks ?? 0,
+    recoveries,
+  };
 }
 
 async function pollLag(): Promise<void> {
@@ -83,11 +200,7 @@ export async function snapshot(db: { query: (q: string) => Promise<any> } | null
   return {
     submit: summarizeLatencies(submitLatencies),
     publishToIndexedMs: summarizeLatencies(publishToIndexed),
-    stmLag: {
-      samples: stmLagSamples.length,
-      maxLagBlocks: Math.max(0, ...stmLagSamples.map((s) => s.lagBlocks)),
-      lastLagBlocks: stmLagSamples[stmLagSamples.length - 1]?.lagBlocks ?? 0,
-    },
+    stmLag: summarizeStmLag(stmLagSamples, getChaosWindows()),
     sseDeliveryLagMs: summarizeLatencies(sseDeliveryLags),
     bookReadMs: summarizeLatencies(bookReadLatencies),
     batcherQueueDepthMax,
@@ -103,9 +216,16 @@ export async function snapshot(db: { query: (q: string) => Promise<any> } | null
 }
 
 export function writeMetrics(snap: MetricsSnapshot): void {
+  // chaosWindows ship with the series: without them the exclusion cannot be
+  // re-derived from metrics.json, and an excluded peak that nobody can audit is
+  // indistinguishable from a peak that was hidden.
   writeOut(
     "metrics.json",
-    JSON.stringify({ snap, stmLagSamples, apiTimingCount: apiTimings.length }, null, 2),
+    JSON.stringify(
+      { snap, stmLagSamples, chaosWindows: getChaosWindows(), apiTimingCount: apiTimings.length },
+      null,
+      2,
+    ),
   );
 }
 
@@ -120,6 +240,8 @@ interface Baseline {
   sseDeliveryLagP50Ms?: number;
   sseDeliveryLagP95Ms?: number;
   maxStmLagBlocks?: number;
+  /** Lag the STM must be back inside one sample interval after a chaos window. */
+  recoveryLagBlocks?: number;
 }
 
 // Below this many samples a "p95" is not a percentile, it is the largest or
@@ -205,5 +327,29 @@ export function baselineViolations(snap: MetricsSnapshot, base: Baseline): Basel
   checkOne("SSE delivery lag p50 ms", snap.sseDeliveryLagMs.p50, base.sseDeliveryLagP50Ms);
   checkTail("SSE delivery lag p95 ms", snap.sseDeliveryLagMs.p95, base.sseDeliveryLagP95Ms, snap.sseDeliveryLagMs.count);
   checkOne("max STM lag blocks", snap.stmLag.maxLagBlocks, base.maxStmLagBlocks);
+
+  // The other half of the 2026-08-18 ruling. Excluding chaos windows from the
+  // throughput gate would leave the restarts ungated, which is how a gate
+  // becomes decorative — so the restart is gated on the property that actually
+  // matters about it: the backlog is absorbed within one sample interval.
+  //
+  // A window whose recovery was never observed is a NOTE, not a pass: it means
+  // the run ended inside the deadline, so there is no measurement either way.
+  // Silently treating that as green is the failure mode this comment exists to
+  // prevent.
+  const excluded = snap.stmLag.excludedSamples ?? 0;
+  if (excluded > 0) {
+    notes.push(
+      `STM lag: ${excluded}/${snap.stmLag.samples} samples excluded as deliberate chaos ` +
+      `(peak including chaos ${snap.stmLag.maxLagBlocksIncludingChaos}, gated max ${snap.stmLag.maxLagBlocks})`,
+    );
+  }
+  for (const r of snap.stmLag.recoveries ?? []) {
+    if (r.lagBlocks === null) {
+      notes.push(`chaos recovery (${r.name}): run ended before a post-deadline sample — unobserved`);
+      continue;
+    }
+    checkOne(`chaos recovery lag blocks (${r.name})`, r.lagBlocks, base.recoveryLagBlocks);
+  }
   return { violations: out, notes };
 }

@@ -180,6 +180,7 @@ Errors — all bodies are `{ "error": CODE, "reason": "human text", …extras }`
 | HTTP | `error` | Meaning / UI treatment |
 |---|---|---|
 | 409 | `DUPLICATE_OFFER` | Already indexed; body has `offerId` + current `status`. Not a failure — link the user to the existing offer. |
+| 409 | `DUPLICATE_MARKERS` | **NEW, breaking (2026-08-18).** A LIVE offer already declares one of this offer's outputs — i.e. this is the same intent, re-wrapped or re-proved. Body has `offerId` (this blob) + `activeOfferId` (the live offer that owns the marker). Treat it exactly like `DUPLICATE_OFFER`: not a failure, link the user to `activeOfferId`. Do NOT auto-retry — a re-proof produces different bytes and the same markers, so it is refused again. The user's existing offer is untouched and still fillable; to change terms they cancel it first. |
 | 400 | `BAD_ENCODING`, `BAD_DESERIALIZE` | Not a valid `swapoffer1…` blob. |
 | 400 | `TOO_LARGE` | Decoded blob over the size cap. |
 | 400 | `NOT_A_SWAP`, `NO_SPENDABLE_INPUT` | Valid tx, but not a takeable offer. |
@@ -196,7 +197,9 @@ For completeness, the validator union is: `BAD_ENCODING`, `TOO_LARGE`,
 `ROOT_UNREADABLE`, `DUPLICATE`. `WRONG_TX_VARIANT` is reserved;
 `UNKNOWN_TOKEN` and `ROOT_UNREADABLE` are fail-closed guards not reachable from
 today's wire format; callback-only `UTXO_*`/`DUPLICATE` values map to the
-public codes described above.
+public codes described above. `DUPLICATE_MARKERS` is deliberately NOT in that
+union: it is an API/STM gate code like `DUPLICATE_OFFER` and `UTXO_NOT_LIVE`,
+because the rule reads the live book rather than the blob.
 
 **Basket offers are accepted but carry no market data.** An offer with more than
 one token color on a side (give A+B, want C+D) is a sealed pre-agreed

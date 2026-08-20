@@ -390,12 +390,19 @@ export function validateZswapOfferBytes(
   }
 
   // ── 7. Dedup (optional) ──
-  // Caller-supplied and identity-based (nullifiers / tx identifiers). Note the
-  // ruling recorded at the submit gate in packages/node/api.ts: dedup is
-  // byte-identical by design. Two wrappers around the LITERAL same intent hash
-  // differently and are treated as two offers, because publication costs a
-  // Celestia fee per blob — re-wrapping is an attack the attacker pays for, and
-  // duplicates compete for the same inputs so only one can ever settle.
+  // Caller-supplied and identity-based (nullifiers / tx identifiers).
+  //
+  // This is rule (i) territory only — the cheap, pre-crypto discriminator. The
+  // production doors implement it as a byte-identical `offer_hash` probe (see
+  // packages/node/api.ts) and it stays exactly where it is.
+  //
+  // Rule (ii), MARKER dedup, is deliberately NOT here. Ruled 2026-08-18: two
+  // wrappers of one intent are byte-different and declare identical markers, so
+  // they must be related — but the check has to run AFTER crypto, because it
+  // registers a claim on markers and an unverified blob must never be able to
+  // block a victim's real offer with them. A ladder step that runs before
+  // `wellFormed` cannot express that, so it lives at the doors instead:
+  // packages/node/marker-dedup.ts, one predicate, both call sites.
   if (opts.seen && opts.seen(nullifiers, identifiers)) {
     return { ok: false, code: "DUPLICATE", reason: "offer already seen", ...derived };
   }

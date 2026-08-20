@@ -18,6 +18,8 @@ const {
   insertOfferFileTokenWithKind,
   getOfferTokensAny,
   getPairStats24h,
+  adjudicateOfferFill,
+  findUnadjudicatedFills,
 } = await import("@zswap-da/database");
 
 // Fixtures seed rows relative to NOW(), so their window starts 24 h before
@@ -29,6 +31,13 @@ let client: InstanceType<typeof pg.Client>;
 
 const BASE = "b".repeat(64);
 const QUOTE = "q".repeat(64);
+
+/** The product's own repair sweep, run verbatim — fixtures never hand-write
+ *  verdict columns, so a test cannot agree with a broken adjudicator. */
+async function adjudicateAll() {
+  const owed = await findUnadjudicatedFills.run({ limit: 10_000 }, client);
+  for (const row of owed) await adjudicateOfferFill.run({ offer_id: row.id }, client);
+}
 
 beforeAll(async () => {
   handle = await startPglite(PORT);
@@ -121,6 +130,11 @@ test("market queries count a dual-kind leg ONCE, summed by color (join-duplicati
      INSERT INTO commitments (commitment, tx_hash, mt_index, height)
      VALUES ('dual-kind-commitment', 'dual-kind-tx', '500', 1)`,
   );
+  // Upstream (5b11085) moved the verdict from read time to a stored column, so
+  // the fixture must run the product's own adjudication before the aggregate
+  // can see the fill. Both halves are kept: the markers above make the verdict
+  // cryptographic rather than heuristic, and this makes it stored.
+  await adjudicateAll();
   const s = (await getPairStats24h.run({ base: BASE, quote: QUOTE, cutoff: DAY_AGO }, client))[0];
   expect(s.fills_24h).toBe(1);
   expect(Number(s.volume_base_24h)).toBe(15);

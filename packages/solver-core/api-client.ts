@@ -13,6 +13,13 @@ import {
   parseOfferValidationVerdict,
   type OfferValidationVerdict,
 } from "./validation-contract.ts";
+import {
+  MAX_OFFER_UPDATES_FRAME_BYTES,
+  OFFER_UPDATES_PATH,
+  OFFER_UPDATES_READY_SEQ,
+  decodeOfferUpdatesFrame,
+  followsInSequence,
+} from "./offer-updates-contract.ts";
 
 const API = process.env["ZSWAP_API"] ?? "http://127.0.0.1:9999";
 
@@ -1151,6 +1158,323 @@ export function openSseStream(
         stopped = true;
         controller?.abort(new Error("SSE stream closed"));
         cancelBackoff();
+      }
+      await lifecycle;
+    },
+  };
+}
+
+// ── Offer-updates websocket stream ───────────────────────────────────────────
+
+/** What one `ready` frame told us about the subscription it opened. */
+export interface OfferUpdatesSubscription {
+  /** Identity of THIS subscription. A different value is a different
+   * subscription: nothing carries over, and derived state must be rebuilt. */
+  streamId: string;
+  /** Committed Effectstream (L2) height observed at or before the moment this
+   * subscription was registered, or null when the backend could not read it.
+   * A consumer binds its later currentness verdict to this floor: a backend
+   * that afterwards reports a LOWER height has rewound, which no snapshot can
+   * repair. */
+  blockL2Height: string | null;
+}
+
+/** The slice of the WHATWG WebSocket surface this client uses. Declared rather
+ * than imported so the client can be driven by an explicit test double without
+ * a DOM lib dependency. */
+export interface WebSocketLike {
+  readyState: number;
+  onopen: ((event?: any) => void) | null;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  onerror: ((event?: any) => void) | null;
+  onclose: ((event?: any) => void) | null;
+  close(code?: number, reason?: string): void;
+}
+
+export interface OfferUpdatesStreamOpts {
+  api?: string;
+  /** Fires once per subscription, when the `ready` frame arrives — NOT when
+   * the socket opens. The backend attaches its event listener before writing
+   * that frame, so this really is the point after which nothing is missed,
+   * and it is the correct moment to start an authoritative snapshot. */
+  onOpen?: (subscription: OfferUpdatesSubscription) => void;
+  /** Fires after a subscription that reached `ready` ends for any reason —
+   * peer close, transport failure, or a sequence gap this client refused.
+   * Not called by close(). */
+  onDisconnect?: () => void;
+  onError?: (err: unknown) => void;
+  baseBackoffMs?: number;
+  maxBackoffMs?: number;
+  /** Deadline covering the socket open AND the `ready` frame. A socket that
+   * opens but never announces a subscription is not a usable stream. */
+  connectTimeoutMs?: number;
+  /** Largest accepted frame. A peer must not be able to grow the solver heap
+   * with one enormous message. */
+  maxFrameBytes?: number;
+  /** Explicit seam for deterministic tests; production uses global WebSocket. */
+  createWebSocket?: (url: string) => WebSocketLike;
+}
+
+export interface OfferUpdatesStreamHandle {
+  /** Stop reconnecting, close any live subscription, and resolve once the
+   * stream lifecycle has ended. Idempotent. */
+  close: () => Promise<void>;
+}
+
+/** Map an HTTP API base onto the websocket origin for the update stream. */
+export function offerUpdatesUrl(api: string): string {
+  const base = api.replace(/\/+$/, "");
+  if (base.startsWith("https://")) return `wss://${base.slice("https://".length)}${OFFER_UPDATES_PATH}`;
+  if (base.startsWith("http://")) return `ws://${base.slice("http://".length)}${OFFER_UPDATES_PATH}`;
+  if (base.startsWith("ws://") || base.startsWith("wss://")) return `${base}${OFFER_UPDATES_PATH}`;
+  throw new ApiRequestError(
+    "malformed",
+    OFFER_UPDATES_PATH,
+    `API base ${api} has no http(s) or ws(s) scheme`,
+  );
+}
+
+/**
+ * Consume the node's websocket update stream, reconnecting with exponential
+ * backoff and jitter until close().
+ *
+ * The whole point of this transport over SSE is that a missed mutation is
+ * DETECTABLE. Every frame carries a per-subscription sequence number; this
+ * client refuses the first frame that does not follow its predecessor and
+ * tears the subscription down, which surfaces to the consumer as an ordinary
+ * disconnect — the state it already knows how to recover from with a full
+ * snapshot. Nothing here ever skips a frame, repairs one, or reorders.
+ */
+export function openOfferUpdatesStream(
+  onEvent: (ev: SseEvent) => void,
+  opts: OfferUpdatesStreamOpts = {},
+): OfferUpdatesStreamHandle {
+  const base = opts.baseBackoffMs ?? DEFAULT_SSE_BASE_BACKOFF_MS;
+  const max = opts.maxBackoffMs ?? DEFAULT_SSE_MAX_BACKOFF_MS;
+  const connectTimeoutMs = opts.connectTimeoutMs ?? DEFAULT_API_TIMEOUT_MS;
+  const maxFrameBytes = opts.maxFrameBytes ?? MAX_OFFER_UPDATES_FRAME_BYTES;
+  for (const [name, value] of [
+    ["baseBackoffMs", base],
+    ["maxBackoffMs", max],
+    ["connectTimeoutMs", connectTimeoutMs],
+    ["maxFrameBytes", maxFrameBytes],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new RangeError(`offer-updates ${name} must be a positive safe integer, got ${value}`);
+    }
+  }
+  const url = offerUpdatesUrl(resolveApi(opts.api));
+  const createWebSocket =
+    opts.createWebSocket ??
+    ((target: string): WebSocketLike => new WebSocket(target) as unknown as WebSocketLike);
+
+  let stopped = false;
+  let active: WebSocketLike | null = null;
+  let backoffTimer: ReturnType<typeof setTimeout> | null = null;
+  let wakeBackoff: (() => void) | null = null;
+
+  const reportError = (err: unknown): void => {
+    try {
+      opts.onError?.(err);
+    } catch {
+      // Diagnostics are never allowed to become a stream-lifecycle failure.
+    }
+  };
+
+  const protocolError = (message: string, cause?: unknown): ApiRequestError =>
+    new ApiRequestError("malformed", OFFER_UPDATES_PATH, message, {
+      ...(cause === undefined ? {} : { cause }),
+    });
+
+  /** Run one subscription attempt. Resolves when it has ended, whatever the
+   * reason; failures are reported, never thrown at the lifecycle loop. */
+  const runSubscription = (): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let socket: WebSocketLike;
+      try {
+        socket = createWebSocket(url);
+      } catch (err) {
+        reportError(
+          new ApiRequestError("network", OFFER_UPDATES_PATH, "could not open a websocket", {
+            cause: err,
+          }),
+        );
+        resolve();
+        return;
+      }
+      active = socket;
+
+      let settled = false;
+      let subscribed = false;
+      let previous: { streamId: string; seq: number } | null = null;
+
+      const timer = setTimeout(() => {
+        reportError(
+          new ApiRequestError(
+            "timeout",
+            OFFER_UPDATES_PATH,
+            `no ready frame within ${connectTimeoutMs} ms`,
+          ),
+        );
+        endSubscription();
+      }, connectTimeoutMs);
+
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        if (active === socket) active = null;
+        if (subscribed && !stopped) {
+          try {
+            opts.onDisconnect?.();
+          } catch (err) {
+            reportError(err);
+          }
+        }
+        resolve();
+      };
+
+      function endSubscription(): void {
+        try {
+          socket.close();
+        } catch {
+          // A closing/closed socket is exactly the state we are asking for.
+        }
+        // A test double or a wedged implementation may never call onclose;
+        // the subscription is over either way.
+        finish();
+      }
+
+      const fail = (error: unknown): void => {
+        reportError(error);
+        endSubscription();
+      };
+
+      socket.onopen = (): void => {
+        // Deliberately NOT the subscription point: the backend announces the
+        // subscription with its `ready` frame, and only that frame proves the
+        // event listener is attached.
+      };
+
+      socket.onmessage = (event: { data: unknown }): void => {
+        if (settled || stopped) return;
+        const data = event?.data;
+        if (typeof data !== "string") {
+          fail(protocolError("update stream sent a non-text frame"));
+          return;
+        }
+        if (data.length > maxFrameBytes) {
+          fail(protocolError(`update frame exceeded ${maxFrameBytes} bytes`));
+          return;
+        }
+        const encoded = new TextEncoder().encode(data).byteLength;
+        if (encoded > maxFrameBytes) {
+          fail(protocolError(`update frame exceeded ${maxFrameBytes} bytes`));
+          return;
+        }
+        const frame = decodeOfferUpdatesFrame(data);
+        if (frame === null) {
+          fail(protocolError("update stream sent a noncanonical frame"));
+          return;
+        }
+
+        if (previous === null) {
+          if (frame.type !== "ready" || frame.seq !== OFFER_UPDATES_READY_SEQ) {
+            fail(protocolError("update stream did not open with a ready frame"));
+            return;
+          }
+          previous = { streamId: frame.streamId, seq: frame.seq };
+          subscribed = true;
+          clearTimeout(timer);
+          try {
+            opts.onOpen?.({ streamId: frame.streamId, blockL2Height: frame.blockL2Height });
+          } catch (err) {
+            reportError(err);
+          }
+          return;
+        }
+
+        if (frame.type === "ready") {
+          fail(protocolError("update stream announced a second subscription"));
+          return;
+        }
+        if (!followsInSequence(previous, frame)) {
+          // THE failure this transport exists to catch: at least one mutation
+          // was not delivered. Never applied partially, never patched over.
+          fail(
+            protocolError(
+              `update stream gap: expected seq ${previous.seq + 1} on stream ` +
+                `${previous.streamId}, got seq ${frame.seq} on stream ${frame.streamId}`,
+            ),
+          );
+          return;
+        }
+        previous = { streamId: frame.streamId, seq: frame.seq };
+        try {
+          onEvent(frame.event as unknown as SseEvent);
+        } catch (err) {
+          reportError(err);
+        }
+      };
+
+      socket.onerror = (event?: any): void => {
+        if (settled) return;
+        reportError(
+          new ApiRequestError("network", OFFER_UPDATES_PATH, "websocket transport error", {
+            cause: event,
+          }),
+        );
+        // onclose follows onerror in every conforming implementation; finish
+        // there so a transient error event does not end a healthy stream.
+      };
+
+      socket.onclose = (): void => {
+        finish();
+      };
+    });
+
+  const waitForBackoff = (delay: number): Promise<void> =>
+    new Promise((resolve) => {
+      if (stopped) {
+        resolve();
+        return;
+      }
+      const done = (): void => {
+        if (backoffTimer !== null) clearTimeout(backoffTimer);
+        backoffTimer = null;
+        if (wakeBackoff === done) wakeBackoff = null;
+        resolve();
+      };
+      wakeBackoff = done;
+      backoffTimer = setTimeout(done, delay);
+    });
+
+  const lifecycle = (async () => {
+    let attempt = 0;
+    while (!stopped) {
+      await runSubscription();
+      if (stopped) return;
+      // Jitter in [0.5, 1.5) so multiple solvers don't reconnect in lockstep.
+      const delay = Math.floor(Math.min(max, base * 2 ** attempt) * (0.5 + Math.random()));
+      attempt = attempt + 1 > 30 ? 30 : attempt + 1;
+      await waitForBackoff(delay);
+    }
+  })();
+
+  return {
+    async close(): Promise<void> {
+      if (!stopped) {
+        stopped = true;
+        try {
+          active?.close();
+        } catch {
+          // Already closing.
+        }
+        wakeBackoff?.();
       }
       await lifecycle;
     },

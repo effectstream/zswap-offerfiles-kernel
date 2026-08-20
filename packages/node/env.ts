@@ -133,6 +133,17 @@ export const apiSseMaxConnections = (): number => {
   return Number.isSafeInteger(parsed) && parsed <= 10_000 ? parsed : 100;
 };
 
+// The websocket update stream (`GET /v1/offers/updates`) never reaches the
+// router-wide request budget — an upgrade request bypasses Fastify's routing
+// entirely — so, exactly as for SSE, concurrent subscriptions are what has to
+// be capped. Excess clients are refused the upgrade with `503 UPDATES_CAPACITY`.
+export const apiUpdatesMaxConnections = (): number => {
+  const raw = getEnv("API_UPDATES_MAX_CONNECTIONS") ?? "100";
+  if (!/^[1-9][0-9]*$/.test(raw)) return 100;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 10_000 ? parsed : 100;
+};
+
 // Decision budget for one exact-files read. Keep a hard upper bound so an
 // operator typo cannot silently permit unbounded async read work. The route
 // observes it at async yields and between validation stages. The ledger's

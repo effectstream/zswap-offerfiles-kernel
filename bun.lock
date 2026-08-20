@@ -158,6 +158,7 @@
         "@zswap-da/validator": "workspace:*",
         "effection": "^3.5.0",
         "rxjs": "^7.8.2",
+        "ws": "^8.21.0",
       },
       "devDependencies": {
         "fastify": "^5.0.0",

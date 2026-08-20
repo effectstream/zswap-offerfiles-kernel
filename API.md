@@ -67,6 +67,7 @@ EFFECTSTREAM_API_PORT=9999
 BATCHER_SUBMIT_URL=http://127.0.0.1:3334
 BATCHER_SUBMIT_TIMEOUT_MS=310000        # absolute fetch + receipt-body deadline
 API_SSE_MAX_CONNECTIONS=100             # persistent stream cap; excess gets 503
+API_UPDATES_MAX_CONNECTIONS=100         # websocket update-stream cap; excess is refused
 OFFER_TTL_SECONDS=                      # offer lifetime; DEFAULTS to ROOT_WINDOW_SECONDS
                                         # (shielded fillability tracks the root window)
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
@@ -807,6 +808,69 @@ carries **either** `nullifier` (shielded input spent) **or** `unshieldedSpend`
 was consumed — handle both. REST uses the content-addressed `offerHash`; numeric
 `offerId` is a node-local row id. `offerHash` can be absent only for legacy rows
 inserted before hashes were persisted, or for a rejection too malformed to hash.
+
+---
+
+#### `GET /v1/offers/updates` (websocket)
+
+The same offer-lifecycle events as the SSE stream above, over a websocket, with
+the two extra signals a client that **mirrors the book** needs in order to prove
+it has missed nothing. Client-initiated like every other endpoint here: the node
+never connects to a client, and it keeps no per-client state beyond the socket —
+no registry, no cursor, no replay buffer, no credentials. Anyone may open it;
+nothing about it is solver-specific. `GET /v1/offers/stream` is unchanged and
+remains the right choice for browsers and dashboards.
+
+```bash
+websocat ws://host:9999/v1/offers/updates
+```
+
+**Frames.** Text frames only, one JSON object each, in the closed
+`offer-updates-v1` grammar. The client sends nothing at all.
+
+```json
+{"protocol":"offer-updates-v1","schemaVersion":1,"type":"ready","streamId":"6f1c…","seq":0,"ts":1750800000000,"blockL2Height":"128401"}
+{"protocol":"offer-updates-v1","schemaVersion":1,"type":"update","streamId":"6f1c…","seq":1,"ts":1750800000100,"event":{"type":"offer_indexed","offerId":42,"offerHash":"9f2c…","blockHeight":1281600,"gives":[],"wants":[],"timestamp":1750800000100}}
+```
+
+- `event` is **byte-identical to the SSE payload** — the node's lifecycle event
+  plus the server-stamped `timestamp` — so one event handler serves both
+  transports.
+- `streamId` (32 lowercase hex) identifies ONE subscription. A different value
+  is a different subscription: nothing carries over.
+- `seq` is per-subscription. `ready` is always `0`, and every following frame is
+  exactly the previous one plus one. **A skipped number means a mutation was not
+  delivered.** Treat it as a lost stream — reconnect and take a fresh full-book
+  read — never as an absence of news. The node never renumbers, never back-fills,
+  and never drops a frame silently: when it cannot deliver one it drops the
+  connection instead.
+- `blockL2Height` is the committed Effectstream (L2) height at or before the
+  moment this subscription was registered, or `null` when it could not be read.
+  It is a floor: heights only advance, so a later `GET /v1/health/sync` reporting
+  a LOWER `blockL2.height` is evidence the node has rewound (a restore, or a
+  lagging replica behind a load balancer). No snapshot repairs that, so a mirror
+  should stop treating its cache as current.
+
+**Ordering guarantee.** The node attaches its event listener BEFORE it writes
+`ready`, in the same synchronous step. `ready` therefore means "everything from
+here on reaches you", which is what makes the standard startup sequence sound:
+subscribe, buffer, read the full book with `GET /v1/offers`, replay the buffer,
+then apply increments live. (`GET /v1/offers/stream` writes its `connected`
+frame before subscribing, and has no sequence numbers with which to notice the
+difference.)
+
+**Keepalive.** The node sends a websocket ping every 30 seconds and requires a
+pong within two intervals.
+
+**Refusals are disconnects, not status codes.** This node runs on Bun, where an
+upgraded connection cannot carry an HTTP response body, and where a
+server-initiated websocket close leaves the HTTP server unable to shut down. So
+every refusal here — the `API_UPDATES_MAX_CONNECTIONS` cap (default 100), a
+malformed handshake, a client that sends data on this push-only stream, a peer
+that stops reading, a frame too large to deliver, a missing pong, node shutdown
+— ends the connection without a close code or reason. Reconnect with backoff and
+resynchronize; that is the same recovery an ordinary network drop needs, and a
+correct consumer of this stream already implements it.
 
 ---
 

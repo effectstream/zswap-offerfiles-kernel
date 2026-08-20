@@ -24,6 +24,7 @@ import {
   apiRateLimitAllowList,
   apiRateLimitMax,
   apiSseMaxConnections,
+  apiUpdatesMaxConnections,
   isEventGatePollEnabled,
   isTokenRegistryEnabled,
   MIDNIGHT_NETWORK_ID,
@@ -45,6 +46,7 @@ import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
 import { registerExactFilesRoute } from "./offer-files-read.ts";
+import { registerOfferUpdatesStream } from "./offer-updates-stream.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
@@ -153,6 +155,12 @@ export const apiRouter: StartConfigApiRouter = async function (
   // canonical validation/liveness primitives but never calls the batcher.
   registerExactFilesRoute(server, dbConn);
 
+  // GET /v1/offers/updates — the client-initiated websocket update stream.
+  // Same lifecycle events as the SSE route below, plus a per-subscription
+  // sequence number so a consumer mirroring the book can prove it missed
+  // nothing. It lives on the HTTP server's `upgrade` event, not on a route.
+  registerOfferUpdatesStream(server, dbConn);
+
   // Drive the event gate from THIS pool — the whole point is that it is not
   // the connection running the block transaction. The runtime writes the block
   // record inside that transaction, so a height visible here proves its COMMIT
@@ -190,11 +198,15 @@ export const apiRouter: StartConfigApiRouter = async function (
   };
   eventBus.on("app_event", onAppEvent);
   const sseMaxConnections = apiSseMaxConnections();
-  // The emitter warning threshold should reflect the explicit connection cap,
-  // plus non-SSE projection listeners. The cap, not EventEmitter warnings, is
-  // the resource boundary.
+  // The emitter warning threshold should reflect the explicit connection caps
+  // of BOTH event transports (SSE responses and websocket subscriptions), plus
+  // non-stream projection listeners. The caps, not EventEmitter warnings, are
+  // the resource boundary. One owner raises and restores this so the two
+  // transports cannot fight over the threshold at shutdown.
   const priorEventBusMaxListeners = eventBus.getMaxListeners();
-  eventBus.setMaxListeners(Math.max(priorEventBusMaxListeners, sseMaxConnections + 10));
+  eventBus.setMaxListeners(
+    Math.max(priorEventBusMaxListeners, sseMaxConnections + apiUpdatesMaxConnections() + 10),
+  );
   let activeSseConnections = 0;
   const activeSseResponses = new Set<any>();
   // Fastify's preClose hook runs before it waits for active requests. Without

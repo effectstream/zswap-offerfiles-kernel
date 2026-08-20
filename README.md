@@ -104,6 +104,7 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `NTP_START_TIME` | optional | NTP reference timestamp; resumed from DB when unset. |
 | `BATCHER_SUBMIT_TIMEOUT_MS` | optional | Absolute batcher fetch + receipt-body deadline; default 310 000 ms, bounded to 1 000–600 000 ms. |
 | `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
+| `API_UPDATES_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/updates` websocket cap; default 100. Excess clients are refused the connection (this endpoint's refusals are disconnects, not HTTP statuses — see API.md). |
 | `OFFER_FILES_READ_TIMEOUT_MS` | optional | Exact-files read decision budget, default 15 000 ms and capped at 60 000 ms. Native synchronous proof work cannot be preempted; a retained concurrency slot bounds unfinished work. |
 | `SOLVER_LEVELS_AUTH_TOKEN` | still required at solver startup | Solver-side bearer (at least 16 non-whitespace characters) for the solver's pre-match validation gate. That gate still calls the removed `POST /v1/offers/validate`, so it is inert until the solver moves to job-time exact-files fetching; the startup check is retained so the variable does not silently disappear from deployments in the meantime. |
 | `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | The mainnet solver defaults to dry-run. Live settlement requires `SOLVER_DRY_RUN=false` **and** the separate exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
@@ -258,6 +259,7 @@ There are **two ways** to post and read offers:
 | `GET` | `/v1/midnight/config` | Public Midnight config the browser contract client needs. |
 | `POST` | `/v1/offers` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, `409` on duplicate, else forward to the batcher → Celestia. Returns the offer's `offerId`. |
 | `GET` | `/v1/offers/stream` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
+| `GET` | `/v1/offers/updates` | Websocket update stream carrying the same lifecycle events, plus a per-subscription sequence number so a consumer mirroring the book can prove it missed nothing. |
 
 Beyond the above, the node also serves `GET /health`, `GET /v1/health/sync`,
 `GET /v1/pairs`, `GET /v1/quote`, and

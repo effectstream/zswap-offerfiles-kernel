@@ -17,6 +17,12 @@ import { OFFER_HRP, OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 // exact-files read have OPPOSITE semantics for an exact, already-indexed live
 // offer. Ingestion refuses it as a duplicate; the read serves its bytes,
 // because being indexed and live is precisely what makes it usable.
+//
+// Upstream PR #47 added a SECOND dedup rule with the same shape, so the matrix
+// carries a second inversion: an offer whose declared markers a live offer
+// already claims is refused at both ingestion doors as DUPLICATE_MARKERS,
+// while the incumbent — whose own markers are, necessarily, claimed by itself —
+// must still read VALID and still hand back its exact bytes.
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
@@ -24,6 +30,7 @@ process.env["PGLITE_DATA_DIR"] ??= "memory://";
 const {
   createAppInputSavepoint,
   deleteRejectedAccountingRow,
+  findActiveOfferByCommitment,
   getOfferRootTiming,
   getOfferStatusByHash,
   insertOfferFileWithHash,
@@ -33,6 +40,7 @@ const {
   recordOfferRejection,
   releaseAppInputSavepoint,
 } = await import("@zswap-da/database");
+const { declaredMarkers } = await import("./marker-dedup.ts");
 const { closeTestPglite } = await import("../database/test-pglite.ts");
 const {
   eventBus,
@@ -87,6 +95,17 @@ if (!probe.ok || !probe.nullifiers?.[0] || !probe.inputRoots?.[0]) {
 const NULLIFIER = probe.nullifiers[0];
 const INPUT_ROOTS = probe.inputRoots;
 
+// The markers this shared fixture DECLARES, derived by the production
+// derivation both doors use — never hand-written, so the matrix cannot agree
+// with a broken derivation.
+const DECLARED_COMMITMENTS = declaredMarkers(probe.tx!)
+  .flatMap((marker) => marker.kind === "commitment" ? [marker.commitment] : []);
+if (DECLARED_COMMITMENTS.length === 0) {
+  throw new Error("shared fixture declares no commitments; the marker row cannot be driven");
+}
+/** A second, unrelated live offer, standing in for the re-proved incumbent. */
+const INCUMBENT_ID = "a".repeat(64);
+
 /**
  * Frozen V0 prediction matrix. The endpoint column is the v1 contract target,
  * not an assertion that the not-yet-implemented route exists.
@@ -118,6 +137,26 @@ const EXPECTED_MATRIX = {
     batcher: "DUPLICATE_OFFER",
     api: "DUPLICATE_OFFER",
     stm: "DUPLICATE_OFFER",
+    exactFiles: "VALID",
+  },
+  // Upstream #47's SECOND dedup rule (9f1f479): an offer whose DECLARED markers
+  // are already claimed by an ACTIVE offer is refused, at both ingestion doors,
+  // after crypto. The state is "some live offer already claims this
+  // commitment" — reached in practice by re-proving one intent against a fresh
+  // root, which yields byte-different bytes, a fresh offer_hash and identical
+  // markers, so rule (i) relates the two not at all.
+  markerClaimedByLiveOffer: {
+    // The batcher has no book: its dedup is byte-keyed and process-local, so a
+    // re-proved copy is invisible to it, exactly as `spent`/`unknownRoot` are.
+    batcher: "VALID",
+    api: "DUPLICATE_MARKERS",
+    stm: "DUPLICATE_MARKERS",
+    // THE INVERSION, again, and the one this phase had to prove: marker dedup
+    // is a rule about admitting a SECOND claimant. It is never a statement
+    // about the offer that holds the claim, so an indexed, live offer whose own
+    // markers are (necessarily) claimed by itself must still read VALID and
+    // still hand back its exact bytes. If this were `DUPLICATE_MARKERS` the
+    // solver could not fetch settlement bytes for any offer in the book.
     exactFiles: "VALID",
   },
   spent: {
@@ -173,7 +212,12 @@ async function markPublished(
   );
 }
 
-type StmState = "unindexed" | "indexed-live" | "spent" | "root-unknown";
+type StmState =
+  | "unindexed"
+  | "indexed-live"
+  | "spent"
+  | "root-unknown"
+  | "marker-claimed";
 type StmObservation = {
   queries: Array<{ queryIR: unknown; params: unknown }>;
   events: Array<Record<string, unknown>>;
@@ -224,6 +268,12 @@ function driveStm(rawBytes: Uint8Array, state: StmState): StmObservation {
       result = state === "spent" ? [{ spent: 1 }] : [];
     } else if (queryIR === (isKnownRootLive as any).queryIR) {
       result = state === "root-unknown" ? [] : [{ present: 1 }];
+    } else if (queryIR === (findActiveOfferByCommitment as any).queryIR) {
+      // Upstream #47's marker-dedup probe. A non-empty answer means some ACTIVE
+      // offer already claims this declared commitment.
+      result = state === "marker-claimed"
+        ? [{ offer_file_id: 91, offer_hash: INCUMBENT_ID }]
+        : [];
     } else if (queryIR === (getOfferRootTiming as any).queryIR) {
       // 774b363 renamed getEarliestRootFirstSeen -> getOfferRootTiming, added a
       // required :block_ms! param, and replaced last_seen_ms with the
@@ -376,6 +426,15 @@ describe("V0 shared validation-context matrix", () => {
     );
     expect(spentButInvisibleHere.valid).toBe(true);
 
+    // Marker overlap is a BOOK question, and this context has no book: its
+    // dedup keys on the bytes it has itself published in this process. A blob
+    // whose markers the backend's live book already claims is admitted here.
+    const markerClaimedButInvisibleHere = adapter().validateInput(
+      batcherInput(VALID_OFFER) as any,
+    );
+    expect(markerClaimedButInvisibleHere.valid).toBe(true);
+    expect(EXPECTED_MATRIX.markerClaimedByLiveOffer.batcher).toBe("VALID");
+
     const published = adapter();
     await markPublished(published, VALID_OFFER);
     const duplicate = published.validateInput(batcherInput(VALID_OFFER) as any);
@@ -430,6 +489,41 @@ describe("V0 shared validation-context matrix", () => {
     expect(response.statusCode).toBe(400);
     expect(response.json().error).toBe(EXPECTED_MATRIX.unknownRoot.api);
     expect(batcherSubmissions).toBe(1);
+
+    // Upstream #47 rule (ii), driven through the real route against real rows:
+    // a DIFFERENT live offer already claims a commitment this blob declares.
+    // Everything else about the submission is admissible — the bytes are not
+    // indexed, the nullifier is unspent, the roots are known, and the crypto
+    // verifies — so the only thing left to refuse it is marker overlap.
+    for (const root of INPUT_ROOTS) {
+      await client!.query(
+        `INSERT INTO known_roots(root, height, last_seen_ms, first_seen_ms)
+         VALUES ($1, 1, $2, $2)`,
+        [root, BLOCK_TIME_MS],
+      );
+    }
+    const incumbent = await client!.query(
+      `INSERT INTO offer_file(celestia_height, transaction_hex, offer_hash, ttl_seconds, first_seen_at)
+       VALUES (76, 'incumbent-blob', $1, 3600, NOW()) RETURNING id`,
+      [INCUMBENT_ID],
+    );
+    await client!.query(
+      `INSERT INTO offer_file_commitments(offer_file_id, commitment) VALUES ($1, $2)`,
+      [incumbent.rows[0].id, DECLARED_COMMITMENTS[0]],
+    );
+    response = await inject(VALID_OFFER);
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toBe(EXPECTED_MATRIX.markerClaimedByLiveOffer.api);
+    // The reason names the incumbent by CONTENT ADDRESS, so the maker can look
+    // up the offer that already owns the marker instead of guessing.
+    expect(response.json().activeOfferId).toBe(INCUMBENT_ID);
+    expect(response.json().reason).toContain(DECLARED_COMMITMENTS[0]);
+    expect(batcherSubmissions).toBe(1);
+
+    await client!.query("DELETE FROM offer_file_commitments WHERE offer_file_id = $1", [
+      incumbent.rows[0].id,
+    ]);
+    await client!.query("DELETE FROM offer_file WHERE offer_hash = $1", [INCUMBENT_ID]);
   });
 
   test("STM ingestion uses raw bytes and rejects duplicate/liveness before crypto", () => {
@@ -458,10 +552,34 @@ describe("V0 shared validation-context matrix", () => {
     const unknownRoot = driveStm(VALID_BYTES, "root-unknown");
     expect(rejectionCode(unknownRoot)).toBe(EXPECTED_MATRIX.unknownRoot.stm);
 
+    // Upstream #47 rule (ii). The marker probe is the AUTHORITATIVE door — the
+    // DA namespace is permissionless, so a blob can arrive having never passed
+    // the API — and it refuses before the offer is written.
+    const markerClaimed = driveStm(VALID_BYTES, "marker-claimed");
+    expect(rejectionCode(markerClaimed)).toBe(EXPECTED_MATRIX.markerClaimedByLiveOffer.stm);
+    expect(markerClaimed.queries.some(({ queryIR }) =>
+      queryIR === (insertOfferFileWithHash as any).queryIR)).toBe(false);
+
+    // Ordering, asserted rather than assumed: rule (i) is cheaper and runs
+    // FIRST, so a byte-identical replay never reaches the marker probe.
+    expect(duplicate.queries.some(({ queryIR }) =>
+      queryIR === (findActiveOfferByCommitment as any).queryIR)).toBe(false);
+    // ...and the marker probe runs AFTER liveness, so neither of the two
+    // liveness refusals pays for it either.
+    expect(spent.queries.some(({ queryIR }) =>
+      queryIR === (findActiveOfferByCommitment as any).queryIR)).toBe(false);
+    expect(unknownRoot.queries.some(({ queryIR }) =>
+      queryIR === (findActiveOfferByCommitment as any).queryIR)).toBe(false);
+
     const accepted = driveStm(VALID_BYTES, "unindexed");
     expect(rejectionCode(accepted)).toBeNull();
     expect(accepted.events.some((event) =>
       event.type === "offer_indexed" && event.offerHash === OFFER_ID)).toBe(true);
+    // An accepted offer DID pay for the probe — one per declared commitment —
+    // which is what makes the refusal above a decision rather than an accident.
+    expect(accepted.queries.filter(({ queryIR }) =>
+      queryIR === (findActiveOfferByCommitment as any).queryIR).length)
+      .toBe(DECLARED_COMMITMENTS.length);
   });
 
   test("the exact-files read agrees with admission and ingestion on the shared matrix", async () => {
@@ -533,6 +651,46 @@ describe("V0 shared validation-context matrix", () => {
       expect(indexedLive.offer).toBe(VALID_OFFER);
       expect(EXPECTED_MATRIX.indexedLiveDuplicate.api).toBe("DUPLICATE_OFFER");
       expect(EXPECTED_MATRIX.indexedLiveDuplicate.stm).toBe("DUPLICATE_OFFER");
+
+      // markerClaimedByLiveOffer: the SECOND inversion, added by upstream #47.
+      // Give the indexed offer above its own marker rows — which is exactly
+      // what ingestion writes for every accepted offer — so the live book now
+      // genuinely claims every commitment this identity declares. Both
+      // ingestion doors would refuse a re-proved copy on that basis
+      // (DUPLICATE_MARKERS above); the read must NOT refuse the incumbent its
+      // own bytes, or the solver could never fetch a settlement file.
+      const indexedRow = await client!.query(
+        "SELECT id FROM offer_file WHERE offer_hash = $1",
+        [OFFER_ID],
+      );
+      for (const commitment of DECLARED_COMMITMENTS) {
+        await client!.query(
+          `INSERT INTO offer_file_commitments(offer_file_id, commitment) VALUES ($1, $2)`,
+          [indexedRow.rows[0].id, commitment],
+        );
+      }
+      // Precondition, asserted rather than assumed: the probe both doors run
+      // now answers "claimed" for this identity's own markers.
+      for (const commitment of DECLARED_COMMITMENTS) {
+        const claimed = await findActiveOfferByCommitment.run({ commitment }, client!);
+        expect(claimed[0]?.offer_hash).toBe(OFFER_ID);
+      }
+      const [selfClaimed] = await readFiles([OFFER_ID]);
+      expect(selfClaimed.verdict.code).toBe(EXPECTED_MATRIX.markerClaimedByLiveOffer.exactFiles);
+      expect(selfClaimed.offer).toBe(VALID_OFFER);
+      expect(EXPECTED_MATRIX.markerClaimedByLiveOffer.api).toBe("DUPLICATE_MARKERS");
+      expect(EXPECTED_MATRIX.markerClaimedByLiveOffer.stm).toBe("DUPLICATE_MARKERS");
+
+      // The refused re-proved copy, conversely, has no row at all: a blob both
+      // doors reject is never indexed, so its identity reads NOT_INDEXED.
+      const reProvedId = "b".repeat(64);
+      const [reProved] = await readFiles([reProvedId]);
+      expect(reProved.verdict.code).toBe("NOT_INDEXED");
+      expect(reProved.offer).toBeUndefined();
+
+      await client!.query("DELETE FROM offer_file_commitments WHERE offer_file_id = $1", [
+        indexedRow.rows[0].id,
+      ]);
 
       // decodableJunk: only reachable by corrupting the index, and refused
       // with the canonical structural code the other contexts produce.

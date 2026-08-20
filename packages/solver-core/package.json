@@ -11,6 +11,7 @@
     "./offer-files": "./offer-files.ts",
     "./ladder-schema": "./ladder-schema.ts",
     "./liquidity-contract": "./liquidity-contract.ts",
+    "./relay-ws-contract": "./relay-ws-contract.ts",
     "./validation-contract": "./validation-contract.ts"
   },
   "scripts": {

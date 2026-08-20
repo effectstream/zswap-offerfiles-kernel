@@ -55,7 +55,7 @@ export type HealthState = 'ok' | 'syncing' | 'error'
 export type ProtocolHealth = { status: HealthState; synced: boolean }
 export type SyncStatus = { status: HealthState; [k: string]: unknown }
 
-export type QuoteSource = 'token-prices' | 'demo-fallback' | 'solver-levels'
+export type QuoteSource = 'token-prices' | 'demo-fallback'
 export type Quote = {
   from_token: string
   to_token: string
@@ -69,22 +69,7 @@ export type Quote = {
   from_usd: number
   to_usd: number | null
   source: QuoteSource
-  /** Present only when source === 'solver-levels'. This is never a reservation. */
-  quote_semantics?: 'indicative'
-  solver_id?: string
-  levels_version?: string
 }
-
-export type PriceLevel = { input: string; output: string }
-export type SolverPriceLevels = {
-  tokenIn: string
-  tokenOut: string
-  levels: PriceLevel[]
-  solverId: string
-  version: string
-  updatedAt: number
-}
-export type SolverLevelsSnapshot = { levels: SolverPriceLevels[] }
 
 /** Phantom-typed request: T is the expected response body. */
 export type ApiRequest<T = any> = {
@@ -129,9 +114,6 @@ export const api = {
   pairs: () => req('GET', `${API_BASE}/v1/pairs`),
   quote: (from_token: string, to_token: string, from_amount: string, to_amount?: string) =>
     req<Quote>('GET', `${API_BASE}/v1/quote?${qs({ from_token, to_token, from_amount, to_amount })}`),
-  /** Fresh authenticated declarations. They are indicative, not executable reservations. */
-  solverLevels: () =>
-    req<SolverLevelsSnapshot>('GET', `${API_BASE}/v1/solver/levels`),
   chartStats: (base: string, quote: string) =>
     req('GET', `${API_BASE}/v1/chart/stats?${qs({ base, quote })}`),
   chartHistory: (base: string, quote: string) =>

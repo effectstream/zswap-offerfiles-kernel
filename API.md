@@ -73,14 +73,9 @@ OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
 SOLVER_LEVELS_AUTH_KEYS='{"maker-a":"replace-with-long-random-secret"}'
                                         # preferred: server-side solver id → bearer secret map;
-                                        # publication AND validate-for-use are disabled when
-                                        # neither auth var is set
+                                        # validate-for-use is disabled when neither auth var is set
 # SOLVER_LEVELS_AUTH_SECRET=             # single-solver alternative; server derives its identity
-SOLVER_LIQUIDITY_READ_AUTH_SECRET=       # dedicated grouped-liquidity read bearer, >=32 chars;
-                                        # must differ from every levels-write secret
 OFFER_VALIDATION_TIMEOUT_MS=15000        # validate-for-use decision budget; max 60000
-SOLVER_LEVELS_TTL_SECONDS=60             # expire pair data; last version remains as a replay tombstone
-SOLVER_LEVELS_QUOTE_ENABLED=false        # strict opt-in: let indicative ladders override /v1/quote
 ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
                                         # 3600 (1 h) on all currently deployed networks;
                                         # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
@@ -99,10 +94,8 @@ SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_R
 SOLVER_ENABLE_PATH_B=false               # default execution scope is posted-price Path A only
 SOLVER_ENABLE_CYCLES=false               # experimental; also requires PATH_B=true
 SOLVER_ENABLE_RESIDUAL_TOPUPS=false      # experimental inventory spend; also requires PATH_B=true
-SOLVER_ENABLE_LEVELS_PUBLICATION=false   # independent explicit opt-in; dry-run always suppresses it
 # SOLVER_LEVELS_AUTH_TOKEN=              # matching bearer secret, >=16 non-whitespace characters
-                                        # required for validate-for-use in every solver mode;
-                                        # levels publication remains a separate non-dry-run opt-in
+                                        # required for validate-for-use in every solver mode
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -390,8 +383,7 @@ calls the batcher, publishes to Celestia, schedules input, or changes offer
 lifecycle state.
 
 Use a bearer secret from `SOLVER_LEVELS_AUTH_KEYS` or
-`SOLVER_LEVELS_AUTH_SECRET`. This route remains enabled independently of
-`SOLVER_ENABLE_LEVELS_PUBLICATION` and `SOLVER_LEVELS_QUOTE_ENABLED`.
+`SOLVER_LEVELS_AUTH_SECRET`.
 
 ```bash
 curl -X POST http://host:9999/v1/offers/validate \
@@ -703,91 +695,11 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 | `discount` | Fractional gap below `market_rate` (e.g. `0.025` = 2.5% under market) |
 | `sponsored` | `true` when the implied rate is at least the sponsorship discount below market (the batcher's fee-sponsorship policy hook) |
 | `from_usd`, `to_usd` | USD value of each leg at the reference price |
-| `source` | `token-prices`, `demo-fallback`, or the explicitly enabled `solver-levels` source |
+| `source` | `token-prices` or `demo-fallback` |
 
-By default this preserves the established token-price response above. When an
-operator explicitly sets `SOLVER_LEVELS_QUOTE_ENABLED=true`, a fresh authenticated
-ladder may win instead. The response retains every field above and additionally
-includes `source: "solver-levels"`, `quote_semantics: "indicative"`, `solver_id`, and
-`levels_version`. It is not a reservation or executable quote.
-
-#### `POST /v1/solver/levels`
-
-Replace the authenticated solver's **complete** indicative ladder declaration.
-Publication fails closed with `503 LEVELS_DISABLED` unless the node configures
-`SOLVER_LEVELS_AUTH_KEYS` (a JSON solver-id → secret map) or the single-solver
-`SOLVER_LEVELS_AUTH_SECRET`. Publishers send the matching secret through their
-`SOLVER_LEVELS_AUTH_TOKEN` environment variable as `Authorization: Bearer ...`;
-the server derives the solver identity from that credential, so the body must not
-contain `solverId`.
-
-```bash
-curl -X POST http://host:9999/v1/solver/levels \
-  -H "Authorization: Bearer $SOLVER_LEVELS_AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"version":"1","pairs":[{"tokenIn":"aaaa...","tokenOut":"bbbb...","levels":[{"input":"1000","output":"990"}]}]}'
-```
-
-`version` is a positive canonical decimal u64 string and must increase for that
-identity. `pairs` is a full snapshot (maximum 64); omitted pairs are withdrawn and
-`pairs: []` withdraws everything. Each pair has at most 64 concave rungs with strictly
-ascending input and output, using positive decimal u256 amounts. Stale or reordered versions
-return `409 STALE_VERSION` with the authenticated identity's canonical
-`lastVersion`, allowing a restarted publisher to advance and retry its complete snapshot.
-The in-memory declaration expires after
-`SOLVER_LEVELS_TTL_SECONDS`, while its bounded last-version tombstone remains to
-prevent replay after expiry.
-
-`GET /v1/solver/levels` returns only currently fresh pair declarations.
-
-#### `GET /v1/solver/liquidity?solver_id=<solver-id>`
-
-Read one solver's complete grouped declaration for the Offer Files data-only
-relay. This endpoint is additive: unlike the legacy flattened levels route, it
-preserves the source identity, version, update time, immutable expiry, and an
-explicit withdrawal/expiry tombstone.
-
-```bash
-curl "http://host:9999/v1/solver/liquidity?solver_id=maker-a" \
-  -H "Authorization: Bearer $OFFER_FILES_LIQUIDITY_AUTH_TOKEN"
-```
-
-The node configures the matching value as
-`SOLVER_LIQUIDITY_READ_AUTH_SECRET`. It must contain at least 32
-non-whitespace characters and must differ from every
-`SOLVER_LEVELS_AUTH_KEYS`/`SOLVER_LEVELS_AUTH_SECRET` write credential. The
-server compares the bearer in constant time. Missing or malformed server
-configuration returns `503 LIQUIDITY_DISABLED`; missing or bad authentication
-returns `401 UNAUTHORIZED` with `WWW-Authenticate: Bearer`.
-
-The request accepts exactly one `solver_id`, using
-`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`, and no other query key or request body.
-A success is `application/json`, `Cache-Control: no-store`, and at most
-1,048,576 bytes:
-
-```json
-{
-  "schemaVersion": 1,
-  "source": "offer-files-solver",
-  "generatedAt": "2026-08-14T12:00:10.000Z",
-  "snapshots": [{
-    "solverId": "maker-a",
-    "version": "9007199254740993",
-    "updatedAt": "2026-08-14T12:00:00.000Z",
-    "expiresAt": "2026-08-14T12:01:00.000Z",
-    "pairs": []
-  }]
-}
-```
-
-`generatedAt` is only the request observation time; polling never refreshes
-`updatedAt` or `expiresAt`. A live declaration carries its complete, stably
-sorted pairs. A known explicit withdrawal or expired declaration retains its
-identity/version/times with `pairs:[]`. An identity never published by this
-backend returns `snapshots:[]`. Either empty form tells the relay to withdraw
-data atomically. A source serialization/boundary failure returns
-`503 LIQUIDITY_UNAVAILABLE`; malformed query or body framing returns `400
-VALIDATION`.
+This backend holds no solver state, so nothing else can win the quote. Solver
+ladders are pushed to the Midnight Intents relay, which does its own
+interpolation; the backend's job is the indexed book and its reads.
 
 ---
 

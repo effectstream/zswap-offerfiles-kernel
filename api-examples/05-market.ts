@@ -22,21 +22,8 @@ const quoteParams = new URLSearchParams({ from_token: FROM, to_token: TO, from_a
 try {
   const quote = await get(`/v1/quote?${quoteParams}`);
   print(`GET /v1/quote  (${AMOUNT} of ${FROM.slice(0,8)}… → ${TO.slice(0,8)}…)`, quote);
-  if ((quote as any).source === "solver-levels") {
-    console.log("  ℹ️  Authenticated solver level selected; indicative only, not a reservation.");
-  }
 } catch (e: any) {
   console.log("Quote unavailable:", e.message);
-}
-
-// Fresh authenticated declarations are public market data. Publishing them is
-// a separate bearer-authenticated operator action and is intentionally absent
-// from this browser-friendly example.
-try {
-  const levels = await get<any>("/v1/solver/levels");
-  print("GET /v1/solver/levels  (indicative)", levels);
-} catch (e: any) {
-  console.log("Solver levels unavailable:", e.message);
 }
 
 // 24h stats

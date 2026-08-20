@@ -8,7 +8,6 @@ import { buildWallet, shieldedBalances, shieldedKeys, waitForSync } from "@zswap
 import {
   isCyclesEnabled,
   isDryRun,
-  isLevelsPublicationEnabled,
   isPathBEnabled,
   isResidualTopUpsEnabled,
   SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS,
@@ -16,7 +15,6 @@ import {
   SOLVER_EXPIRY_MARGIN_SECONDS,
   SOLVER_LADDER_CONFIG,
   SOLVER_LEVELS_AUTH_TOKEN,
-  SOLVER_LEVELS_PUSH_INTERVAL_MS,
   SOLVER_MAX_CYCLE_LEN,
   SOLVER_RESYNC_INTERVAL_MS,
   SOLVER_SEED,
@@ -28,12 +26,6 @@ import { Book, type BookOffer } from "./book.ts";
 import { loadLadderConfig, type LoadedLadders } from "./config.ts";
 import { findCandidates, type Candidate, type EngineConfig } from "./engine.ts";
 import { Executor, type FillOutcome, type MatchOutcome } from "./executor.ts";
-import {
-  shouldPublishLevels,
-  startLevelsPush,
-  type LevelsPushHandle,
-  validateLevelsAuthToken,
-} from "./levels-push.ts";
 import {
   startBookSync,
   type BookChange,
@@ -86,12 +78,10 @@ export interface SolverOptions {
   enableCycles?: boolean;
   enablePathB?: boolean;
   enableResidualTopUps?: boolean;
-  /** Authenticated quote publication is independent from execution and
-   * defaults off. The shared solver bearer remains mandatory because every
-   * candidate uses validate-for-use even when publication is disabled. */
-  enableLevelsPublication?: boolean;
+  /** Shared solver bearer. Still mandatory: every candidate goes through
+   * validate-for-use. Ladder publication to the backend no longer exists —
+   * ladders are pushed to the Midnight Intents relay instead. */
   levelsAuthToken?: string;
-  levelsPushIntervalMs?: number;
   /** Deterministic boundary seams for lifecycle/integration tests. Production
    * entrypoints never provide these. */
   syncDependencies?: SyncDependencies;
@@ -209,7 +199,7 @@ const asError = (reason: unknown, fallback: string): Error =>
 /** Own asynchronous balance reads by generation. Superseded, timed-out, or
  * stopped reads can resolve late but can never reinstall stale inventory. The
  * visible Stock is emptied for the whole read/failure window, which makes both
- * execution admission and levels publication fail closed. */
+ * execution admission fails closed. */
 export function createInventoryRefreshController(
   opts: InventoryRefreshOptions,
 ): InventoryRefreshController {
@@ -440,8 +430,6 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   const enableCycles = opts.enableCycles ?? isCyclesEnabled();
   const enablePathB = opts.enablePathB ?? isPathBEnabled();
   const enableResidualTopUps = opts.enableResidualTopUps ?? isResidualTopUpsEnabled();
-  const enableLevelsPublication =
-    opts.enableLevelsPublication ?? isLevelsPublicationEnabled();
   const levelsAuthToken = opts.levelsAuthToken ?? SOLVER_LEVELS_AUTH_TOKEN;
   const startupTimeoutMs = opts.startupTimeoutMs ?? 180_000;
   const walletOperationTimeoutMs = opts.walletOperationTimeoutMs ?? 240_000;
@@ -457,11 +445,13 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       throw new Error(`${name} must be a positive safe integer, got ${value}`);
     }
   }
-  const publishLevels = shouldPublishLevels(dryRun, enableLevelsPublication);
-  // This bearer now protects validate-for-use as well as optional levels
-  // publication. Candidate validation is mandatory in live and dry-run modes,
-  // so publication being disabled does not make an absent credential safe.
-  validateLevelsAuthToken(levelsAuthToken);
+  // This bearer protects validate-for-use. Candidate validation is mandatory
+  // in live and dry-run modes alike, so the credential is never optional.
+  if (levelsAuthToken.length < 16 || /\s/.test(levelsAuthToken)) {
+    throw new Error(
+      "SOLVER_LEVELS_AUTH_TOKEN must contain at least 16 non-whitespace characters",
+    );
+  }
   const rawLog = opts.log ?? ((msg: string) => console.log(msg));
   const log = (message: string): void => {
     try {
@@ -482,8 +472,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   log(
     `[solver] network=${net.id} api=${api}${dryRun ? " DRY-RUN (no transactions)" : ""} ` +
       `path-b=${enablePathB ? "on" : "off"} cycles=${enableCycles ? "on" : "off"} ` +
-      `residual-topups=${enableResidualTopUps ? "on" : "off"} ` +
-      `levels-publication=${publishLevels ? "on" : "off"}`,
+      `residual-topups=${enableResidualTopUps ? "on" : "off"}`,
   );
   for (const pair of ladders.ladders.pairs()) {
     const top = pair.levels[pair.levels.length - 1];
@@ -497,22 +486,15 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   let wallet: SolverWallet | null = null;
   let balanceWallet: SolverWallet | null = null;
   let executor: Executor | null = null;
-  let levels: LevelsPushHandle | null = null;
   let backendCurrent = false;
   let backendGeneration: ValidationGeneration | null = null;
   let validationAvailable = false;
   let inventoryChanged = (_ready: boolean): void => {};
   let validationChanged = (_state: ValidationAvailabilityState): void => {};
-  let withdrawalBarrier: Promise<void> = Promise.resolve();
   const book = new Book();
   const inventory = createInventoryRefreshController({
     stock,
     readBalances: async (signal) => {
-      // If publication was already in flight when inventory became unknown,
-      // wait for its coalesced empty snapshot attempt before installing a new
-      // ready balance. This prevents a fast recovery from overtaking its own
-      // withdrawal on the wire.
-      await withdrawalBarrier;
       if (signal.aborted) throw asError(signal.reason, "inventory refresh aborted");
       if (!balanceWallet) throw new Error("wallet is unavailable for inventory refresh");
       return walletDependencies.shieldedBalances(balanceWallet);
@@ -744,18 +726,13 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     }
   };
 
-  // A failed/started refresh empties Stock, causing an immediate authenticated
-  // withdrawal. A successful newer generation republishes and re-decides over
-  // the current complete book. Both callbacks are non-authoritative.
+  // A failed/started refresh empties Stock, which withdraws every advertised
+  // capacity. A successful newer generation re-decides over the current
+  // complete book. Both callbacks are non-authoritative.
   inventoryChanged = (ready): void => {
     if (ready && (!backendCurrent || !validationAvailable)) {
       inventory.invalidate(new Error("inventory read completed outside combined readiness"));
       return;
-    }
-    if (levels) {
-      const publication = levels.push();
-      observe(publication);
-      if (!ready) withdrawalBarrier = publication;
     }
     if (ready && backendCurrent && validationAvailable) {
       maybeResolveSolverReady();
@@ -889,17 +866,6 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       log,
     });
 
-    // A dry run must not advertise prices it will not honour.
-    levels = publishLevels
-      ? startLevelsPush({
-          api,
-          authToken: levelsAuthToken,
-          ladders: ladders.ladders,
-          stock,
-          intervalMs: opts.levelsPushIntervalMs ?? SOLVER_LEVELS_PUSH_INTERVAL_MS,
-          log,
-        })
-      : null;
     void sync.ready.then(
       () => {
         initialSyncReady = true;
@@ -921,7 +887,6 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     inventory.stop();
     const cleanups: Promise<boolean>[] = [];
     cleanups.push(cleanupWithin(validationGate, stopTimeoutMs, (owned) => owned.stop()));
-    if (levels) cleanups.push(cleanupWithin(levels, stopTimeoutMs, (owned) => owned.stop()));
     if (sync) cleanups.push(cleanupWithin(sync, stopTimeoutMs, (owned) => owned.stop()));
     if (executor) {
       cleanups.push(cleanupWithin(executor, stopTimeoutMs, async (owned) => {
@@ -984,13 +949,11 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         );
       }
 
-      const ownedLevels = levels;
       const ownedWallet = wallet;
       const ownedExecutor = executor;
       const tasks: Promise<unknown>[] = [
         Promise.resolve().then(() => activeSync.stop()),
         Promise.resolve().then(() => validationGate.stop()),
-        Promise.resolve().then(() => ownedLevels?.stop()),
         Promise.resolve().then(async () => {
           const result = await ownedExecutor?.stop(stopTimeoutMs);
           if (result && (result.retainedClaims > 0 || result.retainedOperations > 0)) {
@@ -1005,7 +968,6 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       ];
       for (const task of tasks) observe(task);
       balanceWallet = null;
-      levels = null;
 
       stopPromise = (async () => {
         let timer: ReturnType<typeof setTimeout> | undefined;

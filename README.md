@@ -104,12 +104,9 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `NTP_START_TIME` | optional | NTP reference timestamp; resumed from DB when unset. |
 | `BATCHER_SUBMIT_TIMEOUT_MS` | optional | Absolute batcher fetch + receipt-body deadline; default 310 000 ms, bounded to 1 000–600 000 ms. |
 | `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
-| `SOLVER_LEVELS_AUTH_KEYS` / `SOLVER_LEVELS_AUTH_SECRET` | required on the node for authenticated solver APIs | Server-side bearer credentials shared by levels publication and validate-for-use. `POST /v1/offers/validate` is independent of the levels feature flags but is disabled if both credential settings are absent. |
-| `SOLVER_LIQUIDITY_READ_AUTH_SECRET` | required to expose grouped solver liquidity | Dedicated read-only bearer for `GET /v1/solver/liquidity`, at least 32 non-whitespace characters and distinct from every levels-write secret. The relay supplies the matching value as `OFFER_FILES_LIQUIDITY_AUTH_TOKEN`; missing or invalid configuration fails closed. |
+| `SOLVER_LEVELS_AUTH_KEYS` / `SOLVER_LEVELS_AUTH_SECRET` | required on the node for the authenticated solver boundary | Server-side bearer credentials for `POST /v1/offers/validate`, which is disabled if both settings are absent. |
 | `OFFER_VALIDATION_TIMEOUT_MS` | optional | Validate-for-use async decision budget, default 15 000 ms and capped at 60 000 ms. Native synchronous proof work cannot be preempted; one retained active slot per solver credential bounds unfinished work. |
-| `SOLVER_ENABLE_LEVELS_PUBLICATION` | optional | Solver-side, exact `true` opt-in. Defaults to `false` and is also suppressed in dry-run mode. |
-| `SOLVER_LEVELS_AUTH_TOKEN` | required by every solver process | Solver-side bearer token matching one node credential (at least 16 non-whitespace characters). It authenticates mandatory validate-for-use even when levels publication is off; publication remains a separate opt-in. The node derives the solver identity from it. |
-| `SOLVER_LEVELS_QUOTE_ENABLED` | optional | Literal `true` opts `/v1/quote` into fresh authenticated indicative ladders; default is `false`. |
+| `SOLVER_LEVELS_AUTH_TOKEN` | required by every solver process | Solver-side bearer token matching one node credential (at least 16 non-whitespace characters). It authenticates mandatory validate-for-use in every solver mode. The node derives the solver identity from it. |
 | `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | The mainnet solver defaults to dry-run. Live settlement requires `SOLVER_DRY_RUN=false` **and** the separate exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
 | `SOLVER_ENABLE_PATH_B` | optional | Defaults to `false`; Path A posted-price fills are the only execution mode enabled by default. |
 | `SOLVER_ENABLE_CYCLES` / `SOLVER_ENABLE_RESIDUAL_TOPUPS` | optional | Independent experimental opt-ins, both default `false` and have no effect unless Path B is also enabled. |
@@ -262,9 +259,6 @@ There are **two ways** to post and read offers:
 | `GET` | `/v1/midnight/config` | Public Midnight config the browser contract client needs. |
 | `POST` | `/v1/offers` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, `409` on duplicate, else forward to the batcher → Celestia. Returns the offer's `offerId`. |
 | `GET` | `/v1/offers/stream` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
-| `POST` | `/v1/solver/levels` | Authenticated, monotonic full-snapshot publication of indicative ladders. Empty `pairs` withdraws all. |
-| `GET` | `/v1/solver/levels` | Fresh authenticated ladder declarations. |
-| `GET` | `/v1/solver/liquidity?solver_id=<id>` | Dedicated read-authenticated, grouped zero/one-snapshot source for the data-only Offer Files relay. |
 
 Beyond the above, the node also serves `GET /health`, `GET /v1/health/sync`,
 `GET /v1/pairs`, `GET /v1/quote`, and

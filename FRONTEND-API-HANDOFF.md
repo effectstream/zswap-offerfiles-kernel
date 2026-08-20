@@ -246,10 +246,8 @@ their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
   u256 strings: `from_amount` is positive; neither amount accepts signs, leading
   zeroes, separators, decimals, or exponents. Invalid input is `400 VALIDATION`
   and is never sanitized into a different amount.
-  `source` is `"token-prices"` or `"demo-fallback"` by default. If the operator
-  explicitly enables authenticated solver precedence, it is `"solver-levels"`
-  and the response also carries `quote_semantics: "indicative"`, `solver_id`, and
-  `levels_version`. This is market data, not a reservation/executable quote.
+  `source` is `"token-prices"` or `"demo-fallback"`. This is market data, not a
+  reservation/executable quote.
   Unregistered colors do NOT error: they quote at a $1 demo fallback (two unknowns ⇒ 1:1). Don't render fallback quotes as real market prices — check the token against `/v1/known-tokens` if the UI needs to distinguish.
 - `GET /v1/chart/stats?base=…&quote=…` → `{ "base", "quote", "last", "change24", "high", "low", "volume_base", "volume_quote" }` (numbers; `change24` in %).
 - `GET /v1/chart/history?base=…&quote=…` → newest-first `[{ "price": n, "amt": n, "up": bool, "at": ms }]`. Derived **only from genuine fills** (consumed, not cancelled) — expect it to be sparser than the old data if the old one counted cancels.

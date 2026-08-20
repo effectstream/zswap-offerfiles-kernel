@@ -229,50 +229,6 @@ export function authenticateSolverLevelsToken(
   return authenticated;
 }
 
-/** Dedicated read-only credential for the grouped solver-liquidity source.
- * It is intentionally not part of the levels-write registry: the relay may
- * read indicative data but must never gain publication authority. */
-export function solverLiquidityReadAuthSecret(): string {
-  const secret = getEnv("SOLVER_LIQUIDITY_READ_AUTH_SECRET");
-  if (secret === undefined || secret === "" || secret.length < 32 || /\s/.test(secret)) {
-    throw new Error(
-      "SOLVER_LIQUIDITY_READ_AUTH_SECRET must contain at least 32 non-whitespace characters",
-    );
-  }
-
-  // Parsing the write registry is part of the read boundary's fail-closed
-  // configuration check: if it cannot be understood, credential separation
-  // cannot be established safely.
-  const writeCredentials = solverLevelsCredentials();
-  const configuredSingleWriteSecret = getEnv("SOLVER_LEVELS_AUTH_SECRET");
-  if (
-    writeCredentials.some((credential) => credential.secret === secret) ||
-    (configuredSingleWriteSecret !== undefined && configuredSingleWriteSecret === secret)
-  ) {
-    throw new Error(
-      "SOLVER_LIQUIDITY_READ_AUTH_SECRET must differ from every levels-write credential",
-    );
-  }
-  return secret;
-}
-
-/** Compare fixed-size digests so correct, wrong, and differently sized bearer
- * values use the same timing-safe equality primitive. */
-export function authenticateSolverLiquidityReadToken(
-  token: string,
-  expectedSecret: string,
-): boolean {
-  const suppliedDigest = createHash("sha256").update(token).digest();
-  const expectedDigest = createHash("sha256").update(expectedSecret).digest();
-  return timingSafeEqual(suppliedDigest, expectedDigest);
-}
-
-/** Solver-backed precedence changes the established /v1/quote contract and is
- * therefore opt-in until protocol scope is approved. Only literal "true"
- * enables it; missing or malformed values fail closed. */
-export const isSolverLevelsQuoteEnabled = (): boolean =>
-  (getEnv("SOLVER_LEVELS_QUOTE_ENABLED") ?? "false") === "true";
-
 // Unit tests can disable upstream's post-commit event gate poll (0358d9e)
 // explicitly. Its 1 s tick issues a getLatestEffectstreamBlock on the API's own
 // connection, which is indistinguishable from validation-path work to a test

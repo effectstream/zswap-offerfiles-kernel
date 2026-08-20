@@ -24,17 +24,12 @@ import {
   apiRateLimitAllowList,
   apiRateLimitMax,
   apiSseMaxConnections,
-  authenticateSolverLiquidityReadToken,
-  authenticateSolverLevelsToken,
   isEventGatePollEnabled,
-  isSolverLevelsQuoteEnabled,
   isTokenRegistryEnabled,
   MIDNIGHT_NETWORK_ID,
   OFFER_MAX_BYTES,
   ROOT_WINDOW_SECONDS,
   midnightContract,
-  solverLevelsCredentials,
-  solverLiquidityReadAuthSecret,
 } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
@@ -53,135 +48,12 @@ import { registerOfferValidationRoute } from "./offer-validation.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
-import {
-  MAX_PAIRS_PER_PUSH,
-  parseLevelsVersion,
-  solverLevels,
-  validatePair,
-  type PriceLevels,
-  type SolverLevelsRegistry,
-} from "./solver-levels.ts";
-import {
-  isSolverLiquidityEnvelope,
-  isSolverLiquidityId,
-  MAX_SOLVER_LIQUIDITY_RESPONSE_BYTES,
-} from "@zswap-da/solver-core/liquidity-contract";
 
 // ─── API Router ───────────────────────────────────────────────────────────────
 
 // MIP-0006 TokenLeg: { token, amount, type } — camelCase, `type` is the
 // value layer. Our DB column is `kind`; the wire name is the MIP's.
 type TokenLegDto = { token: string; amount: string; type: string };
-
-type SolverLiquiditySource = Pick<SolverLevelsRegistry, "liquidityEnvelope">;
-
-/** Register the dedicated read-only grouped-liquidity source. The bearer is
- * deliberately separate from every publication credential, and authentication
- * runs before body parsing or any query/registry work. */
-export function registerSolverLiquidityRoute(
-  server: any,
-  source: SolverLiquiditySource = solverLevels,
-  now: () => number = () => Date.now(),
-): void {
-  server.get(
-    "/v1/solver/liquidity",
-    {
-      bodyLimit: 1_024,
-      onRequest: (request: any, reply: any, done: () => void) => {
-        reply.header("Cache-Control", "no-store");
-        let expectedSecret: string;
-        try {
-          expectedSecret = solverLiquidityReadAuthSecret();
-        } catch (error) {
-          console.error("[SOLVER_LIQUIDITY] Invalid authentication configuration", error);
-          reply.code(503).send({
-            error: "LIQUIDITY_DISABLED",
-            reason: "solver liquidity reading is unavailable",
-          });
-          return;
-        }
-
-        const authorization = String(request.headers?.authorization ?? "");
-        const match = /^Bearer ([^\s]+)$/.exec(authorization);
-        if (
-          match === null ||
-          !authenticateSolverLiquidityReadToken(match[1], expectedSecret)
-        ) {
-          reply.header("WWW-Authenticate", "Bearer");
-          reply.code(401).send({
-            error: "UNAUTHORIZED",
-            reason: "valid solver liquidity read bearer token required",
-          });
-          return;
-        }
-        done();
-      },
-      preParsing: (
-        request: any,
-        reply: any,
-        payload: any,
-        done: (error: Error | null, stream?: any) => void,
-      ) => {
-        const contentLength = request.headers?.["content-length"];
-        const transferEncoding = request.headers?.["transfer-encoding"];
-        if (
-          (contentLength !== undefined && String(contentLength) !== "0") ||
-          transferEncoding !== undefined
-        ) {
-          reply.code(400).send({
-            error: "VALIDATION",
-            reason: "solver liquidity requests must not include a body",
-          });
-          return;
-        }
-        done(null, payload);
-      },
-    },
-    async (request: any, reply: any) => {
-      if (request.body !== undefined) {
-        return reply.code(400).send({
-          error: "VALIDATION",
-          reason: "solver liquidity requests must not include a body",
-        });
-      }
-      const query = request?.query;
-      const keys = typeof query === "object" && query !== null && !Array.isArray(query)
-        ? Object.keys(query)
-        : [];
-      const solverId = keys.length === 1 && keys[0] === "solver_id"
-        ? (query as Record<string, unknown>).solver_id
-        : undefined;
-      if (!isSolverLiquidityId(solverId)) {
-        return reply.code(400).send({
-          error: "VALIDATION",
-          reason: "expected exactly one solver_id using the canonical solver identity grammar",
-        });
-      }
-
-      let serialized: string;
-      try {
-        const observedAt = now();
-        const envelope = source.liquidityEnvelope(solverId, observedAt);
-        serialized = JSON.stringify(envelope);
-        if (Buffer.byteLength(serialized, "utf8") > MAX_SOLVER_LIQUIDITY_RESPONSE_BYTES) {
-          throw new RangeError(
-            `solver liquidity response exceeds ${MAX_SOLVER_LIQUIDITY_RESPONSE_BYTES} bytes`,
-          );
-        }
-        if (!isSolverLiquidityEnvelope(envelope)) {
-          throw new TypeError("solver liquidity registry returned a noncanonical envelope");
-        }
-      } catch (error) {
-        console.error("[SOLVER_LIQUIDITY] Failed to produce grouped snapshot", error);
-        return reply.code(503).send({
-          error: "LIQUIDITY_UNAVAILABLE",
-          reason: "solver liquidity snapshot is unavailable",
-        });
-      }
-      return reply.type("application/json").send(serialized);
-    },
-  );
-}
 
 /** Write one SSE frame without retaining an unbounded slow-client buffer. */
 export function writeSseChunk(
@@ -280,10 +152,6 @@ export const apiRouter: StartConfigApiRouter = async function (
   // happens after the router-wide limiter and before the submission route; it
   // shares validation/liveness primitives but never calls the batcher.
   registerOfferValidationRoute(server, dbConn);
-
-  // Dedicated read-authenticated grouped declaration for the data-only relay.
-  // This does not change the existing flattened levels or quote routes.
-  registerSolverLiquidityRoute(server);
 
   // Drive the event gate from THIS pool — the whole point is that it is not
   // the connection running the block transaction. The runtime writes the block
@@ -622,173 +490,18 @@ export const apiRouter: StartConfigApiRouter = async function (
       unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
     const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
 
-    // Authenticated ladders are indicative, not reservations. Precedence over
-    // the established token-price contract is disabled unless the operator
-    // explicitly acknowledges it with SOLVER_LEVELS_QUOTE_ENABLED=true.
-    const posted = isSolverLevelsQuoteEnabled()
-      ? solverLevels.quoteDetails(fromToken, toToken, fromAmount, Date.now())
-      : null;
-    if (posted !== null) {
-      // Keep the established display metrics as JSON numbers. All executable
-      // base-unit amounts above remain bounded bigint and are serialized as
-      // strings; Number is used only for approximate rate/USD presentation.
-      const rate = Number(posted.amountOut) / Number(fromAmount);
-      return {
-        from_token: fromToken,
-        to_token: toToken,
-        from_amount: fromAmount.toString(),
-        market_rate: rate,
-        suggested_to_amount: posted.amountOut.toString(),
-        to_amount: (toAmount ?? posted.amountOut).toString(),
-        implied_rate: toAmount === undefined ? rate : Number(toAmount) / Number(fromAmount),
-        discount:
-          toAmount === undefined
-            ? 0
-            : Number(posted.amountOut - toAmount) / Number(posted.amountOut),
-        sponsored: toAmount !== undefined && toAmount < posted.amountOut,
-        from_usd: Number(fromAmount) * pf,
-        to_usd: Number(toAmount ?? posted.amountOut) * pt,
-        // Authenticated declarations are still INDICATIVE market data: this
-        // response carries no reservation or quote id and grants no right to a
-        // fill. Callers must settle the underlying offer independently.
-        quote_semantics: "indicative",
-        solver_id: posted.solverId,
-        levels_version: posted.version,
-        source: "solver-levels",
-      };
-    }
-
+    // Quotes come from the token-price table (or the demo fallback) only. The
+    // backend deliberately holds NO solver state: solver-posted ladders used to
+    // take precedence here through a registry this node maintained, which made
+    // the indexer a quote venue for one class of client. Under the confirmed
+    // architecture the COW solver pushes its ladders to the Midnight Intents
+    // relay and the relay does the interpolation, so this backend keeps a
+    // single, client-agnostic price source.
     return {
       ...quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount),
       source: unknownTokens.length > 0 ? "demo-fallback" : "token-prices",
     };
   });
-
-  // POST /v1/solver/levels — replace one authenticated solver's COMPLETE
-  // declaration. The bearer token selects the identity; caller-supplied
-  // solverId is ignored/refused. An empty pairs array explicitly withdraws all
-  // of that solver's prices. Versions are decimal u64 strings and strictly
-  // monotonic, which rejects stale/reordered publication races.
-  server.post("/v1/solver/levels", async (request: any, reply: any) => {
-    let credentials: ReturnType<typeof solverLevelsCredentials>;
-    try {
-      credentials = solverLevelsCredentials();
-    } catch (error) {
-      console.error("[SOLVER_LEVELS] Invalid authentication configuration", error);
-      return reply.code(503).send({
-        error: "LEVELS_DISABLED",
-        reason: "solver level publication is unavailable",
-      });
-    }
-    if (credentials.length === 0) {
-      return reply.code(503).send({
-        error: "LEVELS_DISABLED",
-        reason: "solver level publication is disabled until credentials are configured",
-      });
-    }
-    const authorization = String(request.headers?.authorization ?? "");
-    const match = /^Bearer ([^\s]+)$/.exec(authorization);
-    const solverId = match
-      ? authenticateSolverLevelsToken(match[1], credentials)
-      : null;
-    if (!solverId) {
-      reply.header("WWW-Authenticate", "Bearer");
-      return reply.code(401).send({
-        error: "UNAUTHORIZED",
-        reason: "valid solver levels bearer token required",
-      });
-    }
-
-    const body = request?.body ?? {};
-    if (body.solverId !== undefined) {
-      return reply.code(400).send({
-        error: "VALIDATION",
-        reason: "solverId is derived from authentication and must not be supplied",
-      });
-    }
-    const version = parseLevelsVersion(body.version);
-    if (version === null) {
-      return reply.code(400).send({
-        error: "VALIDATION",
-        reason: "version must be a positive canonical decimal u64 string",
-      });
-    }
-    const pairs = body.pairs;
-    if (!Array.isArray(pairs) || pairs.length > MAX_PAIRS_PER_PUSH) {
-      return reply.code(400).send({
-        error: "VALIDATION",
-        reason: `pairs must be an array of at most ${MAX_PAIRS_PER_PUSH} entries`,
-      });
-    }
-    // Bound numeric strings before the shared schema converts them to BigInt.
-    // The HTTP body limit bounds bytes, but a single enormous decimal still
-    // causes avoidable super-linear parsing work.
-    const overlongAmount = pairs.findIndex((pair: unknown) => {
-      if (typeof pair !== "object" || pair === null) return false;
-      const levels = (pair as Record<string, unknown>).levels;
-      if (!Array.isArray(levels)) return false;
-      return levels.some((level) => {
-        if (typeof level !== "object" || level === null) return false;
-        const record = level as Record<string, unknown>;
-        return (typeof record.input === "string" && record.input.length > 78) ||
-          (typeof record.output === "string" && record.output.length > 78);
-      });
-    });
-    if (overlongAmount !== -1) {
-      return reply.code(400).send({
-        error: "VALIDATION",
-        reason: `pairs[${overlongAmount}] level amounts must fit canonical decimal u256`,
-      });
-    }
-    // All-or-nothing: a partially applied push would leave the registry
-    // describing a price curve no solver ever published.
-    const invalid = pairs.findIndex((pair: unknown) => !validatePair(pair));
-    if (invalid !== -1) {
-      return reply.code(400).send({
-        error: "VALIDATION",
-        reason:
-          `pairs[${invalid}] is malformed — need distinct 64-hex tokenIn/tokenOut and ` +
-          `a non-empty concave ladder of positive canonical decimal u256 amounts ` +
-          `strictly ascending in input/output`,
-      });
-    }
-    const outOfRange = (pairs as PriceLevels[]).findIndex((pair) =>
-      pair.levels.some((level) =>
-        parseQuoteAmount(level.input) === null || parseQuoteAmount(level.output) === null
-      )
-    );
-    if (outOfRange !== -1) {
-      return reply.code(400).send({
-        error: "VALIDATION",
-        reason: `pairs[${outOfRange}] level amounts must be positive integers no larger than u256`,
-      });
-    }
-
-    const published = solverLevels.publish(
-      solverId,
-      pairs as PriceLevels[],
-      version,
-      Date.now(),
-    );
-    if (!published.ok) {
-      return reply.code(published.code === "REGISTRY_FULL" ? 503 : 409).send({
-        error: published.code,
-        reason: published.reason,
-        ...(published.code === "STALE_VERSION"
-          ? { lastVersion: published.lastVersion }
-          : {}),
-      });
-    }
-    return {
-      solverId,
-      version: version.toString(),
-      accepted: published.accepted,
-      withdrawn: published.withdrawn,
-    };
-  });
-
-  // GET /v1/solver/levels — every ladder currently fresh enough to quote from.
-  server.get("/v1/solver/levels", async () => ({ levels: solverLevels.all(Date.now()) }));
 
   // GET /v1/chart/{stats,history} — REAL per-pair market data derived from the
   // indexer DB: history = consumed offers (offer_file_history), stats = last/24h/

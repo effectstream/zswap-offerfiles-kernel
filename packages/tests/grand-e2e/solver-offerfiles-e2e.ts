@@ -103,22 +103,16 @@ const REAL_E1_ALLOWED_UNTRACKED_PATHS = Object.freeze([
   "packages/node/offer-liveness.ts",
   "packages/node/offer-validation.test.ts",
   "packages/node/offer-validation.ts",
-  "packages/node/solver-liquidity-route.test.ts",
-  "packages/node/solver-liquidity.test.ts",
   "packages/node/validation-contexts.characterization.test.ts",
   "packages/solver-core/api-client.sync-health.test.ts",
   "packages/solver-core/api-client.validation.test.ts",
   "packages/solver-core/discovery-boundary.test.ts",
-  "packages/solver-core/fixtures/offer-files-data-lineage/v1/upstream-liquidity-200-live.json",
-  "packages/solver-core/fixtures/offer-files-data-lineage/v1/upstream-liquidity-200-withdrawn.json",
   "packages/solver-core/fixtures/offer-validation/v1/request.json",
   "packages/solver-core/fixtures/offer-validation/v1/verdict-expired-before-archive.json",
   "packages/solver-core/fixtures/offer-validation/v1/verdict-live-but-invalid.json",
   "packages/solver-core/fixtures/offer-validation/v1/verdict-not-indexed.json",
   "packages/solver-core/fixtures/offer-validation/v1/verdict-unsupported-profile.json",
   "packages/solver-core/fixtures/offer-validation/v1/verdict-valid.json",
-  "packages/solver-core/liquidity-contract.test.ts",
-  "packages/solver-core/liquidity-contract.ts",
   "packages/solver-core/validation-contract.test.ts",
   "packages/solver-core/validation-contract.ts",
   "packages/solver/backend-currentness.characterization.test.ts",
@@ -127,10 +121,6 @@ const REAL_E1_ALLOWED_UNTRACKED_PATHS = Object.freeze([
   "packages/solver/src/readiness-state.ts",
   "packages/solver/src/validation-gate.ts",
   "packages/solver/validation-gate.test.ts",
-  "packages/tests/data-lineage-e2e/offer-files-service.ts",
-  "packages/tests/data-lineage-e2e/relay-service.mjs",
-  "packages/tests/data-lineage-e2e/run.ts",
-  "packages/tests/data-lineage-e2e/upstream-recorder.mjs",
   "packages/tests/grand-e2e/lib/solver-offerfiles-celestia.bun.lock",
   "packages/tests/grand-e2e/lib/solver-offerfiles-celestia.package.json",
   "packages/tests/grand-e2e/lib/solver-offerfiles-harness-service.mjs",
@@ -159,7 +149,6 @@ const REAL_E1_ALLOWED_UNTRACKED_PATHS = Object.freeze([
 const REAL_E1_REQUIRED_SOURCE_PATHS = Object.freeze([
   "packages/node/offer-liveness.ts",
   "packages/node/offer-validation.ts",
-  "packages/solver-core/liquidity-contract.ts",
   "packages/solver-core/validation-contract.ts",
   "packages/solver/src/readiness-state.ts",
   "packages/solver/src/validation-gate.ts",
@@ -473,7 +462,6 @@ interface RealE1AcceptanceConfig {
   postgresPassword: string;
   indexerSecret: string;
   storagePassword: string;
-  liquidityReadSecret: string;
   userSeed: string;
   solverSeed: string;
   secrets: string[];
@@ -3459,7 +3447,6 @@ function createRealE1AcceptanceConfig(): RealE1AcceptanceConfig {
   const postgresPassword = `e1-${randomBytes(24).toString("hex")}`;
   const indexerSecret = randomBytes(32).toString("hex").toUpperCase();
   const storagePassword = `e1-${randomBytes(32).toString("hex")}`;
-  const liquidityReadSecret = randomBytes(32).toString("hex");
   const userSeed = randomBytes(32).toString("hex");
   const solverSeed = randomBytes(32).toString("hex");
   assert(userSeed !== solverSeed && userSeed !== E1_GENESIS_SEED && solverSeed !== E1_GENESIS_SEED, "generated actor seeds collided");
@@ -3469,7 +3456,6 @@ function createRealE1AcceptanceConfig(): RealE1AcceptanceConfig {
     postgresPassword,
     indexerSecret,
     storagePassword,
-    liquidityReadSecret,
     userSeed,
     solverSeed,
     oneShotLogs: [],
@@ -3477,7 +3463,6 @@ function createRealE1AcceptanceConfig(): RealE1AcceptanceConfig {
       postgresPassword,
       indexerSecret,
       storagePassword,
-      liquidityReadSecret,
       ...identities.flatMap((identity) => [identity.solverToken, identity.recorderToken]),
       userSeed,
       solverSeed,
@@ -3523,7 +3508,6 @@ function realE1AcceptanceEnvironment(
     `POSTGRES_PASSWORD=${config.postgresPassword}`,
     `MIDNIGHT_INDEXER_SECRET=${config.indexerSecret}`,
     `MIDNIGHT_STORAGE_PASSWORD=${config.storagePassword}`,
-    `SOLVER_LIQUIDITY_READ_AUTH_SECRET=${config.liquidityReadSecret}`,
     `SOLVER_AUTH_REGISTRY=${JSON.stringify(solverRegistry)}`,
     `TELEMETRY_IDENTITIES=${JSON.stringify(telemetryIdentities)}`,
     `E1_ACCEPTANCE_RUN_ID=${config.runId}`,

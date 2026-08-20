@@ -937,7 +937,6 @@ services:
       OFFER_TTL_SECONDS: "28800"
       OFFER_VALIDATION_TIMEOUT_MS: "30000"
       SOLVER_LEVELS_AUTH_KEYS: "\${SOLVER_AUTH_REGISTRY:?SOLVER_AUTH_REGISTRY must be set}"
-      SOLVER_LIQUIDITY_READ_AUTH_SECRET: "\${SOLVER_LIQUIDITY_READ_AUTH_SECRET:?SOLVER_LIQUIDITY_READ_AUTH_SECRET must be set}"
       BATCHER_SUBMIT_URL: http://batcher-sink:8080
     healthcheck:
       test: ["CMD", "bun", "-e", ${backendHealthcheck}]
@@ -1131,7 +1130,6 @@ services:
       SOLVER_ENABLE_PATH_B: "false"
       SOLVER_ENABLE_CYCLES: "false"
       SOLVER_ENABLE_RESIDUAL_TOPUPS: "false"
-      SOLVER_ENABLE_LEVELS_PUBLICATION: "false"
       SOLVER_DRY_RUN: "false"
     volumes:
       - type: bind

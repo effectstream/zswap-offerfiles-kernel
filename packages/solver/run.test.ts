@@ -14,7 +14,7 @@ import type { SyncDependencies } from "./src/sse-sync.ts";
 import { Stock } from "./src/stock.ts";
 
 const TOKEN = "a".repeat(64);
-const LEVELS_STOCK_TOKEN = "b3ca74538249b3d8c57cb464968f14735fda823d9a3a16ea13d881fab964a803";
+const STOCK_TOKEN = "b3ca74538249b3d8c57cb464968f14735fda823d9a3a16ea13d881fab964a803";
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
@@ -491,7 +491,7 @@ test("runtime exposes contained validate-before-admit-and-execute trace ordering
     offerBech32: `blob-${traceHash}`,
     computed: {
       gives: [{ token: traceGive, amount: "1000", type: "SHIELDED" }],
-      wants: [{ token: LEVELS_STOCK_TOKEN, amount: "900", type: "SHIELDED" }],
+      wants: [{ token: STOCK_TOKEN, amount: "900", type: "SHIELDED" }],
       expiresAt: OFFER_EXPIRES,
       firstSeenAt: "2026-08-14T00:00:00.000Z",
       inputNullifiers: [traceNullifier],
@@ -513,7 +513,7 @@ test("runtime exposes contained validate-before-admit-and-execute trace ordering
       code: "VALID",
       computed: {
         gives: [{ token: traceGive, amount: "1000", kind: "SHIELDED" }],
-        wants: [{ token: LEVELS_STOCK_TOKEN, amount: "900", kind: "SHIELDED" }],
+        wants: [{ token: STOCK_TOKEN, amount: "900", kind: "SHIELDED" }],
         inputNullifiers: [traceNullifier],
         expiresAt: OFFER_EXPIRES,
       },
@@ -560,7 +560,7 @@ test("runtime exposes contained validate-before-admit-and-execute trace ordering
       walletDependencies: {
         buildWallet: async () => fakeWallet,
         waitForSync: async () => {},
-        shieldedBalances: async () => ({ [LEVELS_STOCK_TOKEN]: 5_000n }),
+        shieldedBalances: async () => ({ [STOCK_TOKEN]: 5_000n }),
         shieldedKeys: () => ({}),
       } as any,
       onValidationTrace: (event) => {
@@ -601,16 +601,10 @@ test("a same-stream L2 advance preserves validated offers but rotates authoritat
   const harness = runtimeHarness();
   const thirdBalance = deferred<Record<string, bigint>>();
   const balances: Array<Promise<Record<string, bigint>>> = [
-    Promise.resolve({ [LEVELS_STOCK_TOKEN]: 3_000n }),
-    Promise.resolve({ [LEVELS_STOCK_TOKEN]: 2_000n }),
+    Promise.resolve({ [STOCK_TOKEN]: 3_000n }),
+    Promise.resolve({ [STOCK_TOKEN]: 2_000n }),
     thirdBalance.promise,
   ];
-  const publications: Array<{ pairs: unknown[] }> = [];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-    publications.push(JSON.parse(String(init?.body)));
-    return new Response("{}", { status: 200 });
-  }) as typeof fetch;
   let balanceReads = 0;
   const fakeWallet = {
     wallet: {
@@ -631,8 +625,6 @@ test("a same-stream L2 advance preserves validated offers but rotates authoritat
       dryRun: false,
       api: "http://backend.test",
       levelsAuthToken: "v".repeat(16),
-      enableLevelsPublication: true,
-      levelsPushIntervalMs: 60_000,
       resyncIntervalMs: 60_000,
       backendHealthCheckIntervalMs: 5,
       backendHealthMaxAgeMs: 1_000,
@@ -655,18 +647,11 @@ test("a same-stream L2 advance preserves validated offers but rotates authoritat
     });
     harness.emitOffer();
     await handle.ready;
-    await waitFor(
-      () => publications.some((publication) => publication.pairs.length > 0),
-      "non-empty levels publication",
-    );
-    expect(balanceReads).toBe(2);
-    expect(handle.stock.available(LEVELS_STOCK_TOKEN)).toBe(2_000n);
+    await waitFor(() => balanceReads === 2, "authoritative inventory refresh");
+    expect(handle.stock.available(STOCK_TOKEN)).toBe(2_000n);
     expect(handle.validatedBook.size).toBe(1);
     expect(harness.validationCalls()).toBe(1);
     const evidence = handle.validatedBook.get(OFFER_HASH)!.validation;
-    const lastNonEmpty = publications.findLastIndex(
-      (publication) => publication.pairs.length > 0,
-    );
 
     harness.setHealthHeight("8");
     await waitFor(() => balanceReads === 3, "height-8 inventory refresh");
@@ -674,20 +659,16 @@ test("a same-stream L2 advance preserves validated offers but rotates authoritat
     expect(handle.validatedBook.size).toBe(1);
     expect(handle.validatedBook.get(OFFER_HASH)!.validation).toBe(evidence);
     expect(harness.validationCalls()).toBe(1);
-    expect(publications.slice(lastNonEmpty + 1).some(
-      (publication) => publication.pairs.length === 0,
-    )).toBe(true);
 
-    thirdBalance.resolve({ [LEVELS_STOCK_TOKEN]: 1_500n });
+    thirdBalance.resolve({ [STOCK_TOKEN]: 1_500n });
     await waitFor(
-      () => handle!.stock.available(LEVELS_STOCK_TOKEN) === 1_500n,
+      () => handle!.stock.available(STOCK_TOKEN) === 1_500n,
       "height-8 inventory restore",
     );
     expect(handle.validatedBook.size).toBe(1);
     expect(harness.validationCalls()).toBe(1);
   } finally {
     await handle?.stop();
-    globalThis.fetch = originalFetch;
   }
 });
 

@@ -21,23 +21,10 @@ test("boolean parser rejects malformed or ambiguous values", () => {
   }
 });
 
-test("levels publication uses a strict default-off boolean", () => {
-  expect(parseBooleanEnv("SOLVER_ENABLE_LEVELS_PUBLICATION", undefined, false)).toBe(false);
-  expect(parseBooleanEnv("SOLVER_ENABLE_LEVELS_PUBLICATION", "true", false)).toBe(true);
-  expect(() => parseBooleanEnv("SOLVER_ENABLE_LEVELS_PUBLICATION", "yes", false)).toThrow(
-    /SOLVER_ENABLE_LEVELS_PUBLICATION/,
-  );
-});
-
-test("runtime config validates expiry and publication cross-field bounds", () => {
+test("runtime config validates expiry and health cross-field bounds", () => {
   expect(() =>
     loadSolverRuntimeEnv(reader({ SOLVER_EXPIRY_MARGIN_SECONDS: "3600", OFFER_TTL_SECONDS: "3600" })),
   ).toThrow(/SOLVER_EXPIRY_MARGIN_SECONDS.*OFFER_TTL_SECONDS/);
-  expect(() =>
-    loadSolverRuntimeEnv(
-      reader({ SOLVER_LEVELS_PUSH_INTERVAL_MS: "60000", SOLVER_LEVELS_TTL_SECONDS: "60" }),
-    ),
-  ).toThrow(/SOLVER_LEVELS_PUSH_INTERVAL_MS.*SOLVER_LEVELS_TTL_SECONDS/);
   expect(() =>
     loadSolverRuntimeEnv(
       reader({
@@ -55,8 +42,8 @@ test("runtime config accepts the bounded defaults", () => {
     backendHealthCheckIntervalMs: 5_000,
     backendHealthMaxAgeMs: 15_000,
     expiryMarginSeconds: 120,
-    levelsPushIntervalMs: 5_000,
-    levelsTtlSeconds: 60,
+    settleTtlMinutes: 30,
+    statusPollMs: 5_000,
   });
 });
 
@@ -69,8 +56,6 @@ test("every bounded runtime variable rejects malformed startup input by name", (
     "SOLVER_EXPIRY_MARGIN_SECONDS",
     "OFFER_TTL_SECONDS",
     "SOLVER_SETTLE_TTL_MINUTES",
-    "SOLVER_LEVELS_PUSH_INTERVAL_MS",
-    "SOLVER_LEVELS_TTL_SECONDS",
     "SOLVER_STATUS_POLL_MS",
   ]) {
     expect(() => loadSolverRuntimeEnv(reader({ [name]: "not-an-integer" }))).toThrow(name);

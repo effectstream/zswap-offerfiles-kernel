@@ -11,6 +11,9 @@ export const SOLVER_SEED = getEnv("SOLVER_SEED") ?? DEV_SEED;
 
 export const ZSWAP_API = getEnv("ZSWAP_API") ?? "http://127.0.0.1:9999";
 export const BATCHER_SUBMIT_URL = getEnv("BATCHER_SUBMIT_URL") ?? "http://127.0.0.1:3334";
+/** Shared solver bearer for the backend's authenticated solver boundary.
+ * Ladder publication to the backend no longer exists; ladders go to the
+ * Midnight Intents relay under its own SOLVER_AUTH_TOKEN. */
 export const SOLVER_LEVELS_AUTH_TOKEN = getEnv("SOLVER_LEVELS_AUTH_TOKEN") ?? "";
 
 export const SOLVER_LADDER_CONFIG =
@@ -61,8 +64,6 @@ export interface SolverRuntimeEnv {
   expiryMarginSeconds: number;
   offerTtlSeconds: number;
   settleTtlMinutes: number;
-  levelsPushIntervalMs: number;
-  levelsTtlSeconds: number;
   statusPollMs: number;
 }
 
@@ -111,20 +112,6 @@ export function loadSolverRuntimeEnv(read: EnvReader = getEnv): SolverRuntimeEnv
       1,
       1_440,
     ),
-    levelsPushIntervalMs: parseBoundedIntegerEnv(
-      "SOLVER_LEVELS_PUSH_INTERVAL_MS",
-      read("SOLVER_LEVELS_PUSH_INTERVAL_MS"),
-      5_000,
-      100,
-      3_600_000,
-    ),
-    levelsTtlSeconds: parseBoundedIntegerEnv(
-      "SOLVER_LEVELS_TTL_SECONDS",
-      read("SOLVER_LEVELS_TTL_SECONDS"),
-      60,
-      1,
-      86_400,
-    ),
     statusPollMs: parseBoundedIntegerEnv(
       "SOLVER_STATUS_POLL_MS",
       read("SOLVER_STATUS_POLL_MS"),
@@ -138,12 +125,6 @@ export function loadSolverRuntimeEnv(read: EnvReader = getEnv): SolverRuntimeEnv
     throw new Error(
       `SOLVER_EXPIRY_MARGIN_SECONDS (${env.expiryMarginSeconds}) must be less than ` +
         `OFFER_TTL_SECONDS (${env.offerTtlSeconds})`,
-    );
-  }
-  if (env.levelsPushIntervalMs >= env.levelsTtlSeconds * 1_000) {
-    throw new Error(
-      `SOLVER_LEVELS_PUSH_INTERVAL_MS (${env.levelsPushIntervalMs}) must be less than ` +
-        `SOLVER_LEVELS_TTL_SECONDS (${env.levelsTtlSeconds})`,
     );
   }
   if (env.backendHealthCheckIntervalMs >= env.backendHealthMaxAgeMs) {
@@ -166,8 +147,6 @@ export const SOLVER_BACKEND_HEALTH_MAX_AGE_MS = runtime.backendHealthMaxAgeMs;
 export const SOLVER_EXPIRY_MARGIN_SECONDS = runtime.expiryMarginSeconds;
 export const SOLVER_OFFER_TTL_SECONDS = runtime.offerTtlSeconds;
 export const SOLVER_SETTLE_TTL_MINUTES = runtime.settleTtlMinutes;
-export const SOLVER_LEVELS_PUSH_INTERVAL_MS = runtime.levelsPushIntervalMs;
-export const SOLVER_LEVELS_TTL_SECONDS = runtime.levelsTtlSeconds;
 export const SOLVER_STATUS_POLL_MS = runtime.statusPollMs;
 
 /** Mirror the book and log every decision, but never build or submit a
@@ -191,15 +170,6 @@ export const isResidualTopUpsEnabled = (): boolean =>
   parseBooleanEnv(
     "SOLVER_ENABLE_RESIDUAL_TOPUPS",
     getEnv("SOLVER_ENABLE_RESIDUAL_TOPUPS"),
-    false,
-  );
-
-/** Authenticated quote publication is a separate capability from settlement.
- * It stays off until both sides are explicitly configured for the protocol. */
-export const isLevelsPublicationEnabled = (): boolean =>
-  parseBooleanEnv(
-    "SOLVER_ENABLE_LEVELS_PUBLICATION",
-    getEnv("SOLVER_ENABLE_LEVELS_PUBLICATION"),
     false,
   );
 

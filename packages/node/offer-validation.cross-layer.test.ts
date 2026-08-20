@@ -2,12 +2,12 @@
 //
 // 259bb9c added `CROSS_LAYER` to OfferRejectCode and made
 // validateZswapOfferBytes return it at the LEG-SHAPE stage — which is exactly
-// where /v1/offers/validate calls the validator, and strictly before its own
-// UNSUPPORTED_SHAPE check. Our canonicalValidatorCode() allow-list throws on
+// where the canonical validation engine behind the exact-files read calls the
+// validator, and strictly before its own UNSUPPORTED_SHAPE check. Our canonicalValidatorCode() allow-list throws on
 // any code it does not name, so before this mapping a cross-layer candidate
 // made the endpoint answer "unavailable" instead of returning a verdict. That
 // is fail-closed (FR-011 holds — the solver still refuses the candidate) but it
-// breaks FR-006's "stable machine-readable verdict and reason code".
+// breaks FR-006's "stable machine-readable refusal and reason code".
 //
 // Resolution (plan open question 3, option (a)): map to the existing
 // UNSUPPORTED_SHAPE code. The v1 profile authorizes only shielded <-> shielded,

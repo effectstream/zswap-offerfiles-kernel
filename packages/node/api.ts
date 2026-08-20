@@ -44,7 +44,7 @@ import { quoteWithPrices, priceOf } from "./market-mock.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
-import { registerOfferValidationRoute } from "./offer-validation.ts";
+import { registerExactFilesRoute } from "./offer-files-read.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
@@ -116,18 +116,18 @@ export const apiRouter: StartConfigApiRouter = async function (
     }
     const status = Number(error?.statusCode);
     if (Number.isFinite(status) && status >= 400 && status < 500) {
-      const isOfferValidation = String(request?.url ?? "").split("?", 1)[0] ===
-        "/v1/offers/validate";
-      if (status === 413 && isOfferValidation) {
+      const isExactFilesRead = String(request?.url ?? "").split("?", 1)[0] ===
+        "/v1/offers/files";
+      if (status === 413 && isExactFilesRead) {
         return reply.code(413).send({
           error: "TOO_LARGE",
           reason: "request body exceeds the configured transport limit",
         });
       }
-      if (status === 415 && isOfferValidation) {
+      if (status === 415 && isExactFilesRead) {
         return reply.code(400).send({
           error: "VALIDATION",
-          reason: "offer validation requests require application/json",
+          reason: "exact-files reads require application/json",
         });
       }
       return reply
@@ -148,10 +148,10 @@ export const apiRouter: StartConfigApiRouter = async function (
   // GET /docs — interactive API playground (upload + accept/settle debugger).
   registerDocsRoutes(server);
 
-  // Authenticated, side-effect-free validate-for-use boundary. Registration
-  // happens after the router-wide limiter and before the submission route; it
-  // shares validation/liveness primitives but never calls the batcher.
-  registerOfferValidationRoute(server, dbConn);
+  // Side-effect-free exact-files read. Registration happens after the
+  // router-wide limiter and before the submission route; it shares the
+  // canonical validation/liveness primitives but never calls the batcher.
+  registerExactFilesRoute(server, dbConn);
 
   // Drive the event gate from THIS pool — the whole point is that it is not
   // the connection running the block transaction. The runtime writes the block

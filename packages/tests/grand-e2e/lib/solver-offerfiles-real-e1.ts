@@ -935,8 +935,7 @@ services:
       API_RATE_LIMIT_MAX: "10000"
       ROOT_WINDOW_SECONDS: "28800"
       OFFER_TTL_SECONDS: "28800"
-      OFFER_VALIDATION_TIMEOUT_MS: "30000"
-      SOLVER_LEVELS_AUTH_KEYS: "\${SOLVER_AUTH_REGISTRY:?SOLVER_AUTH_REGISTRY must be set}"
+      OFFER_FILES_READ_TIMEOUT_MS: "30000"
       BATCHER_SUBMIT_URL: http://batcher-sink:8080
     healthcheck:
       test: ["CMD", "bun", "-e", ${backendHealthcheck}]

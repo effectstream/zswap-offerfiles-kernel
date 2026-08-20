@@ -1,4 +1,13 @@
-import { OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
+// Canonical "is this exact indexed offer usable right now" engine.
+//
+// It is the single composition of the backend's own admission/ingestion
+// components — the shared structural validator, the ordered liveness
+// descriptors, and native proof verification — bracketed by committed state
+// anchors so a lifecycle race cannot produce a stale positive verdict. The
+// exact-files read in offer-files-read.ts is its only HTTP consumer; keeping
+// the engine separate from that route is what makes FR-007's "reuse, do not
+// re-implement" checkable.
+
 import {
   getLatestEffectstreamBlock,
   getOfferByHash,
@@ -9,7 +18,6 @@ import {
   OFFER_VALIDATION_PROFILE,
   OFFER_VALIDATION_SCHEMA_VERSION,
   isSupportedOfferValidationSemantics,
-  parseOfferValidationRequest,
   parseOfferValidationVerdict,
   type OfferValidationCode,
   type OfferValidationRequest,
@@ -25,30 +33,15 @@ import {
 } from "@zswap-da/validator";
 
 import {
-  authenticateSolverLevelsToken,
   MIDNIGHT_NETWORK_ID,
   OFFER_MAX_BYTES,
-  offerValidationTimeoutMs,
   ROOT_WINDOW_SECONDS,
-  solverLevelsCredentials,
 } from "./env.ts";
 import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
 import { getFreshSyncStatus, getSyncStatus } from "./sync-health.ts";
 
 const MAX_U64 = (1n << 64n) - 1n;
 const CONSISTENT_READ_ATTEMPTS = 3;
-
-/** The route-level JSON bound is deliberately a little larger than the
- * validator's exact bech32m ceiling so a just-oversized offer receives the
- * stable domain `TOO_LARGE` verdict. Larger transport bodies stop at 413
- * before JSON parsing or proof work. */
-export function offerValidationBodyLimit(maxDecodedBytes = OFFER_MAX_BYTES): number {
-  const safeMax = Number.isSafeInteger(maxDecodedBytes) && maxDecodedBytes > 0
-    ? maxDecodedBytes
-    : 1024 * 1024;
-  const encodedOfferChars = Math.ceil((safeMax * 8) / 5) + OFFER_HRP.length + 7;
-  return encodedOfferChars + 2_048;
-}
 
 export class OfferValidationUnavailableError extends Error {
   constructor(message: string) {
@@ -94,8 +87,12 @@ function boundedReason(value: unknown): string {
   return reason.slice(0, OFFER_VALIDATION_MAX_REASON_CHARS - 1) + "…";
 }
 
-function checkedVerdict(
-  request: OfferValidationRequest,
+/** Build one verdict and refuse to emit anything the frozen v1 contract does
+ * not accept. Callers that have no offer bytes at all (an identity that is not
+ * indexed, or an unsupported profile) use this directly. */
+export function checkedVerdict(
+  profile: string,
+  offerId: string,
   anchor: ValidationStateAnchor,
   fields: Omit<
     OfferValidationVerdict,
@@ -104,8 +101,8 @@ function checkedVerdict(
 ): OfferValidationVerdict {
   const candidate: OfferValidationVerdict = {
     schemaVersion: OFFER_VALIDATION_SCHEMA_VERSION,
-    profile: request.profile,
-    claimedOfferId: request.offerId,
+    profile,
+    claimedOfferId: offerId,
     stateVersion: anchor.version,
     validatedAt: anchor.atIso,
     ...fields,
@@ -193,7 +190,11 @@ function canonicalStateVersion(value: unknown): string | null {
   return version;
 }
 
-async function requireCurrentBackend(
+/** Establish that this backend's projection is current and bind that verdict
+ * to one committed Effectstream anchor. Every consumer of this module answers
+ * from an anchor produced here; nothing is decided against an unsynchronized
+ * or unbound backend state. */
+export async function requireCurrentBackend(
   dbConn: any,
   signal?: AbortSignal,
   freshFirst = false,
@@ -357,7 +358,7 @@ function stateVerdict(
   if (state.failure === null) {
     throw new OfferValidationUnavailableError("live state has no negative verdict");
   }
-  return checkedVerdict(request, state.anchor, {
+  return checkedVerdict(request.profile, request.offerId, state.anchor, {
     valid: false,
     live: state.live,
     computedOfferId,
@@ -380,7 +381,7 @@ export async function validateOfferForUse(
   const initialAnchor = await requireCurrentBackend(dbConn, signal);
 
   if (request.profile !== OFFER_VALIDATION_PROFILE) {
-    return checkedVerdict(request, initialAnchor, {
+    return checkedVerdict(request.profile, request.offerId, initialAnchor, {
       valid: false,
       live: false,
       computedOfferId: null,
@@ -408,7 +409,7 @@ export async function validateOfferForUse(
     }
   }
   if (computedOfferId !== null && computedOfferId !== request.offerId) {
-    return checkedVerdict(request, initialAnchor, {
+    return checkedVerdict(request.profile, request.offerId, initialAnchor, {
       valid: false,
       live: false,
       computedOfferId,
@@ -418,7 +419,7 @@ export async function validateOfferForUse(
     });
   }
   if (!structural.ok) {
-    return checkedVerdict(request, initialAnchor, {
+    return checkedVerdict(request.profile, request.offerId, initialAnchor, {
       valid: false,
       live: false,
       computedOfferId,
@@ -461,7 +462,7 @@ export async function validateOfferForUse(
   // decoded transaction. Reject unsupported shapes before native proof work;
   // this verdict does not claim that the proof was valid.
   if (!isSupportedOfferValidationSemantics(initialSemantics)) {
-    return checkedVerdict(request, initialState.anchor, {
+    return checkedVerdict(request.profile, request.offerId, initialState.anchor, {
       valid: false,
       live: true,
       computedOfferId,
@@ -505,7 +506,7 @@ export async function validateOfferForUse(
     return stateVerdict(request, computedOfferId, finalState);
   }
   if (!crypto.ok) {
-    return checkedVerdict(request, finalState.anchor, {
+    return checkedVerdict(request.profile, request.offerId, finalState.anchor, {
       valid: false,
       live: true,
       computedOfferId,
@@ -533,7 +534,7 @@ export async function validateOfferForUse(
     );
   }
 
-  return checkedVerdict(request, finalState.anchor, {
+  return checkedVerdict(request.profile, request.offerId, finalState.anchor, {
     valid: true,
     live: true,
     computedOfferId,
@@ -541,150 +542,4 @@ export async function validateOfferForUse(
     code: "VALID",
     computed,
   });
-}
-
-/** Register the authenticated validation-only boundary. Authentication uses
- * the existing solver credential registry but does not consult the optional
- * solver-level publication/quote feature switches. */
-export function registerOfferValidationRoute(server: any, dbConn: any): void {
-  // One physical validation operation per configured solver identity. A
-  // request deadline only ends the HTTP decision; a database driver may not
-  // observe AbortSignal until its in-flight query settles. Keep the identity's
-  // slot occupied until that underlying read-only operation really settles so
-  // an allowlisted/co-located solver cannot accumulate abandoned work.
-  const activeBySolver = new Map<string, Promise<OfferValidationVerdict>>();
-
-  server.post(
-    "/v1/offers/validate",
-    {
-      bodyLimit: offerValidationBodyLimit(),
-      // Authentication must run before Fastify parses/buffers the JSON body:
-      // an unauthenticated oversized request may spend one rate-limit token,
-      // but it cannot allocate an offer body or reach any validation work.
-      onRequest: (request: any, reply: any, done: () => void) => {
-        let credentials: ReturnType<typeof solverLevelsCredentials>;
-        try {
-          credentials = solverLevelsCredentials();
-        } catch (error) {
-          console.error("[OFFER_VALIDATION] Invalid authentication configuration", error);
-          reply.code(503).send({
-            error: "VALIDATION_DISABLED",
-            reason: "offer validation is unavailable",
-          });
-          return;
-        }
-        if (credentials.length === 0) {
-          reply.code(503).send({
-            error: "VALIDATION_DISABLED",
-            reason: "offer validation is disabled until solver credentials are configured",
-          });
-          return;
-        }
-        const authorization = String(request.headers?.authorization ?? "");
-        const match = /^Bearer ([^\s]+)$/.exec(authorization);
-        const solverId = match
-          ? authenticateSolverLevelsToken(match[1], credentials)
-          : null;
-        if (solverId === null) {
-          reply.header("WWW-Authenticate", "Bearer");
-          reply.code(401).send({
-            error: "UNAUTHORIZED",
-            reason: "valid solver bearer token required",
-          });
-          return;
-        }
-        request.offerValidationSolverId = solverId;
-        done();
-      },
-    },
-    async (request: any, reply: any) => {
-      const parsed = parseOfferValidationRequest(request.body);
-      if (parsed === null) {
-        return reply.code(400).send({
-          error: "VALIDATION",
-          reason:
-            "expected exactly {schemaVersion:1, profile, offerId:<64 lowercase hex>, offer}",
-        });
-      }
-
-      const solverId = request.offerValidationSolverId;
-      if (typeof solverId !== "string" || solverId.length === 0) {
-        return reply.code(503).send({
-          error: "VALIDATION_UNAVAILABLE",
-          reason: "offer validation could not bind the authenticated solver identity",
-        });
-      }
-      if (activeBySolver.has(solverId)) {
-        return reply.code(503).send({
-          error: "VALIDATION_UNAVAILABLE",
-          reason: "an offer validation operation is already active for this solver credential",
-        });
-      }
-
-      const controller = new AbortController();
-      const timeoutMs = offerValidationTimeoutMs();
-      let rejectCancellation!: (error: Error) => void;
-      const cancelled = new Promise<never>((_resolve, reject) => {
-        rejectCancellation = reject;
-      });
-      const abort = (reason: Error) => {
-        if (controller.signal.aborted) return;
-        controller.abort(reason);
-        rejectCancellation(reason);
-      };
-      const onRequestAborted = () => abort(new Error("validation request body disconnected"));
-      const onResponseClosed = () => {
-        // ServerResponse emits close after both a normal end and a premature
-        // socket loss. Only the latter cancels still-running validation work.
-        if (reply.raw?.writableEnded) return;
-        abort(new Error("validation response socket disconnected"));
-      };
-      const responseSocket = reply.raw?.socket ?? request.raw?.socket;
-      request.raw?.once?.("aborted", onRequestAborted);
-      reply.raw?.once?.("close", onResponseClosed);
-      responseSocket?.once?.("end", onResponseClosed);
-      responseSocket?.once?.("close", onResponseClosed);
-      const timer = setTimeout(
-        () => abort(new Error(`validation deadline exceeded after ${timeoutMs}ms`)),
-        timeoutMs,
-      );
-
-      const operation = validateOfferForUse(parsed, dbConn, {
-        signal: controller.signal,
-      });
-      activeBySolver.set(solverId, operation);
-      void operation.finally(() => {
-        if (activeBySolver.get(solverId) === operation) {
-          activeBySolver.delete(solverId);
-        }
-      }).catch(() => undefined);
-      // A timeout can win while a read-only driver query is completing. Keep
-      // its eventual rejection observed; signal checks stop later stages and
-      // the per-solver slot above remains held until physical settlement.
-      void operation.catch(() => undefined);
-      try {
-        return await Promise.race([operation, cancelled]);
-      } catch (error) {
-        if (!(error instanceof OfferValidationUnavailableError) &&
-          !controller.signal.aborted) {
-          console.error("[OFFER_VALIDATION] Unexpected failure", error);
-        }
-        if (reply.raw?.destroyed || reply.raw?.writableEnded) {
-          return reply;
-        }
-        return reply.code(503).send({
-          error: "VALIDATION_UNAVAILABLE",
-          reason: controller.signal.aborted
-            ? "offer validation timed out or was cancelled"
-            : "offer validation could not establish current backend state",
-        });
-      } finally {
-        clearTimeout(timer);
-        request.raw?.off?.("aborted", onRequestAborted);
-        reply.raw?.off?.("close", onResponseClosed);
-        responseSocket?.off?.("end", onResponseClosed);
-        responseSocket?.off?.("close", onResponseClosed);
-      }
-    },
-  );
 }

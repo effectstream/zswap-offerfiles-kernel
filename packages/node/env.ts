@@ -1,5 +1,4 @@
 import { fileURLToPath } from "node:url";
-import { createHash, timingSafeEqual } from "node:crypto";
 
 import { getEnv } from "@effectstream/utils/runtime";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
@@ -134,100 +133,18 @@ export const apiSseMaxConnections = (): number => {
   return Number.isSafeInteger(parsed) && parsed <= 10_000 ? parsed : 100;
 };
 
-// Decision budget for one solver validate-for-use request. Keep a hard upper
-// bound so an operator typo cannot silently permit unbounded async read work.
-// The endpoint observes it at async yields and between validation stages. The
-// ledger's synchronous native proof call blocks the event loop and therefore
-// cannot be preempted (or notice an elapsed timer) mid-call. The route retains
-// its per-solver active slot until any post-deadline read really settles.
-export const offerValidationTimeoutMs = (): number => {
-  const raw = getEnv("OFFER_VALIDATION_TIMEOUT_MS") ?? "15000";
+// Decision budget for one exact-files read. Keep a hard upper bound so an
+// operator typo cannot silently permit unbounded async read work. The route
+// observes it at async yields and between validation stages. The ledger's
+// synchronous native proof call blocks the event loop and therefore cannot be
+// preempted (or notice an elapsed timer) mid-call, so the route retains its
+// concurrency slot until any post-deadline read really settles.
+export const exactFilesReadTimeoutMs = (): number => {
+  const raw = getEnv("OFFER_FILES_READ_TIMEOUT_MS") ?? "15000";
   if (!/^[1-9][0-9]*$/.test(raw)) return 15_000;
   const parsed = Number(raw);
   return Number.isSafeInteger(parsed) && parsed <= 60_000 ? parsed : 15_000;
 };
-
-export interface SolverLevelsCredential {
-  solverId: string;
-  secret: string;
-}
-
-const validSolverId = (value: string): boolean =>
-  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
-
-/**
- * Server-side credentials for authenticated solver publications.
- *
- * Preferred multi-solver form:
- *   SOLVER_LEVELS_AUTH_KEYS='{"maker-a":"secret-a","maker-b":"secret-b"}'
- *
- * A single-secret deployment may instead set SOLVER_LEVELS_AUTH_SECRET. Its
- * public identity is derived from the secret, so a caller cannot choose or
- * spoof another solverId. The publisher supplies the matching value via its
- * SOLVER_LEVELS_AUTH_TOKEN environment variable.
- */
-export function solverLevelsCredentials(): SolverLevelsCredential[] {
-  const rawKeys = getEnv("SOLVER_LEVELS_AUTH_KEYS")?.trim();
-  if (rawKeys) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rawKeys);
-    } catch {
-      throw new Error("SOLVER_LEVELS_AUTH_KEYS must be a JSON object of solverId to secret");
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new Error("SOLVER_LEVELS_AUTH_KEYS must be a JSON object of solverId to secret");
-    }
-    const entries = Object.entries(parsed as Record<string, unknown>);
-    if (entries.length === 0) {
-      throw new Error("SOLVER_LEVELS_AUTH_KEYS must contain at least one credential");
-    }
-    const seenSecrets = new Set<string>();
-    return entries.map(([solverId, value]) => {
-      if (!validSolverId(solverId)) {
-        throw new Error(`invalid solver identity in SOLVER_LEVELS_AUTH_KEYS: ${solverId}`);
-      }
-      if (typeof value !== "string" || value.length < 16 || /\s/.test(value)) {
-        throw new Error(
-          `secret for solver '${solverId}' must contain at least 16 non-whitespace characters`,
-        );
-      }
-      if (seenSecrets.has(value)) {
-        throw new Error("SOLVER_LEVELS_AUTH_KEYS secrets must be unique per solver identity");
-      }
-      seenSecrets.add(value);
-      return { solverId, secret: value };
-    });
-  }
-
-  const secret = getEnv("SOLVER_LEVELS_AUTH_SECRET");
-  if (secret === undefined || secret === "") return [];
-  if (secret.length < 16 || /\s/.test(secret)) {
-    throw new Error(
-      "SOLVER_LEVELS_AUTH_SECRET must contain at least 16 non-whitespace characters",
-    );
-  }
-  return [{
-    solverId: `solver-${createHash("sha256").update(secret).digest("hex").slice(0, 32)}`,
-    secret,
-  }];
-}
-
-/** Constant-time bearer lookup over the configured credential set. */
-export function authenticateSolverLevelsToken(
-  token: string,
-  credentials = solverLevelsCredentials(),
-): string | null {
-  const supplied = Buffer.from(token);
-  let authenticated: string | null = null;
-  for (const credential of credentials) {
-    const expected = Buffer.from(credential.secret);
-    if (supplied.length === expected.length && timingSafeEqual(supplied, expected)) {
-      authenticated = credential.solverId;
-    }
-  }
-  return authenticated;
-}
 
 // Unit tests can disable upstream's post-commit event gate poll (0358d9e)
 // explicitly. Its 1 s tick issues a getLatestEffectstreamBlock on the API's own

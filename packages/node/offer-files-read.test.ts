@@ -19,14 +19,9 @@ process.env["PGLITE_DATA_DIR"] ??= "memory://";
 // 1 s event-gate poll (0358d9e) must not issue queries underneath it.
 process.env["EVENT_GATE_POLL_ENABLED"] = "false";
 
-const AUTH_SECRET = "validation-fixture-secret-00001";
-const priorAuthSecret = process.env["SOLVER_LEVELS_AUTH_SECRET"];
-const priorAuthKeys = process.env["SOLVER_LEVELS_AUTH_KEYS"];
 const priorRateMax = process.env["API_RATE_LIMIT_MAX"];
 const priorAllowList = process.env["API_RATE_LIMIT_ALLOWLIST"];
-const priorTimeout = process.env["OFFER_VALIDATION_TIMEOUT_MS"];
-process.env["SOLVER_LEVELS_AUTH_SECRET"] = AUTH_SECRET;
-delete process.env["SOLVER_LEVELS_AUTH_KEYS"];
+const priorTimeout = process.env["OFFER_FILES_READ_TIMEOUT_MS"];
 process.env["API_RATE_LIMIT_MAX"] = "1000";
 process.env["API_RATE_LIMIT_ALLOWLIST"] = "127.0.0.1";
 
@@ -41,22 +36,19 @@ const {
 } = await import("@zswap-da/validator");
 const { offerHashFromBlob } = await import("@zswap-da/offer-guard");
 const {
-  OFFER_VALIDATION_PROFILE,
-  OFFER_VALIDATION_SCHEMA_VERSION,
-  parseOfferValidationVerdict,
-} = await import("@zswap-da/solver-core/validation-contract");
+  EXACT_FILES_PROFILE,
+  EXACT_FILES_SCHEMA_VERSION,
+  MAX_EXACT_FILES_PER_READ,
+  parseExactFilesResponse,
+} = await import("@zswap-da/solver-core/exact-files-contract");
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const fastify = (await import("fastify")).default;
 const { apiRouter } = await import("./api.ts");
 const { eventBus } = await import("./event-bus.ts");
-const {
-  offerValidationBodyLimit,
-  validationStateAnchorFromRow,
-} = await import("./offer-validation.ts");
-const {
-  OFFER_MAX_BYTES,
-} = await import("./env.ts");
+const { validationStateAnchorFromRow } = await import("./offer-validation.ts");
+const { MAX_CONCURRENT_EXACT_FILES_READS } = await import("./offer-files-read.ts");
+const { OFFER_MAX_BYTES } = await import("./env.ts");
 const { resetSyncHealthCacheForTest } = await import("./sync-health.ts");
 
 const FIXTURE = readFileSync(
@@ -68,7 +60,7 @@ const BLOCK_HEIGHT = 42;
 const BLOCK_AT = "2026-08-14T12:34:56.000Z";
 const BLOCK_AT_MS = Date.parse(BLOCK_AT);
 const EXPIRES_AT = "2026-08-14T13:34:56.000Z";
-const AUTH = { authorization: `Bearer ${AUTH_SECRET}` };
+const UNKNOWN_ID = "ab".repeat(32);
 
 const deferred = validateZswapOffer(FIXTURE, {
   refState: getBlankRefState("undeployed"),
@@ -77,7 +69,7 @@ const deferred = validateZswapOffer(FIXTURE, {
   crypto: "defer",
 });
 if (!deferred.ok || !deferred.nullifiers?.[0] || !deferred.inputRoots?.[0]) {
-  throw new Error(`valid fixture cannot seed validation API: ${deferred.code}`);
+  throw new Error(`valid fixture cannot seed the exact-files read: ${deferred.code}`);
 }
 const NULLIFIER = deferred.nullifiers[0];
 const ROOTS = deferred.inputRoots;
@@ -146,14 +138,12 @@ function holdNextApiQuery(): () => void {
 }
 
 const requestFor = (
-  offer = FIXTURE,
-  offerId = offerHashFromBlob(offer),
-  profile = OFFER_VALIDATION_PROFILE,
+  offerIds: string[] = [OFFER_ID],
+  profile = EXACT_FILES_PROFILE,
 ) => ({
-  schemaVersion: OFFER_VALIDATION_SCHEMA_VERSION,
+  schemaVersion: EXACT_FILES_SCHEMA_VERSION,
   profile,
-  offerId,
-  offer,
+  offerIds,
 });
 
 async function seedRoots(): Promise<void> {
@@ -216,23 +206,27 @@ function isBoundOfferRead(args: unknown[]): boolean {
     text.includes("FROM offer_file_history");
 }
 
-async function postValidation(
-  payload: unknown,
-  headers: Record<string, string> = AUTH,
-): Promise<any> {
+async function readFiles(payload: unknown): Promise<any> {
   return server.inject({
     method: "POST",
-    url: "/v1/offers/validate",
-    headers,
+    url: "/v1/offers/files",
     payload,
   });
 }
 
-function expectCanonicalVerdict(response: any): any {
+/** Assert the response is canonical under the shared contract, INCLUDING the
+ * byte-to-identity binding, and hand back its parsed body. */
+function expectCanonicalRead(response: any): any {
   expect(response.statusCode).toBe(200);
   const body = response.json();
-  expect(parseOfferValidationVerdict(body)).toEqual(body);
+  expect(parseExactFilesResponse(body, { hashOffer: offerHashFromBlob })).toEqual(body);
   return body;
+}
+
+function onlyEntry(response: any): any {
+  const body = expectCanonicalRead(response);
+  expect(body.files).toHaveLength(1);
+  return body.files[0];
 }
 
 async function setHealthyPagination(): Promise<void> {
@@ -269,7 +263,7 @@ beforeAll(async () => {
     `INSERT INTO effectstream.effectstream_blocks
        (block_height, ver, main_chain_block_hash, seed, ms_timestamp,
         effectstream_block_hash)
-     VALUES ($1, 1, $2, 'offer-validation', $3, $4)`,
+     VALUES ($1, 1, $2, 'offer-files-read', $3, $4)`,
     [BLOCK_HEIGHT, Buffer.from("01", "hex"), BLOCK_AT, Buffer.from("02", "hex")],
   );
   await client.query(
@@ -341,16 +335,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = originalFetch;
-  if (priorAuthSecret === undefined) delete process.env["SOLVER_LEVELS_AUTH_SECRET"];
-  else process.env["SOLVER_LEVELS_AUTH_SECRET"] = priorAuthSecret;
-  if (priorAuthKeys === undefined) delete process.env["SOLVER_LEVELS_AUTH_KEYS"];
-  else process.env["SOLVER_LEVELS_AUTH_KEYS"] = priorAuthKeys;
   if (priorRateMax === undefined) delete process.env["API_RATE_LIMIT_MAX"];
   else process.env["API_RATE_LIMIT_MAX"] = priorRateMax;
   if (priorAllowList === undefined) delete process.env["API_RATE_LIMIT_ALLOWLIST"];
   else process.env["API_RATE_LIMIT_ALLOWLIST"] = priorAllowList;
-  if (priorTimeout === undefined) delete process.env["OFFER_VALIDATION_TIMEOUT_MS"];
-  else process.env["OFFER_VALIDATION_TIMEOUT_MS"] = priorTimeout;
+  if (priorTimeout === undefined) delete process.env["OFFER_FILES_READ_TIMEOUT_MS"];
+  else process.env["OFFER_FILES_READ_TIMEOUT_MS"] = priorTimeout;
   try {
     await server?.close();
   } finally {
@@ -359,136 +349,97 @@ afterAll(async () => {
   }
 });
 
-describe("POST /v1/offers/validate transport/auth boundary", () => {
-  test.serial("requires configured solver bearer auth independently of levels flags", async () => {
-    let response = await postValidation(requestFor(), {});
-    expect(response.statusCode).toBe(401);
-    expect(response.headers["www-authenticate"]).toBe("Bearer");
-
-    response = await postValidation(requestFor(), { authorization: "Bearer wrong-secret" });
-    expect(response.statusCode).toBe(401);
-
-    response = await postValidation(
-      { ...requestFor(), offer: "x".repeat(offerValidationBodyLimit() + 1) },
-      {},
-    );
-    expect(response.statusCode).toBe(401);
-
-    delete process.env["SOLVER_LEVELS_AUTH_SECRET"];
-    try {
-      response = await postValidation(requestFor());
-      expect(response.statusCode).toBe(503);
-      expect(response.json().error).toBe("VALIDATION_DISABLED");
-    } finally {
-      process.env["SOLVER_LEVELS_AUTH_SECRET"] = AUTH_SECRET;
-    }
-  });
-
+describe("POST /v1/offers/files transport boundary", () => {
   test.serial("rejects non-exact request envelopes with 400", async () => {
-    let response = await postValidation({ ...requestFor(), extra: true });
-    expect(response.statusCode).toBe(400);
-    expect(response.json().error).toBe("VALIDATION");
+    const malformed: unknown[] = [
+      null,
+      {},
+      { ...requestFor(), extra: true },
+      { ...requestFor(), schemaVersion: 2 },
+      { schemaVersion: EXACT_FILES_SCHEMA_VERSION, profile: EXACT_FILES_PROFILE },
+      requestFor([]),
+      requestFor([OFFER_ID, OFFER_ID]),
+      requestFor([OFFER_ID.toUpperCase()]),
+      requestFor(Array.from(
+        { length: MAX_EXACT_FILES_PER_READ + 1 },
+        (_value, index) => index.toString(16).padStart(64, "0"),
+      )),
+    ];
+    const queriesBefore = proxiedQueryCount;
+    for (const payload of malformed) {
+      const response = await readFiles(payload);
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toBe("VALIDATION");
+    }
+    // A refused envelope never reaches the database.
+    expect(proxiedQueryCount).toBe(queriesBefore);
 
-    response = await server.inject({
+    const wrongMedia = await server.inject({
       method: "POST",
-      url: "/v1/offers/validate",
-      headers: { ...AUTH, "content-type": "application/xml" },
-      payload: "<validation />",
+      url: "/v1/offers/files",
+      headers: { "content-type": "application/xml" },
+      payload: "<files />",
     });
-    expect(response.statusCode).toBe(400);
-    expect(response.json().error).toBe("VALIDATION");
+    expect(wrongMedia.statusCode).toBe(400);
+    expect(wrongMedia.json().error).toBe("VALIDATION");
   });
 
-  test.serial("bounds decoded offers as a domain verdict and larger transports as 413", async () => {
-    const maxEncodedChars = Math.ceil((OFFER_MAX_BYTES * 8) / 5) + OFFER_HRP.length + 7;
-    const domainOversize = `${OFFER_HRP}1${"q".repeat(maxEncodedChars)}`;
-    let response = await postValidation({
-      ...requestFor(),
-      offer: domainOversize,
-    });
-    expect(expectCanonicalVerdict(response).code).toBe("TOO_LARGE");
-
-    const transportOversize = "x".repeat(offerValidationBodyLimit() + 1);
-    response = await postValidation({ ...requestFor(), offer: transportOversize });
-    expect(response.statusCode).toBe(413);
-    expect(response.json().error).toBe("TOO_LARGE");
-
-    const submissionTransportOversize = "x".repeat(Math.ceil(OFFER_MAX_BYTES * 2) + 1);
-    const submission = await server.inject({
+  test.serial("bounds the transport body well below any offer payload", async () => {
+    const oversize = await server.inject({
       method: "POST",
-      url: "/v1/offers",
-      payload: { offer: submissionTransportOversize },
+      url: "/v1/offers/files",
+      headers: { "content-type": "application/json" },
+      payload: `{"schemaVersion":1,"profile":"${EXACT_FILES_PROFILE}","offerIds":["${
+        "x".repeat(16 * 1024)
+      }"]}`,
     });
-    expect(submission.statusCode).toBe(413);
-    expect(submission.json().error).toBe("BAD_REQUEST");
+    expect(oversize.statusCode).toBe(413);
+    expect(oversize.json().error).toBe("TOO_LARGE");
+  });
+
+  test.serial("the router-wide request budget throttles the read", async () => {
+    const previousMax = process.env["API_RATE_LIMIT_MAX"];
+    const previousAllow = process.env["API_RATE_LIMIT_ALLOWLIST"];
+    process.env["API_RATE_LIMIT_MAX"] = "1";
+    process.env["API_RATE_LIMIT_ALLOWLIST"] = "";
+    const limited = fastify();
+    try {
+      await apiRouter(limited, client);
+      await limited.ready();
+    } finally {
+      if (previousMax === undefined) delete process.env["API_RATE_LIMIT_MAX"];
+      else process.env["API_RATE_LIMIT_MAX"] = previousMax;
+      if (previousAllow === undefined) delete process.env["API_RATE_LIMIT_ALLOWLIST"];
+      else process.env["API_RATE_LIMIT_ALLOWLIST"] = previousAllow;
+    }
+    try {
+      const first = await limited.inject({
+        method: "POST",
+        url: "/v1/offers/files",
+        payload: { ...requestFor(), extra: true },
+      });
+      expect(first.statusCode).toBe(400);
+      const throttled = await limited.inject({
+        method: "POST",
+        url: "/v1/offers/files",
+        payload: { ...requestFor(), extra: true },
+      });
+      expect(throttled.statusCode).toBe(429);
+      expect(throttled.json().error).toBe("RATE_LIMITED");
+    } finally {
+      await limited.close();
+    }
   });
 });
 
-describe("POST /v1/offers/validate frozen domain contract", () => {
-  test.serial("returns the canonical unsupported-profile fixture without decoding content", async () => {
-    const fixture = JSON.parse(readFileSync(
-      join(import.meta.dir, "..", "solver-core", "fixtures", "offer-validation", "v1",
-        "verdict-unsupported-profile.json"),
-      "utf8",
-    ));
-    const request = {
-      schemaVersion: 1,
-      profile: "future-profile-v2",
-      offerId: "ab".repeat(32),
-      offer: "swapoffer1fixture",
-    };
-    expect((await postValidation(request)).json()).toEqual(fixture);
-  });
-
-  test.serial("preserves canonical structural codes and exact decoded-byte hash binding", async () => {
-    let response = await postValidation({
-      ...requestFor(),
-      offer: "definitely-not-an-offer",
-    });
-    let verdict = expectCanonicalVerdict(response);
-    expect(verdict).toMatchObject({
-      code: "BAD_ENCODING",
-      computedOfferId: null,
-      status: "unknown",
-      live: false,
-    });
-
-    const junk = bech32m.encode(
-      OFFER_HRP,
-      bech32m.toWords(new Uint8Array(64).fill(9)),
-      false,
-    );
-    response = await postValidation(requestFor(junk));
-    verdict = expectCanonicalVerdict(response);
-    expect(verdict.code).toBe("BAD_DESERIALIZE");
-    expect(verdict.computedOfferId).toBe(offerHashFromBlob(junk));
-
-    response = await postValidation(requestFor(FIXTURE, "ab".repeat(32)));
-    verdict = expectCanonicalVerdict(response);
-    expect(verdict).toMatchObject({
-      code: "HASH_MISMATCH",
-      claimedOfferId: "ab".repeat(32),
-      computedOfferId: OFFER_ID,
-    });
-  });
-
-  test.serial("requires exact indexed presence but treats that presence as VALID, not duplicate", async () => {
-    await removeOffer();
-    try {
-      const unindexed = expectCanonicalVerdict(await postValidation(requestFor()));
-      expect(unindexed).toMatchObject({
-        valid: false,
-        live: false,
-        status: "not_indexed",
-        code: "NOT_INDEXED",
-        computedOfferId: OFFER_ID,
-      });
-    } finally {
-      await seedLiveOffer();
-    }
-
-    const live = expectCanonicalVerdict(await postValidation(requestFor()));
-    expect(live).toMatchObject({
+describe("POST /v1/offers/files exact bytes and stable refusals", () => {
+  test.serial("serves the exact indexed bytes for a live valid identity", async () => {
+    const entry = onlyEntry(await readFiles(requestFor()));
+    expect(entry.offerId).toBe(OFFER_ID);
+    // FR-006/FR-008: the bytes are the indexed ones, bound to the identity.
+    expect(entry.offer).toBe(FIXTURE);
+    expect(offerHashFromBlob(entry.offer)).toBe(OFFER_ID);
+    expect(entry.verdict).toMatchObject({
       valid: true,
       live: true,
       status: "live",
@@ -504,21 +455,56 @@ describe("POST /v1/offers/validate frozen domain contract", () => {
         expiresAt: EXPIRES_AT,
       },
     });
+  });
 
-    await raceClient.query(
-      "UPDATE offer_file SET transaction_hex = $1 WHERE offer_hash = $2",
-      [TAMPERED, OFFER_ID],
+  test.serial("answers several identities in request order, one entry each", async () => {
+    await removeOffer(TAMPERED_ID);
+    const body = expectCanonicalRead(
+      await readFiles(requestFor([UNKNOWN_ID, OFFER_ID, TAMPERED_ID])),
     );
+    expect(body.files.map((file: any) => file.offerId)).toEqual([
+      UNKNOWN_ID,
+      OFFER_ID,
+      TAMPERED_ID,
+    ]);
+    expect(body.files[0].verdict.code).toBe("NOT_INDEXED");
+    expect(body.files[0].offer).toBeUndefined();
+    expect(body.files[1].verdict.code).toBe("VALID");
+    expect(body.files[1].offer).toBe(FIXTURE);
+    expect(body.files[2].verdict.code).toBe("NOT_INDEXED");
+    expect(body.files[2].offer).toBeUndefined();
+  });
+
+  test.serial("an unknown identity is NOT_INDEXED, never an empty success", async () => {
+    await removeOffer();
     try {
-      const mismatchedIndex = await postValidation(requestFor());
-      expect(mismatchedIndex.statusCode).toBe(503);
-      expect(mismatchedIndex.json().error).toBe("VALIDATION_UNAVAILABLE");
+      const entry = onlyEntry(await readFiles(requestFor()));
+      expect(entry.offer).toBeUndefined();
+      expect(entry.verdict).toMatchObject({
+        valid: false,
+        live: false,
+        status: "not_indexed",
+        code: "NOT_INDEXED",
+        computedOfferId: null,
+      });
     } finally {
-      await raceClient.query(
-        "UPDATE offer_file SET transaction_hex = $1 WHERE offer_hash = $2",
-        [FIXTURE, OFFER_ID],
-      );
+      await seedLiveOffer();
     }
+  });
+
+  test.serial("an unknown profile is a stable verdict, not a transport error", async () => {
+    const entry = onlyEntry(
+      await readFiles(requestFor([OFFER_ID], "future-profile-v2")),
+    );
+    expect(entry.offer).toBeUndefined();
+    expect(entry.verdict).toMatchObject({
+      valid: false,
+      live: false,
+      profile: "future-profile-v2",
+      status: "unknown",
+      code: "UNSUPPORTED_PROFILE",
+      computedOfferId: null,
+    });
   });
 
   test.serial("keeps current liveness independent from stored live lifecycle status", async () => {
@@ -527,8 +513,9 @@ describe("POST /v1/offers/validate frozen domain contract", () => {
       [NULLIFIER],
     );
     try {
-      const spent = expectCanonicalVerdict(await postValidation(requestFor()));
-      expect(spent).toMatchObject({
+      const entry = onlyEntry(await readFiles(requestFor()));
+      expect(entry.offer).toBeUndefined();
+      expect(entry.verdict).toMatchObject({
         valid: false,
         live: false,
         status: "live",
@@ -540,8 +527,9 @@ describe("POST /v1/offers/validate frozen domain contract", () => {
 
     await raceClient.query("DELETE FROM known_roots");
     try {
-      const staleRoot = expectCanonicalVerdict(await postValidation(requestFor()));
-      expect(staleRoot).toMatchObject({
+      const entry = onlyEntry(await readFiles(requestFor()));
+      expect(entry.offer).toBeUndefined();
+      expect(entry.verdict).toMatchObject({
         valid: false,
         live: false,
         status: "live",
@@ -558,20 +546,22 @@ describe("POST /v1/offers/validate frozen domain contract", () => {
       [new Date(BLOCK_AT_MS - 1), OFFER_ID],
     );
     try {
-      const expired = expectCanonicalVerdict(await postValidation(requestFor()));
-      expect(expired).toMatchObject({
+      const entry = onlyEntry(await readFiles(requestFor()));
+      expect(entry.offer).toBeUndefined();
+      expect(entry.verdict).toMatchObject({
         valid: false,
         live: false,
         status: "live",
         code: "EXPIRED",
       });
+
       await raceClient.query(
         "UPDATE offer_file SET metadata_expires_at = $1 WHERE offer_hash = $2",
         [new Date(-1), OFFER_ID],
       );
-      const noncanonical = await postValidation(requestFor());
+      const noncanonical = await readFiles(requestFor());
       expect(noncanonical.statusCode).toBe(503);
-      expect(noncanonical.json().error).toBe("VALIDATION_UNAVAILABLE");
+      expect(noncanonical.json().error).toBe("FILES_UNAVAILABLE");
     } finally {
       await raceClient.query(
         "UPDATE offer_file SET metadata_expires_at = $1 WHERE offer_hash = $2",
@@ -580,11 +570,12 @@ describe("POST /v1/offers/validate frozen domain contract", () => {
     }
   });
 
-  test.serial("returns stored archived lifecycle state without proof or duplicate rejection", async () => {
+  test.serial("an archived offer returns its lifecycle state and no bytes", async () => {
     await archiveOffer();
     try {
-      const archived = expectCanonicalVerdict(await postValidation(requestFor()));
-      expect(archived).toMatchObject({
+      const entry = onlyEntry(await readFiles(requestFor()));
+      expect(entry.offer).toBeUndefined();
+      expect(entry.verdict).toMatchObject({
         valid: false,
         live: false,
         status: "expired",
@@ -595,13 +586,12 @@ describe("POST /v1/offers/validate frozen domain contract", () => {
     }
   });
 
-  test.serial("reuses canonical crypto while retaining independent live/status axes", async () => {
+  test.serial("reuses canonical crypto: an indexed invalid proof serves no bytes", async () => {
     await seedLiveOffer(TAMPERED, TAMPERED_ID);
     try {
-      const proofInvalid = expectCanonicalVerdict(
-        await postValidation(requestFor(TAMPERED, TAMPERED_ID)),
-      );
-      expect(proofInvalid).toMatchObject({
+      const entry = onlyEntry(await readFiles(requestFor([TAMPERED_ID])));
+      expect(entry.offer).toBeUndefined();
+      expect(entry.verdict).toMatchObject({
         valid: false,
         live: true,
         status: "live",
@@ -611,16 +601,45 @@ describe("POST /v1/offers/validate frozen domain contract", () => {
       await removeOffer(TAMPERED_ID);
     }
   });
+
+  test.serial("an identity whose stored bytes are someone else's serves nothing", async () => {
+    // Index corruption: the row keyed by OFFER_ID holds the tampered bytes,
+    // which hash to a different identity. The read must refuse rather than
+    // return bytes under the requested identity.
+    await raceClient.query(
+      "UPDATE offer_file SET transaction_hex = $1 WHERE offer_hash = $2",
+      [TAMPERED, OFFER_ID],
+    );
+    try {
+      const entry = onlyEntry(await readFiles(requestFor()));
+      expect(entry.offer).toBeUndefined();
+      expect(entry.verdict).toMatchObject({
+        valid: false,
+        code: "HASH_MISMATCH",
+        claimedOfferId: OFFER_ID,
+        computedOfferId: TAMPERED_ID,
+      });
+    } finally {
+      await raceClient.query(
+        "UPDATE offer_file SET transaction_hex = $1 WHERE offer_hash = $2",
+        [FIXTURE, OFFER_ID],
+      );
+    }
+  });
 });
 
-describe("POST /v1/offers/validate currentness, race, and side effects", () => {
-  test.serial("fails unavailable when the backend cannot prove all sync positions current", async () => {
+describe("POST /v1/offers/files currentness, races, and side effects", () => {
+  test.serial("fails unavailable when the backend cannot prove its positions current", async () => {
     resetSyncHealthCacheForTest();
     await raceClient.query("DELETE FROM effectstream.sync_protocol_pagination");
     try {
-      const response = await postValidation(requestFor());
+      const response = await readFiles(requestFor());
       expect(response.statusCode).toBe(503);
-      expect(response.json().error).toBe("VALIDATION_UNAVAILABLE");
+      expect(response.json().error).toBe("FILES_UNAVAILABLE");
+
+      // An unsynchronized node must not answer "not indexed" either.
+      const unknown = await readFiles(requestFor([UNKNOWN_ID]));
+      expect(unknown.statusCode).toBe(503);
     } finally {
       await setHealthyPagination();
       resetSyncHealthCacheForTest();
@@ -628,14 +647,13 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
   });
 
   test.serial("rechecks uncached aggregate currentness after proof verification", async () => {
-    // Warm the normal health cache while both external positions are current.
-    expect(expectCanonicalVerdict(await postValidation(requestFor())).code).toBe("VALID");
+    expect(onlyEntry(await readFiles(requestFor())).verdict.code).toBe("VALID");
     midnightTip = 10_000;
     celestiaTip = 20_000;
     try {
-      const response = await postValidation(requestFor());
+      const response = await readFiles(requestFor());
       expect(response.statusCode).toBe(503);
-      expect(response.json().error).toBe("VALIDATION_UNAVAILABLE");
+      expect(response.json().error).toBe("FILES_UNAVAILABLE");
     } finally {
       midnightTip = 100;
       celestiaTip = 200;
@@ -644,18 +662,19 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
   });
 
   test.serial("retries a stale health-cache height against the direct committed anchor", async () => {
-    expect(expectCanonicalVerdict(await postValidation(requestFor())).stateVersion).toBe("42");
+    expect(onlyEntry(await readFiles(requestFor())).verdict.stateVersion).toBe("42");
     const nextAt = new Date(BLOCK_AT_MS + 60_000).toISOString();
     await raceClient.query(
       `INSERT INTO effectstream.effectstream_blocks
          (block_height, ver, main_chain_block_hash, seed, ms_timestamp,
           effectstream_block_hash)
-       VALUES (43, 1, $1, 'offer-validation-next', $2, $3)`,
+       VALUES (43, 1, $1, 'offer-files-read-next', $2, $3)`,
       [Buffer.from("03", "hex"), nextAt, Buffer.from("04", "hex")],
     );
     try {
-      const retried = expectCanonicalVerdict(await postValidation(requestFor()));
-      expect(retried).toMatchObject({
+      const entry = onlyEntry(await readFiles(requestFor()));
+      expect(entry.offer).toBe(FIXTURE);
+      expect(entry.verdict).toMatchObject({
         code: "VALID",
         stateVersion: "43",
         validatedAt: nextAt,
@@ -668,14 +687,17 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
     }
   });
 
-  test.serial("post-crypto fresh read observes an archive race and cannot answer VALID", async () => {
+  test.serial("an offer archived between index and read serves no bytes", async () => {
+    // The liveness race the spec's edge cases name: live when the read starts,
+    // archived by the time the post-proof state read runs.
     await seedLiveOffer();
     boundOfferReads = 0;
     raceArmed = true;
     try {
-      const raced = expectCanonicalVerdict(await postValidation(requestFor()));
+      const entry = onlyEntry(await readFiles(requestFor()));
       expect(boundOfferReads).toBe(2);
-      expect(raced).toMatchObject({
+      expect(entry.offer).toBeUndefined();
+      expect(entry.verdict).toMatchObject({
         valid: false,
         live: false,
         status: "expired",
@@ -721,7 +743,7 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
     return snapshot;
   };
 
-  test.serial("valid and invalid verdicts cause zero DB/event/batcher side effects", async () => {
+  test.serial("served and refused reads alike cause zero DB/event/batcher effects", async () => {
     await seedLiveOffer();
     await seedRoots();
     const before = await databaseSnapshot();
@@ -730,162 +752,99 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
     const listener = (event: unknown) => events.push(event);
     eventBus.on("app_event", listener);
     try {
-      expect(expectCanonicalVerdict(await postValidation(requestFor())).code).toBe("VALID");
-      expect(expectCanonicalVerdict(await postValidation({
-        ...requestFor(),
-        offer: "not-an-offer",
-      })).code).toBe("BAD_ENCODING");
+      expect(onlyEntry(await readFiles(requestFor())).verdict.code).toBe("VALID");
+      const mixed = expectCanonicalRead(await readFiles(requestFor([OFFER_ID, UNKNOWN_ID])));
+      expect(mixed.files.map((file: any) => file.verdict.code)).toEqual([
+        "VALID",
+        "NOT_INDEXED",
+      ]);
     } finally {
       eventBus.off("app_event", listener);
     }
+    // FR-009: no publication, no Celestia fee, no lifecycle mutation.
     expect(await databaseSnapshot()).toEqual(before);
     expect(batcherSubmissions).toBe(beforeBatcher);
     expect(events).toEqual([]);
   });
 
-  test.serial("two solver identities concurrently revalidate one live offer without effects", async () => {
+  test.serial("concurrent reads past the window are refused, never queued", async () => {
     await seedLiveOffer();
-    await seedRoots();
     const before = await databaseSnapshot();
-    const previousSecret = process.env["SOLVER_LEVELS_AUTH_SECRET"];
-    const previousKeys = process.env["SOLVER_LEVELS_AUTH_KEYS"];
-    const solverASecret = "validation-concurrent-a-00001";
-    const solverBSecret = "validation-concurrent-b-00001";
-    process.env["SOLVER_LEVELS_AUTH_KEYS"] = JSON.stringify({
-      "concurrent-a": solverASecret,
-      "concurrent-b": solverBSecret,
-    });
-    delete process.env["SOLVER_LEVELS_AUTH_SECRET"];
-    let responses: any[];
-    try {
-      responses = await Promise.all([
-        postValidation(requestFor(), { authorization: `Bearer ${solverASecret}` }),
-        postValidation(requestFor(), { authorization: `Bearer ${solverBSecret}` }),
-      ]);
-    } finally {
-      if (previousSecret === undefined) delete process.env["SOLVER_LEVELS_AUTH_SECRET"];
-      else process.env["SOLVER_LEVELS_AUTH_SECRET"] = previousSecret;
-      if (previousKeys === undefined) delete process.env["SOLVER_LEVELS_AUTH_KEYS"];
-      else process.env["SOLVER_LEVELS_AUTH_KEYS"] = previousKeys;
+    const responses = await Promise.all(
+      Array.from({ length: MAX_CONCURRENT_EXACT_FILES_READS + 8 }, () =>
+        readFiles(requestFor())
+      ),
+    );
+    const served = responses.filter((response) => response.statusCode === 200);
+    const busy = responses.filter((response) => response.statusCode === 503);
+    expect(served.length).toBeGreaterThan(0);
+    expect(served.length).toBeLessThanOrEqual(MAX_CONCURRENT_EXACT_FILES_READS);
+    expect(served.length + busy.length).toBe(responses.length);
+    for (const response of served) {
+      expect(onlyEntry(response).verdict.code).toBe("VALID");
     }
-    for (const response of responses!) {
-      expect(expectCanonicalVerdict(response)).toMatchObject({
-        valid: true,
-        live: true,
-        status: "live",
-        code: "VALID",
-        computedOfferId: OFFER_ID,
-      });
+    for (const response of busy) {
+      expect(response.json().error).toBe("FILES_UNAVAILABLE");
+      expect(response.json().reason).toContain("already active");
     }
     expect(await databaseSnapshot()).toEqual(before);
   });
 
-  test.serial("malformed and proof-invalid request bursts remain bounded and read-only", async () => {
-    const malformed = [
-      null,
-      {},
-      { ...requestFor(), schemaVersion: 2 },
-      { ...requestFor(), offerId: OFFER_ID.toUpperCase() },
-      { ...requestFor(), extra: true },
-      { schemaVersion: 1, profile: OFFER_VALIDATION_PROFILE, offerId: OFFER_ID },
-    ];
-    const queriesBeforeMalformed = proxiedQueryCount;
-    const malformedResponses = await Promise.all(
-      malformed.map((payload) => postValidation(payload)),
-    );
-    expect(malformedResponses.map((response) => response.statusCode)).toEqual(
-      malformed.map(() => 400),
-    );
-    expect(proxiedQueryCount).toBe(queriesBeforeMalformed);
-
-    await seedLiveOffer(TAMPERED, TAMPERED_ID);
+  test.serial("the deadline retains its slot until held read work actually settles", async () => {
     const before = await databaseSnapshot();
-    try {
-      const responses = await Promise.all(
-        Array.from({ length: 8 }, () =>
-          postValidation(requestFor(TAMPERED, TAMPERED_ID))
-        ),
-      );
-      const domain = responses.filter((response) => response.statusCode === 200);
-      const busy = responses.filter((response) => response.statusCode === 503);
-      expect(domain).toHaveLength(1);
-      expect(expectCanonicalVerdict(domain[0]).code).toBe("PROOF_INVALID");
-      expect(busy).toHaveLength(7);
-      for (const response of busy) {
-        expect(response.json().reason).toContain("already active");
-      }
-      expect(await databaseSnapshot()).toEqual(before);
-    } finally {
-      await removeOffer(TAMPERED_ID);
-    }
-  });
-
-  test.serial("deadline retains the active slot until held read work actually settles", async () => {
-    const before = await databaseSnapshot();
-    expect(expectCanonicalVerdict(await postValidation(requestFor())).code).toBe("VALID");
-    process.env["OFFER_VALIDATION_TIMEOUT_MS"] = "100";
+    expect(onlyEntry(await readFiles(requestFor())).verdict.code).toBe("VALID");
+    process.env["OFFER_FILES_READ_TIMEOUT_MS"] = "100";
     const entriesBefore = heldQueryEntries;
     const release = holdNextApiQuery();
-    const first = postValidation(requestFor());
+    const first = readFiles(requestFor());
     try {
       // Readiness wait, not a speed assertion: the `expect` below is what
-      // proves the query registered. The old 100 ms budget was sized for this
-      // file running alone; the eight-path suite now runs it alongside
-      // packages/tests/grand-e2e (upstream added it to the CI list), and a
-      // loaded container needs longer to get the in-flight request that far.
+      // proves the query registered. A loaded container needs time to get the
+      // in-flight request that far.
       for (let attempt = 0; attempt < 1000 && heldQueryEntries === entriesBefore; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
       expect(heldQueryEntries).toBe(entriesBefore + 1);
-      const countWithPhysicalReadHeld = proxiedQueryCount;
-
-      const concurrent = await Promise.all(
-        Array.from({ length: 12 }, () => postValidation(requestFor())),
-      );
-      for (const response of concurrent) {
-        expect(response.statusCode).toBe(503);
-        expect(response.json().reason).toContain("already active");
-      }
-      expect(proxiedQueryCount).toBe(countWithPhysicalReadHeld);
 
       const timedOut = await first;
       expect(timedOut.statusCode).toBe(503);
-      expect(timedOut.json().error).toBe("VALIDATION_UNAVAILABLE");
+      expect(timedOut.json().error).toBe("FILES_UNAVAILABLE");
+      expect(timedOut.json().reason).toContain("timed out");
 
+      // The slot is still held by the physically unfinished read, so the
+      // window is one narrower than its nominal size until it settles.
+      const countWithPhysicalReadHeld = proxiedQueryCount;
       const afterDeadline = await Promise.all(
-        Array.from({ length: 12 }, () => postValidation(requestFor())),
+        Array.from({ length: MAX_CONCURRENT_EXACT_FILES_READS }, () => readFiles(requestFor())),
       );
-      for (const response of afterDeadline) {
-        expect(response.statusCode).toBe(503);
-        expect(response.json().reason).toContain("already active");
-      }
-      expect(proxiedQueryCount).toBe(countWithPhysicalReadHeld);
+      expect(afterDeadline.filter((response) => response.statusCode === 503).length)
+        .toBeGreaterThan(0);
+      expect(proxiedQueryCount).toBeGreaterThanOrEqual(countWithPhysicalReadHeld);
     } finally {
       release();
-      if (priorTimeout === undefined) delete process.env["OFFER_VALIDATION_TIMEOUT_MS"];
-      else process.env["OFFER_VALIDATION_TIMEOUT_MS"] = priorTimeout;
+      if (priorTimeout === undefined) delete process.env["OFFER_FILES_READ_TIMEOUT_MS"];
+      else process.env["OFFER_FILES_READ_TIMEOUT_MS"] = priorTimeout;
     }
 
     let recovered: any;
     for (let attempt = 0; attempt < 200; attempt++) {
-      recovered = await postValidation(requestFor());
+      recovered = await readFiles(requestFor());
       if (recovered.statusCode === 200) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    expect(expectCanonicalVerdict(recovered).code).toBe("VALID");
+    expect(onlyEntry(recovered).verdict.code).toBe("VALID");
     expect(await databaseSnapshot()).toEqual(before);
   });
 
-  test.serial("a completed-body HTTP response socket close cancels further work", async () => {
-    expect(expectCanonicalVerdict(await postValidation(requestFor())).code).toBe("VALID");
+  test.serial("a lost response socket cancels further read work", async () => {
+    expect(onlyEntry(await readFiles(requestFor())).verdict.code).toBe("VALID");
     const entriesBefore = heldQueryEntries;
     const release = holdNextApiQuery();
     const body = JSON.stringify(requestFor());
     latestApiSocket = null;
     const wireRequest =
-      "POST /v1/offers/validate HTTP/1.1\r\n" +
+      "POST /v1/offers/files HTTP/1.1\r\n" +
       `Host: 127.0.0.1:${apiPort}\r\n` +
-      `Authorization: Bearer ${AUTH_SECRET}\r\n` +
       "Content-Type: application/json\r\n" +
       `Content-Length: ${Buffer.byteLength(body)}\r\n` +
       "Connection: keep-alive\r\n\r\n" +
@@ -905,16 +864,6 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
     ], { stdout: "ignore", stderr: "ignore" });
 
     try {
-      // Same readiness wait as above, and this one additionally covers a
-      // `bun` subprocess spawn plus a TCP connect — 200 ms never had margin
-      // for that under load.
-      //
-      // Both conditions, not just the held entry: the connection hook that
-      // assigns latestApiSocket and the query hold are separate events with no
-      // guaranteed order, so waiting only for the hold left the socket
-      // assertion below racing the hook. That is what actually flaked once
-      // packages/tests/grand-e2e joined the suite — it failed in ~150 ms,
-      // nowhere near any budget.
       for (
         let attempt = 0;
         attempt < 1000 && (heldQueryEntries === entriesBefore || latestApiSocket === null);
@@ -938,11 +887,6 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
       await socketClient.exited;
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      const busy = await postValidation(requestFor());
-      expect(busy.statusCode).toBe(503);
-      expect(busy.json().reason).toContain("already active");
-      expect(proxiedQueryCount).toBe(countWithPhysicalReadHeld);
-
       release();
       await new Promise((resolve) => setTimeout(resolve, 50));
       // The response-close AbortSignal is checked immediately after the held
@@ -955,50 +899,15 @@ describe("POST /v1/offers/validate currentness, race, and side effects", () => {
 
     let recovered: any;
     for (let attempt = 0; attempt < 200; attempt++) {
-      recovered = await postValidation(requestFor());
+      recovered = await readFiles(requestFor());
       if (recovered.statusCode === 200) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    expect(expectCanonicalVerdict(recovered).code).toBe("VALID");
-  });
-
-  test.serial("the router-wide request budget throttles the validation route", async () => {
-    const previousMax = process.env["API_RATE_LIMIT_MAX"];
-    const previousAllow = process.env["API_RATE_LIMIT_ALLOWLIST"];
-    process.env["API_RATE_LIMIT_MAX"] = "1";
-    process.env["API_RATE_LIMIT_ALLOWLIST"] = "";
-    const limited = fastify();
-    try {
-      await apiRouter(limited, client);
-      await limited.ready();
-    } finally {
-      if (previousMax === undefined) delete process.env["API_RATE_LIMIT_MAX"];
-      else process.env["API_RATE_LIMIT_MAX"] = previousMax;
-      if (previousAllow === undefined) delete process.env["API_RATE_LIMIT_ALLOWLIST"];
-      else process.env["API_RATE_LIMIT_ALLOWLIST"] = previousAllow;
-    }
-    try {
-      expect((await limited.inject({
-        method: "POST",
-        url: "/v1/offers/validate",
-        headers: AUTH,
-        payload: { ...requestFor(), extra: true },
-      })).statusCode).toBe(400);
-      const throttled = await limited.inject({
-        method: "POST",
-        url: "/v1/offers/validate",
-        headers: AUTH,
-        payload: { ...requestFor(), extra: true },
-      });
-      expect(throttled.statusCode).toBe(429);
-      expect(throttled.json().error).toBe("RATE_LIMITED");
-    } finally {
-      await limited.close();
-    }
+    expect(onlyEntry(recovered).verdict.code).toBe("VALID");
   });
 });
 
-test.serial("V2 DB adapter still issues the canonical nullifier probe", () => {
+test.serial("the DB adapter still issues the canonical nullifier probe", () => {
   expect((isNullifierSpent as any).queryIR.statement).toContain("FROM nullifiers");
 });
 

@@ -71,11 +71,7 @@ OFFER_TTL_SECONDS=                      # offer lifetime; DEFAULTS to ROOT_WINDO
                                         # (shielded fillability tracks the root window)
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
-SOLVER_LEVELS_AUTH_KEYS='{"maker-a":"replace-with-long-random-secret"}'
-                                        # preferred: server-side solver id → bearer secret map;
-                                        # validate-for-use is disabled when neither auth var is set
-# SOLVER_LEVELS_AUTH_SECRET=             # single-solver alternative; server derives its identity
-OFFER_VALIDATION_TIMEOUT_MS=15000        # validate-for-use decision budget; max 60000
+OFFER_FILES_READ_TIMEOUT_MS=15000        # exact-files read decision budget; max 60000
 ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
                                         # 3600 (1 h) on all currently deployed networks;
                                         # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
@@ -94,8 +90,6 @@ SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_R
 SOLVER_ENABLE_PATH_B=false               # default execution scope is posted-price Path A only
 SOLVER_ENABLE_CYCLES=false               # experimental; also requires PATH_B=true
 SOLVER_ENABLE_RESIDUAL_TOPUPS=false      # experimental inventory spend; also requires PATH_B=true
-# SOLVER_LEVELS_AUTH_TOKEN=              # matching bearer secret, >=16 non-whitespace characters
-                                        # required for validate-for-use in every solver mode
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -374,93 +368,134 @@ Lookups resolve via the offer's content hash (an indexed probe). A blob that doe
 
 ---
 
-#### `POST /v1/offers/validate`
+#### `POST /v1/offers/files`
 
-Authenticated, side-effect-free validation of an **already indexed** candidate
-for solver use. This is not the submission route: exact indexed presence is
-required evidence and is never returned as a duplicate error. The route never
-calls the batcher, publishes to Celestia, schedules input, or changes offer
-lifecycle state.
+The **exact-files read**: name content identities, get back the exact indexed
+bytes for the ones that are live and valid right now, and a stable
+machine-readable verdict for every other one. This is the read a solver uses at
+job time, when it must build a settlement out of the maker's real bytes rather
+than anything it cached.
 
-Use a bearer secret from `SOLVER_LEVELS_AUTH_KEYS` or
-`SOLVER_LEVELS_AUTH_SECRET`.
+It is not the submission route, and it inverts the submission route's
+semantics: being already indexed and live is exactly what makes an offer
+usable here, never a duplicate error. It never calls the batcher, publishes to
+Celestia, pays a Celestia fee, schedules input, or changes lifecycle state.
+Every database operation on this path is a read.
+
+No authentication: this backend serves every client alike and keeps no
+per-solver state. Exposure is bounded by the router-wide request budget, the
+identity cap per request, one absolute deadline, and a small concurrency
+window.
 
 ```bash
-curl -X POST http://host:9999/v1/offers/validate \
-  -H 'Authorization: Bearer replace-with-long-random-secret' \
+curl -X POST http://host:9999/v1/offers/files \
   -H 'Content-Type: application/json' \
   -d '{
     "schemaVersion": 1,
     "profile": "offer-files-solver-v1",
-    "offerId": "9f2c4a...e1",
-    "offer": "swapoffer1..."
+    "offerIds": ["9f2c4a...e1"]
   }'
 ```
 
-The body is closed: all four fields are required and extra fields return
-`400`. `offerId` is exactly 64 lowercase hex characters and must equal SHA-256
-of the decoded raw transaction bytes.
+The body is closed: all three fields are required and extra fields return
+`400`. `offerIds` holds 1–8 distinct identities, each exactly 64 lowercase hex
+characters (SHA-256 of the decoded raw transaction bytes).
 
-**Domain response `200`**
+**Response `200`** — one entry per requested identity, in request order:
 
 ```json
 {
   "schemaVersion": 1,
   "profile": "offer-files-solver-v1",
-  "valid": true,
-  "live": true,
-  "claimedOfferId": "9f2c4a...e1",
-  "computedOfferId": "9f2c4a...e1",
-  "stateVersion": "42",
-  "validatedAt": "2026-08-14T12:34:56.000Z",
-  "status": "live",
-  "code": "VALID",
-  "computed": {
-    "gives": [ { "token": "00...00", "amount": "1000000", "kind": "SHIELDED" } ],
-    "wants": [ { "token": "ff...ff", "amount": "5000000", "kind": "SHIELDED" } ],
-    "inputNullifiers": ["7c1d9b..."],
-    "expiresAt": "2026-08-14T13:34:56.000Z"
-  }
+  "files": [
+    {
+      "offerId": "9f2c4a...e1",
+      "offer": "swapoffer1...",
+      "verdict": {
+        "schemaVersion": 1,
+        "profile": "offer-files-solver-v1",
+        "valid": true,
+        "live": true,
+        "claimedOfferId": "9f2c4a...e1",
+        "computedOfferId": "9f2c4a...e1",
+        "stateVersion": "42",
+        "validatedAt": "2026-08-14T12:34:56.000Z",
+        "status": "live",
+        "code": "VALID",
+        "computed": {
+          "gives": [ { "token": "00...00", "amount": "1000000", "kind": "SHIELDED" } ],
+          "wants": [ { "token": "ff...ff", "amount": "5000000", "kind": "SHIELDED" } ],
+          "inputNullifiers": ["7c1d9b..."],
+          "expiresAt": "2026-08-14T13:34:56.000Z"
+        }
+      }
+    },
+    {
+      "offerId": "1b77aa...09",
+      "verdict": {
+        "schemaVersion": 1,
+        "profile": "offer-files-solver-v1",
+        "valid": false,
+        "live": false,
+        "claimedOfferId": "1b77aa...09",
+        "computedOfferId": null,
+        "stateVersion": "42",
+        "validatedAt": "2026-08-14T12:34:56.000Z",
+        "status": "not_indexed",
+        "code": "NOT_INDEXED",
+        "reason": "the requested offer identity is not indexed by this backend"
+      }
+    }
+  ]
 }
 ```
 
+`offer` is present **if and only if** the entry's verdict is `VALID`, and the
+bytes always hash to the identity they are served under — the server re-derives
+that binding before answering, and callers must re-derive it on receipt. A
+refusal can never carry usable bytes.
+
 `valid`, current `live`, and stored lifecycle `status` are separate facts. An
 indexed live but unsupported shape can be `status:"live"` and `live:true` while
-`valid:false`; a spent input or stale root can retain stored
-`status:"live"` while current `live:false`. Expiry may also become current
-before the cleanup transition runs, producing `code:"EXPIRED"`,
-`status:"live"`, and `live:false`. Any non-live stored status must have
-`live:false`.
+`valid:false`; a spent input or stale root can retain stored `status:"live"`
+while current `live:false`. Expiry may also become current before the cleanup
+transition runs, producing `code:"EXPIRED"`, `status:"live"`, and
+`live:false`. Any non-live stored status must have `live:false`.
 
-Stable domain-negative codes include `UNSUPPORTED_PROFILE`, `HASH_MISMATCH`,
+Stable refusal codes include `UNSUPPORTED_PROFILE`, `HASH_MISMATCH`,
 `NOT_INDEXED`, `NOT_LIVE`, `EXPIRED`, `UNSUPPORTED_SHAPE`, and the canonical
-structure/crypto/liveness codes documented for submission. All domain outcomes
-use `200`; malformed envelopes and transport size use `400`/`413`. Missing or
-bad credentials use `401`, absent/malformed credential configuration uses
-`503`, and unsynchronized state, an already-active credential, deadline,
-cancellation, or internal read failure uses `503`. `429` is the router-wide
-rate limit. None of these non-200 responses is a validation verdict.
+structure/crypto/liveness codes documented for submission. `HASH_MISMATCH`
+means the indexed row's stored bytes do not hash to the identity it is filed
+under — index corruption, reported per identity instead of as an outage. Every
+per-identity outcome uses `200`; malformed envelopes use `400`, oversized
+transports `413`, and `429` is the router-wide rate limit. Unsynchronized
+backend state, a full concurrency window, a deadline, a cancellation, or an
+internal read failure use `503 FILES_UNAVAILABLE`. None of the non-200
+responses is a verdict — in particular an unsynchronized node will not report
+an offer as absent.
 
-The backend checks currentness, validates structure and indexed liveness, and
-rejects unsupported transaction economics before native proof work. Supported
-shapes run canonical proof verification, re-fetch both external chain tips,
-then perform a fresh committed status/liveness read bound to the same L2
-anchor. `stateVersion` and `validatedAt` identify that final backend state. The
-result is indicative and point-in-time only: it is not a reservation or fill
-promise.
+Per identity the backend proves its own positions current, validates structure
+and indexed liveness, and rejects unsupported transaction economics before
+native proof work. Supported shapes run canonical proof verification, re-fetch
+both external chain tips, then perform a fresh committed status/liveness read
+bound to the same L2 anchor. `stateVersion` and `validatedAt` identify that
+final backend state. The answer is point-in-time: it is not a reservation or a
+fill promise, and an offer can be consumed a moment later.
 
-Authentication and the router-wide rate limiter run before JSON parsing. The
-decision timer is observed at async yields and between validation/read stages.
-The ledger's native proof verifier is synchronous and cannot be interrupted—or
-even let the event-loop timer fire—after it has started, so the deadline is not
-a hard wall-clock latency cap while proof verification runs. Only one physical
-validation operation may be active per solver credential. If an HTTP deadline
-wins while a database read is still settling, that credential's slot remains
-occupied until the underlying read-only operation actually finishes. These
-bounds complement transport size, rate limiting, and the cheap indexed-state
-rejection ladder. An incomplete request-body abort or a response-socket close
-also cancels at the next cooperative boundary; the retained slot still prevents
-the disconnected caller from accumulating unfinished driver work.
+The same canonical components serve HTTP submission, STM ingestion, and this
+read; contract tests drive all of them over one shared fixture matrix so their
+codes cannot drift apart.
+
+The decision timer is observed at async yields and between validation/read
+stages. The ledger's native proof verifier is synchronous and cannot be
+interrupted — or even let the event-loop timer fire — once it has started, so
+the deadline is not a hard wall-clock latency cap while proof verification
+runs. Identities are resolved serially, at most four reads run concurrently,
+and requests past that window are refused immediately rather than queued. If an
+HTTP deadline wins while a database read is still settling, that slot stays
+occupied until the underlying read-only operation actually finishes. An
+incomplete request-body abort or a response-socket close also cancels at the
+next cooperative boundary.
 
 ---
 

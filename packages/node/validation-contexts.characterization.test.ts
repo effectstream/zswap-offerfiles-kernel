@@ -1,15 +1,22 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createServer } from "node:net";
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { bech32m } from "@scure/base";
 import { getMigrations } from "@effectstream/db/version";
 import { OFFER_HRP, OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
-// V0 characterization: these tests deliberately exercise the three current
-// production contexts before V1 extracts a reusable service. Keep the shared
-// fixture/state matrix explicit: submission dedup and validate-for-use have
-// opposite semantics for an exact, already-indexed live offer.
+// SC-006 parity: one shared fixture and state matrix driven through all four
+// production validation contexts — the batcher's pre-fee admission, HTTP
+// submission, STM ingestion, and the exact-files read — so the read's answers
+// are pinned against the backend's own admission/ingestion decisions rather
+// than asserted in isolation.
+//
+// The inversion is the point and must stay explicit: submission dedup and the
+// exact-files read have OPPOSITE semantics for an exact, already-indexed live
+// offer. Ingestion refuses it as a duplicate; the read serves its bytes,
+// because being indexed and live is precisely what makes it usable.
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
@@ -39,6 +46,12 @@ const {
 } = await import("@zswap-da/offer-guard");
 const { ZswapCelestiaAdapter } = await import("../batcher/celestia.ts");
 const { apiRouter } = await import("./api.ts");
+const {
+  EXACT_FILES_PROFILE,
+  EXACT_FILES_SCHEMA_VERSION,
+  parseExactFilesResponse,
+} = await import("@zswap-da/solver-core/exact-files-contract");
+const { resetSyncHealthCacheForTest } = await import("./sync-health.ts");
 const { gameStateTransitions } = await import("./state-machine.ts");
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
@@ -83,25 +96,29 @@ const EXPECTED_MATRIX = {
     batcher: "BAD_ENCODING",
     api: "BAD_ENCODING",
     stm: "BAD_DESERIALIZE",
-    validateForUse: "BAD_ENCODING",
+    // Undecodable bytes cannot be ASKED for by identity: an identity that no
+    // indexed row carries is simply absent.
+    exactFiles: "NOT_INDEXED",
   },
   decodableJunk: {
     batcher: "BAD_DESERIALIZE",
     api: "BAD_DESERIALIZE",
     stm: "BAD_DESERIALIZE",
-    validateForUse: "BAD_DESERIALIZE",
+    // Indexed junk (only reachable through direct row corruption) is refused
+    // with the same canonical structural code the other contexts use.
+    exactFiles: "BAD_DESERIALIZE",
   },
   liveUnindexed: {
     batcher: "VALID",
     api: "FORWARDED",
     stm: "INDEXED",
-    validateForUse: "NOT_INDEXED",
+    exactFiles: "NOT_INDEXED",
   },
   indexedLiveDuplicate: {
     batcher: "DUPLICATE_OFFER",
     api: "DUPLICATE_OFFER",
     stm: "DUPLICATE_OFFER",
-    validateForUse: "VALID",
+    exactFiles: "VALID",
   },
   spent: {
     // The batcher has no authoritative chain-state database and therefore
@@ -109,13 +126,13 @@ const EXPECTED_MATRIX = {
     batcher: "VALID",
     api: "NULLIFIER_SPENT",
     stm: "NULLIFIER_SPENT",
-    validateForUse: "NULLIFIER_SPENT",
+    exactFiles: "NULLIFIER_SPENT",
   },
   unknownRoot: {
     batcher: "VALID",
     api: "ROOT_UNKNOWN",
     stm: "ROOT_UNKNOWN",
-    validateForUse: "ROOT_UNKNOWN",
+    exactFiles: "ROOT_UNKNOWN",
   },
 } as const;
 
@@ -284,15 +301,41 @@ beforeAll(async () => {
     [Buffer.from("01", "hex"), new Date(BLOCK_TIME_MS), Buffer.from("02", "hex")],
   );
 
+  // Health scaffolding: the exact-files read refuses to answer at all unless
+  // this backend can prove its own positions current, so the shared matrix
+  // needs a synchronized node. NTP is anchored so the committed block above is
+  // the expected one; both chain tips match their merged pagination cursors.
+  await client.query(
+    `INSERT INTO effectstream.sync_protocol_config_snapshot
+       (protocol_name, network_type, immutable_config)
+     VALUES ('ntp-validation', 'ntp', $1::jsonb)`,
+    [JSON.stringify({ startTime: Date.now() - 60_000, blockTimeMS: 60_000 })],
+  );
+  await client.query(
+    `INSERT INTO effectstream.sync_protocol_pagination(protocol_name, page_number, page)
+     VALUES ('parallelMidnight', 100, '{}'::jsonb),
+            ('parallelCelestia', 200, '{}'::jsonb)`,
+  );
+
   originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    if (String(input).endsWith("/send-input")) batcherSubmissions += 1;
-    return new Response(JSON.stringify({
-      success: true,
-      message: "Input processed successfully",
-      inputsProcessed: 1,
-      transactionHash: "characterization-tx",
-    }), {
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input).endsWith("/send-input")) {
+      batcherSubmissions += 1;
+      return new Response(JSON.stringify({
+        success: true,
+        message: "Input processed successfully",
+        inputsProcessed: 1,
+        transactionHash: "characterization-tx",
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    const body = String(init?.body ?? "");
+    const json = body.includes("header.NetworkHead")
+      ? { jsonrpc: "2.0", id: 1, result: { header: { height: "200" } } }
+      : { data: { block: { height: 100 } } };
+    return new Response(JSON.stringify(json), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
@@ -421,11 +464,111 @@ describe("V0 shared validation-context matrix", () => {
       event.type === "offer_indexed" && event.offerHash === OFFER_ID)).toBe(true);
   });
 
-  test("validate-for-use predictions preserve the required semantic inversion", () => {
-    expect(EXPECTED_MATRIX.liveUnindexed.validateForUse).toBe("NOT_INDEXED");
-    expect(EXPECTED_MATRIX.indexedLiveDuplicate.validateForUse).toBe("VALID");
-    expect(EXPECTED_MATRIX.spent.validateForUse).toBe("NULLIFIER_SPENT");
-    expect(EXPECTED_MATRIX.unknownRoot.validateForUse).toBe("ROOT_UNKNOWN");
+  test("the exact-files read agrees with admission and ingestion on the shared matrix", async () => {
+    const readFiles = async (offerIds: string[]) => {
+      resetSyncHealthCacheForTest();
+      const response = await server.inject({
+        method: "POST",
+        url: "/v1/offers/files",
+        payload: {
+          schemaVersion: EXACT_FILES_SCHEMA_VERSION,
+          profile: EXACT_FILES_PROFILE,
+          offerIds,
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      // Same binding the solver applies, run here so a wrong-identity or
+      // byte-substituted answer could not pass as agreement.
+      expect(parseExactFilesResponse(body, { hashOffer: offerHashFromBlob })).toEqual(body);
+      return body.files;
+    };
+    const seedRoots = async () => {
+      await client!.query("DELETE FROM known_roots");
+      for (const root of INPUT_ROOTS) {
+        await client!.query(
+          `INSERT INTO known_roots(root, height, last_seen_ms, first_seen_ms)
+           VALUES ($1, 1, $2, $2)`,
+          [root, BLOCK_TIME_MS],
+        );
+      }
+    };
+    const indexOffer = async (offer: string, offerHash: string) => {
+      await client!.query("DELETE FROM offer_file WHERE offer_hash = $1", [offerHash]);
+      await client!.query(
+        `INSERT INTO offer_file
+           (celestia_height, transaction_hex, offer_hash, metadata_expires_at,
+            ttl_seconds, first_seen_at)
+         VALUES (77, $1, $2, $3, 3600, NOW())`,
+        [offer, offerHash, new Date(BLOCK_TIME_MS + 3_600_000)],
+      );
+    };
+    const batcherCallsBefore = batcherSubmissions;
+    const events: unknown[] = [];
+    const listener = (event: unknown) => events.push(event);
+    eventBus.on("app_event", listener);
+
+    try {
+      // transportGarbage: undecodable bytes have no indexable identity at all,
+      // so the only thing a caller can name is an identity nothing carries.
+      const garbageId = createHash("sha256")
+        .update(new TextEncoder().encode("definitely-not-an-offer"))
+        .digest("hex");
+      // liveUnindexed: the same valid, live bytes every other context accepts.
+      await client!.query("DELETE FROM offer_file WHERE offer_hash = $1", [OFFER_ID]);
+      await client!.query("DELETE FROM nullifiers WHERE nullifier = $1", [NULLIFIER]);
+      await seedRoots();
+
+      let [garbage, unindexed] = await readFiles([garbageId, OFFER_ID]);
+      expect(garbage.verdict.code).toBe(EXPECTED_MATRIX.transportGarbage.exactFiles);
+      expect(garbage.offer).toBeUndefined();
+      expect(unindexed.verdict.code).toBe(EXPECTED_MATRIX.liveUnindexed.exactFiles);
+      expect(unindexed.offer).toBeUndefined();
+
+      // indexedLiveDuplicate: the exact inversion. Every ingestion context
+      // refuses this row as a duplicate; the read serves its bytes.
+      await indexOffer(VALID_OFFER, OFFER_ID);
+      const [indexedLive] = await readFiles([OFFER_ID]);
+      expect(indexedLive.verdict.code).toBe(EXPECTED_MATRIX.indexedLiveDuplicate.exactFiles);
+      expect(indexedLive.offer).toBe(VALID_OFFER);
+      expect(EXPECTED_MATRIX.indexedLiveDuplicate.api).toBe("DUPLICATE_OFFER");
+      expect(EXPECTED_MATRIX.indexedLiveDuplicate.stm).toBe("DUPLICATE_OFFER");
+
+      // decodableJunk: only reachable by corrupting the index, and refused
+      // with the canonical structural code the other contexts produce.
+      const junkId = offerHashFromBlob(DECODABLE_JUNK);
+      await indexOffer(DECODABLE_JUNK, junkId);
+      const [junk] = await readFiles([junkId]);
+      expect(junk.verdict.code).toBe(EXPECTED_MATRIX.decodableJunk.exactFiles);
+      expect(junk.offer).toBeUndefined();
+      await client!.query("DELETE FROM offer_file WHERE offer_hash = $1", [junkId]);
+
+      // spent: identical bytes, authoritative chain state says the nullifier
+      // is gone. Same code as HTTP submission and STM ingestion.
+      await client!.query(
+        `INSERT INTO nullifiers(nullifier, height, offer_matched) VALUES ($1, 77, false)`,
+        [NULLIFIER],
+      );
+      const [spent] = await readFiles([OFFER_ID]);
+      expect(spent.verdict.code).toBe(EXPECTED_MATRIX.spent.exactFiles);
+      expect(spent.offer).toBeUndefined();
+      await client!.query("DELETE FROM nullifiers WHERE nullifier = $1", [NULLIFIER]);
+
+      // unknownRoot: same again for the root-window predicate.
+      await client!.query("DELETE FROM known_roots");
+      const [unknownRoot] = await readFiles([OFFER_ID]);
+      expect(unknownRoot.verdict.code).toBe(EXPECTED_MATRIX.unknownRoot.exactFiles);
+      expect(unknownRoot.offer).toBeUndefined();
+      await seedRoots();
+    } finally {
+      eventBus.off("app_event", listener);
+      await client!.query("DELETE FROM offer_file WHERE offer_hash = $1", [OFFER_ID]);
+      await client!.query("DELETE FROM nullifiers WHERE nullifier = $1", [NULLIFIER]);
+    }
+
+    // Reading never publishes, never pays a Celestia fee, never emits.
+    expect(batcherSubmissions).toBe(batcherCallsBefore);
+    expect(events).toEqual([]);
   });
 });
 

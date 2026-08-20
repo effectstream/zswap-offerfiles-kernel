@@ -104,9 +104,8 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `NTP_START_TIME` | optional | NTP reference timestamp; resumed from DB when unset. |
 | `BATCHER_SUBMIT_TIMEOUT_MS` | optional | Absolute batcher fetch + receipt-body deadline; default 310 000 ms, bounded to 1 000–600 000 ms. |
 | `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
-| `SOLVER_LEVELS_AUTH_KEYS` / `SOLVER_LEVELS_AUTH_SECRET` | required on the node for the authenticated solver boundary | Server-side bearer credentials for `POST /v1/offers/validate`, which is disabled if both settings are absent. |
-| `OFFER_VALIDATION_TIMEOUT_MS` | optional | Validate-for-use async decision budget, default 15 000 ms and capped at 60 000 ms. Native synchronous proof work cannot be preempted; one retained active slot per solver credential bounds unfinished work. |
-| `SOLVER_LEVELS_AUTH_TOKEN` | required by every solver process | Solver-side bearer token matching one node credential (at least 16 non-whitespace characters). It authenticates mandatory validate-for-use in every solver mode. The node derives the solver identity from it. |
+| `OFFER_FILES_READ_TIMEOUT_MS` | optional | Exact-files read decision budget, default 15 000 ms and capped at 60 000 ms. Native synchronous proof work cannot be preempted; a retained concurrency slot bounds unfinished work. |
+| `SOLVER_LEVELS_AUTH_TOKEN` | still required at solver startup | Solver-side bearer (at least 16 non-whitespace characters) for the solver's pre-match validation gate. That gate still calls the removed `POST /v1/offers/validate`, so it is inert until the solver moves to job-time exact-files fetching; the startup check is retained so the variable does not silently disappear from deployments in the meantime. |
 | `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | The mainnet solver defaults to dry-run. Live settlement requires `SOLVER_DRY_RUN=false` **and** the separate exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
 | `SOLVER_ENABLE_PATH_B` | optional | Defaults to `false`; Path A posted-price fills are the only execution mode enabled by default. |
 | `SOLVER_ENABLE_CYCLES` / `SOLVER_ENABLE_RESIDUAL_TOPUPS` | optional | Independent experimental opt-ins, both default `false` and have no effect unless Path B is also enabled. |
@@ -253,7 +252,7 @@ There are **two ways** to post and read offers:
 | `GET` | `/v1/offers/:offerId` | One offer **including its `swapoffer1…` string** (`offerBech32`), by content hash. Resolves archived offers with their final status. |
 | `GET` | `/v1/offers/:offerId/status` | Lightweight status probe by content hash. |
 | `POST` | `/v1/offers/status` | Status by blob (`{offer}` or `{offers: […]}`, max 50) — POST body because real blobs are 16–25 KB. |
-| `POST` | `/v1/offers/validate` | Authenticated, side-effect-free validate-for-use verdict for exact already-indexed bytes; current state is re-read after proof verification. |
+| `POST` | `/v1/offers/files` | Exact-files read: 1–8 content identities in, exact indexed bytes out for the live+valid ones and a stable verdict for the rest. Side-effect-free; current state is re-read after proof verification. |
 | `GET` | `/v1/known-tokens` | Token color → name registry. |
 | `POST` | `/v1/known-tokens` | Register a token name/color/kind (dev/e2e only; off in production). |
 | `GET` | `/v1/midnight/config` | Public Midnight config the browser contract client needs. |

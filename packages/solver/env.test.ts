@@ -2,13 +2,39 @@ import { expect, test } from "bun:test";
 
 import {
   loadRelayClientEnv,
+  loadSolverRelayHttpEnv,
   loadSolverJournalEnv,
   loadSolverRuntimeEnv,
   parseBooleanEnv,
   parseBoundedIntegerEnv,
+  parseSolverRelayHttpUrl,
 } from "./env.ts";
 
 const reader = (values: Record<string, string>) => (name: string): string | undefined => values[name];
+
+test("relay HTTP authority is explicit, required only for execution, and canonical", () => {
+  expect(() => loadSolverRelayHttpEnv(reader({}), { relayExecutionEnabled: true })).toThrow(
+    /SOLVER_RELAY_HTTP_URL.*required/,
+  );
+  expect(loadSolverRelayHttpEnv(reader({}), { relayExecutionEnabled: false })).toBeNull();
+  expect(parseSolverRelayHttpUrl("https://relay.example/api/v1/")).toBe(
+    "https://relay.example/api/v1",
+  );
+  expect(loadSolverRelayHttpEnv(
+    reader({ SOLVER_RELAY_HTTP_URL: "http://127.0.0.1:13017/api/v1" }),
+    { relayExecutionEnabled: true },
+  )).toBe("http://127.0.0.1:13017/api/v1");
+});
+
+test("relay HTTP authority rejects implicit, ambiguous, or non-HTTP forms", () => {
+  for (const raw of [
+    "", " ws://relay.example", "ws://relay.example", "wss://relay.example",
+    "relay.example", "https://user:pass@relay.example", "https://relay.example?x=1",
+    "https://relay.example#fragment", "https://relay.example/api//v1", "https://relay.example\0",
+  ]) {
+    expect(() => parseSolverRelayHttpUrl(raw)).toThrow(/SOLVER_RELAY_HTTP_URL/);
+  }
+});
 
 test("bounded integer parser rejects coercible, zero, negative, and out-of-range values", () => {
   for (const raw of ["", "0", "-1", "1.5", "1e3", "10ms", " 10", "9007199254740992"]) {

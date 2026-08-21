@@ -246,6 +246,8 @@ export interface RelayClientHandle {
    * loop does not resume afterwards.
    */
   withdraw: () => Promise<void>;
+  /** Drain every accepted terminal lifecycle callback. */
+  idle: () => Promise<void>;
   /** Withdraw (bounded, best-effort) and then close. Idempotent; never
    *  rejects. */
   stop: () => Promise<void>;
@@ -321,6 +323,8 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   let withdrawing: Promise<void> | null = null;
   let stopping: Promise<void> | null = null;
   let inFlight: Promise<void> | null = null;
+  const terminalChains = new Map<string, Promise<void>>();
+  const terminalTasks = new Set<Promise<void>>();
   let queued = false;
   let lastTruncation: TruncationSignal = { pairCapOffers: 0, rungCapOffers: 0 };
   let lastCurrent: boolean | null = null;
@@ -357,6 +361,27 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     } catch {
       // Same, for the string-logger idiom.
     }
+  };
+
+  /** Relay terminal callbacks are durable ownership operations. Serialize
+   * them per job, retain them independently of the socket generation, and
+   * drain them during stop so a later frame cannot overtake a journal write. */
+  const dispatchTerminal = (
+    jobId: string,
+    label: "tx-submitted" | "submit-failed",
+    callback: (() => void | Promise<void>) | undefined,
+  ): void => {
+    if (callback === undefined) return;
+    const prior = terminalChains.get(jobId) ?? Promise.resolve();
+    const current = prior.catch(() => undefined).then(callback).catch((error) => {
+      emit("message-refused", "error", `${label} handler rejected: ${String(error)}`);
+    });
+    terminalChains.set(jobId, current);
+    terminalTasks.add(current);
+    void current.finally(() => {
+      terminalTasks.delete(current);
+      if (terminalChains.get(jobId) === current) terminalChains.delete(jobId);
+    }).catch(() => undefined);
   };
 
   const clearTimer = (handle: unknown): null => {
@@ -641,25 +666,13 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
 
     const submitted = parseTxSubmitted(parsed);
     if (submitted !== null) {
-      try {
-        void Promise.resolve(options.onTxSubmitted?.(submitted)).catch((error) => {
-          emit("message-refused", "error", `tx-submitted handler rejected: ${String(error)}`);
-        });
-      } catch (error) {
-        emit("message-refused", "error", `tx-submitted handler threw: ${String(error)}`);
-      }
+      dispatchTerminal(submitted.jobId, "tx-submitted", () => options.onTxSubmitted?.(submitted));
       return;
     }
 
     const failed = parseSubmitFailed(parsed);
     if (failed !== null) {
-      try {
-        void Promise.resolve(options.onSubmitFailed?.(failed)).catch((error) => {
-          emit("message-refused", "error", `submit-failed handler rejected: ${String(error)}`);
-        });
-      } catch (error) {
-        emit("message-refused", "error", `submit-failed handler threw: ${String(error)}`);
-      }
+      dispatchTerminal(failed.jobId, "submit-failed", () => options.onSubmitFailed?.(failed));
       return;
     }
 
@@ -795,6 +808,12 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     return withdrawing;
   };
 
+  const idle = async (): Promise<void> => {
+    // One microtask lets a just-delivered message install its tracked chain.
+    await Promise.resolve();
+    while (terminalTasks.size > 0) await Promise.allSettled([...terminalTasks]);
+  };
+
   const stop = (): Promise<void> => {
     if (stopping) return stopping;
     stopping = (async () => {
@@ -819,6 +838,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
           // A closing/closed socket is exactly the state being asked for.
         }
       }
+      await idle();
       stats.connected = false;
       stats.stopped = true;
       emit("stopped", "info", "relay client stopped");
@@ -831,6 +851,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   return {
     push: () => requestPush("manual"),
     withdraw,
+    idle,
     stop,
     stats: () => ({ ...stats }),
   };

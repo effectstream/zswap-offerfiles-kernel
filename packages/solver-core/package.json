@@ -13,6 +13,7 @@
     "./ladder-derivation": "./ladder-derivation.ts",
     "./ladder-schema": "./ladder-schema.ts",
     "./offer-updates-contract": "./offer-updates-contract.ts",
+    "./receipt-client": "./receipt-client.ts",
     "./relay-ws-contract": "./relay-ws-contract.ts",
     "./validation-contract": "./validation-contract.ts"
   },

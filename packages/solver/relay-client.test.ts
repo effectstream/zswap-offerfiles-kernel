@@ -750,6 +750,47 @@ function harness(
   return { socket, clock, client, events };
 }
 
+describe("relay client — durable terminal callback ordering", () => {
+  test("same-job callbacks serialize and stop drains the complete chain", async () => {
+    const gate = deferred();
+    const order: string[] = [];
+    const { socket, client } = harness(cacheOf(seed(CANONICAL_ROWS)), {
+      onTxSubmitted: async () => {
+        order.push("submitted:start");
+        await gate.promise;
+        order.push("submitted:end");
+      },
+      onSubmitFailed: async () => { order.push("failed"); },
+    });
+    socket.onmessage!({ data: JSON.stringify({ type: "tx-submitted", jobId: "ordered", txId: "tx" }) });
+    socket.onmessage!({ data: JSON.stringify({ type: "submit-failed", jobId: "ordered", reason: "late" }) });
+    await flushMicrotasks();
+    expect(order).toEqual(["submitted:start"]);
+
+    let stopped = false;
+    const stopping = client.stop().then(() => { stopped = true; });
+    await flushMicrotasks();
+    expect(stopped).toBe(false);
+    gate.resolve();
+    await stopping;
+    expect(order).toEqual(["submitted:start", "submitted:end", "failed"]);
+  });
+
+  test("a rejected callback is contained and cannot strand the next callback", async () => {
+    const seen: string[] = [];
+    const { socket, client, events } = harness(cacheOf(seed(CANONICAL_ROWS)), {
+      onTxSubmitted: async () => { throw new Error("journal write failed"); },
+      onSubmitFailed: async () => { seen.push("next"); },
+    });
+    socket.onmessage!({ data: JSON.stringify({ type: "tx-submitted", jobId: "contained", txId: "tx" }) });
+    socket.onmessage!({ data: JSON.stringify({ type: "submit-failed", jobId: "contained", reason: "late" }) });
+    await client.stop();
+    expect(seen).toEqual(["next"]);
+    expect(events.some((event) => event.kind === "message-refused" &&
+      event.message.includes("tx-submitted handler rejected"))).toBe(true);
+  });
+});
+
 describe("relay client — push loop properties", () => {
   test("R-07: a tick during a push coalesces into ONE follow-up, never interleaved", async () => {
     const book = seed(CANONICAL_ROWS);

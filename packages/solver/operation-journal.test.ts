@@ -143,6 +143,13 @@ test("compare-and-set transitions are monotonic and duplicate terminals are idem
     })).toThrow(/conflicts with durable evidence/);
     expect(journal.require("op-cas").lifecycleState).toBe("PREPARED");
 
+    expect(journal.recordReceipt("op-cas", { relayState: "done", relayExtrinsicHash: "relay-hash" })
+      .receipt).toMatchObject({ relayState: "done", relayExtrinsicHash: "relay-hash" });
+    expect(journal.recordReceipt("op-cas", { relayState: "done" }).lifecycleState).toBe("PREPARED");
+    expect(() => journal.recordReceipt("op-cas", { relayState: "error", ledgerHeight: 7 }))
+      .toThrow(/conflicts with durable evidence/);
+    expect(journal.require("op-cas").receipt.ledgerHeight).toBeUndefined();
+
     journal.transition("op-cas", "PREPARED", "APPLIED");
     journal.transition("op-cas", "APPLIED", "AWAITING_RELAY");
     journal.transition("op-cas", "AWAITING_RELAY", "RELAY_SUBMITTED", {

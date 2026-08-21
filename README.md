@@ -107,6 +107,7 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `API_UPDATES_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/updates` websocket cap; default 100. Excess clients are refused the connection (this endpoint's refusals are disconnects, not HTTP statuses — see API.md). |
 | `OFFER_FILES_READ_TIMEOUT_MS` | optional | Exact-files read decision budget, default 15 000 ms and capped at 60 000 ms. Native synchronous proof work cannot be preempted; a retained concurrency slot bounds unfinished work. |
 | `SOLVER_RELAY_WS_URL` / `SOLVER_RELAY_AUTH_TOKEN` | required for live solver mode | Outbound Midnight Intents solver WebSocket and its shared bearer. The backend exact-files read is unauthenticated. |
+| `SOLVER_RELAY_HTTP_URL` | **required for relay job execution** | Explicit public relay HTTP base for durable `GET /jobs/:jobId` recovery. It is validated independently and is never derived by rewriting the websocket URL. |
 | `SOLVER_JOURNAL_PATH` | **required for relay job execution** | Absolute path to the solver-local SQLite wallet-operation journal on a persistent mounted volume. Startup fails closed if it is missing, unwritable, corrupt, locked, full, or schema-incompatible. |
 | `SOLVER_RELAY_MAX_PARALLEL_SWAPS` | optional | Advertised and enforced concurrent proof-build bound; default 8. |
 | `SOLVER_RELAY_PUSH_INTERVAL_MS` / `SOLVER_RELAY_RECONNECT_DELAY_MS` | optional | Complete ladder replacement cadence (default 1 000 ms) and reconnect delay (default 2 000 ms). |
@@ -115,12 +116,14 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 
 A complete dev → mainnet env template lives at `.env.mainnet.example`.
 
-> **BREAKING DEPLOYMENT REQUIREMENT (RF1):** relay job execution now requires
-> a durable `SOLVER_JOURNAL_PATH`. Provision one persistent volume per solver
+> **BREAKING DEPLOYMENT REQUIREMENT (RF1/RF2):** relay job execution now requires
+> both a durable `SOLVER_JOURNAL_PATH` and an explicit
+> `SOLVER_RELAY_HTTP_URL`. Provision one persistent volume per solver
 > instance and mount it at a stable absolute path (for example,
 > `/var/lib/cow-solver/operations.sqlite`) before upgrading. Never share one
 > journal file between instances. `:memory:` is rejected by production code;
-> its explicit escape hatch exists only for isolated test harnesses.
+> its explicit escape hatch exists only for isolated test harnesses. Configure
+> the relay's public HTTP base directly; do not infer it from the websocket URL.
 
 > **Dry-run limitation:** the current dry-run mirrors the offer book but does not
 > load wallet inventory, so it cannot prove which Path-A fills a funded solver

@@ -28,6 +28,8 @@ const H1 = "11".repeat(32);
 const H2 = "22".repeat(32);
 const N1 = "31".repeat(32);
 const N2 = "32".repeat(32);
+const RELAY_TX = `0x${"cd".repeat(32)}`;
+const LEDGER_TX = "ef".repeat(32);
 
 interface FakeTx {
   label: string;
@@ -108,6 +110,10 @@ function harness(options: {
   offers?: BookOffer[];
   exactResponse?: (offers: BookOffer[]) => ExactFilesResponse | Promise<ExactFilesResponse>;
   status?: "live" | "consumed" | "cancelled" | "expired" | "unknown";
+  relayStatus?: "pending" | "solving" | "done" | "error";
+  positiveEvidence?: boolean;
+  ledgerTxByOffer?: Record<string, string>;
+  evidenceThrows?: boolean;
   semanticMismatch?: boolean;
   failImbalance?: boolean;
   walletOperationTimeoutMs?: number;
@@ -121,6 +127,7 @@ function harness(options: {
   for (const source of sources) book.upsert(source);
   let current = options.current ?? true;
   let now = Date.now();
+  let backendStatus = options.status ?? "live";
   const stock = new Stock();
   stock.setBalances({ [A]: 1_000n, [B]: 1_000n });
   const calls: string[] = [];
@@ -196,6 +203,7 @@ function harness(options: {
     wallet,
     journal,
     keys: { dustSecretKey: "dust-key" },
+    relayHttpUrl: "http://relay.test/api/v1",
     maxParallelSwaps: options.maxParallelSwaps ?? 2,
     expiryMarginSeconds: 120,
     settleTtlMinutes: 1,
@@ -207,9 +215,22 @@ function harness(options: {
         if (exactBarrier) await exactBarrier;
         return await exact(offerIds.map((offerId) => sources.find((source) => source.offerHash === offerId)!));
       },
-      getOfferStatus: async (offerId) => {
+      getOfferConsumptionEvidence: async (offerId) => {
         if (statusBarrier) await statusBarrier;
-        return { offerId, status: options.status ?? "live" };
+        if (options.evidenceThrows) throw new Error("malformed backend response");
+        const status = backendStatus;
+        return status === "consumed" && options.positiveEvidence !== false
+          ? { version: 1 as const, offerId, status, evidence: {
+            ledgerTxHash: options.ledgerTxByOffer?.[offerId] ?? LEDGER_TX,
+            height: 88,
+          } }
+          : { version: 1 as const, offerId, status: status === "unknown" ? "not_found" as const : status };
+      },
+      getRelayJobStatus: async () => {
+        const status = options.relayStatus ?? "pending";
+        if (status === "done") return { status, txId: RELAY_TX };
+        if (status === "error") return { status, reason: "relay rejected" };
+        return { status };
       },
       reconstructOffer: (blob) => {
         const hash = blob.slice("blob:".length);
@@ -258,6 +279,9 @@ function harness(options: {
     journal,
     setCurrent: (value: boolean) => { current = value; },
     advance: (ms: number) => { now += ms; },
+    setStatus: (status: "live" | "consumed" | "cancelled" | "expired" | "unknown") => {
+      backendStatus = status;
+    },
     blockExact: () => {
       exactBarrier = new Promise<void>((resolve) => { blockExact = resolve; });
     },
@@ -398,7 +422,7 @@ test("duplicate jobIds and maxParallelSwaps are enforced while exact fetch is in
   await h.executor.stop();
 });
 
-test("stop joins an already accepted job and reverts its solver-owned result", async () => {
+test("stop joins an accepted job and quarantines an unresolved relay outcome", async () => {
   const h = harness();
   h.blockExact();
   const swap = h.executor.onSwap(job("shutdown-race"));
@@ -411,37 +435,136 @@ test("stop joins an already accepted job and reverts its solver-owned result", a
   expect((await swap).type).toBe("swap-tx");
   await stop;
   expect(stopped).toBe(true);
-  expect(h.reverts).toHaveLength(1);
-  expect(h.executor.stats()).toMatchObject({ awaitingRelay: 0, stopped: true });
+  expect(h.reverts).toHaveLength(0);
+  expect(h.executor.stats()).toMatchObject({ awaitingRelay: 0, quarantined: 1, stopped: true });
 });
 
 test("submit-failed reverts the cached solver-owned transaction; tx-submitted clears it without revert", async () => {
   const failed = harness();
   expect((await failed.executor.onSwap(job("failed"))).type).toBe("swap-tx");
-  failed.executor.onSubmitFailed({ type: "submit-failed", jobId: "failed", reason: "chain refused" });
-  await failed.executor.idle();
+  await failed.executor.onSubmitFailed({ type: "submit-failed", jobId: "failed", reason: "chain refused" });
   expect(failed.reverts).toHaveLength(1);
   expect(failed.executor.stats().awaitingRelay).toBe(0);
   await failed.executor.stop();
 
   const submitted = harness({ status: "consumed" });
   expect((await submitted.executor.onSwap(job("submitted"))).type).toBe("swap-tx");
-  submitted.executor.onTxSubmitted({ type: "tx-submitted", jobId: "submitted", txId: "tx-1" });
-  await submitted.executor.sweep();
+  await submitted.executor.onTxSubmitted({ type: "tx-submitted", jobId: "submitted", txId: RELAY_TX });
   expect(submitted.reverts).toHaveLength(0);
   expect(submitted.book.get(H1)).toBeUndefined();
   expect(submitted.executor.stats()).toMatchObject({ awaitingConsumption: 0, completed: 1 });
   await submitted.executor.stop();
 });
 
-test("missed relay terminal signal is recovered by the chain-TTL sweeper", async () => {
+test("duplicate terminal delivery is idempotent and conflicting frames remain quarantined", async () => {
+  const duplicate = harness({ status: "consumed" });
+  expect((await duplicate.executor.onSwap(job("duplicate-terminal"))).type).toBe("swap-tx");
+  await duplicate.executor.onTxSubmitted({
+    type: "tx-submitted", jobId: "duplicate-terminal", txId: RELAY_TX,
+  });
+  await duplicate.executor.onTxSubmitted({
+    type: "tx-submitted", jobId: "duplicate-terminal", txId: RELAY_TX,
+  });
+  expect(duplicate.executor.stats()).toMatchObject({ completed: 1, quarantined: 0 });
+  expect(duplicate.reverts).toHaveLength(0);
+  await duplicate.executor.stop();
+
+  const doneThenError = harness({ status: "live" });
+  expect((await doneThenError.executor.onSwap(job("done-then-error"))).type).toBe("swap-tx");
+  await doneThenError.executor.onTxSubmitted({
+    type: "tx-submitted", jobId: "done-then-error", txId: RELAY_TX,
+  });
+  await doneThenError.executor.onSubmitFailed({
+    type: "submit-failed", jobId: "done-then-error", reason: "contradictory failure",
+  });
+  expect(doneThenError.executor.stats()).toMatchObject({ completed: 0, reverted: 0, quarantined: 1 });
+  expect(doneThenError.journal.list().find((row) => row.operationKind === "JOB_SETTLEMENT")!.receipt)
+    .toMatchObject({ relayState: "done", relayExtrinsicHash: RELAY_TX });
+  await doneThenError.executor.stop();
+
+  const errorThenDone = harness({ status: "consumed" });
+  expect((await errorThenDone.executor.onSwap(job("error-then-done"))).type).toBe("swap-tx");
+  await errorThenDone.executor.onSubmitFailed({
+    type: "submit-failed", jobId: "error-then-done", reason: "relay failure",
+  });
+  await errorThenDone.executor.onTxSubmitted({
+    type: "tx-submitted", jobId: "error-then-done", txId: RELAY_TX,
+  });
+  expect(errorThenDone.executor.stats()).toMatchObject({ completed: 0, reverted: 0, quarantined: 1 });
+  expect(errorThenDone.journal.list().find((row) => row.operationKind === "JOB_SETTLEMENT")!.receipt)
+    .toMatchObject({ relayState: "error" });
+  await errorThenDone.executor.stop();
+});
+
+test("backend lag, split ledger hashes, markerless consumption, and malformed reads fail closed", async () => {
+  const lag = harness({ status: "live" });
+  expect((await lag.executor.onSwap(job("backend-lag"))).type).toBe("swap-tx");
+  await lag.executor.onTxSubmitted({ type: "tx-submitted", jobId: "backend-lag", txId: RELAY_TX });
+  expect(lag.executor.stats().quarantined).toBe(1);
+  lag.setStatus("consumed");
+  await lag.executor.sweep();
+  expect(lag.executor.stats()).toMatchObject({ quarantined: 0, completed: 1 });
+  await lag.executor.stop();
+
+  const two = [offer(H1, N1, 10n, 20n), offer(H2, N2, 10n, 10n)];
+  const split = harness({
+    offers: two,
+    status: "consumed",
+    ledgerTxByOffer: { [H1]: LEDGER_TX, [H2]: "ab".repeat(32) },
+  });
+  expect((await split.executor.onSwap(job("split-ledger", "20", "30"))).type).toBe("swap-tx");
+  await split.executor.onTxSubmitted({ type: "tx-submitted", jobId: "split-ledger", txId: RELAY_TX });
+  expect(split.executor.stats()).toMatchObject({ quarantined: 1, completed: 0 });
+  await split.executor.stop();
+
+  for (const [name, options] of [
+    ["markerless", { status: "consumed" as const, positiveEvidence: false }],
+    ["malformed", { status: "consumed" as const, evidenceThrows: true }],
+  ] as const) {
+    const uncertain = harness(options);
+    expect((await uncertain.executor.onSwap(job(name))).type).toBe("swap-tx");
+    await uncertain.executor.onTxSubmitted({ type: "tx-submitted", jobId: name, txId: RELAY_TX });
+    expect(uncertain.executor.stats()).toMatchObject({ quarantined: 1, completed: 0, reverted: 0 });
+    await uncertain.executor.stop();
+  }
+});
+
+test("offer_consumed is wake-only and still requires both HTTP authorities", async () => {
+  const h = harness({ status: "live", relayStatus: "done" });
+  expect((await h.executor.onSwap(job("wake-only"))).type).toBe("swap-tx");
+  h.executor.notifyConsumed(H1);
+  await h.executor.idle();
+  expect(h.executor.stats()).toMatchObject({ completed: 0, quarantined: 1 });
+  expect(h.executor.unavailableOfferHashes()).toEqual([H1]);
+
+  h.setStatus("consumed");
+  h.executor.notifyConsumed(H1);
+  await h.executor.idle();
+  expect(h.executor.stats()).toMatchObject({ completed: 1, quarantined: 0 });
+  await h.executor.stop();
+});
+
+test("missed relay terminal signal is recovered from relay HTTP without hash-domain comparison", async () => {
   for (const status of ["live", "consumed"] as const) {
-    const h = harness({ status });
+    const h = harness({ status, relayStatus: status === "live" ? "error" : "done" });
     expect((await h.executor.onSwap(job(`missed-${status}`))).type).toBe("swap-tx");
     h.advance(60_001);
     await h.executor.sweep();
-    expect(h.reverts).toHaveLength(1);
-    expect(h.executor.stats()).toMatchObject({ awaitingRelay: 0, reverted: 1, completed: 0 });
+    expect(h.reverts).toHaveLength(status === "live" ? 1 : 0);
+    expect(h.executor.stats()).toMatchObject(status === "live"
+      ? { awaitingRelay: 0, reverted: 1, completed: 0 }
+      : { awaitingRelay: 0, reverted: 0, completed: 1 });
+    if (status === "consumed") {
+      const receipt = h.journal.list().find((row) => row.operationKind === "JOB_SETTLEMENT")!.receipt;
+      expect(receipt).toEqual({
+        relayJobId: "missed-consumed",
+        relayState: "done",
+        relayExtrinsicHash: RELAY_TX,
+        ledgerTxHash: LEDGER_TX,
+        ledgerHeight: 88,
+      });
+      expect(receipt.relayExtrinsicHash).not.toBe(receipt.ledgerTxHash);
+    }
     await h.executor.stop();
   }
 });
@@ -452,13 +575,13 @@ test("tx-submitted racing a TTL status read can never revert the submitted walle
   h.advance(60_001);
   const sweep = h.executor.sweep();
   await Promise.resolve();
-  h.executor.onTxSubmitted({
+  const submitted = h.executor.onTxSubmitted({
     type: "tx-submitted",
     jobId: "submitted-during-sweep",
-    txId: "tx-raced-sweeper",
+    txId: RELAY_TX,
   });
   h.releaseStatus();
-  await sweep;
+  await Promise.all([sweep, submitted]);
   expect(h.reverts).toHaveLength(0);
   expect(h.executor.stats()).toMatchObject({
     awaitingRelay: 0,
@@ -515,8 +638,8 @@ test("failed immediate rollback is cached and retried; relay signals cannot clea
     reason: JOB_WALLET_FAILED,
   });
   expect(h.executor.stats()).toMatchObject({ quarantined: 1, revertFailures: 0 });
-  h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "cleanup", txId: "should-be-ignored" });
-  h.executor.onSubmitFailed({ type: "submit-failed", jobId: "cleanup", reason: "should-be-ignored" });
+  await h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "cleanup", txId: RELAY_TX });
+  await h.executor.onSubmitFailed({ type: "submit-failed", jobId: "cleanup", reason: "should-be-ignored" });
   expect(h.executor.stats().quarantined).toBe(1);
   h.advance(60_001);
   await h.executor.sweep();

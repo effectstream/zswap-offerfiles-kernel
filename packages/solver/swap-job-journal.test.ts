@@ -21,6 +21,8 @@ const A = "aa".repeat(32);
 const B = "bb".repeat(32);
 const H = "11".repeat(32);
 const N = "31".repeat(32);
+const RELAY_TX = `0x${"cd".repeat(32)}`;
+const LEDGER_TX = "ef".repeat(32);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const JOURNAL_CHILD = new URL("./swap-job-journal-child.ts", import.meta.url).pathname;
@@ -114,6 +116,8 @@ const start = (
     signal?: AbortSignal;
     loggerThrows?: boolean;
     blockRevert?: Promise<void>;
+    relayStatus?: "pending" | "done" | "error";
+    backendStatus?: "live" | "consumed";
   } = {},
 ): Started => {
   const journal = SolverOperationJournal.open({ path });
@@ -141,6 +145,7 @@ const start = (
     wallet,
     journal,
     keys: { dustSecretKey: "dust" },
+    relayHttpUrl: "http://relay.test/api/v1",
     maxParallelSwaps: 2,
     expiryMarginSeconds: 120,
     settleTtlMinutes: 1,
@@ -148,7 +153,14 @@ const start = (
     ...(options.signal ? { signal: options.signal } : {}),
     dependencies: {
       readExactOfferFiles: async () => ({ schemaVersion: 1, profile: "native-shielded-v1", files: [] }),
-      getOfferStatus: async (offerId) => ({ offerId, status: "live" }),
+      getOfferConsumptionEvidence: async (offerId) => options.backendStatus === "consumed"
+        ? { version: 1, offerId, status: "consumed", evidence: { ledgerTxHash: LEDGER_TX, height: 99 } }
+        : { version: 1, offerId, status: "live" },
+      getRelayJobStatus: async () => options.relayStatus === "done"
+        ? { status: "done", txId: RELAY_TX }
+        : options.relayStatus === "error"
+          ? { status: "error", reason: "relay rejected" }
+          : { status: "pending" },
       reconstructOffer: () => tx("maker") as any,
       deriveOfferSemantics: () => ({ gives: [], wants: [], nullifiers: [] }),
       mergeFinalized: ((values: FakeTx[]) => tx(values.map((value) => value.label).join("+"))) as any,
@@ -352,6 +364,132 @@ test("relay-ambiguous reopen states never trigger a local wallet mutation and re
       reopened.journal.close();
     });
   }
+});
+
+test("relay HTTP and durable receipts settle every restart boundary exactly once", async () => {
+  const stages = [
+    { name: "http-done-before-receipt", state: "AWAITING_RELAY" as const, receipt: false, ledger: false },
+    { name: "done-receipt-before-transition", state: "AWAITING_RELAY" as const, receipt: true, ledger: false },
+    { name: "after-relay-transition", state: "RELAY_SUBMITTED" as const, receipt: true, ledger: false },
+    { name: "after-confirming-transition", state: "CONFIRMING" as const, receipt: true, ledger: false },
+    { name: "ledger-receipt-before-settle", state: "CONFIRMING" as const, receipt: true, ledger: true },
+  ];
+  for (const stage of stages) {
+    await withJournalPath(async (path) => {
+      const seed = SolverOperationJournal.open({ path });
+      const settlement = prepare(seed, 1, "JOB_SETTLEMENT", "settlement");
+      const contribution = prepare(seed, 1, "FINALIZED_CONTRIBUTION", "wallet", {
+        kind: "FINALIZED_TRANSACTION",
+        value: `accepted-${stage.name}`,
+      });
+      move(seed, settlement, stage.state);
+      move(seed, contribution, stage.state);
+      if (stage.receipt) seed.recordReceipt(settlement, {
+        relayJobId: "restart-job",
+        relayState: "done",
+        relayExtrinsicHash: RELAY_TX,
+      });
+      if (stage.ledger) seed.recordReceipt(settlement, {
+        ledgerTxHash: LEDGER_TX,
+        ledgerHeight: 99,
+      });
+      seed.close();
+
+      const reopened = start(path, { relayStatus: "done", backendStatus: "consumed" });
+      await reopened.executor.ready;
+      expect(reopened.calls).toEqual([]);
+      expect(reopened.stock.reserved(B)).toBe(0n);
+      expect(reopened.journal.list().every((row) => row.lifecycleState === "SETTLED")).toBe(true);
+      const receipt = reopened.journal.require(settlement).receipt;
+      expect(receipt).toEqual({
+        relayJobId: "restart-job",
+        relayState: "done",
+        relayExtrinsicHash: RELAY_TX,
+        ledgerTxHash: LEDGER_TX,
+        ledgerHeight: 99,
+      });
+      expect(receipt.relayExtrinsicHash).not.toBe(receipt.ledgerTxHash);
+      await reopened.executor.stop();
+      reopened.journal.close();
+
+      const twice = start(path, { relayStatus: "error", backendStatus: "live" });
+      await twice.executor.ready;
+      expect(twice.calls).toEqual([]);
+      expect(twice.stock.reserved(B)).toBe(0n);
+      expect(twice.journal.list().every((row) => row.lifecycleState === "SETTLED")).toBe(true);
+      await twice.executor.stop();
+      twice.journal.close();
+    });
+  }
+});
+
+test("backend lag survives one restart and later settles from the durable relay receipt", async () => {
+  await withJournalPath(async (path) => {
+    const seed = SolverOperationJournal.open({ path });
+    const settlement = prepare(seed, 1, "JOB_SETTLEMENT", "settlement");
+    const contribution = prepare(seed, 1, "FINALIZED_CONTRIBUTION", "wallet", {
+      kind: "FINALIZED_TRANSACTION",
+      value: "accepted-backend-lag",
+    });
+    move(seed, settlement, "RELAY_SUBMITTED");
+    move(seed, contribution, "RELAY_SUBMITTED");
+    seed.recordReceipt(settlement, {
+      relayJobId: "restart-job",
+      relayState: "done",
+      relayExtrinsicHash: RELAY_TX,
+    });
+    seed.close();
+
+    const lagged = start(path, { relayStatus: "error", backendStatus: "live" });
+    await lagged.executor.ready;
+    expect(lagged.calls).toEqual([]);
+    expect(lagged.stock.reserved(B)).toBe(5n);
+    expect(lagged.journal.list().every((row) => row.lifecycleState === "QUARANTINED")).toBe(true);
+    await lagged.executor.stop();
+    lagged.journal.close();
+
+    const caughtUp = start(path, { relayStatus: "error", backendStatus: "consumed" });
+    await caughtUp.executor.ready;
+    expect(caughtUp.calls).toEqual([]);
+    expect(caughtUp.stock.reserved(B)).toBe(0n);
+    expect(caughtUp.journal.list().every((row) => row.lifecycleState === "SETTLED")).toBe(true);
+    await caughtUp.executor.stop();
+    caughtUp.journal.close();
+  });
+});
+
+test("HTTP relay failure plus no ledger proof reverts once across double restart", async () => {
+  await withJournalPath(async (path) => {
+    const seed = SolverOperationJournal.open({ path });
+    const settlement = prepare(seed, 1, "JOB_SETTLEMENT", "settlement");
+    const contribution = prepare(seed, 1, "FINALIZED_CONTRIBUTION", "wallet", {
+      kind: "FINALIZED_TRANSACTION",
+      value: "http-failed-wallet",
+    });
+    move(seed, settlement, "AWAITING_RELAY");
+    move(seed, contribution, "AWAITING_RELAY");
+    seed.close();
+
+    const failed = start(path, { relayStatus: "error", backendStatus: "live" });
+    await failed.executor.ready;
+    expect(failed.calls).toEqual(["final:http-failed-wallet"]);
+    expect(failed.stock.reserved(B)).toBe(0n);
+    expect(failed.journal.list().every((row) => row.lifecycleState === "REVERTED")).toBe(true);
+    expect(failed.journal.require(settlement).receipt).toMatchObject({
+      relayJobId: "restart-job",
+      relayState: "error",
+    });
+    await failed.executor.stop();
+    failed.journal.close();
+
+    const twice = start(path, { relayStatus: "done", backendStatus: "consumed" });
+    await twice.executor.ready;
+    expect(twice.calls).toEqual([]);
+    expect(twice.stock.reserved(B)).toBe(0n);
+    expect(twice.journal.list().every((row) => row.lifecycleState === "REVERTED")).toBe(true);
+    await twice.executor.stop();
+    twice.journal.close();
+  });
 });
 
 test("artifact-less PREPARED crash window is quarantined without releasing its durable claim", async () => {

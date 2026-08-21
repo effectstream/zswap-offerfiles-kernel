@@ -9,7 +9,9 @@ import { MAX_EXACT_FILES_PER_READ } from "@zswap-da/solver-core/exact-files-cont
 import {
   isDryRun,
   loadRelayClientEnv,
+  loadSolverRelayHttpEnv,
   loadSolverJournalEnv,
+  parseSolverRelayHttpUrl,
   SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS,
   SOLVER_BACKEND_HEALTH_MAX_AGE_MS,
   SOLVER_EXPIRY_MARGIN_SECONDS,
@@ -82,6 +84,8 @@ export interface SolverOptions {
   /** R2 relay boundary. Live mode requires both; dry-run deliberately starts
    * neither the wallet job executor nor the relay client. */
   relayUrl?: string;
+  /** Explicit HTTP base for GET /jobs/:jobId. Never derived from relayUrl. */
+  relayHttpUrl?: string;
   relayAuthToken?: string;
   relayPushIntervalMs?: number;
   relayReconnectDelayMs?: number;
@@ -435,6 +439,9 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   const dryRun = opts.dryRun ?? isDryRun();
   const relayEnv = loadRelayClientEnv();
   const relayUrl = opts.relayUrl ?? SOLVER_RELAY_WS_URL;
+  const relayHttpUrl = opts.relayHttpUrl === undefined
+    ? loadSolverRelayHttpEnv(undefined, { relayExecutionEnabled: !dryRun })
+    : parseSolverRelayHttpUrl(opts.relayHttpUrl);
   const relayAuthToken = opts.relayAuthToken ?? SOLVER_RELAY_AUTH_TOKEN;
   const maxParallelSwaps = opts.maxParallelSwaps ?? relayEnv.maxParallelSwaps;
   const startupTimeoutMs = opts.startupTimeoutMs ?? 180_000;
@@ -451,9 +458,9 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       throw new Error(`${name} must be a positive safe integer, got ${value}`);
     }
   }
-  if (!dryRun && (relayUrl === "" || relayAuthToken === "")) {
+  if (!dryRun && (relayUrl === "" || relayAuthToken === "" || relayHttpUrl === null)) {
     throw new Error(
-      "live solver requires SOLVER_RELAY_WS_URL and SOLVER_RELAY_AUTH_TOKEN",
+      "live solver requires SOLVER_RELAY_WS_URL, SOLVER_RELAY_HTTP_URL, and SOLVER_RELAY_AUTH_TOKEN",
     );
   }
   const rawLog = opts.log ?? ((msg: string) => console.log(msg));
@@ -736,6 +743,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       journal: operationJournal,
       keys: walletDependencies.shieldedKeys(ownedWallet) as any,
       api,
+      relayHttpUrl: relayHttpUrl!,
       maxParallelSwaps,
       expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
       settleTtlMinutes: SOLVER_SETTLE_TTL_MINUTES,
@@ -812,6 +820,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   balanceRetryTimer?.unref?.();
 
   const idle = async (): Promise<void> => {
+    await relayClient?.idle();
     await jobExecutor?.idle();
   };
 

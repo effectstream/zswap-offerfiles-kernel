@@ -9,10 +9,16 @@
 import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 
 import {
-  getOfferStatus,
   readExactOfferFiles,
   reconstructOffer,
 } from "@zswap-da/solver-core/api-client";
+import {
+  canonicalRelayExtrinsicHash,
+  getOfferConsumptionEvidence,
+  getRelayJobStatus,
+  type OfferConsumptionResponse,
+  type RelayJobStatus,
+} from "@zswap-da/solver-core/receipt-client";
 import {
   MAX_EXACT_FILES_PER_READ,
   type ExactFilesResponse,
@@ -161,7 +167,8 @@ export interface ExactOfferSemantics {
 
 export interface SwapJobDependencies {
   readExactOfferFiles: typeof readExactOfferFiles;
-  getOfferStatus: typeof getOfferStatus;
+  getOfferConsumptionEvidence: typeof getOfferConsumptionEvidence;
+  getRelayJobStatus: typeof getRelayJobStatus;
   reconstructOffer: typeof reconstructOffer;
   deriveOfferSemantics: (transaction: unknown) => ExactOfferSemantics;
   mergeFinalized: typeof mergeFinalized;
@@ -174,7 +181,8 @@ export interface SwapJobDependencies {
 
 const DEFAULT_DEPENDENCIES: SwapJobDependencies = {
   readExactOfferFiles,
-  getOfferStatus,
+  getOfferConsumptionEvidence,
+  getRelayJobStatus,
   reconstructOffer,
   deriveOfferSemantics: (transaction) => {
     const ledgerTransaction = transaction as Parameters<typeof deriveLegs>[0];
@@ -216,6 +224,8 @@ export interface SwapJobExecutorOptions {
   journal: SolverOperationJournal;
   keys: { dustSecretKey: unknown } & Record<string, unknown>;
   api?: string;
+  /** Explicit relay HTTP authority. Never derived from the websocket URL. */
+  relayHttpUrl: string;
   maxParallelSwaps: number;
   expiryMarginSeconds: number;
   settleTtlMinutes: number;
@@ -226,8 +236,7 @@ export interface SwapJobExecutorOptions {
   timers?: SwapJobTimers;
   signal?: AbortSignal;
   dependencies?: Partial<SwapJobDependencies>;
-  /** Called only after a positive backend status read, so a missed websocket
-   * consumption event still retracts the cache and next ladder. */
+  /** Called only after positive tx-bound backend ledger evidence. */
   onOfferConsumed?: (offerHash: string) => void;
   refreshBalances?: () => Promise<void>;
   log?: (message: string) => void;
@@ -248,8 +257,8 @@ export interface SwapJobExecutorStats {
 
 export interface SwapJobExecutorHandle {
   onSwap: (job: SwapMessage) => Promise<SwapTxMessage | JobErrorMessage>;
-  onTxSubmitted: (message: TxSubmittedMessage) => void;
-  onSubmitFailed: (message: SubmitFailedMessage) => void;
+  onTxSubmitted: (message: TxSubmittedMessage) => Promise<void>;
+  onSubmitFailed: (message: SubmitFailedMessage) => Promise<void>;
   notifyConsumed: (offerHash: string) => void;
   unavailableOfferHashes: () => string[];
   /** Resolves after durable claims have been rebuilt and all locally decidable
@@ -290,7 +299,6 @@ interface AwaitingJob {
   jobId: string;
   claim: Claim;
   offerHashes: string[];
-  consumed: Set<string>;
   walletTransaction: FinalizedTransaction;
   ttlExpiresAt: number;
   reverting: boolean;
@@ -305,7 +313,6 @@ interface ConsumptionJob {
   jobId: string;
   claim: Claim;
   offerHashes: string[];
-  consumed: Set<string>;
   ttlExpiresAt: number;
   generation: number;
   operationKey: string;
@@ -324,6 +331,8 @@ interface QuarantinedJob {
   operationKey: string;
   /** Relay/backend ambiguity is intentionally not decided locally in RF1B. */
   locallyRevertible: boolean;
+  /** Retry relay HTTP plus backend ledger evidence, never local inference. */
+  evidenceReconcile: boolean;
 }
 
 const snapshotOffer = (offer: BookOffer): BookOffer => ({
@@ -492,6 +501,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
   requirePositiveInteger("maxParallelSwaps", options.maxParallelSwaps);
   requirePositiveInteger("expiryMarginSeconds", options.expiryMarginSeconds);
   requirePositiveInteger("settleTtlMinutes", options.settleTtlMinutes);
+  if (options.relayHttpUrl.length === 0) throw new Error("relayHttpUrl is required");
   const requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
   const walletOperationTimeoutMs = options.walletOperationTimeoutMs ?? 240_000;
   const sweepIntervalMs = options.sweepIntervalMs ?? 10_000;
@@ -508,8 +518,8 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
   const confirmations = new Map<string, ConsumptionJob>();
   const quarantined = new Map<string, QuarantinedJob>();
   const tombstones = new Map<string, number>();
-  const consumedAt = new Map<string, number>();
   const tasks = new Set<Promise<unknown>>();
+  const terminalChains = new Map<string, Promise<void>>();
   let sweepTimer: unknown = null;
   let sweeping: Promise<void> | null = null;
   let stopped = false;
@@ -542,6 +552,15 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     tasks.add(task);
     void task.finally(() => tasks.delete(task)).catch(() => undefined);
     return task;
+  };
+  const enqueueTerminal = (jobId: string, operation: () => Promise<void>): Promise<void> => {
+    const prior = terminalChains.get(jobId) ?? Promise.resolve();
+    const current = prior.catch(() => undefined).then(operation);
+    terminalChains.set(jobId, current);
+    void current.finally(() => {
+      if (terminalChains.get(jobId) === current) terminalChains.delete(jobId);
+    }).catch(() => undefined);
+    return track(current);
   };
   const terminal = (state: JournalLifecycleState): boolean =>
     state === "SETTLED" || state === "REVERTED" || state === "FAILED";
@@ -638,23 +657,53 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       }
     }
   };
-  const markRelaySubmitted = (record: AwaitingJob, txId: string): void => {
-    for (const initial of terminalOrder(group(record.jobId, record.generation))) {
-      const row = journal.require(initial.operationKey);
-      if (terminal(row.lifecycleState)) continue;
-      if (row.lifecycleState !== "AWAITING_RELAY") {
-        throw new Error(`${row.operationKey} is not awaiting relay`);
-      }
-      journal.transition(row.operationKey, "AWAITING_RELAY", "RELAY_SUBMITTED",
-        row.operationKind === "JOB_SETTLEMENT"
-          ? { receipt: { relayJobId: record.jobId, relayState: "tx-submitted", relayExtrinsicHash: txId } }
-          : {});
-    }
-  };
-  const markSettled = (record: ConsumptionJob): void => {
+  const markRelaySubmitted = (
+    record: { jobId: string; generation: number; operationKey: string },
+    txId: string,
+  ): void => {
+    const canonical = canonicalRelayExtrinsicHash(txId);
+    if (canonical === null) throw new Error("relay txId is not a canonical 32-byte extrinsic hash");
+    journal.recordReceipt(record.operationKey, {
+      relayJobId: record.jobId,
+      relayState: "done",
+      relayExtrinsicHash: canonical,
+    });
     for (const initial of terminalOrder(group(record.jobId, record.generation))) {
       let row = journal.require(initial.operationKey);
       if (terminal(row.lifecycleState)) continue;
+      if (row.lifecycleState === "AWAITING_RELAY") {
+        journal.transition(row.operationKey, "AWAITING_RELAY", "RELAY_SUBMITTED");
+      } else if (row.lifecycleState === "QUARANTINED") {
+        journal.transition(row.operationKey, "QUARANTINED", "CONFIRMING");
+      } else if (row.lifecycleState !== "RELAY_SUBMITTED" && row.lifecycleState !== "CONFIRMING") {
+        throw new Error(`${row.operationKey} cannot record relay submission from ${row.lifecycleState}`);
+      }
+    }
+  };
+  const markRelayFailed = (
+    record: { jobId: string; operationKey: string },
+  ): void => {
+    journal.recordReceipt(record.operationKey, {
+      relayJobId: record.jobId,
+      relayState: "error",
+    });
+  };
+  const markSettled = (
+    record: ConsumptionJob,
+    evidence?: { ledgerTxHash: string; height: number },
+  ): void => {
+    if (evidence !== undefined) {
+      journal.recordReceipt(record.operationKey, {
+        ledgerTxHash: evidence.ledgerTxHash,
+        ledgerHeight: evidence.height,
+      });
+    }
+    for (const initial of terminalOrder(group(record.jobId, record.generation))) {
+      let row = journal.require(initial.operationKey);
+      if (terminal(row.lifecycleState)) continue;
+      if (row.lifecycleState === "AWAITING_RELAY") {
+        row = journal.transition(row.operationKey, "AWAITING_RELAY", "RELAY_SUBMITTED");
+      }
       if (row.lifecycleState === "RELAY_SUBMITTED") {
         journal.transition(row.operationKey, "RELAY_SUBMITTED", "SETTLED");
       } else if (row.lifecycleState === "CONFIRMING" || row.lifecycleState === "QUARANTINED") {
@@ -737,9 +786,6 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     journal.transition(key, "REVERTING", "REVERTED");
   };
 
-  const allConsumed = (record: { offerHashes: string[]; consumed: Set<string> }): boolean =>
-    record.offerHashes.every((offerHash) => record.consumed.has(offerHash));
-
   const revertWallet = async (record: AwaitingJob): Promise<boolean> => {
     if (record.reverting || !owns(record)) return false;
     record.reverting = true;
@@ -783,6 +829,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       quarantined.set(record.jobId, {
         ...record,
         locallyRevertible: true,
+        evidenceReconcile: false,
       });
       stats.revertFailures += 1;
       log(`revert failed for ${record.jobId}; durable quarantine retained: ${errorMessage(error)}`);
@@ -793,38 +840,14 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     }
   };
 
-  const completeConsumed = (jobId: string): void => {
-    const confirmation = confirmations.get(jobId);
-    if (!confirmation || !allConsumed(confirmation)) return;
-    try {
-      markSettled(confirmation);
-      confirmations.delete(jobId);
-      tombstones.set(jobId, retention(confirmation));
-      release(confirmation.claim);
-      stats.completed += 1;
-      log(`backend confirmed submitted maker consumption for ${jobId}`);
-    } catch (error) {
-      try { quarantineGroup(jobId, confirmation.generation, "SETTLEMENT_JOURNAL_FAILED", error); } catch { /* retained */ }
-      confirmations.delete(jobId);
-      quarantined.set(jobId, {
-        ...confirmation,
-        locallyRevertible: false,
-        reverting: false,
-      });
-      log(`settlement for ${jobId} remains durably quarantined: ${errorMessage(error)}`);
-    }
-    refreshStats();
-  };
-
   const notifyConsumed = (offerHash: string): void => {
     const canonical = offerHash.toLowerCase();
-    consumedAt.set(canonical, now());
-    for (const record of awaiting.values()) if (record.offerHashes.includes(canonical)) record.consumed.add(canonical);
-    for (const record of confirmations.values()) {
-      if (record.offerHashes.includes(canonical)) {
-        record.consumed.add(canonical);
-        completeConsumed(record.jobId);
-      }
+    // The websocket event is only a wake-up. It is never settlement evidence:
+    // the versioned backend read below must still bind every maker offer to one
+    // identical inner Midnight ledger transaction and height.
+    if ([...awaiting.values(), ...confirmations.values(), ...quarantined.values()]
+      .some((record) => record.offerHashes.includes(canonical))) {
+      void sweep();
     }
   };
 
@@ -1074,6 +1097,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         generation: record.generation,
         operationKey: record.operationKey,
         locallyRevertible: error.rawTransaction !== undefined || error.walletTransaction !== undefined,
+        evidenceReconcile: false,
       });
       log(`quarantined uncertain wallet mutation for ${record.job.jobId}`);
       return true;
@@ -1083,7 +1107,6 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         jobId: record.job.jobId,
         claim: record.claim,
         offerHashes: record.offerHashes,
-        consumed: new Set(),
         walletTransaction: error.walletTransaction,
         ttlExpiresAt: error.ttlExpiresAt,
         reverting: false,
@@ -1141,6 +1164,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         operationKind: "JOB_SETTLEMENT",
         ttlExpiresAtMs: ttlExpiresAt,
         deadlineAtMs: Math.min(ttlExpiresAt, now() + walletOperationTimeoutMs),
+        receipt: { relayJobId: job.jobId },
       });
     } catch (error) {
       release(route.claim);
@@ -1171,7 +1195,6 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
               jobId: job.jobId,
               claim: route.claim,
               offerHashes: record.offerHashes,
-              consumed: new Set(),
               walletTransaction: late.walletTransaction,
               ttlExpiresAt: late.ttlExpiresAt,
               reverting: false,
@@ -1197,6 +1220,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
                   jobId: job.jobId, claim: route.claim, offerHashes: record.offerHashes,
                   ttlExpiresAt, reverting: false, generation, operationKey: record.operationKey,
                   locallyRevertible: false,
+                  evidenceReconcile: false,
                 });
               }
             }
@@ -1215,7 +1239,6 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         jobId: job.jobId,
         claim: route.claim,
         offerHashes: record.offerHashes,
-        consumed: new Set(record.offerHashes.filter((hash) => consumedAt.has(hash))),
         walletTransaction: built.walletTransaction,
         ttlExpiresAt: built.ttlExpiresAt,
         reverting: false,
@@ -1243,6 +1266,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
               jobId: job.jobId, claim: route.claim, offerHashes: record.offerHashes,
               ttlExpiresAt, reverting: false, generation, operationKey: record.operationKey,
               locallyRevertible: false,
+              evidenceReconcile: false,
             });
           }
           if (!group(job.jobId, generation).some((row) => !terminal(row.lifecycleState))) {
@@ -1265,69 +1289,203 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
   const onSwap = (job: SwapMessage): Promise<SwapTxMessage | JobErrorMessage> =>
     track(executeSwap(job));
 
-  const onTxSubmitted = (message: TxSubmittedMessage): void => {
-    const record = awaiting.get(message.jobId);
-    if (!record || record.reverting || !record.relayAccepted) return;
-    try {
-      markRelaySubmitted(record, message.txId);
-    } catch (error) {
-      try { quarantineGroup(record.jobId, record.generation, "RELAY_TRANSITION_UNCERTAIN", error); } catch { /* retained */ }
-      awaiting.delete(message.jobId);
-      quarantined.set(message.jobId, { ...record, locallyRevertible: false });
-      log(`relay submission for ${message.jobId} remains durably quarantined: ${errorMessage(error)}`);
-      refreshStats();
-      return;
+  type EvidenceRead =
+    | { kind: "uniform"; ledgerTxHash: string; height: number }
+    | { kind: "none" }
+    | { kind: "unknown"; reason: string };
+
+  const readUniformEvidence = async (
+    record: { offerHashes: string[] },
+  ): Promise<EvidenceRead> => {
+    const results: OfferConsumptionResponse[] = [];
+    for (const offerHash of record.offerHashes) {
+      try {
+        results.push(await dependencies.getOfferConsumptionEvidence(offerHash, {
+          baseUrl: options.api ?? "http://127.0.0.1:9999",
+          timeoutMs: requestTimeoutMs,
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        }));
+      } catch (error) {
+        return { kind: "unknown", reason: `backend evidence unavailable: ${errorMessage(error)}` };
+      }
     }
-    awaiting.delete(message.jobId);
-    // Clear the cached wallet transaction exactly as the relay protocol says,
-    // but retain the claim until backend plain reads confirm maker consumption.
-    confirmations.set(message.jobId, {
-      jobId: message.jobId,
+    const positive = results.filter((result) => result.evidence !== undefined);
+    if (positive.length === results.length && positive.length > 0) {
+      const first = positive[0]!.evidence!;
+      if (positive.every((result) => result.evidence!.ledgerTxHash === first.ledgerTxHash &&
+          result.evidence!.height === first.height)) {
+        for (const offerHash of record.offerHashes) {
+          try { options.onOfferConsumed?.(offerHash); } catch { /* evidence remains authoritative */ }
+        }
+        return { kind: "uniform", ledgerTxHash: first.ledgerTxHash, height: first.height };
+      }
+      return { kind: "unknown", reason: "maker offers bind to split ledger transactions or heights" };
+    }
+    if (positive.length > 0 || results.some((result) => result.status === "consumed")) {
+      return { kind: "unknown", reason: "maker consumption evidence is partial or markerless" };
+    }
+    return { kind: "none" };
+  };
+
+  const activeReceiptRecord = (jobId: string): AwaitingJob | ConsumptionJob | QuarantinedJob | undefined =>
+    awaiting.get(jobId) ?? confirmations.get(jobId) ?? quarantined.get(jobId);
+
+  const quarantineEvidence = (
+    record: AwaitingJob | ConsumptionJob | QuarantinedJob,
+    code: string,
+    reason: unknown,
+  ): void => {
+    try { quarantineGroup(record.jobId, record.generation, code, reason); } catch { /* row remains non-terminal */ }
+    awaiting.delete(record.jobId);
+    confirmations.delete(record.jobId);
+    const prior = quarantined.get(record.jobId);
+    quarantined.set(record.jobId, {
+      jobId: record.jobId,
       claim: record.claim,
       offerHashes: record.offerHashes,
-      consumed: record.consumed,
+      ...(prior?.rawTransaction === undefined ? {} : { rawTransaction: prior.rawTransaction }),
+      ...(prior?.rawTransactions === undefined ? {} : { rawTransactions: prior.rawTransactions }),
+      ...(("walletTransaction" in record && record.walletTransaction !== undefined)
+        ? { walletTransaction: record.walletTransaction }
+        : prior?.walletTransaction === undefined ? {} : { walletTransaction: prior.walletTransaction }),
+      ttlExpiresAt: record.ttlExpiresAt,
+      reverting: false,
+      generation: record.generation,
+      operationKey: record.operationKey,
+      locallyRevertible: false,
+      evidenceReconcile: true,
+    });
+    log(`${record.jobId} remains durably quarantined: ${detail(reason)}`);
+    refreshStats();
+  };
+
+  const finishSettled = (
+    record: AwaitingJob | ConsumptionJob | QuarantinedJob,
+    evidence: Extract<EvidenceRead, { kind: "uniform" }>,
+  ): void => {
+    const confirmation: ConsumptionJob = {
+      jobId: record.jobId,
+      claim: record.claim,
+      offerHashes: record.offerHashes,
       ttlExpiresAt: record.ttlExpiresAt,
       generation: record.generation,
       operationKey: record.operationKey,
-    });
-    completeConsumed(message.jobId);
+    };
+    markSettled(confirmation, { ledgerTxHash: evidence.ledgerTxHash, height: evidence.height });
+    awaiting.delete(record.jobId);
+    confirmations.delete(record.jobId);
+    quarantined.delete(record.jobId);
+    tombstones.set(record.jobId, retention(record));
+    release(record.claim);
+    stats.completed += 1;
+    log(`backend bound ${record.jobId} to ledger tx ${evidence.ledgerTxHash} at height ${evidence.height}`);
     refreshStats();
-    log(`relay submitted ${message.jobId} as ${message.txId}; awaiting backend consumption`);
   };
 
-  const onSubmitFailed = (message: SubmitFailedMessage): void => {
-    const record = awaiting.get(message.jobId);
-    if (!record || !record.relayAccepted) return;
-    log(`relay submit failed for ${message.jobId}: ${message.reason}`);
-    void track(revertWallet(record));
-  };
-
-  const pollConsumption = async (
-    record: AwaitingJob | ConsumptionJob,
-  ): Promise<boolean> => {
-    for (const offerHash of record.offerHashes) {
-      if (record.consumed.has(offerHash)) continue;
-      try {
-        const status = await dependencies.getOfferStatus(offerHash, {
-          ...(options.api === undefined ? {} : { api: options.api }),
-          timeoutMs: requestTimeoutMs,
-        });
-        if (status.status === "consumed") {
-          record.consumed.add(offerHash);
-          consumedAt.set(offerHash, now());
-          try {
-            options.onOfferConsumed?.(offerHash);
-          } catch {
-            // The positive status remains authority even if the observer fails.
-          }
-        }
-      } catch (error) {
-        log(`status read failed for ${offerHash.slice(0, 10)}: ${errorMessage(error)}`);
-      }
+  const reconcileRelayDone = async (
+    record: AwaitingJob | ConsumptionJob | QuarantinedJob,
+    txId: string,
+  ): Promise<void> => {
+    try {
+      markRelaySubmitted(record, txId);
+      awaiting.delete(record.jobId);
+      quarantined.delete(record.jobId);
+      confirmations.set(record.jobId, {
+        jobId: record.jobId,
+        claim: record.claim,
+        offerHashes: record.offerHashes,
+        ttlExpiresAt: record.ttlExpiresAt,
+        generation: record.generation,
+        operationKey: record.operationKey,
+      });
+      const evidence = await readUniformEvidence(record);
+      if (evidence.kind === "uniform") finishSettled(record, evidence);
+      else quarantineEvidence(record, "BACKEND_EVIDENCE_UNKNOWN", evidence.kind === "none"
+        ? "relay submission is positive but maker consumption is not yet proven"
+        : evidence.reason);
+    } catch (error) {
+      quarantineEvidence(record, "RELAY_OR_SETTLEMENT_CONFLICT", error);
     }
-    completeConsumed(record.jobId);
-    return allConsumed(record);
   };
+
+  const reconcileRelayFailure = async (
+    record: AwaitingJob | ConsumptionJob | QuarantinedJob,
+    reason: string,
+  ): Promise<void> => {
+    try {
+      markRelayFailed(record);
+      const evidence = await readUniformEvidence(record);
+      if (evidence.kind !== "none") {
+        quarantineEvidence(record, "RELAY_FAILURE_EVIDENCE_CONFLICT",
+          evidence.kind === "uniform" ? "relay failure conflicts with positive ledger evidence" : evidence.reason);
+        return;
+      }
+      if (!("walletTransaction" in record) || record.walletTransaction === undefined) {
+        quarantineEvidence(record, "RELAY_FAILURE_ARTIFACT_UNKNOWN",
+          "explicit relay failure has no restorable solver wallet transaction");
+        return;
+      }
+      log(`relay submit failed for ${record.jobId}: ${reason}; backend has no consumption proof`);
+      awaiting.set(record.jobId, { ...record, relayAccepted: true });
+      quarantined.delete(record.jobId);
+      confirmations.delete(record.jobId);
+      await revertWallet(awaiting.get(record.jobId)!);
+    } catch (error) {
+      quarantineEvidence(record, "RELAY_FAILURE_RECONCILIATION_UNKNOWN", error);
+    }
+  };
+
+  const reconcileFromHttp = async (
+    record: AwaitingJob | ConsumptionJob | QuarantinedJob,
+  ): Promise<void> => {
+    let status: RelayJobStatus;
+    try {
+      status = await dependencies.getRelayJobStatus(record.jobId, {
+        baseUrl: options.relayHttpUrl,
+        timeoutMs: requestTimeoutMs,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+    } catch (error) {
+      quarantineEvidence(record, "RELAY_HTTP_OUTCOME_UNKNOWN", error);
+      return;
+    }
+    if (status.status === "done") return reconcileRelayDone(record, status.txId);
+    if (status.status === "error") return reconcileRelayFailure(record, status.reason);
+    quarantineEvidence(record, "RELAY_HTTP_OUTCOME_UNKNOWN", `relay job is still ${status.status}`);
+  };
+
+  const reconcileDurableEvidence = async (
+    record: AwaitingJob | ConsumptionJob | QuarantinedJob,
+  ): Promise<void> => {
+    const receipt = journal.require(record.operationKey).receipt;
+    if (receipt.relayState === "done" && receipt.relayExtrinsicHash !== undefined) {
+      return reconcileRelayDone(record, receipt.relayExtrinsicHash);
+    }
+    if (receipt.relayState === "error") {
+      return reconcileRelayFailure(record, "durable relay failure receipt");
+    }
+    if (receipt.relayState !== undefined || receipt.relayExtrinsicHash !== undefined) {
+      quarantineEvidence(record, "RELAY_RECEIPT_MALFORMED", "durable relay receipt is incomplete");
+      return;
+    }
+    return reconcileFromHttp(record);
+  };
+
+  const onTxSubmitted = (message: TxSubmittedMessage): Promise<void> =>
+    enqueueTerminal(message.jobId, async () => {
+      const record = activeReceiptRecord(message.jobId);
+      if (!record || ("relayAccepted" in record && !record.relayAccepted) ||
+          ("locallyRevertible" in record && record.locallyRevertible) || record.reverting) return;
+      await reconcileRelayDone(record, message.txId);
+    });
+
+  const onSubmitFailed = (message: SubmitFailedMessage): Promise<void> =>
+    enqueueTerminal(message.jobId, async () => {
+      const record = activeReceiptRecord(message.jobId);
+      if (!record || ("relayAccepted" in record && !record.relayAccepted) ||
+          ("locallyRevertible" in record && record.locallyRevertible) || record.reverting) return;
+      await reconcileRelayFailure(record, message.reason);
+    });
 
   const retryQuarantine = async (record: QuarantinedJob): Promise<boolean> => {
     if (record.reverting || !record.locallyRevertible || !owns(record)) return false;
@@ -1358,23 +1516,24 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
   const runSweep = async (): Promise<void> => {
     const at = now();
     for (const [jobId, expiry] of tombstones) if (expiry <= at) tombstones.delete(jobId);
-    const consumedRetentionMs = options.settleTtlMinutes * 60_000;
-    for (const [offerHash, observedAt] of consumedAt) {
-      if (observedAt + consumedRetentionMs <= at) consumedAt.delete(offerHash);
+
+    for (const record of [...quarantined.values()]) {
+      if (record.locallyRevertible) await retryQuarantine(record);
+      else if (record.evidenceReconcile) {
+        await enqueueTerminal(record.jobId, () => reconcileDurableEvidence(record));
+      }
     }
 
-    for (const record of [...quarantined.values()]) await retryQuarantine(record);
-
     for (const record of [...awaiting.values()]) {
-      if (record.relayAccepted) await pollConsumption(record);
-      // A tx-submitted frame can move this exact object to confirmations
-      // while the status request above is in flight. Re-check ownership before
-      // TTL rollback so the sweeper can never revert a submitted transaction.
-      if (record.ttlExpiresAt <= at && awaiting.get(record.jobId) === record) {
+      if (record.relayAccepted) {
+        await enqueueTerminal(record.jobId, () => reconcileFromHttp(record));
+      } else if (record.ttlExpiresAt <= at && awaiting.get(record.jobId) === record) {
         await revertWallet(record);
       }
     }
-    for (const record of [...confirmations.values()]) await pollConsumption(record);
+    for (const record of [...confirmations.values()]) {
+      await enqueueTerminal(record.jobId, () => reconcileDurableEvidence(record));
+    }
   };
 
   const sweep = (): Promise<void> => {
@@ -1413,7 +1572,6 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
             jobId: settlement.jobId,
             claim: terminalClaim,
             offerHashes: settlement.offerHashes,
-            consumed: new Set(settlement.offerHashes),
             ttlExpiresAt: settlement.ttlExpiresAtMs,
             generation: settlement.generation,
             operationKey: settlement.operationKey,
@@ -1447,22 +1605,10 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       const relayAmbiguous = settlement.lifecycleState === "AWAITING_RELAY" ||
         settlement.lifecycleState === "RELAY_SUBMITTED" ||
         settlement.lifecycleState === "CONFIRMING" ||
-        settlement.errorCode?.startsWith("RELAY_") === true;
-      if (relayAmbiguous) {
-        quarantineGroup(settlement.jobId, settlement.generation, "RELAY_OUTCOME_UNKNOWN",
-          "RF1B defers relay/backend evidence reconciliation to RF2");
-        quarantined.set(settlement.jobId, {
-          jobId: settlement.jobId,
-          claim,
-          offerHashes: settlement.offerHashes,
-          ttlExpiresAt: settlement.ttlExpiresAtMs,
-          generation: settlement.generation,
-          operationKey: settlement.operationKey,
-          reverting: false,
-          locallyRevertible: false,
-        });
-        continue;
-      }
+        settlement.lifecycleState === "QUARANTINED" && (
+          settlement.receipt.relayState !== undefined ||
+          settlement.errorCode?.startsWith("RELAY_") === true ||
+          settlement.errorCode?.startsWith("BACKEND_") === true);
       const artifactlessMutation = jobRows.some((row) =>
         row.operationKind !== "JOB_SETTLEMENT" && row.lifecycleState === "PREPARED" &&
         row.walletArtifactBytes === undefined);
@@ -1490,6 +1636,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
             jobId: settlement.jobId, claim, offerHashes: settlement.offerHashes,
             ttlExpiresAt: settlement.ttlExpiresAtMs, generation: settlement.generation,
             operationKey: settlement.operationKey, reverting: false, locallyRevertible: false,
+            evidenceReconcile: false,
           });
           continue;
         }
@@ -1509,12 +1656,32 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         const walletTransaction = finalizedTransactions.length > 0
           ? dependencies.mergeFinalized(finalizedTransactions)
           : undefined;
+        if (relayAmbiguous) {
+          quarantineGroup(settlement.jobId, settlement.generation, "RELAY_OUTCOME_UNKNOWN",
+            "startup is reconciling the pinned relay HTTP and backend ledger authorities");
+          const evidenceRecord: QuarantinedJob = {
+            jobId: settlement.jobId,
+            claim,
+            offerHashes: settlement.offerHashes,
+            ...(walletTransaction === undefined ? {} : { walletTransaction }),
+            ttlExpiresAt: settlement.ttlExpiresAtMs,
+            generation: settlement.generation,
+            operationKey: settlement.operationKey,
+            reverting: false,
+            locallyRevertible: false,
+            evidenceReconcile: true,
+          };
+          quarantined.set(settlement.jobId, evidenceRecord);
+          await enqueueTerminal(settlement.jobId, () => reconcileDurableEvidence(evidenceRecord));
+          continue;
+        }
         const record: QuarantinedJob = {
           jobId: settlement.jobId, claim, offerHashes: settlement.offerHashes,
           ...(rawTransactions.length === 0 ? {} : { rawTransactions }),
           ...(walletTransaction === undefined ? {} : { walletTransaction }),
           ttlExpiresAt: settlement.ttlExpiresAtMs, generation: settlement.generation,
           operationKey: settlement.operationKey, reverting: false, locallyRevertible: true,
+          evidenceReconcile: false,
         };
         quarantined.set(settlement.jobId, record);
         await retryQuarantine(record);
@@ -1524,6 +1691,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
           jobId: settlement.jobId, claim, offerHashes: settlement.offerHashes,
           ttlExpiresAt: settlement.ttlExpiresAtMs, generation: settlement.generation,
           operationKey: settlement.operationKey, reverting: false, locallyRevertible: false,
+          evidenceReconcile: relayAmbiguous,
         });
         log(`artifact restore failed for ${settlement.jobId}; durable quarantine retained: ${errorMessage(error)}`);
       }
@@ -1556,8 +1724,13 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         }
         log("shutdown deadline retained in-flight wallet work in the durable journal");
       }
-      await Promise.allSettled([...quarantined.values()].map((record) => retryQuarantine(record)));
-      await Promise.allSettled([...awaiting.values()].map((record) => revertWallet(record)));
+      await Promise.allSettled([...quarantined.values()].map((record) =>
+        record.locallyRevertible
+          ? retryQuarantine(record)
+          : record.evidenceReconcile ? reconcileDurableEvidence(record) : Promise.resolve()));
+      await Promise.allSettled([...awaiting.values()].map((record) =>
+        record.relayAccepted ? reconcileFromHttp(record) : revertWallet(record)));
+      await Promise.allSettled([...confirmations.values()].map((record) => reconcileDurableEvidence(record)));
       stats.stopped = true;
       refreshStats();
     })();

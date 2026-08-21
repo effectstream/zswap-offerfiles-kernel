@@ -6,12 +6,14 @@ import { Transaction } from "@midnight-ntwrk/ledger-v8";
 
 import {
   declaredLedgerSegments,
-  BatcherRequestTimeoutError,
   ImbalanceUnreadableError,
-  parseBatcherAcknowledgement,
-  settleViaBatcher,
   tokenImbalances,
 } from "./batcher.ts";
+import {
+  BatcherRequestTimeoutError,
+  parseBatcherAcknowledgement,
+  settleViaBatcher,
+} from "./batcher.test-support.ts";
 
 const originalFetch = globalThis.fetch;
 

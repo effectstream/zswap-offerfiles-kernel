@@ -454,6 +454,28 @@ export class SolverOperationJournal {
     return this.require(operationKey);
   }
 
+  /** Add one independently observed receipt field without changing lifecycle.
+   * Values are write-once: an identical replay is idempotent and any conflict
+   * rolls back atomically. This lets RF2 persist relay and inner-ledger facts
+   * as their separate authorities become available. */
+  recordReceipt(operationKey: string, receipt: JournalReceipt): JournalOperation {
+    this.#assertOpen();
+    requireText("operationKey", operationKey);
+    requireReceipt(receipt);
+    const now = this.#now();
+    const write = this.#db.transaction(() => {
+      const row = this.#db.query("SELECT id FROM journal_operations WHERE operation_key = ?")
+        .get(operationKey) as { id: number } | null;
+      if (!row) throw new Error(`journal operation not found: ${operationKey}`);
+      this.#writeReceipt(row.id, receipt);
+      this.#db.query("UPDATE journal_operations SET updated_at_ms = ? WHERE id = ?")
+        .run(now, row.id);
+      this.#assertWithinCeilings();
+    });
+    write();
+    return this.require(operationKey);
+  }
+
   get(operationKey: string): JournalOperation | undefined {
     this.#assertOpen();
     const row = this.#db.query(`${SELECT_OPERATION} WHERE o.operation_key = ?`).get(operationKey) as

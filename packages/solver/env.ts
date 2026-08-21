@@ -22,6 +22,7 @@ export const ZSWAP_API = getEnv("ZSWAP_API") ?? "http://127.0.0.1:9999";
  * a token shorter than 32 characters.
  */
 export const SOLVER_RELAY_WS_URL = getEnv("SOLVER_RELAY_WS_URL") ?? "";
+export const SOLVER_RELAY_HTTP_URL = getEnv("SOLVER_RELAY_HTTP_URL") ?? "";
 export const SOLVER_RELAY_AUTH_TOKEN = getEnv("SOLVER_RELAY_AUTH_TOKEN") ?? "";
 
 export const SOLVER_LADDER_CONFIG =
@@ -31,6 +32,49 @@ export const SOLVER_LADDER_CONFIG =
   fileURLToPath(new URL("./config/ladders.dev.json", import.meta.url));
 
 type EnvReader = (name: string) => string | undefined;
+
+export interface SolverRelayHttpEnvOptions {
+  relayExecutionEnabled: boolean;
+}
+
+export function parseSolverRelayHttpUrl(raw: string): string {
+  const name = "SOLVER_RELAY_HTTP_URL";
+  if (raw.length === 0 || raw.trim() !== raw || raw.includes("\0")) {
+    throw new Error(`${name} must be a non-empty canonical HTTP(S) URL without whitespace or NUL`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${name} must be an absolute HTTP(S) URL`);
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") {
+    throw new Error(
+      `${name} must use http/https and contain no credentials, query, or fragment`,
+    );
+  }
+  if (parsed.pathname.includes("//")) {
+    throw new Error(`${name} path must not contain empty segments`);
+  }
+  parsed.pathname = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/$/, "");
+  return parsed.toString().replace(/\/$/, "");
+}
+
+/** The public relay status authority is configured explicitly. It is never
+ * guessed by rewriting the websocket URL because the deployed HTTP prefix may
+ * be different (for example `/api/v1`). */
+export function loadSolverRelayHttpEnv(
+  read: EnvReader = getEnv,
+  options: SolverRelayHttpEnvOptions = { relayExecutionEnabled: true },
+): string | null {
+  const raw = read("SOLVER_RELAY_HTTP_URL");
+  if (raw === undefined) {
+    if (!options.relayExecutionEnabled) return null;
+    throw new Error("SOLVER_RELAY_HTTP_URL is required when relay job execution is enabled");
+  }
+  return parseSolverRelayHttpUrl(raw);
+}
 
 export interface SolverJournalEnv {
   path: string;

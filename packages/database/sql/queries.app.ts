@@ -1033,6 +1033,85 @@ export const getOfferStatusByHash = prepared<IGetOfferStatusByHashParams, IGetOf
        WHERE offer_hash = :offer_hash!`,
 );
 
+// RF2 settlement evidence for the current shielded-offer release scope.
+//
+// A positive row is deliberately stricter than the general display status:
+// every declared shielded input must have one non-null spending ledger tx,
+// every declared output commitment must have been created by that SAME ledger
+// tx, and every marker must report one block height. Markerless, NULL, partial,
+// split, unshielded, expired, and cancellation rows retain their truthful
+// status but carry no evidence. This query is SELECT-only.
+export interface IGetOfferConsumptionEvidenceParams { offer_hash: string }
+export interface IGetOfferConsumptionEvidenceResult {
+  status: string;
+  ledger_tx_hash: string | null;
+  ledger_height: string | null;
+}
+export const getOfferConsumptionEvidence = prepared<
+  IGetOfferConsumptionEvidenceParams,
+  IGetOfferConsumptionEvidenceResult
+>(
+      `WITH target AS (
+         SELECT id, TRUE AS is_live, 'live'::text AS status
+           FROM offer_file
+          WHERE offer_hash = :offer_hash!
+         UNION ALL
+         SELECT h.id, FALSE AS is_live,
+                (${archivedStatusCase("h.id")})::text AS status
+           FROM offer_file_history h
+          WHERE h.offer_hash = :offer_hash!
+         LIMIT 1
+       ),
+       input_evidence AS (
+         SELECT COUNT(hn.nullifier)::int AS declared_count,
+                COUNT(n.nullifier) FILTER (WHERE n.tx_hash IS NOT NULL)::int AS bound_count,
+                COUNT(DISTINCT n.tx_hash) FILTER (WHERE n.tx_hash IS NOT NULL)::int AS tx_count,
+                MIN(n.tx_hash) FILTER (WHERE n.tx_hash IS NOT NULL) AS tx_hash,
+                MIN(n.height) FILTER (WHERE n.tx_hash IS NOT NULL) AS min_height,
+                MAX(n.height) FILTER (WHERE n.tx_hash IS NOT NULL) AS max_height
+           FROM target t
+           LEFT JOIN offer_file_nullifiers_history hn
+             ON NOT t.is_live AND hn.offer_file_id = t.id
+           LEFT JOIN nullifiers n ON n.nullifier = hn.nullifier
+       ),
+       output_evidence AS (
+         SELECT COUNT(hc.commitment)::int AS declared_count,
+                COUNT(c.commitment) FILTER (WHERE c.tx_hash IS NOT NULL)::int AS bound_count,
+                COUNT(DISTINCT c.tx_hash) FILTER (WHERE c.tx_hash IS NOT NULL)::int AS tx_count,
+                MIN(c.tx_hash) FILTER (WHERE c.tx_hash IS NOT NULL) AS tx_hash,
+                MIN(c.height) FILTER (WHERE c.tx_hash IS NOT NULL) AS min_height,
+                MAX(c.height) FILTER (WHERE c.tx_hash IS NOT NULL) AS max_height
+           FROM target t
+           LEFT JOIN offer_file_commitments_history hc
+             ON NOT t.is_live AND hc.offer_file_id = t.id
+           LEFT JOIN commitments c ON c.commitment = hc.commitment
+       ),
+       verdict AS (
+         SELECT t.status, i.tx_hash, i.min_height,
+                (t.status = 'consumed'
+                 AND NOT t.is_live
+                 AND i.declared_count > 0 AND i.bound_count = i.declared_count
+                 AND i.tx_count = 1 AND i.min_height = i.max_height
+                 AND o.declared_count > 0 AND o.bound_count = o.declared_count
+                 AND o.tx_count = 1 AND o.min_height = o.max_height
+                 AND i.tx_hash = o.tx_hash AND i.min_height = o.min_height
+                 AND NOT EXISTS (
+                   SELECT 1 FROM offer_file_unshielded_spends_history us
+                    WHERE us.offer_file_id = t.id)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM offer_file_unshielded_outputs_history uo
+                    WHERE uo.offer_file_id = t.id)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM offer_file_tokens_history tok
+                    WHERE tok.offer_file_id = t.id AND tok.kind <> 'SHIELDED')) AS positive
+           FROM target t CROSS JOIN input_evidence i CROSS JOIN output_evidence o
+       )
+       SELECT status,
+              CASE WHEN positive THEN tx_hash ELSE NULL END AS ledger_tx_hash,
+              CASE WHEN positive THEN min_height::text ELSE NULL END AS ledger_height
+         FROM verdict`,
+);
+
 export interface IGetOfferByHashParams { offer_hash: string }
 export interface IGetOfferByHashResult {
   id: number;

@@ -1,6 +1,6 @@
 // Gate 3 probe: can the solver close a set that does not cross exactly?
 //
-//   bun packages/solver/scripts/probe-topup.ts
+//   bun packages/solver/test-support/probe-topup.ts
 //
 // Ring makers only ever build a single-pair half. The solver's top-up half is
 // different: one initSwap that supplies every shortfall and takes every surplus
@@ -25,8 +25,8 @@ import {
   describeImbalances,
   mergeFinalized,
   nonDustImbalances,
-  settleViaBatcher,
 } from "@zswap-da/solver-core/batcher";
+import { settleViaBatcher } from "../../solver-core/batcher.test-support.ts";
 import { buildWallet, shieldedKeys, waitForSync } from "@zswap-da/solver-core/wallet";
 
 import { loadLadderConfig } from "../src/config.ts";

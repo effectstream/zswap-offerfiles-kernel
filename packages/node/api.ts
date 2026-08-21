@@ -49,6 +49,7 @@ import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
 import { registerExactFilesRoute } from "./offer-files-read.ts";
+import { registerOfferConsumptionRoute } from "./offer-consumption-read.ts";
 import { registerOfferUpdatesStream } from "./offer-updates-stream.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
@@ -158,6 +159,10 @@ export const apiRouter: StartConfigApiRouter = async function (
   // router-wide limiter and before the submission route; it shares the
   // canonical validation/liveness primitives but never calls the batcher.
   registerExactFilesRoute(server, dbConn);
+
+  // Strict RF2 settlement authority. This is a SELECT-only read and returns
+  // inner-ledger evidence only when every shielded marker agrees.
+  registerOfferConsumptionRoute(server, dbConn);
 
   // GET /v1/offers/updates — the client-initiated websocket update stream.
   // Same lifecycle events as the SSE route below, plus a per-subscription

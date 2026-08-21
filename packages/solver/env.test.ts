@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   loadRelayClientEnv,
+  loadSolverJournalEnv,
   loadSolverRuntimeEnv,
   parseBooleanEnv,
   parseBoundedIntegerEnv,
@@ -24,6 +25,81 @@ test("boolean parser rejects malformed or ambiguous values", () => {
   for (const raw of ["TRUE", "False", "1", "yes", " true", ""]) {
     expect(() => parseBooleanEnv("FEATURE", raw, false)).toThrow(/FEATURE/);
   }
+});
+
+test("journal config is required for relay execution and uses an absolute durable path", () => {
+  expect(() => loadSolverJournalEnv(reader({}), { relayExecutionEnabled: true })).toThrow(
+    /SOLVER_JOURNAL_PATH.*required/,
+  );
+  expect(loadSolverJournalEnv(reader({}), { relayExecutionEnabled: false })).toBeNull();
+  expect(
+    loadSolverJournalEnv(
+      reader({ SOLVER_JOURNAL_PATH: "/var/lib/cow-solver/operations.sqlite" }),
+      { relayExecutionEnabled: true },
+    ),
+  ).toEqual({ path: "/var/lib/cow-solver/operations.sqlite", allowMemory: false });
+  for (const path of ["", "relative.sqlite", " /journal.sqlite", "/journal.sqlite ", "/bad\0path"]) {
+    expect(() =>
+      loadSolverJournalEnv(reader({ SOLVER_JOURNAL_PATH: path }), { relayExecutionEnabled: true }),
+    ).toThrow(/SOLVER_JOURNAL_PATH/);
+  }
+});
+
+test("memory journal requires both canonical flag and explicit test-harness mode", () => {
+  expect(() =>
+    loadSolverJournalEnv(reader({ SOLVER_JOURNAL_PATH: ":memory:" }), {
+      relayExecutionEnabled: true,
+      runtimeMode: "test-harness",
+    }),
+  ).toThrow(/SOLVER_JOURNAL_ALLOW_MEMORY/);
+  expect(() =>
+    loadSolverJournalEnv(
+      reader({ SOLVER_JOURNAL_PATH: ":memory:", SOLVER_JOURNAL_ALLOW_MEMORY: "true" }),
+      { relayExecutionEnabled: true },
+    ),
+  ).toThrow(/test harness/);
+
+  const warnings: string[] = [];
+  expect(
+    loadSolverJournalEnv(
+      reader({ SOLVER_JOURNAL_PATH: ":memory:", SOLVER_JOURNAL_ALLOW_MEMORY: "true" }),
+      {
+        relayExecutionEnabled: true,
+        runtimeMode: "test-harness",
+        warn: (message) => warnings.push(message),
+      },
+    ),
+  ).toEqual({ path: ":memory:", allowMemory: true });
+  expect(warnings).toEqual([expect.stringContaining("will not survive restart")]);
+
+  expect(() =>
+    loadSolverJournalEnv(
+      reader({ SOLVER_JOURNAL_PATH: ":memory:", SOLVER_JOURNAL_ALLOW_MEMORY: "TRUE" }),
+      { relayExecutionEnabled: true, runtimeMode: "test-harness" },
+    ),
+  ).toThrow(/expected exactly "true" or "false"/);
+  expect(() =>
+    loadSolverJournalEnv(
+      reader({
+        SOLVER_JOURNAL_PATH: "/journal.sqlite",
+        SOLVER_JOURNAL_ALLOW_MEMORY: "true",
+      }),
+      { relayExecutionEnabled: true },
+    ),
+  ).toThrow(/valid only/);
+});
+
+test("throwing memory-journal warning sink is contained", () => {
+  expect(() =>
+    loadSolverJournalEnv(
+      reader({ SOLVER_JOURNAL_PATH: ":memory:", SOLVER_JOURNAL_ALLOW_MEMORY: "true" }),
+      {
+        relayExecutionEnabled: true,
+        runtimeMode: "test-harness",
+        warn: () => { throw new Error("logger failed"); },
+      },
+    ),
+  ).not.toThrow();
 });
 
 test("runtime config validates expiry and health cross-field bounds", () => {

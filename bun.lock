@@ -189,6 +189,9 @@
         "@zswap-da/validator": "workspace:*",
         "rxjs": "^7.8.2",
       },
+      "devDependencies": {
+        "@midnightntwrk/wallet-sdk-capabilities": "3.3.1",
+      },
     },
     "packages/solver-core": {
       "name": "@zswap-da/solver-core",

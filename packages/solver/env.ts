@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { isAbsolute } from "node:path";
 
 import { getEnv } from "@effectstream/utils/runtime";
 
@@ -31,6 +32,19 @@ export const SOLVER_LADDER_CONFIG =
 
 type EnvReader = (name: string) => string | undefined;
 
+export interface SolverJournalEnv {
+  path: string;
+  allowMemory: boolean;
+}
+
+export interface SolverJournalEnvOptions {
+  /** A mirror-only process does not execute relay jobs and need not own a journal. */
+  relayExecutionEnabled: boolean;
+  /** `:memory:` is structurally unavailable to production callers. */
+  runtimeMode?: "production" | "test-harness";
+  warn?: (message: string) => void;
+}
+
 /** Parse one bounded base-10 integer without parseInt's prefix/coercion traps. */
 export function parseBoundedIntegerEnv(
   name: string,
@@ -61,6 +75,62 @@ export function parseBooleanEnv(
   if (raw === "true") return true;
   if (raw === "false") return false;
   throw new Error(`${name}: expected exactly "true" or "false", got ${JSON.stringify(raw)}`);
+}
+
+/**
+ * Parse the durable wallet-operation journal boundary independently of the
+ * relay client. RF1B wires this into lifecycle ordering; RF1A keeps parsing
+ * side-effect-free and makes `:memory:` impossible outside an explicit test
+ * harness.
+ */
+export function loadSolverJournalEnv(
+  read: EnvReader = getEnv,
+  options: SolverJournalEnvOptions = { relayExecutionEnabled: true },
+): SolverJournalEnv | null {
+  const rawPath = read("SOLVER_JOURNAL_PATH");
+  const rawAllowMemory = read("SOLVER_JOURNAL_ALLOW_MEMORY");
+  const allowMemory = parseBooleanEnv(
+    "SOLVER_JOURNAL_ALLOW_MEMORY",
+    rawAllowMemory,
+    false,
+  );
+
+  if (rawPath === undefined) {
+    if (allowMemory) {
+      throw new Error("SOLVER_JOURNAL_ALLOW_MEMORY=true requires SOLVER_JOURNAL_PATH=:memory:");
+    }
+    if (!options.relayExecutionEnabled) return null;
+    throw new Error(
+      "SOLVER_JOURNAL_PATH is required when relay job execution is enabled",
+    );
+  }
+  if (rawPath.length === 0 || rawPath.trim() !== rawPath || rawPath.includes("\0")) {
+    throw new Error("SOLVER_JOURNAL_PATH must be a non-empty canonical path without whitespace or NUL bytes");
+  }
+
+  if (rawPath === ":memory:") {
+    if (!allowMemory || options.runtimeMode !== "test-harness") {
+      throw new Error(
+        "SOLVER_JOURNAL_PATH=:memory: requires SOLVER_JOURNAL_ALLOW_MEMORY=true in an explicit test harness",
+      );
+    }
+    try {
+      options.warn?.(
+        "[JOURNAL] using :memory: test harness — wallet-operation state will not survive restart",
+      );
+    } catch {
+      // Diagnostics never alter the safety decision or create an unhandled throw.
+    }
+    return { path: rawPath, allowMemory: true };
+  }
+
+  if (allowMemory) {
+    throw new Error("SOLVER_JOURNAL_ALLOW_MEMORY=true is valid only with SOLVER_JOURNAL_PATH=:memory:");
+  }
+  if (!isAbsolute(rawPath)) {
+    throw new Error("SOLVER_JOURNAL_PATH must be an absolute mounted-volume path");
+  }
+  return { path: rawPath, allowMemory: false };
 }
 
 export interface SolverRuntimeEnv {

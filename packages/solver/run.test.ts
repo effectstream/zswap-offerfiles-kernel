@@ -235,6 +235,67 @@ test("journal validation failure happens before wallet acquisition", async () =>
   expect(walletBuilds).toBe(0);
 });
 
+test("production-parity dry-run syncs real wallet inventory but invokes no mutating wallet or relay path", async () => {
+  const lifecycle: string[] = [];
+  const calls: string[] = [];
+  let mutations = 0;
+  let relayStarts = 0;
+  const wallet = {
+    initSwap: async () => { mutations += 1; throw new Error("must not mutate"); },
+    finalizeTransaction: async () => { mutations += 1; throw new Error("must not mutate"); },
+    revertTransaction: async () => { mutations += 1; },
+    revert: async () => { mutations += 1; },
+    dust: { balanceTransactions: async () => { mutations += 1; throw new Error("must not mutate"); } },
+    stop: async () => { calls.push("wallet-stop"); },
+  };
+  const handle = await runSolver({
+    dryRun: true,
+    syncDependencies: syncHarness(lifecycle),
+    resyncIntervalMs: 60_000,
+    backendHealthCheckIntervalMs: 30_000,
+    backendHealthMaxAgeMs: 60_000,
+    startupTimeoutMs: 1_000,
+    stopTimeoutMs: 1_000,
+    walletDependencies: {
+      buildWallet: async () => { calls.push("wallet-build"); return { wallet } as any; },
+      waitForSync: async () => { calls.push("wallet-sync"); },
+      shieldedBalances: async () => { calls.push("balances"); return { [B]: 77n }; },
+      shieldedKeys: () => { throw new Error("dry-run must not load mutating keys"); },
+    },
+    relayCreateWebSocket: () => { relayStarts += 1; throw new Error("relay must not start"); },
+    log: () => {},
+  });
+  await handle.ready;
+  expect(calls.slice(0, 3)).toEqual(["wallet-build", "wallet-sync", "balances"]);
+  expect(handle.stock.balance(B)).toBe(77n);
+  expect(mutations).toBe(0);
+  expect(relayStarts).toBe(0);
+  await handle.stop();
+  expect(calls).toContain("wallet-stop");
+});
+
+test("test-only dry-run wallet opt-out is explicit and loudly reports missing parity", async () => {
+  const logs: string[] = [];
+  let walletBuilds = 0;
+  const handle = await runSolver({
+    dryRun: true,
+    dryRunWalletMode: "skip-test-only",
+    syncDependencies: syncHarness([]),
+    resyncIntervalMs: 60_000,
+    backendHealthCheckIntervalMs: 30_000,
+    backendHealthMaxAgeMs: 60_000,
+    walletDependencies: {
+      buildWallet: async () => { walletBuilds += 1; throw new Error("must skip"); },
+    } as any,
+    log: (message) => logs.push(message),
+  });
+  await handle.ready;
+  expect(walletBuilds).toBe(0);
+  expect(logs.some((message) => message.includes("TEST-ONLY") && message.includes("NO Path-A parity")))
+    .toBe(true);
+  await handle.stop();
+});
+
 test("relay publishes empty and rejects jobs until journal reconciliation finishes", async () => {
   const lifecycle: string[] = [];
   const journal = SolverOperationJournal.open({ path: ":memory:", allowMemory: true });

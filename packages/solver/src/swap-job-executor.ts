@@ -67,6 +67,11 @@ export const JOB_EXACT_FILE_MISMATCH = "exact_file_mismatch";
 export const JOB_WALLET_FAILED = "wallet_build_failed";
 export const JOB_WALLET_TIMEOUT = "wallet_build_timeout";
 export const JOB_RECONCILING = "journal_reconciliation_in_progress";
+export const JOB_PAIR_UNSUPPORTED = "pair_not_supported";
+export const JOB_MIN_OUTPUT = "minimum_output_not_met";
+export const JOB_DUST_PER_JOB = "dust_per_job_limit";
+export const JOB_DUST_WINDOW = "dust_window_exhausted";
+export const JOB_DUST_ESTIMATE = "dust_estimate_unavailable";
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 const MAX_U256 = (1n << 256n) - 1n;
@@ -116,19 +121,19 @@ class WalletCleanupFailure extends JobRefusal {
  * mirror. It must remain an occupied slot/claim and be retried by the sweeper;
  * releasing it would let uncertain wallet state fund another job. */
 class WalletMutationUncertain extends JobRefusal {
-  readonly rawTransaction: unknown;
+  readonly rawTransactions: unknown[];
   readonly walletTransaction: FinalizedTransaction | undefined;
   readonly ttlExpiresAt: number;
 
   constructor(
     detail: string,
-    rawTransaction: unknown,
+    rawTransactions: unknown[],
     walletTransaction: FinalizedTransaction | undefined,
     ttlExpiresAt: number,
   ) {
     super(JOB_WALLET_FAILED, detail);
     this.name = "WalletMutationUncertain";
-    this.rawTransaction = rawTransaction;
+    this.rawTransactions = rawTransactions;
     this.walletTransaction = walletTransaction;
     this.ttlExpiresAt = ttlExpiresAt;
   }
@@ -228,6 +233,15 @@ export interface SwapJobExecutorOptions {
   relayHttpUrl: string;
   maxParallelSwaps: number;
   expiryMarginSeconds: number;
+  supportedPairs?: ReadonlySet<string> | null;
+  minJobOutput?: ReadonlyMap<string, bigint> | null;
+  dustAdmission?: {
+    maxPerJob: bigint;
+    maxPerWindow: bigint;
+    windowMs: number;
+  } | null;
+  /** Schedules an immediate relay withdrawal after an atomic window refusal. */
+  onDustWindowBlocked?: () => void;
   settleTtlMinutes: number;
   requestTimeoutMs?: number;
   walletOperationTimeoutMs?: number;
@@ -261,6 +275,7 @@ export interface SwapJobExecutorHandle {
   onSubmitFailed: (message: SubmitFailedMessage) => Promise<void>;
   notifyConsumed: (offerHash: string) => void;
   unavailableOfferHashes: () => string[];
+  dustAvailable: () => boolean;
   /** Resolves after durable claims have been rebuilt and all locally decidable
    * startup records have been reconciled. Relay startup must await this. */
   ready: Promise<void>;
@@ -376,16 +391,33 @@ export function resolveSwapJobRoute(
   job: SwapMessage,
   cache: SwapJobCache,
   stock: Stock,
-  options: { nowMs: number; expiryMarginSeconds: number; unavailableOfferHashes: Iterable<string> },
+  options: {
+    nowMs: number;
+    expiryMarginSeconds: number;
+    unavailableOfferHashes: Iterable<string>;
+    supportedPairs?: ReadonlySet<string> | null;
+    minJobOutput?: ReadonlyMap<string, bigint> | null;
+  },
 ): ResolvedRoute {
   requireCanonicalJob(job);
   if (!cache.isCurrent()) throw new JobRefusal(JOB_CACHE_NOT_CURRENT);
+  const tokenIn = job.tokenIn.toLowerCase();
+  const tokenOut = job.tokenOut.toLowerCase();
+  if (options.supportedPairs != null && !options.supportedPairs.has(`${tokenIn}->${tokenOut}`)) {
+    throw new JobRefusal(JOB_PAIR_UNSUPPORTED);
+  }
+  const minimum = options.minJobOutput?.get(tokenOut);
+  if (options.minJobOutput != null && (minimum === undefined || BigInt(job.amountOut) < minimum)) {
+    throw new JobRefusal(JOB_MIN_OUTPUT);
+  }
 
   const derived = deriveLadder(cache.book.all(), {
     nowMs: options.nowMs,
     expiryMarginSeconds: options.expiryMarginSeconds,
     unavailableOfferHashes: options.unavailableOfferHashes,
     maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
+    ...(options.supportedPairs === undefined ? {} : { supportedPairs: options.supportedPairs }),
+    ...(options.minJobOutput === undefined ? {} : { minJobOutput: options.minJobOutput }),
   });
   const pair = matchingPair(derived.levels, derived.provenance, job);
   if (pair === null) throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "directed pair is absent");
@@ -491,6 +523,23 @@ function assertInverseHalf(
   }
 }
 
+function estimateDustAmount(
+  transaction: unknown,
+  readImbalances: typeof tokenImbalances,
+): bigint {
+  let rows: Imbalance[];
+  try {
+    rows = readImbalances(transaction as FinalizedTransaction);
+  } catch (error) {
+    throw new JobRefusal(JOB_DUST_ESTIMATE, errorMessage(error));
+  }
+  const dust = rows.filter((row) => row.tag === "dust" && row.amount !== 0n);
+  if (dust.length === 0) throw new JobRefusal(JOB_DUST_ESTIMATE, "no DUST fee contribution exposed");
+  // Sum magnitudes conservatively: sign conventions may describe contribution
+  // from either side, but under-counting a fee reservation is never acceptable.
+  return dust.reduce((sum, row) => sum + (row.amount < 0n ? -row.amount : row.amount), 0n);
+}
+
 function requirePositiveInteger(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new RangeError(`${name} must be a positive safe integer, got ${value}`);
@@ -508,6 +557,12 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
   requirePositiveInteger("requestTimeoutMs", requestTimeoutMs);
   requirePositiveInteger("walletOperationTimeoutMs", walletOperationTimeoutMs);
   requirePositiveInteger("sweepIntervalMs", sweepIntervalMs);
+  if (options.dustAdmission != null) {
+    if (options.dustAdmission.maxPerJob <= 0n || options.dustAdmission.maxPerWindow <= 0n) {
+      throw new RangeError("DUST admission limits must be positive bigints");
+    }
+    requirePositiveInteger("dustAdmission.windowMs", options.dustAdmission.windowMs);
+  }
 
   const dependencies: SwapJobDependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
   const now = options.nowMs ?? (() => Date.now());
@@ -525,6 +580,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
   let stopped = false;
   let reconciled = false;
   let stopping: Promise<void> | null = null;
+  let dustBlockedUsage: bigint | null = null;
 
   const stats: SwapJobExecutorStats = {
     building: 0,
@@ -629,6 +685,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       }
       journal.transition(row.operationKey, "REVERTING", "REVERTED");
     }
+    journal.releaseDust(jobKey(jobId, generation));
   };
   const markFailed = (record: BuildingJob, error: unknown): void => {
     for (const initial of terminalOrder(group(record.job.jobId, record.generation))) {
@@ -712,6 +769,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         throw new Error(`${row.operationKey} cannot settle from ${row.lifecycleState}`);
       }
     }
+    journal.markDustSpent(record.operationKey);
   };
 
   const unavailableOfferHashes = (): string[] => [
@@ -722,6 +780,19 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       ...[...quarantined.values()].flatMap((record) => record.offerHashes),
     ]),
   ].sort();
+  const dustAvailable = (): boolean => {
+    if (options.dustAdmission == null) return true;
+    try {
+      const usage = journal.dustUsage(options.dustAdmission.windowMs, now());
+      if (dustBlockedUsage !== null) {
+        if (usage < dustBlockedUsage) dustBlockedUsage = null;
+        else return false;
+      }
+      return usage < options.dustAdmission.maxPerWindow;
+    } catch {
+      return false;
+    }
+  };
   const isSeen = (jobId: string): boolean =>
     building.has(jobId) || awaiting.has(jobId) || confirmations.has(jobId) ||
     quarantined.has(jobId) || tombstones.has(jobId);
@@ -928,6 +999,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     let mirrorReverted = false;
     let mirrorKey: string | undefined;
     const finalized: Array<{ key: string; sourceKey: string; transaction: FinalizedTransaction }> = [];
+    const pendingUnproven: Array<{ key: string; transaction: unknown }> = [];
 
     // Fee sizing needs the taker's half too. Build an equivalent local mirror,
     // immediately revert its token reservation, and pass its bytes only to the
@@ -996,9 +1068,29 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         ttl,
       );
       applyArtifact(dustKey, "UNPROVEN_TRANSACTION", dependencies.serializeUnproven(dustTransaction));
+      pendingUnproven.push({ key: dustKey, transaction: dustTransaction });
+      if (options.dustAdmission != null) {
+        const amount = estimateDustAmount(dustTransaction, dependencies.tokenImbalances);
+        const reserved = journal.reserveDust({
+          operationKey: record.operationKey,
+          jobId: job.jobId,
+          generation: record.generation,
+          amount,
+          ...options.dustAdmission,
+        });
+        if (!reserved.accepted) {
+          if (reserved.reason === "window") {
+            dustBlockedUsage = reserved.usage;
+            try { options.onDustWindowBlocked?.(); } catch { /* safety state is durable */ }
+            throw new JobRefusal(JOB_DUST_WINDOW);
+          }
+          throw new JobRefusal(JOB_DUST_PER_JOB);
+        }
+      }
       const finalizedDustKey = prepareMutation(record, "FINALIZED_CONTRIBUTION", "dust");
       const finalizedDust = await options.wallet.finalizeTransaction(dustTransaction);
       applyArtifact(finalizedDustKey, "FINALIZED_TRANSACTION", dependencies.serializeFinalized(finalizedDust));
+      pendingUnproven.splice(0, pendingUnproven.length);
       walletTransactions.push(finalizedDust);
       finalized.push({ key: finalizedDustKey, sourceKey: dustKey, transaction: finalizedDust });
 
@@ -1011,6 +1103,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       // job-error can be called mutation-free. Revert failures are folded into
       // the error so the caller quarantines the claim rather than releasing it.
       const failedTransactions: FinalizedTransaction[] = [];
+      const failedUnproven: unknown[] = [];
       let cleanupError: unknown = null;
       for (const contribution of finalized) {
         try {
@@ -1022,6 +1115,17 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
           failedTransactions.push(contribution.transaction);
           cleanupError ??= candidate;
           try { quarantineRow(journal.require(contribution.key), "LOCAL_REVERT_FAILED", candidate); } catch { /* retained */ }
+        }
+      }
+      for (const pending of pendingUnproven) {
+        try {
+          journal.transition(pending.key, "APPLIED", "REVERTING");
+          await options.wallet.revertTransaction(pending.transaction);
+          journal.transition(pending.key, "REVERTING", "REVERTED");
+        } catch (candidate) {
+          failedUnproven.push(pending.transaction);
+          cleanupError ??= candidate;
+          try { quarantineRow(journal.require(pending.key), "LOCAL_REVERT_FAILED", candidate); } catch { /* retained */ }
         }
       }
       let mirrorCleanupError: unknown = null;
@@ -1044,6 +1148,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       const remaining = group(job.jobId, record.generation).filter((row) =>
         row.operationKind !== "JOB_SETTLEMENT" && !terminal(row.lifecycleState));
       if (remaining.length === 0) {
+        journal.releaseDust(record.operationKey);
         if (journal.require(record.operationKey).lifecycleState === "QUARANTINED") {
           markReverted(job.jobId, record.generation);
         } else {
@@ -1058,7 +1163,10 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       quarantineGroup(job.jobId, record.generation, "LOCAL_MUTATION_UNCERTAIN", combined);
       throw new WalletMutationUncertain(
         combined,
-        mirrorReverted ? undefined : mirrorTransaction,
+        [
+          ...failedUnproven,
+          ...(mirrorReverted || mirrorTransaction === undefined ? [] : [mirrorTransaction]),
+        ],
         failedWalletTransaction,
         ttlExpiresAt,
       );
@@ -1088,7 +1196,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         jobId: record.job.jobId,
         claim: record.claim,
         offerHashes: record.offerHashes,
-        ...(error.rawTransaction === undefined ? {} : { rawTransaction: error.rawTransaction }),
+        ...(error.rawTransactions.length === 0 ? {} : { rawTransactions: error.rawTransactions }),
         ...(error.walletTransaction === undefined
           ? {}
           : { walletTransaction: error.walletTransaction }),
@@ -1096,7 +1204,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         reverting: false,
         generation: record.generation,
         operationKey: record.operationKey,
-        locallyRevertible: error.rawTransaction !== undefined || error.walletTransaction !== undefined,
+        locallyRevertible: error.rawTransactions.length > 0 || error.walletTransaction !== undefined,
         evidenceReconcile: false,
       });
       log(`quarantined uncertain wallet mutation for ${record.job.jobId}`);
@@ -1134,6 +1242,8 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         nowMs: now(),
         expiryMarginSeconds: options.expiryMarginSeconds,
         unavailableOfferHashes: unavailableOfferHashes(),
+        ...(options.supportedPairs === undefined ? {} : { supportedPairs: options.supportedPairs }),
+        ...(options.minJobOutput === undefined ? {} : { minJobOutput: options.minJobOutput }),
       });
     } catch (error) {
       const refusal = error instanceof JobRefusal ? error : new JobRefusal(JOB_ROUTE_NOT_CURRENT);
@@ -1534,6 +1644,10 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     for (const record of [...confirmations.values()]) {
       await enqueueTerminal(record.jobId, () => reconcileDurableEvidence(record));
     }
+    if (options.dustAdmission != null) {
+      journal.pruneDust(options.dustAdmission.windowMs, at);
+    }
+    journal.pruneTerminal(at);
   };
 
   const sweep = (): Promise<void> => {
@@ -1697,6 +1811,9 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       }
     }
     if (options.signal?.aborted) throw abortError(options.signal.reason, "journal reconciliation aborted");
+    if (options.dustAdmission != null) {
+      journal.pruneDust(options.dustAdmission.windowMs, now());
+    }
     journal.pruneTerminal(now());
     reconciled = true;
     refreshStats();
@@ -1743,6 +1860,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     onSubmitFailed,
     notifyConsumed,
     unavailableOfferHashes,
+    dustAvailable,
     ready,
     sweep,
     idle,

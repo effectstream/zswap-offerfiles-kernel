@@ -53,6 +53,39 @@ const seed = (rows: ApiZswap[]): Book => {
 const cache = (book: Book, current = true): LadderCache => ({ book, isCurrent: () => current });
 
 describe("ladder source — the cache is the only input", () => {
+  test("RF3 pair allowlist and output minimum deterministically constrain publication", () => {
+    const allowed = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
+      ...OPTIONS,
+      supportedPairs: new Set([`${B}->${A}`]),
+      minJobOutput: new Map([[A, 25n]]),
+    });
+    expect(allowed.priceLevels.levels[0]!.levels).toEqual([
+      { input: "20", output: "30" },
+      { input: "25", output: "35" },
+    ]);
+    // Hidden sub-minimum rungs remain in provenance because they are whole
+    // offers backing the first admitted cumulative quote.
+    expect(allowed.derived.provenance[0]!.rungs).toHaveLength(3);
+
+    const unsupported = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
+      ...OPTIONS,
+      supportedPairs: new Set([`${A}->${B}`]),
+    });
+    expect(unsupported.priceLevels.levels).toEqual([]);
+    expect(unsupported.derived.excluded.map(({ reason }) => reason)).toEqual([
+      "unsupported-pair", "unsupported-pair", "unsupported-pair",
+    ]);
+
+    const missingMinimum = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
+      ...OPTIONS,
+      minJobOutput: new Map(),
+    });
+    expect(missingMinimum.priceLevels.levels).toEqual([]);
+    expect(missingMinimum.derived.excluded.map(({ reason }) => reason)).toEqual([
+      "minimum-output", "minimum-output", "minimum-output",
+    ]);
+  });
+
   test("a seeded book pushes exactly the canonical ladder and its capabilities", () => {
     const push = deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, maxParallelSwaps: 8 });
 

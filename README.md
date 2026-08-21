@@ -112,7 +112,11 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `SOLVER_RELAY_MAX_PARALLEL_SWAPS` | optional | Advertised and enforced concurrent proof-build bound; default 8. |
 | `SOLVER_RELAY_PUSH_INTERVAL_MS` / `SOLVER_RELAY_RECONNECT_DELAY_MS` | optional | Complete ladder replacement cadence (default 1 000 ms) and reconnect delay (default 2 000 ms). |
 | `SOLVER_STATUS_POLL_MS` / `SOLVER_SETTLE_TTL_MINUTES` | optional | Backend-consumption backstop cadence and chain-TTL wallet rollback window. |
-| `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | The mainnet solver defaults to dry-run. Live settlement requires `SOLVER_DRY_RUN=false` **and** the separate exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
+| `SOLVER_SUPPORTED_PAIRS` | optional (UNSET is OPEN + warning) | Strict JSON array of unique directed lowercase `64hex->64hex` pairs. SET is enforced in both ladder publication and jobs. |
+| `SOLVER_MIN_JOB_OUTPUT` | optional (UNSET is OPEN + warning) | Strict JSON object from lowercase output-token `64hex` to positive canonical integer strings. A SET map omits tokens without a minimum and sub-minimum rungs/jobs. |
+| `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` / `SOLVER_DUST_WINDOW_MS` | optional as one group (UNSET is OPEN + warning) | All three must be SET together. Amounts are positive canonical decimal bigints; window is a positive safe integer in ms. Reservations are journal-durable and rolling-window bounded. |
+| `SOLVER_ADMISSION_WARNING_INTERVAL_MS` | optional | Startup/periodic warning cadence for every UNSET admission group; positive safe integer, default 900000. |
+| `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | Mainnet defaults to dry-run, which now requires and syncs the real funded wallet and loads read-only Stock while starting no relay jobs. Live settlement additionally requires the exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
 
 A complete dev → mainnet env template lives at `.env.mainnet.example`.
 
@@ -125,10 +129,16 @@ A complete dev → mainnet env template lives at `.env.mainnet.example`.
 > its explicit escape hatch exists only for isolated test harnesses. Configure
 > the relay's public HTTP base directly; do not infer it from the websocket URL.
 
-> **Dry-run limitation:** the current dry-run mirrors the offer book but does not
-> load wallet inventory, so it cannot prove which Path-A fills a funded solver
-> would admit. Treat it as a no-submit synchronization check, not live-decision
-> parity; real-funds readiness remains blocked by the project plan.
+> **BREAKING DRY-RUN DEPLOYMENT CHANGE (RF3):** mainnet dry-run now refuses the
+> repository dev seed, opens and syncs the configured real wallet, and loads a
+> read-only inventory snapshot. It starts no relay socket/job executor and calls
+> no mutating wallet method. Operators must therefore provision `SOLVER_SEED`
+> and wallet/indexer/proof connectivity for dry-run as well as live mode.
+
+Admission groups deliberately preserve the pre-RF3 OPEN default when wholly
+UNSET, but log a contained `[ADMISSION]` warning at startup and every configured
+warning interval. Malformed or partially-set groups fail startup; there is no
+silent coercion. For real-funds rollout, SET all three policy groups explicitly.
 
 ## Testing
 

@@ -4,6 +4,7 @@ import {
   loadRelayClientEnv,
   loadSolverRelayHttpEnv,
   loadSolverJournalEnv,
+  loadSolverAdmissionEnv,
   loadSolverRuntimeEnv,
   parseBooleanEnv,
   parseBoundedIntegerEnv,
@@ -11,6 +12,8 @@ import {
 } from "./env.ts";
 
 const reader = (values: Record<string, string>) => (name: string): string | undefined => values[name];
+const A = "a".repeat(64);
+const B = "b".repeat(64);
 
 test("relay HTTP authority is explicit, required only for execution, and canonical", () => {
   expect(() => loadSolverRelayHttpEnv(reader({}), { relayExecutionEnabled: true })).toThrow(
@@ -42,6 +45,48 @@ test("bounded integer parser rejects coercible, zero, negative, and out-of-range
   }
   expect(parseBoundedIntegerEnv("TEST_LIMIT", "100", 5, 1, 100)).toBe(100);
   expect(parseBoundedIntegerEnv("TEST_LIMIT", undefined, 5, 1, 100)).toBe(5);
+});
+
+test("admission config accepts exact SET grammar and records no OPEN groups", () => {
+  const env = loadSolverAdmissionEnv(reader({
+    SOLVER_SUPPORTED_PAIRS: JSON.stringify([`${A}->${B}`]),
+    SOLVER_MIN_JOB_OUTPUT: JSON.stringify({ [B]: "25" }),
+    SOLVER_DUST_MAX_PER_JOB: "7",
+    SOLVER_DUST_MAX_PER_WINDOW: "20",
+    SOLVER_DUST_WINDOW_MS: "60000",
+    SOLVER_ADMISSION_WARNING_INTERVAL_MS: "1234",
+  }));
+  expect([...env.supportedPairs!]).toEqual([`${A}->${B}`]);
+  expect([...env.minJobOutput!]).toEqual([[B, 25n]]);
+  expect(env.dust).toEqual({ maxPerJob: 7n, maxPerWindow: 20n, windowMs: 60_000 });
+  expect(env.warningIntervalMs).toBe(1234);
+  expect(env.openGroups).toEqual([]);
+});
+
+test("unset admission groups are OPEN under Q-RF-2 and use the warning default", () => {
+  const env = loadSolverAdmissionEnv(reader({}));
+  expect(env.supportedPairs).toBeNull();
+  expect(env.minJobOutput).toBeNull();
+  expect(env.dust).toBeNull();
+  expect(env.warningIntervalMs).toBe(900_000);
+  expect(env.openGroups).toHaveLength(3);
+});
+
+test("admission config fails closed on malformed, noncanonical, duplicate, and partial values", () => {
+  for (const values of [
+    { SOLVER_SUPPORTED_PAIRS: "not-json" },
+    { SOLVER_SUPPORTED_PAIRS: JSON.stringify([`${A.toUpperCase()}->${B}`]) },
+    { SOLVER_SUPPORTED_PAIRS: JSON.stringify([`${A}->${A}`]) },
+    { SOLVER_SUPPORTED_PAIRS: JSON.stringify([`${A}->${B}`, `${A}->${B}`]) },
+    { SOLVER_MIN_JOB_OUTPUT: JSON.stringify({ [B]: 1 }) },
+    { SOLVER_MIN_JOB_OUTPUT: JSON.stringify({ [B]: "01" }) },
+    { SOLVER_DUST_MAX_PER_JOB: "1" },
+    { SOLVER_DUST_MAX_PER_JOB: "0", SOLVER_DUST_MAX_PER_WINDOW: "1", SOLVER_DUST_WINDOW_MS: "1" },
+    { SOLVER_DUST_MAX_PER_JOB: "1", SOLVER_DUST_MAX_PER_WINDOW: "1", SOLVER_DUST_WINDOW_MS: "1e3" },
+    { SOLVER_ADMISSION_WARNING_INTERVAL_MS: "0" },
+  ]) {
+    expect(() => loadSolverAdmissionEnv(reader(values))).toThrow();
+  }
 });
 
 test("boolean parser rejects malformed or ambiguous values", () => {

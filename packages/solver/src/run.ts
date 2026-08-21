@@ -9,6 +9,7 @@ import { MAX_EXACT_FILES_PER_READ } from "@zswap-da/solver-core/exact-files-cont
 import {
   isDryRun,
   loadRelayClientEnv,
+  loadSolverAdmissionEnv,
   loadSolverRelayHttpEnv,
   loadSolverJournalEnv,
   parseSolverRelayHttpUrl,
@@ -23,7 +24,9 @@ import {
   SOLVER_SETTLE_TTL_MINUTES,
   SOLVER_STATUS_POLL_MS,
   ZSWAP_API,
+  type SolverAdmissionEnv,
 } from "../env.ts";
+import { startAdmissionWarnings, type AdmissionWarningTimers } from "./admission.ts";
 import { Book, type BookOffer } from "./book.ts";
 import { loadLadderConfig, type LoadedLadders } from "./config.ts";
 import {
@@ -72,10 +75,10 @@ export interface SolverOptions {
   ladderConfigPath?: string;
   /** Defaults to ZSWAP_API. */
   api?: string;
-  /** Mirror without building or submitting a transaction. Defaults to
-   * SOLVER_DRY_RUN. Current dry-run intentionally opens no wallet, so its empty
-   * Stock is not Path-A admission parity; tracked by release gate R-18. */
+  /** Read-only mirror and real inventory without starting relay jobs. */
   dryRun?: boolean;
+  /** Explicit test-only escape hatch lacking Path-A inventory parity. */
+  dryRunWalletMode?: "real" | "skip-test-only";
   seed?: string;
   resyncIntervalMs?: number;
   backendHealthCheckIntervalMs?: number;
@@ -105,6 +108,8 @@ export interface SolverOptions {
    * mandatory SOLVER_JOURNAL_PATH environment boundary. */
   journalOptions?: SolverOperationJournalOptions;
   journalOpen?: typeof SolverOperationJournal.open;
+  admission?: SolverAdmissionEnv;
+  admissionWarningTimers?: AdmissionWarningTimers;
   /** Deadline applied to wallet build/sync/first balance and, separately, to
    * the initial authoritative book snapshot plus buffered SSE drain. */
   startupTimeoutMs?: number;
@@ -437,6 +442,12 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   const walletDependencies = opts.walletDependencies ?? DEFAULT_WALLET_DEPENDENCIES;
   const api = opts.api ?? ZSWAP_API;
   const dryRun = opts.dryRun ?? isDryRun();
+  const dryRunWalletMode = opts.dryRunWalletMode ?? "real";
+  if (!dryRun && dryRunWalletMode !== "real") {
+    throw new Error("dryRunWalletMode=skip-test-only is valid only in dry-run");
+  }
+  const walletRequired = !dryRun || dryRunWalletMode === "real";
+  const admission = opts.admission ?? loadSolverAdmissionEnv();
   const relayEnv = loadRelayClientEnv();
   const relayUrl = opts.relayUrl ?? SOLVER_RELAY_WS_URL;
   const relayHttpUrl = opts.relayHttpUrl === undefined
@@ -501,9 +512,14 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       throw error;
     }
   }
+  const admissionWarnings = startAdmissionWarnings(admission, log, opts.admissionWarningTimers);
 
   log(
-    `[solver] network=${net.id} api=${api}${dryRun ? " DRY-RUN (mirror only)" : " RFQ relay mode"}`,
+    `[solver] network=${net.id} api=${api}${dryRun
+      ? dryRunWalletMode === "real"
+        ? " DRY-RUN (read-only real wallet/inventory; relay jobs disabled)"
+        : " DRY-RUN TEST-ONLY (wallet skipped; NO Path-A parity)"
+      : " RFQ relay mode"}`,
   );
 
   type SolverWallet = Awaited<ReturnType<typeof walletDependencies.buildWallet>>;
@@ -530,7 +546,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     await inventory.refresh(signal);
   };
 
-  if (!dryRun) {
+  if (walletRequired) {
     try {
       wallet = await initializeOwnedResource<SolverWallet>({
         build: () => walletDependencies.buildWallet(opts.seed ?? SOLVER_SEED),
@@ -552,6 +568,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       inventory.stop();
       balanceWallet = null;
       operationJournal?.close();
+      admissionWarnings.stop();
       throw err;
     }
     log(
@@ -587,7 +604,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       !solverReadySettled &&
       initialSyncReady &&
       backendCurrent &&
-      (dryRun || inventory.isReady())
+      (dryRunWalletMode === "skip-test-only" || inventory.isReady())
     ) {
       solverReadySettled = true;
       resolveSolverReady();
@@ -605,7 +622,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   };
 
   const retryInventory = async (): Promise<void> => {
-    if (dryRun || !backendCurrent || inventory.isReady()) return;
+    if (!walletRequired || !backendCurrent || inventory.isReady()) return;
     if (recoveryRunning) {
       recoveryRequested = true;
       return;
@@ -638,7 +655,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   const onCurrentnessChange = (state: ReturnType<SyncHandle["currentness"]>): void => {
     if (state.kind !== "current") {
       backendCurrent = false;
-      if (!dryRun) {
+      if (walletRequired) {
         inventory.invalidate(
           new Error(`backend projection unavailable: ${state.reason}`),
         );
@@ -648,7 +665,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     }
     const wasCurrent = backendCurrent;
     backendCurrent = true;
-    if (!dryRun && !wasCurrent) {
+    if (walletRequired && !wasCurrent) {
       inventory.invalidate(new Error("backend projection restored; refreshing inventory"));
       recoveryRequested = true;
       observe(retryInventory());
@@ -705,6 +722,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     await Promise.all(cleanups);
     balanceWallet = null;
     operationJournal?.close();
+    admissionWarnings.stop();
     throw err;
   }
   if (!sync) throw new Error("book synchronization failed to initialize");
@@ -725,6 +743,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       ]);
       balanceWallet = null;
       operationJournal?.close();
+      admissionWarnings.stop();
       throw error;
     }
   }
@@ -747,6 +766,9 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       maxParallelSwaps,
       expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
       settleTtlMinutes: SOLVER_SETTLE_TTL_MINUTES,
+      supportedPairs: admission.supportedPairs,
+      minJobOutput: admission.minJobOutput,
+      dustAdmission: admission.dust,
       walletOperationTimeoutMs,
       sweepIntervalMs: opts.jobSweepIntervalMs ?? SOLVER_STATUS_POLL_MS,
       ...(opts.jobTimers ? { timers: opts.jobTimers } : {}),
@@ -762,6 +784,12 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         const owner = new AbortController();
         await refreshBalances(owner.signal);
       },
+      onDustWindowBlocked: () => {
+        log("[ADMISSION] rolling DUST window refused a routed job; withdrawing every ladder");
+        void relayClient?.push().catch((error) => {
+          log(`[ADMISSION] immediate DUST withdrawal failed: ${asError(error, "unknown error").message}`);
+        });
+      },
       log,
     });
 
@@ -773,7 +801,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         authToken: relayAuthToken,
         cache: {
           book: activeSync.book,
-          isCurrent: () => journalReconciled && activeSync.isCurrent(),
+          isCurrent: () => journalReconciled && activeSync.isCurrent() && activeJobs.dustAvailable(),
         },
         ladder: {
           expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
@@ -782,6 +810,8 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
           // whose whole-offer prefix cannot fit that read.
           maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
           unavailableOfferHashes: activeJobs.unavailableOfferHashes,
+          supportedPairs: admission.supportedPairs,
+          minJobOutput: admission.minJobOutput,
         },
         pushIntervalMs: opts.relayPushIntervalMs ?? relayEnv.pushIntervalMs,
         reconnectDelayMs: opts.relayReconnectDelayMs ?? relayEnv.reconnectDelayMs,
@@ -805,11 +835,12 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       ]);
       balanceWallet = null;
       operationJournal.close();
+      admissionWarnings.stop();
       throw error;
     }
   }
 
-  const balanceRetryTimer = dryRun
+  const balanceRetryTimer = !walletRequired
     ? null
     : setInterval(() => {
       if (backendCurrent && !inventory.isReady() && !inventory.isRefreshing()) {
@@ -841,6 +872,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         rejectSolverReady(new Error("solver stopped before combined readiness"));
       }
       if (balanceRetryTimer) clearInterval(balanceRetryTimer);
+      admissionWarnings.stop();
       inventory.stop();
       const retainedInventoryOperations = inventory.retainedOperations();
       if (retainedInventoryOperations > 0) {

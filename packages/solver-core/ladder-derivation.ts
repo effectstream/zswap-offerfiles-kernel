@@ -116,6 +116,11 @@ export type LadderExclusionReason =
   | "rung-cap"
   /** Past `maxPairs`. */
   | "pair-cap"
+  /** RF3 static policy excludes this directed pair. */
+  | "unsupported-pair"
+  /** RF3 static policy has no minimum for the output token, or total depth
+   *  cannot reach that minimum. */
+  | "minimum-output"
   /** The assembled pair failed local wire validation and was dropped whole. */
   | "invalid-pair";
 
@@ -150,6 +155,11 @@ export interface DeriveLadderOptions {
   expiryMarginSeconds: number;
   /** Offers spoken for elsewhere (in-flight claims). Excluded as `unavailable`. */
   unavailableOfferHashes?: Iterable<string>;
+  /** null/undefined is OPEN; a supplied set is an enforced directed allowlist. */
+  supportedPairs?: ReadonlySet<string> | null;
+  /** null/undefined is OPEN; a supplied map requires each output token to have
+   *  a minimum and suppresses rungs below it. */
+  minJobOutput?: ReadonlyMap<string, bigint> | null;
   maxPairs?: number;
   maxRungsPerPair?: number;
 }
@@ -315,6 +325,11 @@ export function deriveLadder(
   // Sorted keys, so no Map iteration order reaches the output.
   for (const key of [...byPair.keys()].sort()) {
     const bucket = [...byPair.get(key)!].sort(byMarginalRateThenHash);
+    const directedPolicyKey = `${bucket[0]!.tokenIn}->${bucket[0]!.tokenOut}`;
+    if (options.supportedPairs != null && !options.supportedPairs.has(directedPolicyKey)) {
+      for (const offer of bucket) excluded.push({ offerHash: offer.offerHash, reason: "unsupported-pair" });
+      continue;
+    }
     const levels: PriceLevel[] = [];
     const rungs: LadderRungProvenance[] = [];
     let cumulativeIn = 0n;
@@ -345,7 +360,19 @@ export function deriveLadder(
 
     if (levels.length === 0) continue;
     const [tokenIn, tokenOut] = [bucket[0]!.tokenIn, bucket[0]!.tokenOut];
-    const pair: PriceLevelsPair = { tokenIn, tokenOut, levels };
+    const minimum = options.minJobOutput?.get(tokenOut);
+    if (options.minJobOutput != null && minimum === undefined) {
+      for (const rung of rungs) excluded.push({ offerHash: rung.offerHash, reason: "minimum-output" });
+      continue;
+    }
+    const admittedLevels = minimum === undefined
+      ? levels
+      : levels.filter((level) => BigInt(level.output) >= minimum);
+    if (admittedLevels.length === 0) {
+      for (const rung of rungs) excluded.push({ offerHash: rung.offerHash, reason: "minimum-output" });
+      continue;
+    }
+    const pair: PriceLevelsPair = { tokenIn, tokenOut, levels: admittedLevels };
 
     // Local frame validation, BEFORE anything can be pushed. A frame the relay
     // rejects is discarded SILENTLY and the previous ladder stays live, so a

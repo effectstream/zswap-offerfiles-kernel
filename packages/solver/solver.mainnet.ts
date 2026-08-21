@@ -3,9 +3,9 @@
  *
  * Requires MIDNIGHT_NETWORK_ID=mainnet, SOLVER_SEED set to a funded wallet, and
  * ZSWAP_API / SOLVER_RELAY_WS_URL pointed at the mainnet deployment. Start with
- * SOLVER_DRY_RUN=true first, but note that current dry-run does not load wallet
- * inventory and therefore cannot validate Path-A admission. A controlled
- * staging rehearsal is still required before any live acknowledgement.
+ * SOLVER_DRY_RUN=true first: dry-run syncs the real wallet and loads read-only
+ * inventory while starting no relay jobs. A controlled staging rehearsal is
+ * still required before any live acknowledgement.
  */
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -27,7 +27,7 @@ if (net.id !== "mainnet") {
 // The dev default is a well-known seed checked into this repo. Reaching mainnet
 // with it would put real funds in a wallet anyone can drain.
 const dryRun = isDryRun(true);
-if (!dryRun && SOLVER_SEED === DEV_SEED) {
+if (SOLVER_SEED === DEV_SEED) {
   throw new Error("solver.mainnet.ts: SOLVER_SEED is unset or the dev seed — refusing to run");
 }
 

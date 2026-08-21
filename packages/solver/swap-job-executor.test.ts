@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { ExactFilesResponse } from "@zswap-da/solver-core/exact-files-contract";
 import type { OfferValidationVerdict } from "@zswap-da/solver-core/validation-contract";
@@ -8,6 +11,7 @@ import type { SwapMessage } from "@zswap-da/solver-core/relay-ws-contract";
 import { Book, type BookOffer } from "./src/book.ts";
 import { SolverOperationJournal } from "./src/operation-journal.ts";
 import { Stock } from "./src/stock.ts";
+import { deriveLadderPush } from "./src/ladder-source.ts";
 import {
   JOB_AT_CAPACITY,
   JOB_CACHE_NOT_CURRENT,
@@ -17,6 +21,11 @@ import {
   JOB_ROUTE_NOT_CURRENT,
   JOB_WALLET_FAILED,
   JOB_WALLET_TIMEOUT,
+  JOB_PAIR_UNSUPPORTED,
+  JOB_MIN_OUTPUT,
+  JOB_DUST_PER_JOB,
+  JOB_DUST_WINDOW,
+  JOB_DUST_ESTIMATE,
   startSwapJobExecutor,
   type ExactOfferSemantics,
   type SwapJobWallet,
@@ -121,6 +130,11 @@ function harness(options: {
   blockStatus?: boolean;
   mirrorRevertFailures?: number;
   revertFailures?: number;
+  supportedPairs?: ReadonlySet<string> | null;
+  minJobOutput?: ReadonlyMap<string, bigint> | null;
+  dustAdmission?: { maxPerJob: bigint; maxPerWindow: bigint; windowMs: number } | null;
+  dustAmount?: bigint | null;
+  journalPath?: string;
 } = {}) {
   const book = new Book();
   const sources = options.offers ?? [offer(H1, N1, 10n, 20n)];
@@ -144,13 +158,16 @@ function harness(options: {
     : null;
   let mirrorRevertFailures = options.mirrorRevertFailures ?? 0;
   let revertFailures = options.revertFailures ?? 0;
+  let dustWindowBlocks = 0;
 
   const wallet: SwapJobWallet = {
     shielded: { getAddress: async () => "solver-address" },
     dust: {
       balanceTransactions: async () => {
         calls.push("dust-balance");
-        return fakeTx("dust-unproven", [{ seg: 0, tag: "dust", raw: "dust", amount: 1n }]);
+        return fakeTx("dust-unproven", options.dustAmount === null ? [] : [
+          { seg: 0, tag: "dust", raw: "dust", amount: options.dustAmount ?? 1n },
+        ]);
       },
     },
     initSwap: async (inputs) => {
@@ -169,9 +186,10 @@ function harness(options: {
         ? fakeTx("residual-final", makerRows(5n, 5n)) as any
         : fakeTx("dust-final", [{ seg: 0, tag: "dust", raw: "dust", amount: 1n }]) as any;
     },
-    revertTransaction: async () => {
-      calls.push("mirror-revert");
-      if (mirrorRevertFailures > 0) {
+    revertTransaction: async (transaction: any) => {
+      const mirror = transaction?.label === "mirror";
+      calls.push(mirror ? "mirror-revert" : `revert-unproven:${transaction?.label ?? "unknown"}`);
+      if (mirror && mirrorRevertFailures > 0) {
         mirrorRevertFailures -= 1;
         throw new Error("mirror revert failed");
       }
@@ -196,7 +214,11 @@ function harness(options: {
     })),
   }));
 
-  const journal = SolverOperationJournal.open({ path: ":memory:", allowMemory: true });
+  const journal = SolverOperationJournal.open({
+    path: options.journalPath ?? ":memory:",
+    allowMemory: options.journalPath === undefined,
+    nowMs: () => now,
+  });
   const activeExecutor = startSwapJobExecutor({
     cache: { book, isCurrent: () => current },
     stock,
@@ -207,6 +229,10 @@ function harness(options: {
     maxParallelSwaps: options.maxParallelSwaps ?? 2,
     expiryMarginSeconds: 120,
     settleTtlMinutes: 1,
+    ...(options.supportedPairs === undefined ? {} : { supportedPairs: options.supportedPairs }),
+    ...(options.minJobOutput === undefined ? {} : { minJobOutput: options.minJobOutput }),
+    ...(options.dustAdmission === undefined ? {} : { dustAdmission: options.dustAdmission }),
+    onDustWindowBlocked: () => { dustWindowBlocks += 1; },
     sweepIntervalMs: 60_000,
     nowMs: () => now,
     dependencies: {
@@ -288,6 +314,7 @@ function harness(options: {
     releaseExact: () => blockExact?.(),
     releaseWallet: () => releaseWallet?.(),
     releaseStatus: () => releaseStatus?.(),
+    dustWindowBlocks: () => dustWindowBlocks,
   };
 }
 
@@ -338,6 +365,148 @@ test("cache staleness and quote-time/job-time ladder drift fail before exact-fil
   });
   expect(drift.calls).toEqual([]);
   await drift.executor.stop();
+});
+
+test("RF3 pair and minimum policy is rechecked at job time before exact or wallet work", async () => {
+  const unsupported = harness({ supportedPairs: new Set([`${B}->${A}`]) });
+  expect(await unsupported.executor.onSwap(job("unsupported"))).toEqual({
+    type: "job-error", jobId: "unsupported", reason: JOB_PAIR_UNSUPPORTED,
+  });
+  expect(unsupported.calls).toEqual([]);
+  await unsupported.executor.stop();
+
+  const minimum = harness({ minJobOutput: new Map([[B, 21n]]) });
+  expect(await minimum.executor.onSwap(job("too-small"))).toEqual({
+    type: "job-error", jobId: "too-small", reason: JOB_MIN_OUTPUT,
+  });
+  expect(minimum.calls).toEqual([]);
+  await minimum.executor.stop();
+
+  const open = harness({ supportedPairs: null, minJobOutput: null });
+  expect((await open.executor.onSwap(job("open"))).type).toBe("swap-tx");
+  await open.executor.stop();
+});
+
+test("RF3 DUST estimate is atomically reserved; per-job/window refusal leaves zero retained mutation", async () => {
+  const perJob = harness({
+    dustAmount: 3n,
+    dustAdmission: { maxPerJob: 2n, maxPerWindow: 10n, windowMs: 60_000 },
+  });
+  expect(await perJob.executor.onSwap(job("per-job"))).toEqual({
+    type: "job-error", jobId: "per-job", reason: JOB_DUST_PER_JOB,
+  });
+  expect(perJob.calls).toContain("revert-unproven:dust-unproven");
+  expect(perJob.stock.reserved(B)).toBe(0n);
+  expect(perJob.journal.listDustReservations()).toEqual([]);
+  await perJob.executor.stop();
+
+  const window = harness({
+    offers: [offer(H1, N1, 10n, 20n), offer(H2, N2, 10n, 20n)],
+    dustAmount: 6n,
+    dustAdmission: { maxPerJob: 10n, maxPerWindow: 10n, windowMs: 60_000 },
+  });
+  expect((await window.executor.onSwap(job("window-first"))).type).toBe("swap-tx");
+  expect(await window.executor.onSwap(job("window-second"))).toEqual({
+    type: "job-error", jobId: "window-second", reason: JOB_DUST_WINDOW,
+  });
+  expect(window.dustWindowBlocks()).toBe(1);
+  expect(window.executor.dustAvailable()).toBe(false);
+  expect(deriveLadderPush({
+    book: window.book,
+    isCurrent: window.executor.dustAvailable,
+  }, { nowMs: Date.now(), expiryMarginSeconds: 120 }).priceLevels.levels).toEqual([]);
+  expect(window.journal.listDustReservations()).toHaveLength(1);
+  await window.executor.onSubmitFailed({
+    type: "submit-failed", jobId: "window-first", reason: "relay refused",
+  });
+  expect(window.journal.listDustReservations()[0]!.state).toBe("RELEASED");
+  expect(window.executor.dustAvailable()).toBe(true);
+  expect(deriveLadderPush({
+    book: window.book,
+    isCurrent: window.executor.dustAvailable,
+  }, { nowMs: Date.now(), expiryMarginSeconds: 120 }).priceLevels.levels).not.toEqual([]);
+  expect((await window.executor.onSwap(job("window-recovered"))).type).toBe("swap-tx");
+  await window.executor.stop();
+});
+
+test("RF3 unavailable DUST estimate fails closed and reverts the estimator mutation", async () => {
+  const h = harness({
+    dustAmount: null,
+    dustAdmission: { maxPerJob: 10n, maxPerWindow: 10n, windowMs: 60_000 },
+  });
+  expect(await h.executor.onSwap(job("estimate-missing"))).toEqual({
+    type: "job-error", jobId: "estimate-missing", reason: JOB_DUST_ESTIMATE,
+  });
+  expect(h.calls).toContain("revert-unproven:dust-unproven");
+  expect(h.stock.reserved(B)).toBe(0n);
+  await h.executor.stop();
+});
+
+test("RF3 DUST reservation becomes rolling-window spend only after proven settlement", async () => {
+  const h = harness({
+    status: "consumed",
+    dustAmount: 4n,
+    dustAdmission: { maxPerJob: 5n, maxPerWindow: 5n, windowMs: 100 },
+  });
+  expect((await h.executor.onSwap(job("dust-settled"))).type).toBe("swap-tx");
+  expect(h.journal.listDustReservations()[0]).toMatchObject({ state: "RESERVED", amount: 4n });
+  await h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "dust-settled", txId: RELAY_TX });
+  expect(h.journal.listDustReservations()[0]).toMatchObject({ state: "SPENT", amount: 4n });
+  expect(h.journal.dustUsage(100)).toBe(4n);
+  h.advance(101);
+  expect(h.journal.dustUsage(100)).toBe(0n);
+  await h.executor.stop();
+});
+
+test("concurrent RF3 jobs cannot oversubscribe one durable DUST window", async () => {
+  const h = harness({
+    offers: [offer(H1, N1, 10n, 20n), offer(H2, N2, 10n, 20n)],
+    maxParallelSwaps: 2,
+    dustAmount: 6n,
+    dustAdmission: { maxPerJob: 10n, maxPerWindow: 10n, windowMs: 60_000 },
+  });
+  const results = await Promise.all([
+    h.executor.onSwap(job("concurrent-a")),
+    h.executor.onSwap(job("concurrent-b")),
+  ]);
+  expect(results.filter((result) => result.type === "swap-tx")).toHaveLength(1);
+  expect(results.filter((result) => result.type === "job-error" && result.reason === JOB_DUST_WINDOW))
+    .toHaveLength(1);
+  expect(h.journal.listDustReservations().filter((row) => row.state === "RESERVED"))
+    .toHaveLength(1);
+  expect(h.journal.dustUsage(60_000)).toBe(6n);
+  await h.executor.stop();
+});
+
+test("restart preserves an unresolved DUST reservation and releases it only after proved revert", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cow-rf3-dust-restart-"));
+  const path = join(directory, "operations.sqlite");
+  try {
+    const first = harness({
+      journalPath: path,
+      dustAmount: 4n,
+      dustAdmission: { maxPerJob: 5n, maxPerWindow: 5n, windowMs: 60_000 },
+      relayStatus: "pending",
+    });
+    expect((await first.executor.onSwap(job("dust-restart"))).type).toBe("swap-tx");
+    expect(first.journal.dustUsage(60_000)).toBe(4n);
+    await first.executor.stop();
+
+    const reopened = harness({
+      journalPath: path,
+      dustAmount: 4n,
+      dustAdmission: { maxPerJob: 5n, maxPerWindow: 5n, windowMs: 60_000 },
+      relayStatus: "error",
+      status: "live",
+    });
+    await reopened.executor.ready;
+    expect(reopened.journal.dustUsage(60_000)).toBe(0n);
+    expect(reopened.journal.listDustReservations()).toEqual([]);
+    expect(reopened.reverts).toHaveLength(1);
+    await reopened.executor.stop();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("consumed, expired, unknown, and mismatched exact files are stable job errors with zero wallet mutation", async () => {

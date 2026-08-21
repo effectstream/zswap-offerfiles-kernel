@@ -53,7 +53,7 @@ async function withDirectory(
   }
 }
 
-test("empty file migrates to WAL schema v1 and reopens with canonical bytes", async () => {
+test("empty file migrates to current WAL schema and reopens with canonical bytes", async () => {
   await withDirectory(async (_directory, path) => {
     await writeFile(path, new Uint8Array());
     const journal = SolverOperationJournal.open({
@@ -118,6 +118,115 @@ test("empty file migrates to WAL schema v1 and reopens with canonical bytes", as
       updatedAtMs: expect.any(Number),
     });
     reopened.close();
+  });
+});
+
+test("DUST reservations are atomic, durable, rolling-window bounded, and terminally accounted", async () => {
+  await withDirectory((_directory, path) => {
+    let now = 1_000;
+    const open = () => SolverOperationJournal.open({ path, nowMs: () => now });
+    let journal = open();
+    journal.createPrepared(prepared("job-1-settlement", {
+      operationKind: "JOB_SETTLEMENT", walletArtifactKind: undefined,
+      walletArtifactBytes: undefined,
+    }));
+    const first = journal.reserveDust({
+      operationKey: "job-1-settlement", jobId: "job-1", generation: 1,
+      amount: 6n, maxPerJob: 7n, maxPerWindow: 10n, windowMs: 100,
+    });
+    expect(first).toMatchObject({ accepted: true, usage: 6n });
+    expect(journal.reserveDust({
+      operationKey: "job-1-settlement", jobId: "job-1", generation: 1,
+      amount: 6n, maxPerJob: 7n, maxPerWindow: 10n, windowMs: 100,
+    })).toMatchObject({ accepted: true, usage: 6n });
+    journal.close();
+
+    // Reopen proves the reservation, not process memory, owns the budget.
+    journal = open();
+    journal.createPrepared(prepared("job-2-settlement", {
+      jobId: "job-2", generation: 1, operationKind: "JOB_SETTLEMENT",
+      walletArtifactKind: undefined, walletArtifactBytes: undefined,
+    }));
+    expect(journal.reserveDust({
+      operationKey: "job-2-settlement", jobId: "job-2", generation: 1,
+      amount: 5n, maxPerJob: 7n, maxPerWindow: 10n, windowMs: 100,
+    })).toEqual({ accepted: false, reason: "window", usage: 6n });
+    expect(journal.reserveDust({
+      operationKey: "job-2-settlement", jobId: "job-2", generation: 1,
+      amount: 8n, maxPerJob: 7n, maxPerWindow: 10n, windowMs: 100,
+    })).toEqual({ accepted: false, reason: "per-job", usage: 6n });
+
+    now = 1_200;
+    // An unresolved reservation never ages out and remains fail-closed.
+    expect(journal.dustUsage(100)).toBe(6n);
+    expect(journal.markDustSpent("job-1-settlement")).toMatchObject({ state: "SPENT", amount: 6n });
+    now = 1_301;
+    expect(journal.dustUsage(100)).toBe(0n);
+
+    now = 1_302;
+    expect(journal.reserveDust({
+      operationKey: "job-2-settlement", jobId: "job-2", generation: 1,
+      amount: 5n, maxPerJob: 7n, maxPerWindow: 10n, windowMs: 100,
+    })).toMatchObject({ accepted: true, usage: 5n });
+    expect(journal.releaseDust("job-2-settlement")).toMatchObject({ state: "RELEASED" });
+    expect(journal.dustUsage(100)).toBe(0n);
+    expect(() => journal.reserveDust({
+      operationKey: "job-2-settlement", jobId: "job-2", generation: 1,
+      amount: 5n, maxPerJob: 7n, maxPerWindow: 10n, windowMs: 100,
+    })).toThrow(JournalCasConflictError);
+    journal.close();
+  });
+});
+
+test("existing RF1 schema v1 migrates in place to durable DUST schema v2", async () => {
+  await withDirectory((_directory, path) => {
+    const initialized = SolverOperationJournal.open({ path, nowMs: () => 1_000 });
+    initialized.close();
+    const legacy = new Database(path, { strict: true });
+    legacy.exec(`
+      DROP TABLE journal_dust_reservations;
+      UPDATE journal_meta SET schema_version = 1 WHERE singleton = 1;
+      PRAGMA user_version = 1;
+    `);
+    legacy.close();
+
+    const migrated = SolverOperationJournal.open({ path, nowMs: () => 1_100 });
+    migrated.createPrepared(prepared("migrated-settlement", {
+      operationKind: "JOB_SETTLEMENT", walletArtifactKind: undefined,
+      walletArtifactBytes: undefined,
+    }));
+    expect(migrated.reserveDust({
+      operationKey: "migrated-settlement", jobId: "job-1", generation: 1,
+      amount: 1n, maxPerJob: 1n, maxPerWindow: 1n, windowMs: 100,
+    })).toMatchObject({ accepted: true, usage: 1n });
+    migrated.close();
+    const raw = new Database(path, { readonly: true, strict: true });
+    expect((raw.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+    raw.close();
+  });
+});
+
+test("terminal pruning cannot erase active DUST accounting before its own safe prune", async () => {
+  await withDirectory((_directory, path) => {
+    let now = 1_000;
+    const journal = SolverOperationJournal.open({
+      path, nowMs: () => now, reconciliationMarginMs: 1,
+    });
+    journal.createPrepared(prepared("dust-prune-parent", {
+      operationKind: "JOB_SETTLEMENT", walletArtifactKind: undefined,
+      walletArtifactBytes: undefined,
+    }));
+    expect(journal.reserveDust({
+      operationKey: "dust-prune-parent", jobId: "job-1", generation: 1,
+      amount: 1n, maxPerJob: 1n, maxPerWindow: 1n, windowMs: 100,
+    })).toMatchObject({ accepted: true });
+    journal.releaseDust("dust-prune-parent");
+    journal.transition("dust-prune-parent", "PREPARED", "FAILED");
+    now = 3_000;
+    expect(journal.pruneTerminal(now)).toBe(0);
+    expect(journal.pruneDust(100, now)).toBe(1);
+    expect(journal.pruneTerminal(now)).toBe(1);
+    journal.close();
   });
 });
 
@@ -309,6 +418,22 @@ test("corrupt, missing-parent, incompatible, and foreign-key-broken journals fai
     // The receipt row now points to a deleted operation.
     raw.close();
     expect(() => SolverOperationJournal.open({ path: broken })).toThrow(JournalOpenError);
+
+    const badDust = join(directory, "bad-dust.sqlite");
+    const dustJournal = SolverOperationJournal.open({ path: badDust, nowMs: () => 1_000 });
+    dustJournal.createPrepared(prepared("bad-dust-parent", {
+      operationKind: "JOB_SETTLEMENT", walletArtifactKind: undefined,
+      walletArtifactBytes: undefined,
+    }));
+    dustJournal.reserveDust({
+      operationKey: "bad-dust-parent", jobId: "job-1", generation: 1,
+      amount: 1n, maxPerJob: 1n, maxPerWindow: 1n, windowMs: 100,
+    });
+    dustJournal.close();
+    const dustRaw = new Database(badDust, { strict: true });
+    dustRaw.exec("UPDATE journal_dust_reservations SET amount_text = '01'");
+    dustRaw.close();
+    expect(() => SolverOperationJournal.open({ path: badDust })).toThrow(JournalOpenError);
   });
 });
 

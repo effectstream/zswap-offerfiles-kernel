@@ -40,6 +40,8 @@ export interface LadderPushOptions {
   /** Offers claimed by an in-flight fill, from `Stock`. Kept as a parameter so
    *  derivation stays pure and this file stays free of executor state. */
   unavailableOfferHashes?: Iterable<string>;
+  supportedPairs?: ReadonlySet<string> | null;
+  minJobOutput?: ReadonlyMap<string, bigint> | null;
   maxParallelSwaps?: number;
   maxPairs?: number;
   maxRungsPerPair?: number;
@@ -89,6 +91,8 @@ export function deriveLadderPush(cache: LadderCache, options: LadderPushOptions)
     ...(options.unavailableOfferHashes === undefined
       ? {}
       : { unavailableOfferHashes: options.unavailableOfferHashes }),
+    ...(options.supportedPairs === undefined ? {} : { supportedPairs: options.supportedPairs }),
+    ...(options.minJobOutput === undefined ? {} : { minJobOutput: options.minJobOutput }),
     ...(options.maxPairs === undefined ? {} : { maxPairs: options.maxPairs }),
     ...(options.maxRungsPerPair === undefined ? {} : { maxRungsPerPair: options.maxRungsPerPair }),
   });

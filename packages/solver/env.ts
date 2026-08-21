@@ -33,6 +33,128 @@ export const SOLVER_LADDER_CONFIG =
 
 type EnvReader = (name: string) => string | undefined;
 
+const CANONICAL_TOKEN_ID = /^[0-9a-f]{64}$/;
+const CANONICAL_POSITIVE_DECIMAL = /^[1-9][0-9]*$/;
+
+export interface SolverDustAdmissionEnv {
+  maxPerJob: bigint;
+  maxPerWindow: bigint;
+  windowMs: number;
+}
+
+export interface SolverAdmissionEnv {
+  /** null means intentionally OPEN under Q-RF-2, with a recurring warning. */
+  supportedPairs: ReadonlySet<string> | null;
+  /** null means intentionally OPEN under Q-RF-2, with a recurring warning. */
+  minJobOutput: ReadonlyMap<string, bigint> | null;
+  /** null means intentionally OPEN under Q-RF-2, with a recurring warning. */
+  dust: SolverDustAdmissionEnv | null;
+  warningIntervalMs: number;
+  openGroups: readonly string[];
+}
+
+const parseJson = (name: string, raw: string): unknown => {
+  if (raw.length === 0 || raw.trim() !== raw || raw.includes("\0")) {
+    throw new Error(`${name}: expected canonical JSON without surrounding whitespace or NUL`);
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error(`${name}: expected valid JSON`);
+  }
+};
+
+const parsePositiveBigint = (name: string, raw: string): bigint => {
+  if (!CANONICAL_POSITIVE_DECIMAL.test(raw)) {
+    throw new Error(`${name}: expected a positive canonical base-10 integer string`);
+  }
+  return BigInt(raw);
+};
+
+/** RF3's economic-admission grammar. Unset groups remain OPEN only under the
+ * explicit Q-RF-2 amendment; partial and malformed groups always fail startup. */
+export function loadSolverAdmissionEnv(read: EnvReader = getEnv): SolverAdmissionEnv {
+  const rawPairs = read("SOLVER_SUPPORTED_PAIRS");
+  let supportedPairs: ReadonlySet<string> | null = null;
+  if (rawPairs !== undefined) {
+    const parsed = parseJson("SOLVER_SUPPORTED_PAIRS", rawPairs);
+    if (!Array.isArray(parsed)) {
+      throw new Error("SOLVER_SUPPORTED_PAIRS: expected a JSON array");
+    }
+    const pairs = new Set<string>();
+    for (const [index, value] of parsed.entries()) {
+      if (typeof value !== "string" ||
+          !/^[0-9a-f]{64}->[0-9a-f]{64}$/.test(value)) {
+        throw new Error(`SOLVER_SUPPORTED_PAIRS[${index}]: expected lowercase 64hex->64hex`);
+      }
+      const [tokenIn, tokenOut] = value.split("->");
+      if (tokenIn === tokenOut) {
+        throw new Error(`SOLVER_SUPPORTED_PAIRS[${index}]: tokens must be distinct`);
+      }
+      if (pairs.has(value)) {
+        throw new Error(`SOLVER_SUPPORTED_PAIRS[${index}]: duplicate directed pair`);
+      }
+      pairs.add(value);
+    }
+    supportedPairs = pairs;
+  }
+
+  const rawMinimums = read("SOLVER_MIN_JOB_OUTPUT");
+  let minJobOutput: ReadonlyMap<string, bigint> | null = null;
+  if (rawMinimums !== undefined) {
+    const parsed = parseJson("SOLVER_MIN_JOB_OUTPUT", rawMinimums);
+    if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
+      throw new Error("SOLVER_MIN_JOB_OUTPUT: expected a JSON object");
+    }
+    const minimums = new Map<string, bigint>();
+    for (const [token, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!CANONICAL_TOKEN_ID.test(token)) {
+        throw new Error(`SOLVER_MIN_JOB_OUTPUT key ${JSON.stringify(token)}: expected lowercase 64hex`);
+      }
+      if (typeof value !== "string") {
+        throw new Error(`SOLVER_MIN_JOB_OUTPUT[${token}]: expected a JSON string`);
+      }
+      minimums.set(token, parsePositiveBigint(`SOLVER_MIN_JOB_OUTPUT[${token}]`, value));
+    }
+    minJobOutput = minimums;
+  }
+
+  const dustNames = [
+    "SOLVER_DUST_MAX_PER_JOB",
+    "SOLVER_DUST_MAX_PER_WINDOW",
+    "SOLVER_DUST_WINDOW_MS",
+  ] as const;
+  const dustValues = dustNames.map((name) => read(name));
+  const setCount = dustValues.filter((value) => value !== undefined).length;
+  if (setCount !== 0 && setCount !== dustNames.length) {
+    throw new Error(`${dustNames.join(", ")} must be all SET or all UNSET`);
+  }
+  let dust: SolverDustAdmissionEnv | null = null;
+  if (setCount === dustNames.length) {
+    dust = {
+      maxPerJob: parsePositiveBigint(dustNames[0], dustValues[0]!),
+      maxPerWindow: parsePositiveBigint(dustNames[1], dustValues[1]!),
+      windowMs: parseBoundedIntegerEnv(
+        dustNames[2], dustValues[2], 1, 1, Number.MAX_SAFE_INTEGER,
+      ),
+    };
+  }
+
+  const warningIntervalMs = parseBoundedIntegerEnv(
+    "SOLVER_ADMISSION_WARNING_INTERVAL_MS",
+    read("SOLVER_ADMISSION_WARNING_INTERVAL_MS"),
+    900_000,
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const openGroups = [
+    ...(supportedPairs === null ? ["SOLVER_SUPPORTED_PAIRS"] : []),
+    ...(minJobOutput === null ? ["SOLVER_MIN_JOB_OUTPUT"] : []),
+    ...(dust === null ? [dustNames.join("+")] : []),
+  ];
+  return { supportedPairs, minJobOutput, dust, warningIntervalMs, openGroups };
+}
+
 export interface SolverRelayHttpEnvOptions {
   relayExecutionEnabled: boolean;
 }

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 
-export const SOLVER_JOURNAL_SCHEMA_VERSION = 1;
+export const SOLVER_JOURNAL_SCHEMA_VERSION = 2;
 export const DEFAULT_JOURNAL_MAX_ROWS = 10_000;
 export const DEFAULT_JOURNAL_MAX_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_JOURNAL_MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
@@ -98,6 +98,23 @@ export interface SolverOperationJournalOptions {
   warn?: (message: string) => void;
 }
 
+export type DustReservationState = "RESERVED" | "SPENT" | "RELEASED";
+
+export interface DustReservation {
+  operationKey: string;
+  jobId: string;
+  generation: number;
+  amount: bigint;
+  state: DustReservationState;
+  reservedAtMs: number;
+  spentAtMs?: number;
+  updatedAtMs: number;
+}
+
+export type DustReservationResult =
+  | { accepted: true; reservation: DustReservation; usage: bigint }
+  | { accepted: false; reason: "per-job" | "window"; usage: bigint };
+
 export class JournalOpenError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -173,6 +190,12 @@ export function parseCanonicalJson<T>(serialized: string): T {
 function requireSafeInteger(name: string, value: number, min = 0): void {
   if (!Number.isSafeInteger(value) || value < min) {
     throw new TypeError(`${name} must be a safe integer >= ${min}`);
+  }
+}
+
+function requirePositiveBigint(name: string, value: bigint): void {
+  if (typeof value !== "bigint" || value <= 0n) {
+    throw new TypeError(`${name} must be a positive bigint`);
   }
 }
 
@@ -263,6 +286,33 @@ interface OperationRow {
   ledger_height: number | null;
 }
 
+interface DustReservationRow {
+  operation_key: string;
+  job_id: string;
+  generation: number;
+  amount_text: string;
+  state: DustReservationState;
+  reserved_at_ms: number;
+  spent_at_ms: number | null;
+  updated_at_ms: number;
+}
+
+function hydrateDust(row: DustReservationRow): DustReservation {
+  if (!CANONICAL_UINT.test(row.amount_text) || row.amount_text === "0") {
+    throw new Error("journal contains a noncanonical DUST amount");
+  }
+  return {
+    operationKey: row.operation_key,
+    jobId: row.job_id,
+    generation: row.generation,
+    amount: BigInt(row.amount_text),
+    state: row.state,
+    reservedAtMs: row.reserved_at_ms,
+    ...(row.spent_at_ms === null ? {} : { spentAtMs: row.spent_at_ms }),
+    updatedAtMs: row.updated_at_ms,
+  };
+}
+
 const SELECT_OPERATION = `
   SELECT o.*,
          r.relay_job_id, r.relay_state, r.relay_extrinsic_hash,
@@ -315,6 +365,11 @@ export class SolverOperationJournal {
       applyPageCeiling(db, normalized.maxBytes);
       const journal = new SolverOperationJournal(db, normalized);
       journal.#assertWithinCeilings();
+      // SQLite CHECK constraints cannot express canonical decimal text.
+      // Hydrate the new authority before returning an apparently usable journal.
+      // Existing operation rows retain RF1B's executor-reconciliation failure
+      // boundary (runSolver also explicitly hydrates them before wallet start).
+      journal.listDustReservations();
       if (normalized.path === ":memory:") {
         try {
           options.warn?.("[JOURNAL] in-memory harness opened; crash durability is disabled");
@@ -494,6 +549,90 @@ export class SolverOperationJournal {
     return (this.#db.query(`${SELECT_OPERATION} ORDER BY o.id`).all() as OperationRow[]).map(hydrate);
   }
 
+  /** Atomically check and reserve the dynamic RF3 DUST budget. Active
+   * reservations count regardless of age; settled spend counts for one rolling
+   * window from settlement. A database lock/error is surfaced and therefore
+   * fails job admission closed. */
+  reserveDust(input: {
+    operationKey: string;
+    jobId: string;
+    generation: number;
+    amount: bigint;
+    maxPerJob: bigint;
+    maxPerWindow: bigint;
+    windowMs: number;
+  }): DustReservationResult {
+    this.#assertOpen();
+    requireText("dust operationKey", input.operationKey);
+    requireText("dust jobId", input.jobId);
+    requireSafeInteger("dust generation", input.generation);
+    requirePositiveBigint("dust amount", input.amount);
+    requirePositiveBigint("dust maxPerJob", input.maxPerJob);
+    requirePositiveBigint("dust maxPerWindow", input.maxPerWindow);
+    requireSafeInteger("dust windowMs", input.windowMs, 1);
+    const now = this.#now();
+    const reserve = this.#db.transaction((): DustReservationResult => {
+      const existing = this.#dustByOperationKey(input.operationKey);
+      if (existing) {
+        if (existing.jobId !== input.jobId || existing.generation !== input.generation ||
+            existing.amount !== input.amount || existing.state === "RELEASED") {
+          throw new JournalCasConflictError(`${input.operationKey}: conflicting DUST reservation replay`);
+        }
+        return { accepted: true, reservation: existing, usage: this.#dustUsage(input.windowMs, now) };
+      }
+      if (input.amount > input.maxPerJob) {
+        return { accepted: false, reason: "per-job", usage: this.#dustUsage(input.windowMs, now) };
+      }
+      const usage = this.#dustUsage(input.windowMs, now);
+      if (usage + input.amount > input.maxPerWindow) {
+        return { accepted: false, reason: "window", usage };
+      }
+      const settlement = this.#db.query(`
+        SELECT job_id, generation FROM journal_operations WHERE operation_key = ?
+      `).get(input.operationKey) as { job_id: string; generation: number } | null;
+      if (!settlement || settlement.job_id !== input.jobId || settlement.generation !== input.generation) {
+        throw new JournalTransitionError("DUST reservation requires its durable job settlement row");
+      }
+      this.#db.query(`
+        INSERT INTO journal_dust_reservations (
+          operation_key, job_id, generation, amount_text, state,
+          reserved_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, 'RESERVED', ?, ?)
+      `).run(input.operationKey, input.jobId, input.generation, input.amount.toString(), now, now);
+      this.#assertWithinCeilings();
+      return {
+        accepted: true,
+        reservation: this.#dustByOperationKey(input.operationKey)!,
+        usage: usage + input.amount,
+      };
+    });
+    return reserve();
+  }
+
+  markDustSpent(operationKey: string): DustReservation | undefined {
+    return this.#transitionDust(operationKey, "SPENT");
+  }
+
+  releaseDust(operationKey: string): DustReservation | undefined {
+    return this.#transitionDust(operationKey, "RELEASED");
+  }
+
+  dustUsage(windowMs: number, nowMs = this.#now()): bigint {
+    this.#assertOpen();
+    requireSafeInteger("dust windowMs", windowMs, 1);
+    requireSafeInteger("dust usage clock", nowMs, 1);
+    return this.#dustUsage(windowMs, nowMs);
+  }
+
+  listDustReservations(): DustReservation[] {
+    this.#assertOpen();
+    return (this.#db.query(`
+      SELECT operation_key, job_id, generation, amount_text, state,
+             reserved_at_ms, spent_at_ms, updated_at_ms
+        FROM journal_dust_reservations ORDER BY rowid
+    `).all() as DustReservationRow[]).map(hydrateDust);
+  }
+
   pruneTerminal(nowMs = this.#now()): number {
     this.#assertOpen();
     requireSafeInteger("prune nowMs", nowMs, 1);
@@ -502,6 +641,10 @@ export class SolverOperationJournal {
         SELECT id FROM journal_operations
          WHERE lifecycle_state IN ('SETTLED', 'REVERTED', 'FAILED')
            AND retention_until_ms <= ?
+           AND NOT EXISTS (
+             SELECT 1 FROM journal_dust_reservations d
+              WHERE d.operation_key = journal_operations.operation_key
+           )
          ORDER BY id
          LIMIT 1000
       `).all(nowMs) as Array<{ id: number }>;
@@ -512,6 +655,10 @@ export class SolverOperationJournal {
            SELECT id FROM journal_operations
             WHERE lifecycle_state IN ('SETTLED', 'REVERTED', 'FAILED')
               AND retention_until_ms <= ?
+              AND NOT EXISTS (
+                SELECT 1 FROM journal_dust_reservations d
+                 WHERE d.operation_key = journal_operations.operation_key
+              )
             ORDER BY id
             LIMIT 1000
          )
@@ -520,6 +667,20 @@ export class SolverOperationJournal {
       return candidates.length;
     });
     return prune();
+  }
+
+  /** Remove only DUST rows that no longer contribute to any possible rolling
+   * window. Parent operation retention can proceed on the next prune pass. */
+  pruneDust(windowMs: number, nowMs = this.#now()): number {
+    this.#assertOpen();
+    requireSafeInteger("dust windowMs", windowMs, 1);
+    requireSafeInteger("dust prune clock", nowMs, 1);
+    const cutoff = Math.max(0, nowMs - windowMs);
+    const result = this.#db.query(`
+      DELETE FROM journal_dust_reservations
+       WHERE state = 'RELEASED' OR (state = 'SPENT' AND spent_at_ms <= ?)
+    `).run(cutoff);
+    return result.changes;
   }
 
   close(): void {
@@ -574,8 +735,52 @@ export class SolverOperationJournal {
     );
   }
 
+  #dustByOperationKey(operationKey: string): DustReservation | undefined {
+    const row = this.#db.query(`
+      SELECT operation_key, job_id, generation, amount_text, state,
+             reserved_at_ms, spent_at_ms, updated_at_ms
+        FROM journal_dust_reservations WHERE operation_key = ?
+    `).get(operationKey) as DustReservationRow | null;
+    return row ? hydrateDust(row) : undefined;
+  }
+
+  #dustUsage(windowMs: number, nowMs: number): bigint {
+    const cutoff = Math.max(0, nowMs - windowMs);
+    const rows = this.#db.query(`
+      SELECT amount_text FROM journal_dust_reservations
+       WHERE state = 'RESERVED' OR (state = 'SPENT' AND spent_at_ms > ?)
+    `).all(cutoff) as Array<{ amount_text: string }>;
+    return rows.reduce((sum, row) => sum + BigInt(row.amount_text), 0n);
+  }
+
+  #transitionDust(operationKey: string, next: "SPENT" | "RELEASED"): DustReservation | undefined {
+    this.#assertOpen();
+    requireText("dust operationKey", operationKey);
+    const now = this.#now();
+    const change = this.#db.transaction(() => {
+      const current = this.#dustByOperationKey(operationKey);
+      if (!current) return undefined;
+      if (current.state === next) return current;
+      if (current.state !== "RESERVED") {
+        throw new JournalTransitionError(
+          `${operationKey}: DUST cannot transition ${current.state} -> ${next}`,
+        );
+      }
+      this.#db.query(`
+        UPDATE journal_dust_reservations
+           SET state = ?, spent_at_ms = ?, updated_at_ms = ?
+         WHERE operation_key = ? AND state = 'RESERVED'
+      `).run(next, next === "SPENT" ? now : null, now, operationKey);
+      return this.#dustByOperationKey(operationKey);
+    });
+    return change();
+  }
+
   #assertWithinCeilings(): void {
-    const count = this.#db.query("SELECT count(*) AS count FROM journal_operations").get() as { count: number };
+    const count = this.#db.query(`
+      SELECT (SELECT count(*) FROM journal_operations) +
+             (SELECT count(*) FROM journal_dust_reservations) AS count
+    `).get() as { count: number };
     if (count.count > this.maxRows) {
       throw new JournalCapacityError(`journal row ceiling ${this.maxRows} exceeded`);
     }
@@ -631,6 +836,17 @@ function normalizeOptions(
 function migrateEmptyDatabase(db: Database): void {
   const version = pragmaNumber(db, "user_version");
   if (version === SOLVER_JOURNAL_SCHEMA_VERSION) return;
+  if (version === 1) {
+    db.transaction(() => {
+      createDustReservationTable(db);
+      db.exec(`
+        UPDATE journal_meta SET schema_version = ${SOLVER_JOURNAL_SCHEMA_VERSION}
+         WHERE singleton = 1 AND schema_version = 1;
+        PRAGMA user_version = ${SOLVER_JOURNAL_SCHEMA_VERSION};
+      `);
+    })();
+    return;
+  }
   if (version !== 0) throw new Error(`unsupported journal schema version ${version}`);
   const tables = db.query(`
     SELECT name FROM sqlite_master
@@ -687,9 +903,29 @@ function migrateEmptyDatabase(db: Database): void {
         ON journal_operations(job_id, generation);
       CREATE INDEX journal_operations_retention
         ON journal_operations(lifecycle_state, retention_until_ms);
-      PRAGMA user_version = ${SOLVER_JOURNAL_SCHEMA_VERSION};
     `);
+    createDustReservationTable(db);
+    db.exec(`PRAGMA user_version = ${SOLVER_JOURNAL_SCHEMA_VERSION}`);
   })();
+}
+
+function createDustReservationTable(db: Database): void {
+  db.exec(`
+    CREATE TABLE journal_dust_reservations (
+      operation_key TEXT PRIMARY KEY
+        REFERENCES journal_operations(operation_key) ON DELETE CASCADE,
+      job_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK (generation >= 0),
+      amount_text TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('RESERVED','SPENT','RELEASED')),
+      reserved_at_ms INTEGER NOT NULL CHECK (reserved_at_ms > 0),
+      spent_at_ms INTEGER,
+      updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= reserved_at_ms),
+      CHECK ((state = 'SPENT') = (spent_at_ms IS NOT NULL))
+    ) STRICT;
+    CREATE INDEX journal_dust_window
+      ON journal_dust_reservations(state, spent_at_ms);
+  `);
 }
 
 function validateDatabase(db: Database): void {

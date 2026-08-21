@@ -1,7 +1,7 @@
 /**
  * Dev-stack solver: mirrors the local node's book and fills against posted
  * ladders. Requires MIDNIGHT_NETWORK_ID=undeployed and a running `bun run dev`
- * (node API on ZSWAP_API, batcher on BATCHER_SUBMIT_URL).
+ * (node API on ZSWAP_API, Intents socket on SOLVER_RELAY_WS_URL).
  */
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";

@@ -2,7 +2,7 @@
  * Preview-network solver.
  *
  * Requires MIDNIGHT_NETWORK_ID=preview, SOLVER_SEED set to a funded wallet, and
- * ZSWAP_API / BATCHER_SUBMIT_URL pointed at the preview deployment. The node's
+ * ZSWAP_API / SOLVER_RELAY_WS_URL pointed at the preview deployment. The node's
  * per-IP budget applies here (no allowlist off-host), so the book mirror leans
  * on the SSE stream rather than polling.
  */

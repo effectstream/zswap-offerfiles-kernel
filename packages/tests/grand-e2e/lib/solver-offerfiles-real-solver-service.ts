@@ -39,7 +39,12 @@ import {
   type SolverHandle,
   type SolverWalletDependencies,
 } from "../../../solver/src/run.ts";
-import type { ValidationGateTrace } from "../../../solver/src/validation-gate.ts";
+
+/** Historical E1 telemetry shape retained only until N6 replaces this pre-R2
+ * harness. The production validation gate it described was deleted by N5. */
+type ValidationGateTrace =
+  | { kind: string; offerHash: string; [key: string]: unknown }
+  | { kind: string; [key: string]: unknown };
 
 const SCHEMA = "zswap-offer-files-real-solver/v1";
 

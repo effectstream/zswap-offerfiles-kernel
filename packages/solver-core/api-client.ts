@@ -8,11 +8,13 @@ import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { createHash } from "node:crypto";
 
 import {
-  OFFER_VALIDATION_PROFILE,
-  OFFER_VALIDATION_SCHEMA_VERSION,
-  parseOfferValidationVerdict,
-  type OfferValidationVerdict,
-} from "./validation-contract.ts";
+  EXACT_FILES_PROFILE,
+  EXACT_FILES_SCHEMA_VERSION,
+  MAX_EXACT_FILES_RESPONSE_BYTES,
+  parseExactFilesRequest,
+  parseExactFilesResponse,
+  type ExactFilesResponse,
+} from "./exact-files-contract.ts";
 import {
   MAX_OFFER_UPDATES_FRAME_BYTES,
   OFFER_UPDATES_PATH,
@@ -34,7 +36,6 @@ export const DEFAULT_API_TIMEOUT_MS = 15_000;
  * complete decoded body so a faulty endpoint cannot make the solver retain an
  * arbitrarily large response while deciding whether trading is safe. */
 export const MAX_SYNC_HEALTH_BODY_BYTES = 1024 * 1024;
-export const MAX_OFFER_VALIDATION_RESPONSE_BYTES = 64 * 1024;
 
 export type ApiFailureKind = "timeout" | "aborted" | "network" | "http" | "malformed";
 
@@ -71,12 +72,6 @@ export interface ApiRequestOptions {
 }
 
 export type ApiTarget = string | ApiRequestOptions | undefined;
-
-export interface OfferValidationApiOptions extends ApiRequestOptions {
-  /** Existing solver bearer credential. Validation is authenticated even when
-   * optional levels publication is disabled. */
-  authToken: string;
-}
 
 const requestOptions = (target: ApiTarget): Required<Pick<ApiRequestOptions, "timeoutMs">> & ApiRequestOptions => {
   const opts = typeof target === "string" ? { api: target } : (target ?? {});
@@ -769,42 +764,33 @@ export const reportsBackendProjectionCurrent = (
   health.celestia.tip !== null &&
   health.celestia.lagBlocks !== null;
 
-/** Ask the Offer Files backend whether these exact content-addressed bytes are
- * usable by the approved solver profile now. Local identity binding happens
- * before authentication or network IO; only a strict HTTP-200 v1 verdict is a
- * domain result. Every other response remains boundary unavailability. */
-export async function validateOfferForUse(
-  offerId: string,
-  offer: string,
-  options: OfferValidationApiOptions,
-): Promise<OfferValidationVerdict> {
-  const operation = "POST /v1/offers/validate";
-  const canonical = canonicalOfferHash(offerId, operation);
-  assertOfferBlobIdentity(offer, canonical, operation);
-  if (
-    typeof options.authToken !== "string" ||
-    options.authToken.length < 16 ||
-    /\s/.test(options.authToken)
-  ) {
-    throw new ApiRequestError(
-      "malformed",
-      operation,
-      "solver bearer credential must contain at least 16 non-whitespace characters",
-    );
+/** Job-time exact-files read (FR-006/008/010).
+ *
+ * This is intentionally the ONLY solver client for settlement bytes. It
+ * canonicalizes every requested identity before dispatch, binds every returned
+ * blob to its own content hash, and requires one response entry in the same
+ * order for every request entry. A malformed/partial/reordered HTTP-200 is
+ * boundary failure, never permission to fall back to the book cache. */
+export async function readExactOfferFiles(
+  offerIds: readonly string[],
+  target?: ApiTarget,
+): Promise<ExactFilesResponse> {
+  const operation = "POST /v1/offers/files";
+  const canonical = offerIds.map((offerId) => canonicalOfferHash(offerId, operation));
+  const request = {
+    schemaVersion: EXACT_FILES_SCHEMA_VERSION,
+    profile: EXACT_FILES_PROFILE,
+    offerIds: canonical,
+  };
+  if (parseExactFilesRequest(request) === null) {
+    throw new ApiRequestError("malformed", operation, "offerIds are not a canonical exact-files request");
   }
 
-  const request = {
-    schemaVersion: OFFER_VALIDATION_SCHEMA_VERSION,
-    profile: OFFER_VALIDATION_PROFILE,
-    offerId: canonical,
-    offer,
-  };
-  return withRequestDeadline(operation, options, async (signal, api) => {
-    const response = await fetch(`${api}/v1/offers/validate`, {
+  return withRequestDeadline(operation, target, async (signal, api) => {
+    const response = await fetch(`${api}/v1/offers/files`, {
       method: "POST",
       headers: {
         accept: "application/json",
-        authorization: `Bearer ${options.authToken}`,
         "content-type": "application/json",
       },
       body: JSON.stringify(request),
@@ -812,43 +798,39 @@ export async function validateOfferForUse(
     });
     if (!response.ok) {
       try {
-        void response.body?.cancel().catch(() => {});
+        void response.body?.cancel().catch(() => undefined);
       } catch {
-        // The typed HTTP result already fails closed; cancellation only makes
-        // connection reuse best-effort for non-conforming response doubles.
+        // The typed HTTP error already fails closed; cancellation is best effort.
       }
       throw httpError(operation, response.status);
     }
-    const parsed = parseOfferValidationVerdict(
-      await parseBoundedJson(
-        response,
-        operation,
-        MAX_OFFER_VALIDATION_RESPONSE_BYTES,
-        signal,
-      ),
+
+    const body = await parseBoundedJson(
+      response,
+      operation,
+      MAX_EXACT_FILES_RESPONSE_BYTES,
+      signal,
     );
+    const parsed = parseExactFilesResponse(body, {
+      hashOffer: (offer) =>
+        createHash("sha256").update(OfferFiles.decode(offer)).digest("hex"),
+    });
     if (parsed === null) {
       throw new ApiRequestError(
         "malformed",
         operation,
-        "response body is not a canonical validate-for-use v1 verdict",
+        "response is not a canonical, content-bound exact-files response",
       );
     }
-    if (parsed.profile !== OFFER_VALIDATION_PROFILE) {
-      throw new ApiRequestError("malformed", operation, "verdict profile is not bound to request");
-    }
-    if (parsed.claimedOfferId !== canonical) {
+    if (
+      parsed.profile !== EXACT_FILES_PROFILE ||
+      parsed.files.length !== canonical.length ||
+      parsed.files.some((entry, index) => entry.offerId !== canonical[index])
+    ) {
       throw new ApiRequestError(
         "malformed",
         operation,
-        "verdict claimedOfferId is not bound to request",
-      );
-    }
-    if (parsed.computedOfferId !== null && parsed.computedOfferId !== canonical) {
-      throw new ApiRequestError(
-        "malformed",
-        operation,
-        "verdict computedOfferId is not bound to request bytes",
+        "response entries are not exactly bound to the requested identities and order",
       );
     }
     return parsed;

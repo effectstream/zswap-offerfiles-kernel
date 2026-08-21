@@ -374,6 +374,87 @@ describe("relay client — against a raw RFC 6455 mock relay", () => {
     expect(JOB_EXECUTION_UNAVAILABLE.startsWith("solver_at_capacity")).toBe(false);
     expect(JOB_EXECUTION_UNAVAILABLE.startsWith("solver_saturated")).toBe(false);
   });
+
+  test("an async job result is returned on the socket generation that delivered it", async () => {
+    const relay = await liveRelay();
+    const jobId = "8e4cbbac-05cf-4943-95fb-7e193e7f6df4";
+    connectTo(relay, cacheOf(seed(CANONICAL_ROWS)), {
+      onSwap: async (job) => ({ type: "swap-tx", jobId: job.jobId, txBytes: "00" }),
+    });
+    await waitUntil(() => pushesOn(relay) >= 1, "the first push");
+    const connection = relay.connections[0]!;
+    connection.sendText({
+      type: "swap",
+      jobId,
+      tokenIn: B,
+      tokenOut: A,
+      amountIn: "12",
+      amountOut: "22",
+    });
+    await waitUntil(() => connection.frames("swap-tx").length === 1, "the async swap-tx");
+    expect(connection.frames("swap-tx")[0]).toEqual({ type: "swap-tx", jobId, txBytes: "00" });
+  });
+
+  test("a mid-job socket drop never sends the late proof on the replacement socket", async () => {
+    const relay = await liveRelay();
+    const jobId = "4d858b1b-b00f-492e-ae48-593edb130a81";
+    let release!: () => void;
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    connectTo(relay, cacheOf(seed(CANONICAL_ROWS)), {
+      onSwap: async (job) => {
+        started();
+        await gate;
+        return { type: "swap-tx", jobId: job.jobId, txBytes: "00" };
+      },
+    });
+    await waitUntil(() => pushesOn(relay) >= 1, "the first push");
+    relay.connections[0]!.sendText({
+      type: "swap",
+      jobId,
+      tokenIn: B,
+      tokenOut: A,
+      amountIn: "12",
+      amountOut: "22",
+    });
+    await didStart;
+    relay.connections[0]!.terminate();
+    await waitUntil(() => relay.connections.length >= 2, "the replacement connection");
+    await waitUntil(() => pushesOn(relay, 1) >= 1, "the replacement re-push");
+
+    release();
+    const replacement = relay.connections[1]!;
+    replacement.ping("late-proof-barrier");
+    await waitUntil(() => replacement.pongs.includes("late-proof-barrier"), "the post-proof pong");
+    expect(replacement.frames("swap-tx")).toEqual([]);
+    expect(replacement.frames("job-error")).toEqual([]);
+  });
+
+  test("tx-submitted and submit-failed are forwarded to their lifecycle handlers", async () => {
+    const relay = await liveRelay();
+    const submitted: string[] = [];
+    const failed: string[] = [];
+    connectTo(relay, cacheOf(seed(CANONICAL_ROWS)), {
+      onTxSubmitted: async (message) => {
+        submitted.push(`${message.jobId}:${message.txId}`);
+      },
+      onSubmitFailed: async (message) => {
+        failed.push(`${message.jobId}:${message.reason}`);
+      },
+    });
+    await waitUntil(() => pushesOn(relay) >= 1, "the first push");
+    const connection = relay.connections[0]!;
+    connection.sendText({ type: "tx-submitted", jobId: "job-1", txId: "tx-1" });
+    connection.sendText({ type: "submit-failed", jobId: "job-2", reason: "rejected" });
+    await waitUntil(() => submitted.length === 1 && failed.length === 1, "both lifecycle handlers");
+    expect(submitted).toEqual(["job-1:tx-1"]);
+    expect(failed).toEqual(["job-2:rejected"]);
+  });
 });
 
 // ── part 2: the loop's own properties, on a manual clock ────────────────────

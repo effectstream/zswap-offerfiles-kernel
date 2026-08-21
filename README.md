@@ -106,10 +106,11 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
 | `API_UPDATES_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/updates` websocket cap; default 100. Excess clients are refused the connection (this endpoint's refusals are disconnects, not HTTP statuses — see API.md). |
 | `OFFER_FILES_READ_TIMEOUT_MS` | optional | Exact-files read decision budget, default 15 000 ms and capped at 60 000 ms. Native synchronous proof work cannot be preempted; a retained concurrency slot bounds unfinished work. |
-| `SOLVER_LEVELS_AUTH_TOKEN` | still required at solver startup | Solver-side bearer (at least 16 non-whitespace characters) for the solver's pre-match validation gate. That gate still calls the removed `POST /v1/offers/validate`, so it is inert until the solver moves to job-time exact-files fetching; the startup check is retained so the variable does not silently disappear from deployments in the meantime. |
+| `SOLVER_RELAY_WS_URL` / `SOLVER_RELAY_AUTH_TOKEN` | required for live solver mode | Outbound Midnight Intents solver WebSocket and its shared bearer. The backend exact-files read is unauthenticated. |
+| `SOLVER_RELAY_MAX_PARALLEL_SWAPS` | optional | Advertised and enforced concurrent proof-build bound; default 8. |
+| `SOLVER_RELAY_PUSH_INTERVAL_MS` / `SOLVER_RELAY_RECONNECT_DELAY_MS` | optional | Complete ladder replacement cadence (default 1 000 ms) and reconnect delay (default 2 000 ms). |
+| `SOLVER_STATUS_POLL_MS` / `SOLVER_SETTLE_TTL_MINUTES` | optional | Backend-consumption backstop cadence and chain-TTL wallet rollback window. |
 | `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | The mainnet solver defaults to dry-run. Live settlement requires `SOLVER_DRY_RUN=false` **and** the separate exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
-| `SOLVER_ENABLE_PATH_B` | optional | Defaults to `false`; Path A posted-price fills are the only execution mode enabled by default. |
-| `SOLVER_ENABLE_CYCLES` / `SOLVER_ENABLE_RESIDUAL_TOPUPS` | optional | Independent experimental opt-ins, both default `false` and have no effect unless Path B is also enabled. |
 
 A complete dev → mainnet env template lives at `.env.mainnet.example`.
 

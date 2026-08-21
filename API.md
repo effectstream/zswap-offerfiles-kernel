@@ -88,9 +88,11 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults
 SOLVER_DRY_RUN=true                      # mainnet default; mirrors only, never settles
                                         # current dry-run does NOT load inventory, so it is not Path-A decision parity
 SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
-SOLVER_ENABLE_PATH_B=false               # default execution scope is posted-price Path A only
-SOLVER_ENABLE_CYCLES=false               # experimental; also requires PATH_B=true
-SOLVER_ENABLE_RESIDUAL_TOPUPS=false      # experimental inventory spend; also requires PATH_B=true
+SOLVER_RELAY_WS_URL=wss://relay/solver   # outbound Midnight Intents solver socket
+SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer; backend exact-files is unauthenticated
+SOLVER_RELAY_MAX_PARALLEL_SWAPS=8        # advertised and enforced proof-build capacity
+SOLVER_STATUS_POLL_MS=5000               # missed-signal backend-consumption backstop
+SOLVER_SETTLE_TTL_MINUTES=30             # wallet rollback window when no terminal signal arrives
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:

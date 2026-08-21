@@ -10,21 +10,15 @@ export const DEV_SEED = "0000000000000000000000000000000000000000000000000000000
 export const SOLVER_SEED = getEnv("SOLVER_SEED") ?? DEV_SEED;
 
 export const ZSWAP_API = getEnv("ZSWAP_API") ?? "http://127.0.0.1:9999";
-export const BATCHER_SUBMIT_URL = getEnv("BATCHER_SUBMIT_URL") ?? "http://127.0.0.1:3334";
-/** Shared solver bearer for the backend's authenticated solver boundary.
- * Ladder publication to the backend no longer exists; ladders go to the
- * Midnight Intents relay under its own SOLVER_AUTH_TOKEN. */
-export const SOLVER_LEVELS_AUTH_TOKEN = getEnv("SOLVER_LEVELS_AUTH_TOKEN") ?? "";
 
 /**
  * Midnight Intents relay client (FR-012).
  *
  * `SOLVER_RELAY_AUTH_TOKEN` is the SAME shared secret the relay deployment
  * calls `SOLVER_AUTH_TOKEN` (and the reference solver reads under that name).
- * It is prefixed here because this process already carries a different solver
- * credential — `SOLVER_LEVELS_AUTH_TOKEN`, for the Offer Files backend — and a
- * bare `SOLVER_AUTH_TOKEN` next to it would not say which boundary it
- * authenticates. The relay refuses a token shorter than 32 characters.
+ * The explicit prefix says which outbound boundary it authenticates. The
+ * backend exact-files read is intentionally unauthenticated. The relay refuses
+ * a token shorter than 32 characters.
  */
 export const SOLVER_RELAY_WS_URL = getEnv("SOLVER_RELAY_WS_URL") ?? "";
 export const SOLVER_RELAY_AUTH_TOKEN = getEnv("SOLVER_RELAY_AUTH_TOKEN") ?? "";
@@ -227,22 +221,6 @@ export const isDryRun = (fallback = false): boolean =>
 
 export const isSolverEnabled = (): boolean =>
   parseBooleanEnv("SOLVER_ENABLED", getEnv("SOLVER_ENABLED"), true);
-
-/** Experimental surfaces stay disabled until their economic oracle is
- * independently approved. Exact two-way zero-residual crossings are separate. */
-export const isCyclesEnabled = (): boolean =>
-  parseBooleanEnv("SOLVER_ENABLE_CYCLES", getEnv("SOLVER_ENABLE_CYCLES"), false);
-
-/** All merged-offer execution is outside the R0-approved default scope. */
-export const isPathBEnabled = (): boolean =>
-  parseBooleanEnv("SOLVER_ENABLE_PATH_B", getEnv("SOLVER_ENABLE_PATH_B"), false);
-
-export const isResidualTopUpsEnabled = (): boolean =>
-  parseBooleanEnv(
-    "SOLVER_ENABLE_RESIDUAL_TOPUPS",
-    getEnv("SOLVER_ENABLE_RESIDUAL_TOPUPS"),
-    false,
-  );
 
 export const isMainnetLiveTradingAcknowledged = (): boolean =>
   parseBooleanEnv(

@@ -2,7 +2,7 @@
  * Mainnet solver — real funds.
  *
  * Requires MIDNIGHT_NETWORK_ID=mainnet, SOLVER_SEED set to a funded wallet, and
- * ZSWAP_API / BATCHER_SUBMIT_URL pointed at the mainnet deployment. Start with
+ * ZSWAP_API / SOLVER_RELAY_WS_URL pointed at the mainnet deployment. Start with
  * SOLVER_DRY_RUN=true first, but note that current dry-run does not load wallet
  * inventory and therefore cannot validate Path-A admission. A controlled
  * staging rehearsal is still required before any live acknowledgement.

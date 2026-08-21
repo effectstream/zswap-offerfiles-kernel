@@ -16,10 +16,10 @@
 //   2. **It answers no quotes.** There is no per-quote solver contact in this
 //      protocol: the relay interpolates `POST /quote` locally from the pushed
 //      ladder. What this client publishes IS the quote.
-//   3. **It executes no jobs.** `swap` handling, `swap-tx`, wallet work and
-//      submission are N5's. Until N5 wires `onSwap`, an arriving job is
-//      answered with a fail-closed `job-error` — never dropped, because the
-//      relay is holding a taker's job open waiting for a terminal answer.
+//   3. **It executes no jobs itself.** `runSolver` wires N5's executor through
+//      the handlers below. Without a handler, an arriving job is answered with
+//      a fail-closed `job-error` — never dropped, because the relay is holding
+//      a taker's job open waiting for a terminal answer.
 //
 // The four push-side halves N3 recorded are implemented here:
 //
@@ -49,8 +49,10 @@ import {
   type LadderExclusion,
 } from "@zswap-da/solver-core/ladder-derivation";
 import {
+  parseJobError,
   parseSubmitFailed,
   parseSwap,
+  parseSwapTx,
   parseTxSubmitted,
   type RelayToSolverMessage,
   type SolverToRelayMessage,
@@ -73,7 +75,8 @@ export const DEFAULT_WITHDRAW_TIMEOUT_MS = 2_000;
 export const DEFAULT_MAX_FRAME_BYTES = 1_048_576;
 
 /**
- * Terminal `job-error` reason used while job execution does not exist (N5).
+ * Terminal `job-error` reason used when a caller starts this reusable client
+ * without wiring the production N5 executor.
  *
  * Deliberately NOT one of the relay's capacity refusals
  * (`solver_at_capacity` / `solver_saturated`): those tell a caller to retry
@@ -197,10 +200,16 @@ export interface RelayClientOptions {
   onEvent?: (event: RelayClientEvent) => void;
   /** Untrusted string logger, the `runSolver` idiom. Contained (R-37). */
   log?: (message: string) => void;
-  /** N5's seam. Until it exists, every routed job is answered `job-error`. */
-  onSwap?: (job: Extract<RelayToSolverMessage, { type: "swap" }>) => void;
-  onTxSubmitted?: (message: Extract<RelayToSolverMessage, { type: "tx-submitted" }>) => void;
-  onSubmitFailed?: (message: Extract<RelayToSolverMessage, { type: "submit-failed" }>) => void;
+  /** N5's seam. Without it, every routed job is answered `job-error`. */
+  onSwap?: (
+    job: Extract<RelayToSolverMessage, { type: "swap" }>,
+  ) => SolverToRelayMessage | void | Promise<SolverToRelayMessage | void>;
+  onTxSubmitted?: (
+    message: Extract<RelayToSolverMessage, { type: "tx-submitted" }>,
+  ) => void | Promise<void>;
+  onSubmitFailed?: (
+    message: Extract<RelayToSolverMessage, { type: "submit-failed" }>,
+  ) => void | Promise<void>;
 }
 
 export interface RelayClientStats {
@@ -354,6 +363,20 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     const target = socket;
     if (!isOpen(target)) throw new Error(`relay socket is not open for ${frame.type}`);
     await target.send(JSON.stringify(frame));
+  };
+
+  /** A job response belongs to the socket that delivered that job. Sending a
+   * late proof on a replacement socket after a mid-job drop could attach it to
+   * a relay generation that never owned the intent. The wallet-side executor
+   * retains the proved half and its TTL sweeper reverts it instead. */
+  const sendOn = async (
+    expectedSocket: RelayWebSocketLike,
+    frame: SolverToRelayMessage,
+  ): Promise<void> => {
+    if (socket !== expectedSocket || !isOpen(expectedSocket)) {
+      throw new Error(`relay socket generation changed before ${frame.type}`);
+    }
+    await expectedSocket.send(JSON.stringify(frame));
   };
 
   /** One complete push: derive fresh, then send the pair in a fixed order.
@@ -535,7 +558,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     scheduleReconnect();
   };
 
-  const handleMessage = (data: unknown): void => {
+  const handleMessage = (data: unknown, sourceSocket: RelayWebSocketLike): void => {
     const text = typeof data === "string" ? data : null;
     if (text === null) {
       emit("message-refused", "warn", "ignoring a non-text relay frame");
@@ -558,18 +581,45 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       if (options.onSwap === undefined) {
         // Fail closed, LOUDLY, and answer: the relay is holding a taker's job
         // open until it gets a terminal message. Dropping it would strand the
-        // job until its own timeout. N5 replaces this with real execution.
+        // job until its own timeout.
         emit(
           "job-refused",
           "error",
-          `refusing swap job ${swap.jobId}: job execution is not wired (N5)`,
+          `refusing swap job ${swap.jobId}: job execution is not wired`,
           { jobId: swap.jobId, reason: JOB_EXECUTION_UNAVAILABLE },
         );
         void sendJobError(swap.jobId, JOB_EXECUTION_UNAVAILABLE);
         return;
       }
       try {
-        options.onSwap(swap);
+        const handled = Promise.resolve(options.onSwap(swap));
+        void handled.then(async (response) => {
+          if (response === undefined) return;
+          const terminal = response.type === "swap-tx"
+            ? parseSwapTx(response)
+            : response.type === "job-error"
+            ? parseJobError(response)
+            : null;
+          if (terminal === null || terminal.jobId !== swap.jobId) {
+            emit(
+              "job-refused",
+              "error",
+              `swap handler returned a malformed terminal result for ${swap.jobId}`,
+              { jobId: swap.jobId },
+            );
+            await sendOn(sourceSocket, {
+              type: "job-error",
+              jobId: swap.jobId,
+              reason: JOB_EXECUTION_UNAVAILABLE,
+            });
+            return;
+          }
+          await sendOn(sourceSocket, terminal);
+        }).catch((error) => {
+          emit("job-refused", "warn", `could not answer job ${swap.jobId}: ${String(error)}`, {
+            jobId: swap.jobId,
+          });
+        });
       } catch (error) {
         emit("job-refused", "error", `swap handler threw for ${swap.jobId}: ${String(error)}`, {
           jobId: swap.jobId,
@@ -582,7 +632,9 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     const submitted = parseTxSubmitted(parsed);
     if (submitted !== null) {
       try {
-        options.onTxSubmitted?.(submitted);
+        void Promise.resolve(options.onTxSubmitted?.(submitted)).catch((error) => {
+          emit("message-refused", "error", `tx-submitted handler rejected: ${String(error)}`);
+        });
       } catch (error) {
         emit("message-refused", "error", `tx-submitted handler threw: ${String(error)}`);
       }
@@ -592,7 +644,9 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     const failed = parseSubmitFailed(parsed);
     if (failed !== null) {
       try {
-        options.onSubmitFailed?.(failed);
+        void Promise.resolve(options.onSubmitFailed?.(failed)).catch((error) => {
+          emit("message-refused", "error", `submit-failed handler rejected: ${String(error)}`);
+        });
       } catch (error) {
         emit("message-refused", "error", `submit-failed handler threw: ${String(error)}`);
       }
@@ -650,7 +704,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
 
     created.onmessage = (event: { data: unknown }): void => {
       if (socket !== created) return;
-      handleMessage(event.data);
+      handleMessage(event.data, created);
     };
 
     created.onerror = (): void => {

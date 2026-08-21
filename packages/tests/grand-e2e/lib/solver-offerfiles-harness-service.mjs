@@ -644,6 +644,7 @@ const JSON_PATCH_PATHS = new Set([
   "/code",
   "/reason",
   "/computed/gives/0/amount",
+  "/files/0/verdict/computed/gives/0/amount",
 ]);
 
 function isBoundedPatchValue(value) {
@@ -671,7 +672,7 @@ function validateJsonPatch(value) {
       }
     } else if (operation.op === "increment-decimal-string") {
       if (Object.keys(operation).some((key) => !["op", "path", "delta"].includes(key)) ||
-        operation.path !== "/computed/gives/0/amount" ||
+        !["/computed/gives/0/amount", "/files/0/verdict/computed/gives/0/amount"].includes(operation.path) ||
         typeof operation.delta !== "string" || !/^[1-9][0-9]{0,5}$/.test(operation.delta)) {
         return "json_patch_increment";
       }
@@ -986,7 +987,7 @@ async function proxyStream(upstreamResponse, controller, requestId, request, res
 }
 
 async function runProxy() {
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     if (request.url === "/ready") return sendJson(response, ready ? 200 : 503, { ready, role, channel });
 
     const requestTarget = originFormTarget(request.url);
@@ -1098,6 +1099,58 @@ async function runProxy() {
       return sendBytes(response, 502, body, "application/json");
     }
   });
+  // WHATWG fetch cannot proxy an HTTP/1.1 websocket upgrade. Preserve the
+  // exact bytes at the split-horizon boundary instead: downstream solvers can
+  // open the backend update stream, while the backend still has no network
+  // route back to them. Ordinary REST requests continue through the recorded
+  // and fault-injectable fetch path above.
+  server.on("upgrade", (request, downstream, head) => {
+    const requestTarget = originFormTarget(request.url);
+    if (!upstreamUrl || requestTarget === null) {
+      downstream.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    const requestId = randomUUID();
+    const upstreamTarget = new URL(upstreamUrl);
+    const upstreamPort = Number(upstreamTarget.port || (upstreamTarget.protocol === "https:" ? 443 : 80));
+    if (upstreamTarget.protocol !== "http:") {
+      downstream.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    void record({
+      channel,
+      phase: "request",
+      requestId,
+      method: request.method,
+      path: request.url,
+      upgrade: "websocket",
+      headers: headerEvidence(request.headers),
+      ...bodyEvidence(Buffer.alloc(0)),
+    }).catch((error) => {
+      console.error("websocket upgrade record failed", error);
+      downstream.destroy();
+    });
+    const upstream = connect({ host: upstreamTarget.hostname, port: upstreamPort }, () => {
+      const requestLine = `${request.method ?? "GET"} ${requestTarget} HTTP/${request.httpVersion}\r\n`;
+      const rawHeaders = [];
+      for (let index = 0; index < request.rawHeaders.length; index += 2) {
+        rawHeaders.push(`${request.rawHeaders[index]}: ${request.rawHeaders[index + 1]}`);
+      }
+      upstream.write(`${requestLine}${rawHeaders.join("\r\n")}\r\n\r\n`);
+      if (head.length > 0) upstream.write(head);
+      downstream.pipe(upstream);
+      upstream.pipe(downstream);
+    });
+    const close = () => {
+      downstream.destroy();
+      upstream.destroy();
+    };
+    downstream.on("error", close);
+    upstream.on("error", close);
+    downstream.on("close", () => upstream.destroy());
+    upstream.on("close", () => downstream.destroy());
+  });
+  return server;
 }
 
 async function runOfferFilesProbe() {
@@ -1383,9 +1436,30 @@ async function runTcpForwarder() {
   const targetHost = requiredEnv("HARNESS_TCP_TARGET_HOST");
   const targetPort = boundedIntegerEnv("HARNESS_TCP_TARGET_PORT", 0, 1, 65_535);
   return createTcpServer((downstream) => {
+    const connectionId = randomUUID();
+    const remoteAddress = downstream.remoteAddress?.replace(/^::ffff:/, "") ?? null;
+    const recordConnection = collectorUrl && remoteAddress !== "127.0.0.1" && remoteAddress !== "::1";
+    if (recordConnection) {
+      void record({
+        channel,
+        phase: "connection-open",
+        connectionId,
+        remoteAddress,
+        targetHost,
+        targetPort,
+      }).catch((error) => {
+        console.error("tcp-forwarder connection record failed", error);
+        downstream.destroy();
+      });
+    }
     const upstream = connect({ host: targetHost, port: targetPort });
     downstream.on("error", () => upstream.destroy());
     upstream.on("error", () => downstream.destroy());
+    downstream.on("close", () => {
+      if (recordConnection) {
+        void record({ channel, phase: "connection-close", connectionId }).catch(() => {});
+      }
+    });
     downstream.pipe(upstream);
     upstream.pipe(downstream);
   });

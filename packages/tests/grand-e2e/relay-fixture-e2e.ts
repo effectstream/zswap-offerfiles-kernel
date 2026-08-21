@@ -1,5 +1,5 @@
 /**
- * Relay fixture runner — plan phases N0 and N4 of
+ * Relay fixture runner — plan phases N0, N4, and N6/EN1 of
  * `plans/00001-zswap-posted-price-solver.md`.
  *
  * Boots the Midnight Intents relay at its PINNED revision in Docker, and:
@@ -16,9 +16,16 @@
  *   cadence, the fail-closed empty publication, reconnect-and-re-push across a
  *   relay restart, and the explicit withdrawal on a live socket.
  *
+ *   `--verify-en1` repeats the N4 behavioural gate through a transparent TCP
+ *   recorder and pins the exact solver-to-relay websocket text frames per
+ *   connection generation. This is SC-002's missing wire artefact: the seeded
+ *   book's derived capabilities/ladder, its update, the reconnect re-push, and
+ *   the final withdrawal are observed outside the solver process.
+ *
  *   RELAY_FIXTURE_SOURCE_REPO=/path/to/midnight-intents-swaps \
  *     bun run packages/tests/grand-e2e/relay-fixture-e2e.ts --verify-n0
  *     bun run packages/tests/grand-e2e/relay-fixture-e2e.ts --verify-n4
+ *     bun run packages/tests/grand-e2e/relay-fixture-e2e.ts --verify-en1
  *
  * Each gate owns its own project, its own ports, and its own teardown.
  *
@@ -37,7 +44,7 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
-import { createServer, type Server } from "node:net";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,7 +73,7 @@ const MIN_HOST_PORT = 10_000;
 const MAX_HOST_PORT_EXCLUSIVE = 61_000;
 const TEMP_PREFIX = "cow-relay-fixture-";
 /** Each gate labels its own Docker resources, so a leak is attributable. */
-const PROJECT_PREFIX = { n0: "cow-n0", n4: "cow-n4" } as const;
+const PROJECT_PREFIX = { n0: "cow-n0", n4: "cow-n4", en1: "cow-en1" } as const;
 const CLEAN_SETTLE_MS = 5_000;
 const READY_TIMEOUT_MS = 90_000;
 const BUILD_TIMEOUT_MS = 900_000;
@@ -97,9 +104,12 @@ interface Session {
   httpPort: number;
   wsPort: number;
   authToken: string;
+  controlToken?: string;
+  chainNodeUrl?: string;
+  chainNetwork?: string;
 }
 
-interface CleanupEvidence {
+export interface CleanupEvidence {
   containers: string[];
   networks: string[];
   volumes: string[];
@@ -186,6 +196,155 @@ async function assertPortIsFree(port: number, label: string): Promise<void> {
     });
   });
   await closeServer(server);
+}
+
+interface RecordedSolverFrame {
+  connection: number;
+  ordinal: number;
+  text: string;
+  value: Record<string, unknown>;
+}
+
+interface WireRecorderHandle {
+  port: number;
+  frames: RecordedSolverFrame[];
+  connections: () => number;
+  stop: () => Promise<void>;
+}
+
+/** Incremental RFC 6455 decoder for solver-to-relay text frames. The proxy is
+ * transparent: it forwards the original masked bytes unchanged, and this
+ * decoder only observes a copy. */
+class SolverFrameDecoder {
+  #buffer = Buffer.alloc(0);
+
+  constructor(
+    private readonly connection: number,
+    private readonly frames: RecordedSolverFrame[],
+  ) {}
+
+  push(chunk: Buffer): void {
+    this.#buffer = Buffer.concat([this.#buffer, chunk]);
+    while (this.#buffer.length >= 2) {
+      const first = this.#buffer[0]!;
+      const second = this.#buffer[1]!;
+      const fin = (first & 0x80) !== 0;
+      const opcode = first & 0x0f;
+      const masked = (second & 0x80) !== 0;
+      let payloadLength = second & 0x7f;
+      let headerLength = 2;
+      if (payloadLength === 126) {
+        if (this.#buffer.length < 4) return;
+        payloadLength = this.#buffer.readUInt16BE(2);
+        headerLength = 4;
+      } else if (payloadLength === 127) {
+        if (this.#buffer.length < 10) return;
+        const wide = this.#buffer.readBigUInt64BE(2);
+        assert(wide <= BigInt(Number.MAX_SAFE_INTEGER), "recorded websocket frame is too large");
+        payloadLength = Number(wide);
+        headerLength = 10;
+      }
+      const maskLength = masked ? 4 : 0;
+      const frameLength = headerLength + maskLength + payloadLength;
+      if (this.#buffer.length < frameLength) return;
+      assert(fin, "solver emitted a fragmented websocket frame; EN1 recorder requires final frames");
+      const maskOffset = headerLength;
+      const payloadOffset = headerLength + maskLength;
+      const payload = Buffer.from(this.#buffer.subarray(payloadOffset, frameLength));
+      if (masked) {
+        const mask = this.#buffer.subarray(maskOffset, maskOffset + 4);
+        for (let index = 0; index < payload.length; index += 1) {
+          payload[index] = payload[index]! ^ mask[index % 4]!;
+        }
+      }
+      this.#buffer = this.#buffer.subarray(frameLength);
+      if (opcode !== 0x1) continue;
+      const text = payload.toString("utf8");
+      const parsed: unknown = JSON.parse(text);
+      assert(
+        typeof parsed === "object" && parsed !== null && !Array.isArray(parsed),
+        `solver text frame is not a JSON object: ${text}`,
+      );
+      this.frames.push({
+        connection: this.connection,
+        ordinal: this.frames.filter((frame) => frame.connection === this.connection).length + 1,
+        text,
+        value: parsed as Record<string, unknown>,
+      });
+    }
+  }
+}
+
+/** Start a transparent loopback proxy on a verified-free random port >=10000.
+ * Each upstream reconnect becomes a new recorded connection generation. */
+async function startWireRecorder(upstreamPort: number, excluded: Set<number>): Promise<WireRecorderHandle> {
+  const reservation = await reserveRandomPort(excluded);
+  const port = reservation.port;
+  await reservation.release();
+  const frames: RecordedSolverFrame[] = [];
+  const sockets = new Set<Socket>();
+  let generation = 0;
+  const server = createServer((client) => {
+    generation += 1;
+    const connection = generation;
+    const decoder = new SolverFrameDecoder(connection, frames);
+    const upstream = createConnection({ host: "127.0.0.1", port: upstreamPort });
+    sockets.add(client);
+    sockets.add(upstream);
+    let handshake = Buffer.alloc(0);
+    let requestComplete = false;
+    client.on("data", (chunk: Buffer) => {
+      upstream.write(chunk);
+      if (requestComplete) {
+        decoder.push(chunk);
+        return;
+      }
+      handshake = Buffer.concat([handshake, chunk]);
+      const boundary = handshake.indexOf("\r\n\r\n");
+      if (boundary < 0) return;
+      requestComplete = true;
+      const remainder = handshake.subarray(boundary + 4);
+      handshake = Buffer.alloc(0);
+      if (remainder.length > 0) decoder.push(remainder);
+    });
+    upstream.on("data", (chunk: Buffer) => client.write(chunk));
+    const closePair = (): void => {
+      client.destroy();
+      upstream.destroy();
+    };
+    client.on("error", closePair);
+    upstream.on("error", closePair);
+    client.on("close", () => {
+      sockets.delete(client);
+      upstream.destroy();
+    });
+    upstream.on("close", () => {
+      sockets.delete(upstream);
+      client.destroy();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => reject(error);
+    server.once("error", onError);
+    server.listen({ host: "127.0.0.1", port, exclusive: true }, () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+  server.unref();
+  let stopped = false;
+  return {
+    port,
+    frames,
+    connections: () => generation,
+    stop: async () => {
+      if (stopped) return;
+      stopped = true;
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      await closeServer(server);
+    },
+  };
 }
 
 async function runCommand(
@@ -450,7 +609,10 @@ function createCleanup(
 
 async function createSession(
   prefix: string,
+  options: boolean | PinnedRelayFixtureStartOptions = false,
 ): Promise<{ session: Session; cleanup: () => Promise<CleanupEvidence>; reservations: PortReservation[] }> {
+  const normalized = typeof options === "boolean" ? { controls: options } : options;
+  const controls = normalized.controls ?? false;
   const excluded = new Set<number>();
   const httpReservation = await reserveRandomPort(excluded);
   const wsReservation = await reserveRandomPort(excluded);
@@ -467,13 +629,17 @@ async function createSession(
     wsPort: wsReservation.port,
     // The relay refuses a SOLVER_AUTH_TOKEN under 32 characters, so this is
     // both a real secret and a real config-boundary exercise.
-    authToken: randomBytes(32).toString("hex"),
+    authToken: normalized.authToken ?? randomBytes(32).toString("hex"),
+    ...(controls ? { controlToken: randomBytes(32).toString("hex") } : {}),
+    ...(normalized.chainNodeUrl === undefined ? {} : { chainNodeUrl: normalized.chainNodeUrl }),
+    ...(normalized.chainNetwork === undefined ? {} : { chainNetwork: normalized.chainNetwork }),
   };
   const cleanup = createCleanup(session, reservations);
   emergencyCleanups.set(project, cleanup);
   await writeFile(
     session.environmentFile,
-    `SOLVER_AUTH_TOKEN=${session.authToken}\n`,
+    `SOLVER_AUTH_TOKEN=${session.authToken}\n` +
+      (session.controlToken === undefined ? "" : `N6_CONTROL_TOKEN=${session.controlToken}\n`),
     { encoding: "utf8", mode: 0o600 },
   );
   await writeFile(
@@ -482,6 +648,9 @@ async function createSession(
       image: session.image,
       httpHostPort: session.httpPort,
       wsHostPort: session.wsPort,
+      controls,
+      ...(session.chainNodeUrl === undefined ? {} : { chainNodeUrl: session.chainNodeUrl }),
+      ...(session.chainNetwork === undefined ? {} : { chainNetwork: session.chainNetwork }),
     }),
     { encoding: "utf8", mode: 0o600 },
   );
@@ -527,8 +696,10 @@ async function buildAndStart(
     allowFailure: true,
   });
   assert(
-    logs.stdout.includes(RELAY_FIXTURE_READY_MARKER),
-    `relay fixture never printed ${RELAY_FIXTURE_READY_MARKER}:\n${logs.stdout}\n${logs.stderr}`,
+    session.chainNodeUrl === undefined
+      ? logs.stdout.includes(RELAY_FIXTURE_READY_MARKER)
+      : /Polkadot API ready/.test(logs.stdout),
+    `relay fixture never printed its ${session.chainNodeUrl === undefined ? RELAY_FIXTURE_READY_MARKER : "chain-ready marker"}:\n${logs.stdout}\n${logs.stderr}`,
   );
   assert(
     /WS server listening/.test(logs.stdout),
@@ -872,7 +1043,10 @@ interface N4Evidence {
   withdrawal: { quoteStatus: number; tokens: number; stillConnected: boolean };
 }
 
-async function assertRelayClientContract(session: Session): Promise<N4Evidence> {
+async function assertRelayClientContract(
+  session: Session,
+  relayWsUrl = `ws://127.0.0.1:${String(session.wsPort)}/`,
+): Promise<N4Evidence> {
   const httpBase = `http://127.0.0.1:${String(session.httpPort)}`;
   const { cache, book } = n4Cache(N4_CANONICAL);
   const derived = n4Derive(cache);
@@ -896,7 +1070,7 @@ async function assertRelayClientContract(session: Session): Promise<N4Evidence> 
   let client: RelayClientHandle | null = null;
   try {
     client = startRelayClient({
-      url: `ws://127.0.0.1:${String(session.wsPort)}/`,
+      url: relayWsUrl,
       authToken: session.authToken,
       cache,
       ladder: {
@@ -1165,6 +1339,248 @@ async function verifyN4(): Promise<void> {
   console.log("[n4] N4 GATE PASS");
 }
 
+interface En1Evidence {
+  behaviour: N4Evidence;
+  recorderPort: number;
+  connections: number;
+  frameCount: number;
+  recordingSha256: string;
+  generations: Array<{
+    connection: number;
+    frameCount: number;
+    firstTwoTypes: string[];
+    firstTwoSha256: string;
+  }>;
+  observed: {
+    canonicalInitialPush: boolean;
+    changedBookPush: boolean;
+    failClosedEmptyPush: boolean;
+    reconnectFullRepush: boolean;
+    gracefulWithdrawal: boolean;
+  };
+}
+
+function frameType(frame: RecordedSolverFrame): string {
+  return typeof frame.value["type"] === "string" ? frame.value["type"] : "<missing>";
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function assertEn1Recording(
+  recorder: WireRecorderHandle,
+  behaviour: N4Evidence,
+): En1Evidence {
+  const canonical = n4Cache(N4_CANONICAL);
+  const initial = n4Derive(canonical.cache);
+  canonical.book.upsert(bookOfferFromApi(n4Row("44".repeat(32), "40", "10"))!);
+  const changed = n4Derive(canonical.cache);
+  const initialCapabilities = JSON.stringify(initial.capabilities);
+  const initialLevels = JSON.stringify(initial.priceLevels);
+  const changedCapabilities = JSON.stringify(changed.capabilities);
+  const changedLevels = JSON.stringify(changed.priceLevels);
+  const emptyCapabilities = JSON.stringify({
+    type: "solver-capabilities",
+    tokenIds: [],
+    maxParallelSwaps: N4_MAX_PARALLEL_SWAPS,
+  });
+  const emptyLevels = JSON.stringify({ type: "price-levels", levels: [] });
+  const connections = [...new Set(recorder.frames.map((frame) => frame.connection))].sort(
+    (left, right) => left - right,
+  );
+  assert(connections.length >= 2, `EN1 expected a reconnect generation, recorded ${connections.length}`);
+  const first = recorder.frames.filter((frame) => frame.connection === connections[0]);
+  const second = recorder.frames.filter((frame) => frame.connection === connections[1]);
+  assert(
+    first[0]?.text === initialCapabilities && first[1]?.text === initialLevels,
+    `EN1 first connection did not begin with the exact derived capabilities+ladder: ` +
+      `${first.slice(0, 2).map((frame) => frame.text).join(" | ")}`,
+  );
+  const changedBookPush = first.some((frame) => frame.text === changedLevels);
+  assert(changedBookPush, "EN1 recorder did not observe the changed-book ladder on connection 1");
+  const emptyCapabilityIndex = first.findIndex((frame) => frame.text === emptyCapabilities);
+  const failClosedEmptyPush = emptyCapabilityIndex >= 0 && first[emptyCapabilityIndex + 1]?.text === emptyLevels;
+  assert(failClosedEmptyPush, "EN1 recorder did not observe the fail-closed empty capabilities+levels push");
+  assert(
+    second[0]?.text === changedCapabilities && second[1]?.text === changedLevels,
+    `EN1 reconnect did not begin with the exact full capabilities+ladder re-push: ` +
+      `${second.slice(0, 2).map((frame) => frame.text).join(" | ")}`,
+  );
+  const withdrawalIndex = second.findIndex(
+    (frame, index) => frame.text === emptyLevels && second[index + 1]?.text === emptyCapabilities,
+  );
+  const gracefulWithdrawal = withdrawalIndex >= 0;
+  assert(gracefulWithdrawal, "EN1 recorder did not observe levels-first graceful withdrawal");
+  for (const frame of recorder.frames) {
+    const type = frameType(frame);
+    assert(
+      type === "solver-capabilities" || type === "price-levels",
+      `EN1 recorded unexpected solver frame type ${type}`,
+    );
+  }
+  const generations = connections.map((connection) => {
+    const frames = recorder.frames.filter((frame) => frame.connection === connection);
+    const firstTwo = frames.slice(0, 2);
+    return {
+      connection,
+      frameCount: frames.length,
+      firstTwoTypes: firstTwo.map(frameType),
+      firstTwoSha256: sha256Text(firstTwo.map((frame) => frame.text).join("\n")),
+    };
+  });
+  const recording = recorder.frames
+    .map((frame) => `${String(frame.connection)}:${String(frame.ordinal)}:${frame.text}`)
+    .join("\n");
+  return {
+    behaviour,
+    recorderPort: recorder.port,
+    connections: recorder.connections(),
+    frameCount: recorder.frames.length,
+    recordingSha256: sha256Text(recording),
+    generations,
+    observed: {
+      canonicalInitialPush: true,
+      changedBookPush,
+      failClosedEmptyPush,
+      reconnectFullRepush: true,
+      gracefulWithdrawal,
+    },
+  };
+}
+
+async function verifyEn1(): Promise<void> {
+  const sourceRepository = process.env["RELAY_FIXTURE_SOURCE_REPO"];
+  assert(
+    sourceRepository && sourceRepository.trim() !== "",
+    "RELAY_FIXTURE_SOURCE_REPO must point at a local midnight-intents-swaps clone containing " +
+      `${RELAY_FIXTURE_REVISION}. It is opened read-only and is never checked out or written to.`,
+  );
+  const { session, cleanup, reservations } = await createSession(PROJECT_PREFIX.en1);
+  let recorder: WireRecorderHandle | null = null;
+  let evidence: En1Evidence | null = null;
+  let failure: unknown;
+  console.log(
+    `[en1] project=${session.project} httpPort=${String(session.httpPort)} wsPort=${String(session.wsPort)}`,
+  );
+  try {
+    await buildAndStart(session, sourceRepository!, async () => {
+      for (const reservation of reservations) await reservation.release();
+    });
+    recorder = await startWireRecorder(
+      session.wsPort,
+      new Set([session.httpPort, session.wsPort]),
+    );
+    console.log(`[en1] transparent websocket recorder port=${String(recorder.port)}`);
+    const behaviour = await assertRelayClientContract(
+      session,
+      `ws://127.0.0.1:${String(recorder.port)}/`,
+    );
+    evidence = assertEn1Recording(recorder, behaviour);
+  } catch (error) {
+    failure = error;
+    const logs = await runCommand("docker", composeArgs(session, ["logs", "--no-color", "--tail", "200"]), {
+      allowFailure: true,
+    });
+    console.error(`[en1] failure diagnostics:\n${logs.stdout}\n${logs.stderr}`);
+  } finally {
+    const recorderPort = recorder?.port;
+    await recorder?.stop();
+    const cleanupEvidence = await cleanup();
+    await sleep(CLEAN_SETTLE_MS);
+    const settled = await dockerResources(session.project);
+    if (!failure) {
+      assertCleanup(cleanupEvidence);
+      assertCleanup(settled);
+      await assertPortIsFree(session.httpPort, "http");
+      await assertPortIsFree(session.wsPort, "ws");
+      if (recorderPort !== undefined) await assertPortIsFree(recorderPort, "EN1 recorder");
+    }
+    console.log(
+      `[en1] teardown: containers=${String(cleanupEvidence.containers.length)} ` +
+        `networks=${String(cleanupEvidence.networks.length)} ` +
+        `volumes=${String(cleanupEvidence.volumes.length)} ` +
+        `images=${String(cleanupEvidence.images.length)}; ` +
+        `after ${String(CLEAN_SETTLE_MS)}ms settle: containers=${String(settled.containers.length)} ` +
+        `networks=${String(settled.networks.length)} volumes=${String(settled.volumes.length)} ` +
+        `images=${String(settled.images.length)}`,
+    );
+  }
+  if (failure) throw failure;
+  console.log(`[en1] evidence: ${JSON.stringify(evidence)}`);
+  console.log("[en1] EN1 GATE PASS");
+}
+
+export interface StartedPinnedRelayFixture {
+  project: string;
+  image: string;
+  httpPort: number;
+  wsPort: number;
+  authToken: string;
+  controlToken?: string;
+  revision: string;
+  bootMode: string;
+  cleanup: () => Promise<CleanupEvidence>;
+}
+
+export interface PinnedRelayFixtureStartOptions {
+  controls?: boolean;
+  authToken?: string;
+  /** Starts the pinned upstream relay main, including its real Polkadot
+   * submission path, instead of the N0 chainless entrypoint. */
+  chainNodeUrl?: string;
+  /** Existing external network carrying the named chain node endpoint. */
+  chainNetwork?: string;
+}
+
+/** Reuse the exact N0/N4 fixture lifecycle from a wider acceptance topology.
+ * The returned relay is already healthy; the caller owns the cleanup and may
+ * attach the project container to an additional project-prefixed Docker
+ * network. */
+export async function startPinnedRelayFixture(
+  sourceRepository: string,
+  prefix = "cow-n6-relay",
+  options: boolean | PinnedRelayFixtureStartOptions = false,
+): Promise<StartedPinnedRelayFixture> {
+  assert(sourceRepository.trim() !== "", "pinned relay source repository is required");
+  if (typeof options !== "boolean" && options.authToken !== undefined) {
+    assert(
+      options.authToken.length >= 32 && !/\s/.test(options.authToken),
+      "supplied pinned relay auth token must contain at least 32 non-whitespace characters",
+    );
+  }
+  if (typeof options !== "boolean" && options.chainNetwork !== undefined) {
+    assert(
+      options.chainNodeUrl !== undefined && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(options.chainNetwork),
+      "pinned relay chain network requires a chain URL and a canonical Docker network name",
+    );
+  }
+  const { session, cleanup, reservations } = await createSession(prefix, options);
+  try {
+    await buildAndStart(session, sourceRepository, async () => {
+      for (const reservation of reservations) await reservation.release();
+    });
+    return {
+      project: session.project,
+      image: session.image,
+      httpPort: session.httpPort,
+      wsPort: session.wsPort,
+      authToken: session.authToken,
+      ...(session.controlToken === undefined ? {} : { controlToken: session.controlToken }),
+      revision: RELAY_FIXTURE_REVISION,
+      bootMode: session.chainNodeUrl === undefined ? RELAY_FIXTURE_BOOT_MODE : "chain-backed",
+      cleanup,
+    };
+  } catch (error) {
+    const diagnostics = await runCommand("docker", composeArgs(session, ["logs", "--no-color", "--tail", "300"]), {
+      allowFailure: true,
+    });
+    console.error(`[relay-fixture] start failure diagnostics:\n${diagnostics.stdout}\n${diagnostics.stderr}`);
+    await cleanup();
+    throw error;
+  }
+}
+
 async function handleSignal(signal: NodeJS.Signals): Promise<void> {
   if (handlingSignal) return;
   handlingSignal = true;
@@ -1180,21 +1596,21 @@ async function handleSignal(signal: NodeJS.Signals): Promise<void> {
   process.exit(signal === "SIGINT" ? 130 : 143);
 }
 
-process.on("SIGINT", () => void handleSignal("SIGINT"));
-process.on("SIGTERM", () => void handleSignal("SIGTERM"));
-
 const invokedDirectly = process.argv[1] !== undefined &&
   process.argv[1] === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  process.on("SIGINT", () => void handleSignal("SIGINT"));
+  process.on("SIGTERM", () => void handleSignal("SIGTERM"));
   const wanted = process.argv.slice(2);
-  const known = ["--verify-n0", "--verify-n4"];
+  const known = ["--verify-n0", "--verify-n4", "--verify-en1"];
   if (wanted.some((argument) => !known.includes(argument))) {
-    console.error("usage: relay-fixture-e2e.ts [--verify-n0] [--verify-n4]");
+    console.error("usage: relay-fixture-e2e.ts [--verify-n0] [--verify-n4] [--verify-en1]");
     process.exit(2);
   }
   // Each gate owns its own fixture session — separate projects, separate
   // ports, separate teardown — so they never share relay state.
   if (wanted.length === 0 || wanted.includes("--verify-n0")) await verifyN0();
   if (wanted.includes("--verify-n4")) await verifyN4();
+  if (wanted.includes("--verify-en1")) await verifyEn1();
 }

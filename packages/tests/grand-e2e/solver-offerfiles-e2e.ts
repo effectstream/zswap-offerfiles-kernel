@@ -9,6 +9,9 @@
  *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-e0
  *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-e1-topology
  *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-e1-services
+ *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-en2
+ *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-en3
+ *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-en4
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -39,6 +42,11 @@ import {
   assertMixedComposeProofLogSafe,
   assertNoProofMaterialLogSignatures,
 } from "./lib/solver-offerfiles-real-proof-log-scan.ts";
+import {
+  startPinnedRelayFixture,
+  type CleanupEvidence as RelayCleanupEvidence,
+  type StartedPinnedRelayFixture,
+} from "./relay-fixture-e2e.ts";
 
 const NODE_IMAGE =
   "node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43";
@@ -121,6 +129,7 @@ const REAL_E1_ALLOWED_UNTRACKED_PATHS = Object.freeze([
   "packages/solver/swap-job-executor.test.ts",
   "packages/tests/grand-e2e/lib/solver-offerfiles-celestia.bun.lock",
   "packages/tests/grand-e2e/lib/solver-offerfiles-celestia.package.json",
+  "packages/tests/grand-e2e/lib/solver-offerfiles-en2-service.ts",
   "packages/tests/grand-e2e/lib/solver-offerfiles-harness-service.mjs",
   "packages/tests/grand-e2e/lib/solver-offerfiles-node-gyp.bun.lock",
   "packages/tests/grand-e2e/lib/solver-offerfiles-node-gyp.package.json",
@@ -151,6 +160,7 @@ const REAL_E1_REQUIRED_SOURCE_PATHS = Object.freeze([
   "packages/solver/src/swap-job-executor.ts",
   "packages/tests/grand-e2e/lib/solver-offerfiles-celestia.bun.lock",
   "packages/tests/grand-e2e/lib/solver-offerfiles-celestia.package.json",
+  "packages/tests/grand-e2e/lib/solver-offerfiles-en2-service.ts",
   "packages/tests/grand-e2e/lib/solver-offerfiles-harness-service.mjs",
   "packages/tests/grand-e2e/lib/solver-offerfiles-node-gyp.bun.lock",
   "packages/tests/grand-e2e/lib/solver-offerfiles-node-gyp.package.json",
@@ -1705,10 +1715,14 @@ function createCleanup(
       }
 
       try {
-        const down = await runCompose(session, ["down", "--volumes", "--remove-orphans", "--timeout", "3"], {
+        const down = await runCompose(
+          session,
+          ["--profile", "acceptance-manual", "down", "--volumes", "--remove-orphans", "--timeout", "3"],
+          {
           allowFailure: true,
           timeoutMs: 60_000,
-        });
+          },
+        );
         downCode = down.code;
         if (down.code !== 0) errors.push(`compose down exited ${down.code}: ${down.stderr}`);
       } catch (error) {
@@ -3556,16 +3570,32 @@ async function writeRealE1ActiveEnvironment(
   solverOutputDirectory: string,
   garbage: { outputDirectory: string; label: string; rawBase64: string },
 ): Promise<void> {
+  let n6Environment = "";
+  if (await pathExists(session.files.environment)) {
+    n6Environment = (await readFile(session.files.environment, "utf8"))
+      .split("\n")
+      .filter((line) => /^N6_[A-Z0-9_]+=/.test(line))
+      .map((line) => `${line}\n`)
+      .join("");
+  }
   await atomicPrivateText(
     session.files.environment,
-    realE1AcceptanceEnvironment(session, config, identity, solverOutputDirectory, garbage),
+    realE1AcceptanceEnvironment(session, config, identity, solverOutputDirectory, garbage) + n6Environment,
   );
+}
+
+interface N6AcceptanceComposeOptions {
+  relayNetwork: string;
+  relayAuthToken: string;
+  relayNodeHostPort?: number;
 }
 
 async function configureRealE1AcceptanceSession(
   session: RealE1Session,
+  n6?: N6AcceptanceComposeOptions,
 ): Promise<RealE1AcceptanceConfig> {
   const config = createRealE1AcceptanceConfig();
+  if (n6) config.secrets.push(n6.relayAuthToken);
   const defaultIdentity = config.identities[0]!;
   const bootSolverOutput = join(session.files.runtimeDirectory, "solver", "boot");
   const inactiveGarbageOutput = join(session.files.runtimeDirectory, "publication", "inactive-garbage");
@@ -3573,13 +3603,21 @@ async function configureRealE1AcceptanceSession(
     mkdir(bootSolverOutput, { mode: 0o700 }),
     mkdir(inactiveGarbageOutput, { mode: 0o700 }),
   ]);
-  const environment = realE1AcceptanceEnvironment(
+  let environment = realE1AcceptanceEnvironment(
     session,
     config,
     defaultIdentity,
     bootSolverOutput,
     { outputDirectory: inactiveGarbageOutput, label: "inactive", rawBase64: "AQ==" },
   );
+  if (n6) {
+    environment += [
+      `N6_RELAY_NETWORK=${n6.relayNetwork}`,
+      `N6_RELAY_AUTH_TOKEN=${n6.relayAuthToken}`,
+      `N6_TARGET_OFFER_HASH=${"0".repeat(64)}`,
+      "",
+    ].join("\n");
+  }
   session.files.generatedSecrets = config.secrets;
   await Promise.all([
     writeFile(session.files.environment, environment, { encoding: "utf8", mode: 0o600 }),
@@ -3596,6 +3634,8 @@ async function configureRealE1AcceptanceSession(
         trafficPath: session.files.traffic,
         runtimeDirectory: session.files.runtimeDirectory,
         proofLogMarker: session.files.proofLogMarker,
+        includeN6Services: n6 !== undefined,
+        ...(n6?.relayNodeHostPort === undefined ? {} : { n6RelayNodeHostPort: n6.relayNodeHostPort }),
       }),
       { encoding: "utf8", mode: 0o600 },
     ),
@@ -3743,11 +3783,16 @@ async function assertAcceptanceComposeIsManualSafe(session: RealE1Session): Prom
     "actor-provisioner": ["midnight_actor_clients"],
     "offer-publisher": ["publisher_egress"],
     "garbage-publisher": ["publisher_egress"],
-    "solver-case": ["midnight_solver_clients", "solver_front"],
+    "solver-case": [
+      "midnight_solver_clients",
+      ...(services["en2-solver"] === undefined ? [] : ["n6_relay"]),
+      "solver_front",
+    ],
     "settlement-verifier": ["midnight_actor_clients"],
     "backend-settlement-verifier": ["offerfiles_private"],
+    ...(services["en2-solver"] === undefined ? {} : { "en2-solver": ["n6_relay", "solver_front"] }),
   };
-  for (const service of [
+  const manualServices = [
     "actor-provisioner",
     "offer-publisher",
     "invalid-fixture-generator",
@@ -3755,7 +3800,9 @@ async function assertAcceptanceComposeIsManualSafe(session: RealE1Session): Prom
     "solver-case",
     "settlement-verifier",
     "backend-settlement-verifier",
-  ]) {
+    ...(services["en2-solver"] === undefined ? [] : ["en2-solver"]),
+  ];
+  for (const service of manualServices) {
     assert(
       services[service]?.profiles?.includes("acceptance-manual") === true,
       `${service}: missing acceptance-manual profile guard`,
@@ -3768,6 +3815,24 @@ async function assertAcceptanceComposeIsManualSafe(session: RealE1Session): Prom
     } else {
       assert(services[service]?.network_mode === "none", "invalid fixture generator must have no network");
     }
+  }
+  if (services["en2-solver"] !== undefined) {
+    assert(
+      JSON.stringify(networkNames(services["en2-backend-forwarder"])) ===
+        JSON.stringify(["control", "offerfiles_private", "solver_front"]),
+      "en2-backend-forwarder: configured networks differ from the exact split-horizon allowlist",
+    );
+    const forwarderEnvironment = configuredEnvironment(services["en2-backend-forwarder"]);
+    assert(
+      forwarderEnvironment.HARNESS_ROLE === "tcp-forwarder" &&
+        forwarderEnvironment.HARNESS_CHANNEL === "solver-backend-tcp" &&
+        forwarderEnvironment.HARNESS_COLLECTOR_URL === "http://traffic-recorder:8080" &&
+        forwarderEnvironment.HARNESS_PORT === "9999" &&
+        forwarderEnvironment.HARNESS_TCP_TARGET_HOST === "offerfiles-backend" &&
+        forwarderEnvironment.HARNESS_TCP_TARGET_PORT === "9999" &&
+        Object.keys(forwarderEnvironment).length === 6,
+      "en2-backend-forwarder: environment differs from the exact pull-only TCP contract",
+    );
   }
   for (const service of [
     "traffic-recorder",
@@ -3914,6 +3979,9 @@ async function assertAcceptanceComposeIsManualSafe(session: RealE1Session): Prom
       [activeSolverOutput, "/inputs/solver", true],
       [join(runtime, "backend-settlement"), "/outputs/settlement", false],
     ],
+    ...(services["en2-solver"] === undefined
+      ? {}
+      : { "en2-solver": [[join(runtime, "en2"), "/outputs/en2", false]] as Array<[string, string, boolean]> }),
   };
   for (const [serviceName, expected] of Object.entries(expectedMounts)) {
     const expectedSources = new Set(expected.map(([source]) => source));
@@ -4769,6 +4837,47 @@ async function runAcceptanceOneShot(
   return evidence;
 }
 
+async function runAcceptanceCommandOverride(
+  session: RealE1Session,
+  config: RealE1AcceptanceConfig,
+  service: string,
+  environment: Readonly<Record<string, string>>,
+  command: readonly string[],
+  logPath: string,
+  timeoutMs: number,
+): Promise<{ bytes: number; sha256: string }> {
+  assert(command.length > 0, `${service}: command override must not be empty`);
+  const environmentArguments: string[] = [];
+  for (const [name, value] of Object.entries(environment).sort(([left], [right]) => left.localeCompare(right))) {
+    assert(/^[A-Z][A-Z0-9_]*$/.test(name), `${service}: malformed override environment name ${name}`);
+    assert(!/[\r\n\0]/.test(value), `${service}: override environment ${name} contains a forbidden byte`);
+    environmentArguments.push("--env", `${name}=${value}`);
+  }
+  const result = await runCompose(
+    session,
+    [
+      "--profile", "acceptance-manual", "run", "--rm", "--no-deps",
+      ...environmentArguments,
+      service,
+      ...command,
+    ],
+    { timeoutMs, maxOutputBytes: 8 * 1024 * 1024 },
+  );
+  const output = `${result.stdout}${result.stderr}`;
+  const bytes = Buffer.from(output);
+  assert(bytes.byteLength <= 8 * 1024 * 1024, `${service}: overridden one-shot output exceeds 8 MiB`);
+  assertNoGeneratedSecrets(`${service} overridden one-shot output`, output, config.secrets);
+  await writeFile(logPath, bytes, { mode: 0o600, flag: "wx" });
+  const evidence = { bytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") };
+  config.oneShotLogs.push({
+    service: `${service}:override`,
+    path: relative(session.files.runtimeDirectory, logPath),
+    ...evidence,
+    text: output,
+  });
+  return evidence;
+}
+
 async function assertPrivateArtifact(path: string): Promise<Buffer> {
   const metadata = await lstat(path);
   assert(metadata.isFile() && !metadata.isSymbolicLink(), `${path}: acceptance artifact is not a non-symlink regular file`);
@@ -5312,6 +5421,7 @@ function assertReleasedStock(runtime: Record<string, unknown>, offerHash: string
 async function startRealSolverCase(
   session: RealE1Session,
   identity: RealE1AcceptanceIdentity,
+  n6RelayNetwork?: string,
 ): Promise<string> {
   const containerName = `${session.project}-case-${identity.caseName}`;
   const started = await runCompose(
@@ -5351,6 +5461,7 @@ async function startRealSolverCase(
     JSON.stringify(lines(networks.stdout).sort()) ===
       JSON.stringify([
         `${session.project}_midnight_solver_clients`,
+        ...(n6RelayNetwork === undefined ? [] : [n6RelayNetwork]),
         `${session.project}_solver_front`,
       ].sort()),
     `${identity.caseName}: live solver networks differ from the exact allowlist`,
@@ -6542,6 +6653,1811 @@ async function runRealSettlementVerifiers(
   };
 }
 
+interface En2Result {
+  project: string;
+  relayProject: string;
+  relayRevision: string;
+  network: string;
+  recorderPort: number;
+  offerHash: string;
+  publicationSha256: string;
+  resultSha256: string;
+  backendPullConnections: number;
+  publisherCelestiaRequests: number;
+  backendCelestiaRequests: number;
+  solverNetworks: string[];
+  backendNetworks: string[];
+  relayTokens: string[];
+  quote: { amountIn: string; amountOut: string };
+  cleanup: {
+    acceptanceErrors: string[];
+    relay: RelayCleanupEvidence;
+    externalNetworkRemoved: boolean;
+  };
+}
+
+async function dockerContainerFor(
+  project: string,
+  service: string,
+  commandChildren: Set<ChildProcessWithoutNullStreams>,
+): Promise<string> {
+  const result = await runCommand(
+    "docker",
+    [
+      "ps", "--filter", `label=com.docker.compose.project=${project}`,
+      "--filter", `label=com.docker.compose.service=${service}`, "--format", "{{.ID}}",
+    ],
+    commandChildren,
+    { timeoutMs: 30_000 },
+  );
+  const ids = result.stdout.trim().split("\n").filter(Boolean);
+  assert(ids.length === 1, `${project}/${service}: expected one running container, got ${ids.length}`);
+  return ids[0]!;
+}
+
+async function dockerContainerNetworks(
+  containerId: string,
+  commandChildren: Set<ChildProcessWithoutNullStreams>,
+): Promise<string[]> {
+  const result = await runCommand(
+    "docker",
+    ["inspect", "--format", "{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}\n{{end}}", containerId],
+    commandChildren,
+    { timeoutMs: 30_000 },
+  );
+  return result.stdout.trim().split("\n").filter(Boolean).sort();
+}
+
+async function dockerContainerIpv4(
+  containerId: string,
+  networkSuffix: string,
+  commandChildren: Set<ChildProcessWithoutNullStreams>,
+): Promise<string> {
+  const result = await runCommand(
+    "docker",
+    ["inspect", "--format", "{{json .NetworkSettings.Networks}}", containerId],
+    commandChildren,
+    { timeoutMs: 30_000 },
+  );
+  const networks = JSON.parse(result.stdout) as Record<string, { IPAddress?: unknown }>;
+  const matches = Object.entries(networks).filter(([name]) => name.endsWith(networkSuffix));
+  assert(matches.length === 1, `${containerId}: expected one ${networkSuffix} network`);
+  const address = matches[0]![1].IPAddress;
+  assert(typeof address === "string" && /^\d+\.\d+\.\d+\.\d+$/.test(address), "container IPv4 is absent");
+  return address;
+}
+
+async function waitForPath(path: string, label: string, timeoutMs: number): Promise<Buffer> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await pathExists(path)) return assertPrivateArtifact(path);
+    await sleep(250);
+  } while (Date.now() < deadline);
+  throw new Error(`${label} was not written within ${timeoutMs} ms`);
+}
+
+async function relayJson(
+  relay: StartedPinnedRelayFixture,
+  path: string,
+  body?: Record<string, string>,
+): Promise<{ status: number; value: Record<string, unknown> }> {
+  const response = await fetch(`http://127.0.0.1:${relay.httpPort}${path}`, {
+    ...(body === undefined
+      ? {}
+      : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  return { status: response.status, value: await response.json() as Record<string, unknown> };
+}
+
+async function waitForRelayEmpty(relay: StartedPinnedRelayFixture, label: string): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  do {
+    const response = await relayJson(relay, "/tokens");
+    if (response.status === 200 && Array.isArray(response.value.tokens) && response.value.tokens.length === 0) return;
+    await sleep(250);
+  } while (Date.now() < deadline);
+  throw new Error(`${label}: relay did not expose an empty token set`);
+}
+
+async function relayControlJson(
+  relay: StartedPinnedRelayFixture,
+  path: string,
+  method: "GET" | "POST" = "GET",
+  body?: Record<string, string>,
+): Promise<{ status: number; value: Record<string, unknown> }> {
+  assert(relay.controlToken !== undefined, "relay controls are not enabled");
+  const response = await fetch(`http://127.0.0.1:${relay.httpPort}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${relay.controlToken}`,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  return { status: response.status, value: await response.json() as Record<string, unknown> };
+}
+
+async function waitForRelayJob(
+  relay: StartedPinnedRelayFixture,
+  jobId: string,
+  terminalType: "job-error" | "swap-tx" | "submit-failed-sent",
+  timeoutMs = 360_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const response = await relayControlJson(relay, `/__n6/job/${encodeURIComponent(jobId)}`);
+    if (response.status === 200 && response.value.type === terminalType) return response.value;
+    await sleep(250);
+  } while (Date.now() < deadline);
+  throw new Error(`${jobId}: relay did not reach ${terminalType} within ${timeoutMs} ms`);
+}
+
+const exactFilesMatch = (): Record<string, unknown> => ({
+  method: "POST",
+  path: "/v1/offers/files",
+  fromOccurrence: 1,
+});
+
+async function waitForRuntimeReady(path: string, timeoutMs = 360_000): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await pathExists(path)) {
+      const parsed = JSON.parse((await readFile(path, "utf8"))) as Record<string, unknown>;
+      if (parsed.ready === true && parsed.state === "running") return parsed;
+    }
+    await sleep(250);
+  } while (Date.now() < deadline);
+  throw new Error(`solver runtime ${path} did not become ready`);
+}
+
+async function runEn2(): Promise<En2Result> {
+  const sourceRepository = process.env.RELAY_FIXTURE_SOURCE_REPO ??
+    "/Users/edwardalvarado/todo/COW Solver/resources/midnight-intents-swaps";
+  const relay = await startPinnedRelayFixture(sourceRepository, "cow-en2-relay");
+  const session = await createRealE1Session(await reserveRandomPort(new Set([relay.httpPort, relay.wsPort])));
+  const network = `cow-en2-${randomBytes(6).toString("hex")}`;
+  let networkCreated = false;
+  let acceptanceCleanup: RealE1CleanupEvidence | undefined;
+  let relayCleanup: RelayCleanupEvidence | undefined;
+  let config: RealE1AcceptanceConfig | undefined;
+  let result: Omit<En2Result, "cleanup"> | undefined;
+  const boundaryCleanupKey = `en2-boundary-${session.project}`;
+  let boundaryCleanupPromise: Promise<CleanupEvidence> | undefined;
+  const cleanupBoundary = (): Promise<CleanupEvidence> => {
+    boundaryCleanupPromise ??= (async () => {
+      const evidence = await relay.cleanup();
+      relayCleanup = evidence;
+      if (networkCreated) {
+        const deadline = Date.now() + 90_000;
+        for (;;) {
+          const removal = await runCommand("docker", ["network", "rm", network], session.children, {
+            timeoutMs: 30_000,
+            allowFailure: true,
+          });
+          if (removal.code === 0 || /No such network|not found/i.test(removal.stderr)) break;
+          if (Date.now() >= deadline) {
+            throw new Error(`could not remove EN2 external network ${network}: ${removal.stderr.trim()}`);
+          }
+          await sleep(500);
+        }
+      }
+      emergencyCleanups.delete(boundaryCleanupKey);
+      return {
+        downCode: 0,
+        containers: evidence.containers,
+        networks: evidence.networks,
+        volumes: evidence.volumes,
+        listenerReleased: true,
+        activeDriverProcesses: 0,
+        temporaryDirectoryRemoved: true,
+        errors: [],
+      };
+    })();
+    return boundaryCleanupPromise;
+  };
+  emergencyCleanups.set(boundaryCleanupKey, cleanupBoundary);
+  try {
+    await runCommand(
+      "docker",
+      ["network", "create", "--label", `org.zswap.n6.run=${session.project}`, network],
+      session.children,
+      { timeoutMs: 30_000 },
+    );
+    networkCreated = true;
+    const relayContainer = await dockerContainerFor(relay.project, "relay-fixture", session.children);
+    await runCommand(
+      "docker",
+      ["network", "connect", "--alias", "relay-fixture", network, relayContainer],
+      session.children,
+      { timeoutMs: 30_000 },
+    );
+
+    config = await configureRealE1AcceptanceSession(session, {
+      relayNetwork: network,
+      relayAuthToken: relay.authToken,
+    });
+    await mkdir(join(session.files.runtimeDirectory, "en2"), { mode: 0o700 });
+    await prepareGeneratedSecretBoundary(session);
+    await assertAcceptanceComposeIsManualSafe(session);
+    await buildRealE1Images(session);
+    await Promise.all([
+      inspectRealE1Image(
+        session, session.appImage, session.files.appImageId, "arm64",
+        session.files.appDockerfile, REAL_E1_APP_IMAGE_LABELS,
+      ),
+      inspectRealE1Image(
+        session, session.celestiaImage, session.files.celestiaImageId, "amd64",
+        session.files.celestiaDockerfile, REAL_E1_CELESTIA_IMAGE_LABELS,
+      ),
+      assertRealE1ImageSelfChecks(session),
+    ]);
+    await assertGeneratedSecretsAbsentFromBuiltImages(session);
+    await runCompose(
+      session,
+      [
+        "up", "--detach", "--wait", "--wait-timeout", "1200",
+        "backend-proxy", "publisher-celestia-proxy", "solver-isolation-probe",
+      ],
+      { timeoutMs: 1_260_000 },
+    );
+    await assertRealE1CelestiaCadence(session);
+    await fundRealE1CelestiaSigner(session);
+    await runAcceptanceOneShot(
+      session, config, "actor-provisioner",
+      join(session.files.runtimeDirectory, "actor", "actor-provisioner.log"), 900_000,
+    );
+    const actorManifestPath = join(session.files.runtimeDirectory, "actor", "actor-manifest.json");
+    const actorManifestBytes = await assertPrivateArtifact(actorManifestPath);
+    const actorManifest = JSON.parse(actorManifestBytes.toString("utf8")) as {
+      offer?: { offerHash?: unknown; offerBlob?: unknown };
+    };
+    const offerHash = String(actorManifest.offer?.offerHash ?? "");
+    assert(/^[0-9a-f]{64}$/.test(offerHash), "EN2 actor has no canonical offer hash");
+    const environment = (await readFile(session.files.environment, "utf8")).replace(
+      /^N6_TARGET_OFFER_HASH=.*$/m,
+      `N6_TARGET_OFFER_HASH=${offerHash}`,
+    );
+    await atomicPrivateText(session.files.environment, environment);
+
+    const beforeSolverEvents = await recorderEvents(session as unknown as HarnessSession);
+    const startSequence = beforeSolverEvents.length === 0 ? 0 : eventSequence(beforeSolverEvents.at(-1)!);
+    await runCompose(
+      session,
+      ["--profile", "acceptance-manual", "up", "--detach", "en2-solver"],
+      { timeoutMs: 120_000 },
+    );
+    const en2Container = await dockerContainerFor(session.project, "en2-solver", session.children);
+    const backendContainer = await dockerContainerFor(session.project, "offerfiles-backend", session.children);
+    const solverNetworks = await dockerContainerNetworks(en2Container, session.children);
+    const backendNetworks = await dockerContainerNetworks(backendContainer, session.children);
+    const solverPullIpv4 = await dockerContainerIpv4(en2Container, "_solver_front", session.children);
+    assert(
+      solverNetworks.some((name) => name.endsWith("_solver_front")) && solverNetworks.includes(network),
+      `EN2 solver networks are not backend-pull plus relay-only: ${solverNetworks.join(",")}`,
+    );
+    assert(
+      solverNetworks.every((name) => name === network || name.endsWith("_solver_front")),
+      `EN2 solver gained an unexpected network: ${solverNetworks.join(",")}`,
+    );
+    assert(
+      backendNetworks.every((name) => !solverNetworks.includes(name)),
+      "backend and solver unexpectedly share a direct network",
+    );
+    await waitForRelayEmpty(relay, "EN2 pre-publication");
+
+    await runAcceptanceOneShot(
+      session, config, "offer-publisher",
+      join(session.files.runtimeDirectory, "publication", "offer-publisher.log"), 180_000,
+    );
+    const publicationPath = join(session.files.runtimeDirectory, "publication", "offer-publication.json");
+    const publicationBytes = await assertPrivateArtifact(publicationPath);
+    const publication = JSON.parse(publicationBytes.toString("utf8")) as {
+      mode?: unknown;
+      actorManifest?: { offerHash?: unknown; sha256?: unknown };
+      payload?: { source?: unknown; sha256?: unknown };
+      verification?: { exactMatchesAtHeight?: unknown; getByCommitmentSha256?: unknown };
+    };
+    assert(
+      publication.mode === "offer" && publication.actorManifest?.offerHash === offerHash &&
+        publication.actorManifest.sha256 === createHash("sha256").update(actorManifestBytes).digest("hex") &&
+        publication.payload?.source === "actor-manifest.offer.offerBlob" &&
+        publication.payload.sha256 === offerHash && publication.verification?.exactMatchesAtHeight === 1 &&
+        publication.verification.getByCommitmentSha256 === offerHash,
+      "EN2 publication is not a direct, byte-bound Celestia submission",
+    );
+
+    const resultPath = join(session.files.runtimeDirectory, "en2", "result.json");
+    const resultBytes = await waitForPath(resultPath, "EN2 solver evidence", 360_000);
+    const solverEvidence = JSON.parse(resultBytes.toString("utf8")) as {
+      targetOfferHash?: unknown;
+      forbiddenEnvironmentKeys?: unknown;
+      targetChangeCount?: unknown;
+      relayStats?: { connected?: unknown; pushes?: unknown };
+      priceLevels?: {
+        levels?: Array<{
+          tokenIn?: unknown;
+          tokenOut?: unknown;
+          levels?: Array<{ input?: unknown; output?: unknown }>;
+        }>;
+      };
+    };
+    const pair = solverEvidence.priceLevels?.levels?.[0];
+    const rung = pair?.levels?.[0];
+    assert(
+      solverEvidence.targetOfferHash === offerHash &&
+        Array.isArray(solverEvidence.forbiddenEnvironmentKeys) && solverEvidence.forbiddenEnvironmentKeys.length === 0 &&
+        Number(solverEvidence.targetChangeCount) >= 1 && solverEvidence.relayStats?.connected === true &&
+        Number(solverEvidence.relayStats.pushes) >= 2 && typeof pair?.tokenIn === "string" &&
+        typeof pair.tokenOut === "string" && typeof rung?.input === "string" && typeof rung.output === "string",
+      "EN2 solver evidence did not bind mirror increment to a later relay ladder push",
+    );
+    const tokenResponse = await relayJson(relay, "/tokens");
+    const quoteResponse = await relayJson(relay, "/quote", {
+      tokenIn: String(pair.tokenIn), tokenOut: String(pair.tokenOut), amountIn: String(rung.input),
+    });
+    assert(tokenResponse.status === 200 && Array.isArray(tokenResponse.value.tokens), "EN2 relay tokens failed");
+    assert(
+      quoteResponse.status === 200 && quoteResponse.value.amountOut === rung.output,
+      `EN2 relay quote mismatch: ${JSON.stringify(quoteResponse.value)}`,
+    );
+
+    const events = (await recorderEvents(session as unknown as HarnessSession))
+      .filter((event) => eventSequence(event) > startSequence);
+    const backendPullConnections = events.filter(
+      (event) => event.channel === "solver-backend-tcp" && event.phase === "connection-open",
+    );
+    const publisherCelestia = events.filter(
+      (event) => event.channel === "publisher-celestia" && event.phase === "request",
+    );
+    const backendCelestia = events.filter(
+      (event) => event.channel === "backend-celestia" && event.phase === "request",
+    );
+    assert(
+      backendPullConnections.length > 0 &&
+        backendPullConnections.every((event) => event.remoteAddress === solverPullIpv4),
+      "EN2 backend TCP boundary accepted a connection not initiated by the solver container",
+    );
+    assert(
+      publisherCelestia.some((event) => event.method === "POST" && event.path === "/"),
+      "EN2 direct Celestia publisher request was not recorded",
+    );
+    assert(backendCelestia.length > 0, "EN2 backend Celestia ingestion traffic was not recorded");
+
+    await runCompose(
+      session,
+      ["--profile", "acceptance-manual", "stop", "--timeout", "30", "en2-solver"],
+      { timeoutMs: 60_000 },
+    );
+    await waitForRelayEmpty(relay, "EN2 graceful withdrawal");
+    result = {
+      project: session.project,
+      relayProject: relay.project,
+      relayRevision: relay.revision,
+      network,
+      recorderPort: session.recorderPort,
+      offerHash,
+      publicationSha256: createHash("sha256").update(publicationBytes).digest("hex"),
+      resultSha256: createHash("sha256").update(resultBytes).digest("hex"),
+      backendPullConnections: backendPullConnections.length,
+      publisherCelestiaRequests: publisherCelestia.length,
+      backendCelestiaRequests: backendCelestia.length,
+      solverNetworks,
+      backendNetworks,
+      relayTokens: tokenResponse.value.tokens as string[],
+      quote: { amountIn: String(rung.input), amountOut: String(rung.output) },
+    };
+  } finally {
+    let profiledDownFailure: string | undefined;
+    if (config !== undefined) {
+      const profiledDown = await runCompose(
+        session,
+        ["--profile", "acceptance-manual", "down", "--volumes", "--remove-orphans", "--timeout", "3"],
+        { timeoutMs: 90_000, allowFailure: true },
+      );
+      if (profiledDown.code !== 0) {
+        profiledDownFailure = `profiled Compose down exited ${profiledDown.code}: ${profiledDown.stderr.trim()}`;
+      }
+    }
+    acceptanceCleanup = await session.cleanup();
+    if (profiledDownFailure !== undefined) acceptanceCleanup.errors.push(profiledDownFailure);
+    await cleanupBoundary();
+  }
+  assert(result !== undefined && acceptanceCleanup !== undefined && relayCleanup !== undefined, "EN2 did not seal evidence");
+  assert(acceptanceCleanup.errors.length === 0, `EN2 acceptance cleanup failed: ${acceptanceCleanup.errors.join("; ")}`);
+  assert(
+    relayCleanup.containers.length === 0 && relayCleanup.networks.length === 0 &&
+      relayCleanup.volumes.length === 0 && relayCleanup.images.length === 0,
+    `EN2 relay cleanup retained resources: ${JSON.stringify(relayCleanup)}`,
+  );
+  const remainingNetwork = await runCommand(
+    "docker", ["network", "inspect", network], session.children, { timeoutMs: 30_000, allowFailure: true },
+  );
+  assert(remainingNetwork.code !== 0, `EN2 external network ${network} survived teardown`);
+  return {
+    ...result,
+    cleanup: {
+      acceptanceErrors: acceptanceCleanup.errors,
+      relay: relayCleanup,
+      externalNetworkRemoved: true,
+    },
+  };
+}
+
+interface En3RefusalEvidence {
+  caseName: string;
+  jobId: string;
+  reason: string;
+  swapSequence: number;
+  exactRequestCount: number;
+  exactRequestSequence: number;
+  exactResponseSequence: number | null;
+  walletMutationEvents: number;
+}
+
+interface En3Result {
+  project: string;
+  relayProject: string;
+  relayRevision: string;
+  network: string;
+  recorderPort: number;
+  offerHash: string;
+  publicationSha256: string;
+  quote: { tokenIn: string; tokenOut: string; amountIn: string; amountOut: string };
+  refusals: En3RefusalEvidence[];
+  valid: {
+    jobId: string;
+    swapSequence: number;
+    exactRequestSequence: number;
+    exactResponseSequence: number;
+    firstWalletSequence: number;
+    transactionBytes: number;
+    transactionSha256: string;
+    revertSequence: number;
+    revertCalls: number;
+    submissionCount: number;
+  };
+  evidenceSha256: string;
+  cleanup: {
+    acceptanceErrors: string[];
+    relay: RelayCleanupEvidence;
+    externalNetworkRemoved: boolean;
+  };
+}
+
+async function waitForRelayQuote(
+  relay: StartedPinnedRelayFixture,
+  quote: { tokenIn: string; tokenOut: string; amountIn: string; amountOut: string },
+  timeoutMs = 360_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const response = await relayJson(relay, "/quote", {
+      tokenIn: quote.tokenIn,
+      tokenOut: quote.tokenOut,
+      amountIn: quote.amountIn,
+    });
+    if (response.status === 200 && response.value.amountOut === quote.amountOut) return;
+    await sleep(500);
+  } while (Date.now() < deadline);
+  throw new Error(`relay did not expose exact EN3 quote ${quote.amountIn}->${quote.amountOut}`);
+}
+
+function exactFilesRequestBodySha256(offerHash: string): string {
+  return createHash("sha256").update(JSON.stringify({
+    schemaVersion: 1,
+    profile: "offer-files-solver-v1",
+    offerIds: [offerHash],
+  })).digest("hex");
+}
+
+function exactFilesRequestsAfter(
+  events: Array<Record<string, unknown>>,
+  afterSequence: number,
+  offerHash: string,
+): Array<Record<string, unknown>> {
+  const bodySha256 = exactFilesRequestBodySha256(offerHash);
+  return events.filter((event) =>
+    eventSequence(event) > afterSequence && event.channel === "backend" && event.phase === "request" &&
+    event.method === "POST" && event.path === "/v1/offers/files" && event.bodySha256 === bodySha256
+  );
+}
+
+function walletMutationEventsAfter(
+  events: Array<Record<string, unknown>>,
+  identity: RealE1AcceptanceIdentity,
+  afterSequence: number,
+): Array<Record<string, unknown>> {
+  return events.filter((event) =>
+    eventSequence(event) > afterSequence && isSolverEvent(event, identity.runId) &&
+    event.phase === "wallet-boundary"
+  );
+}
+
+async function removeExternalNetwork(
+  network: string,
+  session: RealE1Session,
+  label: string,
+): Promise<void> {
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    const removal = await runCommand("docker", ["network", "rm", network], session.children, {
+      timeoutMs: 30_000,
+      allowFailure: true,
+    });
+    if (removal.code === 0 || /No such network|not found/i.test(removal.stderr)) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`could not remove ${label} external network ${network}: ${removal.stderr.trim()}`);
+    }
+    await sleep(500);
+  }
+}
+
+async function runEn3(): Promise<En3Result> {
+  const sourceRepository = process.env.RELAY_FIXTURE_SOURCE_REPO ??
+    "/Users/edwardalvarado/todo/COW Solver/resources/midnight-intents-swaps";
+  const relay = await startPinnedRelayFixture(sourceRepository, "cow-en3-relay", true);
+  assert(relay.controlToken !== undefined, "EN3 relay control token was not created");
+  const session = await createRealE1Session(await reserveRandomPort(new Set([relay.httpPort, relay.wsPort])));
+  const network = `cow-en3-${randomBytes(6).toString("hex")}`;
+  let networkCreated = false;
+  let relayAttachedToControl = false;
+  let acceptanceCleanup: RealE1CleanupEvidence | undefined;
+  let relayCleanup: RelayCleanupEvidence | undefined;
+  let config: RealE1AcceptanceConfig | undefined;
+  let identity: RealE1AcceptanceIdentity | undefined;
+  let activeSolver = "";
+  let result: Omit<En3Result, "cleanup"> | undefined;
+  const boundaryCleanupKey = `en3-boundary-${session.project}`;
+  let boundaryCleanupPromise: Promise<CleanupEvidence> | undefined;
+  const cleanupBoundary = (): Promise<CleanupEvidence> => {
+    boundaryCleanupPromise ??= (async () => {
+      const evidence = await relay.cleanup();
+      relayCleanup = evidence;
+      if (networkCreated) await removeExternalNetwork(network, session, "EN3");
+      emergencyCleanups.delete(boundaryCleanupKey);
+      return {
+        downCode: 0,
+        containers: evidence.containers,
+        networks: evidence.networks,
+        volumes: evidence.volumes,
+        listenerReleased: true,
+        activeDriverProcesses: 0,
+        temporaryDirectoryRemoved: true,
+        errors: [],
+      };
+    })();
+    return boundaryCleanupPromise;
+  };
+  emergencyCleanups.set(boundaryCleanupKey, cleanupBoundary);
+
+  try {
+    await runCommand(
+      "docker",
+      ["network", "create", "--label", `org.zswap.n6.run=${session.project}`, network],
+      session.children,
+      { timeoutMs: 30_000 },
+    );
+    networkCreated = true;
+    const relayContainer = await dockerContainerFor(relay.project, "relay-fixture", session.children);
+    await runCommand(
+      "docker",
+      ["network", "connect", "--alias", "relay-fixture", network, relayContainer],
+      session.children,
+      { timeoutMs: 30_000 },
+    );
+
+    config = await configureRealE1AcceptanceSession(session, {
+      relayNetwork: network,
+      relayAuthToken: relay.authToken,
+    });
+    identity = acceptanceIdentity(config, "valid-fill");
+    await mkdir(join(session.files.runtimeDirectory, "en3"), { mode: 0o700 });
+    await prepareGeneratedSecretBoundary(session);
+    await assertAcceptanceComposeIsManualSafe(session);
+    await buildRealE1Images(session);
+    await Promise.all([
+      inspectRealE1Image(
+        session, session.appImage, session.files.appImageId, "arm64",
+        session.files.appDockerfile, REAL_E1_APP_IMAGE_LABELS,
+      ),
+      inspectRealE1Image(
+        session, session.celestiaImage, session.files.celestiaImageId, "amd64",
+        session.files.celestiaDockerfile, REAL_E1_CELESTIA_IMAGE_LABELS,
+      ),
+      assertRealE1ImageSelfChecks(session),
+    ]);
+    await assertGeneratedSecretsAbsentFromBuiltImages(session);
+    await runCompose(
+      session,
+      [
+        "up", "--detach", "--wait", "--wait-timeout", "1200",
+        "backend-proxy", "telemetry-relay", "publisher-celestia-proxy", "solver-isolation-probe",
+      ],
+      { timeoutMs: 1_260_000 },
+    );
+    const controlNetwork = `${session.project}_control`;
+    await runCommand(
+      "docker",
+      ["network", "connect", "--alias", "relay-control", controlNetwork, relayContainer],
+      session.children,
+      { timeoutMs: 30_000 },
+    );
+    relayAttachedToControl = true;
+
+    await assertRealE1CelestiaCadence(session);
+    await fundRealE1CelestiaSigner(session);
+    await runAcceptanceOneShot(
+      session, config, "actor-provisioner",
+      join(session.files.runtimeDirectory, "actor", "actor-provisioner.log"), 900_000,
+    );
+    const actorManifestPath = join(session.files.runtimeDirectory, "actor", "actor-manifest.json");
+    const actorManifestBytes = await assertPrivateArtifact(actorManifestPath);
+    const actorManifest = JSON.parse(actorManifestBytes.toString("utf8")) as {
+      tokens?: { A?: unknown; B?: unknown };
+      offer?: {
+        offerHash?: unknown;
+        gives?: Array<{ token?: unknown; amount?: unknown; kind?: unknown }>;
+        wants?: Array<{ token?: unknown; amount?: unknown; kind?: unknown }>;
+      };
+    };
+    const offerHash = String(actorManifest.offer?.offerHash ?? "");
+    const give = actorManifest.offer?.gives?.[0];
+    const want = actorManifest.offer?.wants?.[0];
+    const quote = {
+      tokenIn: String(want?.token ?? "").toLowerCase(),
+      tokenOut: String(give?.token ?? "").toLowerCase(),
+      amountIn: String(want?.amount ?? ""),
+      amountOut: String(give?.amount ?? ""),
+    };
+    assert(
+      /^[0-9a-f]{64}$/.test(offerHash) && /^[0-9a-f]{64}$/.test(quote.tokenIn) &&
+        /^[0-9a-f]{64}$/.test(quote.tokenOut) && /^[1-9][0-9]*$/.test(quote.amountIn) &&
+        /^[1-9][0-9]*$/.test(quote.amountOut) && quote.tokenIn !== quote.tokenOut &&
+        quote.tokenIn === String(actorManifest.tokens?.B ?? "").toLowerCase() &&
+        quote.tokenOut === String(actorManifest.tokens?.A ?? "").toLowerCase() &&
+        give?.kind === "SHIELDED" && want?.kind === "SHIELDED",
+      "EN3 actor manifest does not expose the exact B-to-A fill oracle",
+    );
+    const environment = (await readFile(session.files.environment, "utf8")).replace(
+      /^N6_TARGET_OFFER_HASH=.*$/m,
+      `N6_TARGET_OFFER_HASH=${offerHash}`,
+    );
+    await atomicPrivateText(session.files.environment, environment);
+
+    await runAcceptanceOneShot(
+      session, config, "offer-publisher",
+      join(session.files.runtimeDirectory, "publication", "offer-publisher.log"), 180_000,
+    );
+    const publicationBytes = await assertPrivateArtifact(
+      join(session.files.runtimeDirectory, "publication", "offer-publication.json"),
+    );
+    const exactPositive = await execAcceptanceJson(
+      session,
+      `(async()=>{const id=${JSON.stringify(offerHash)};const end=Date.now()+300000;for(;;){const r=await fetch('http://backend-proxy:8080/v1/offers/files',{method:'POST',headers:{accept:'application/json','content-type':'application/json'},body:JSON.stringify({schemaVersion:1,profile:'offer-files-solver-v1',offerIds:[id]}),signal:AbortSignal.timeout(15000)});if(r.status===200){const v=await r.json();if(v.schemaVersion===1&&v.profile==='offer-files-solver-v1'&&Array.isArray(v.files)&&v.files.length===1&&v.files[0]?.offerId===id&&v.files[0]?.verdict?.valid===true&&v.files[0]?.verdict?.live===true){console.log(JSON.stringify(v));return}}if(Date.now()>=end)throw new Error('exact file did not become available');await new Promise(resolve=>setTimeout(resolve,1000))}})().catch(e=>{console.error(e);process.exit(1)})`,
+      330_000,
+    );
+    const positiveFiles = exactPositive.files as Array<Record<string, unknown>>;
+    assert(Array.isArray(positiveFiles) && positiveFiles.length === 1, "EN3 positive exact-files oracle is malformed");
+    const positiveEntry = positiveFiles[0]!;
+    const positiveVerdict = positiveEntry.verdict as Record<string, unknown>;
+    assert(positiveEntry.offerId === offerHash && positiveVerdict.valid === true, "EN3 positive exact-files identity mismatch");
+
+    const outputDirectory = join(session.files.runtimeDirectory, "solver", "en3");
+    await activateRealE1Identity(
+      session,
+      config,
+      identity,
+      outputDirectory,
+      { outputDirectory: join(session.files.runtimeDirectory, "publication", "inactive-en3"), label: "inactive", rawBase64: "AQ==" },
+    );
+    activeSolver = await startRealSolverCase(session, identity, network);
+    await waitForRuntimeReady(join(outputDirectory, "solver-runtime.json"), 600_000);
+    await waitForRelayQuote(relay, quote, 360_000);
+
+    const negativeVerdict = {
+      ...positiveVerdict,
+      valid: false,
+      live: false,
+      status: "consumed",
+      code: "NOT_LIVE",
+      reason: "n6 externally injected refusal",
+    } as Record<string, unknown>;
+    delete negativeVerdict.computed;
+    const negativeResponse = {
+      schemaVersion: 1,
+      profile: "offer-files-solver-v1",
+      files: [{ offerId: offerHash, verdict: negativeVerdict }],
+    };
+    const refusals: Array<{
+      caseName: string;
+      expectedReason: string;
+      fault: Record<string, unknown>;
+      postOutcomeDelayMs?: number;
+    }> = [
+      {
+        caseName: "domain-invalid",
+        expectedReason: "exact_file_refused",
+        fault: {
+          mode: "replace", status: 200, contentType: "application/json", afterUpstream: true,
+          bodyBase64: Buffer.from(JSON.stringify(negativeResponse)).toString("base64"), match: exactFilesMatch(),
+        },
+      },
+      {
+        caseName: "unavailable",
+        expectedReason: "exact_files_unavailable",
+        fault: { mode: "status", status: 503, match: exactFilesMatch() },
+      },
+      {
+        caseName: "malformed",
+        expectedReason: "exact_files_unavailable",
+        fault: { mode: "malformed", match: exactFilesMatch() },
+      },
+      {
+        caseName: "projection-mismatch",
+        expectedReason: "exact_file_mismatch",
+        fault: {
+          mode: "json-patch", afterUpstream: true, patchId: "en3-projection-mismatch",
+          operations: [{
+            op: "increment-decimal-string",
+            path: "/files/0/verdict/computed/gives/0/amount",
+            delta: "1",
+          }],
+          match: exactFilesMatch(),
+        },
+      },
+      {
+        caseName: "timeout",
+        expectedReason: "exact_files_unavailable",
+        fault: { mode: "delay", delayMs: 20_000, match: exactFilesMatch() },
+        postOutcomeDelayMs: 6_000,
+      },
+      {
+        caseName: "disconnect",
+        expectedReason: "exact_files_unavailable",
+        fault: { mode: "disconnect", match: exactFilesMatch() },
+      },
+    ];
+    const refusalEvidence: En3RefusalEvidence[] = [];
+    for (const [index, descriptor] of refusals.entries()) {
+      await setFault(session as unknown as HarnessSession, "backend", descriptor.fault);
+      const jobId = `en3-${descriptor.caseName}-${index + 1}`;
+      let dispatchedSequence = 0;
+      try {
+        const dispatched = await relayControlJson(relay, "/__n6/job", "POST", { jobId, ...quote });
+        dispatchedSequence = Number(dispatched.value.recorderSequence);
+        assert(
+          dispatched.status === 202 && dispatched.value.status === "sent" &&
+            Number.isSafeInteger(dispatchedSequence) && dispatchedSequence > 0,
+          `${descriptor.caseName}: pinned relay did not dispatch the real swap job`,
+        );
+        const terminal = await waitForRelayJob(relay, jobId, "job-error", 360_000);
+        assert(
+          terminal.reason === descriptor.expectedReason,
+          `${descriptor.caseName}: expected ${descriptor.expectedReason}, got ${String(terminal.reason)}`,
+        );
+        if (descriptor.postOutcomeDelayMs) await sleep(descriptor.postOutcomeDelayMs);
+        const events = await recorderEvents(session as unknown as HarnessSession);
+        const markers = events.filter((event) =>
+          event.channel === "relay-control" && event.phase === "job" && event.event === "swap-arrived" &&
+          event.jobId === jobId
+        );
+        assert(
+          markers.length === 1 && eventSequence(markers[0]!) === dispatchedSequence,
+          `${descriptor.caseName}: swap-arrival marker is not unique/bound to the dispatch response`,
+        );
+        const requests = exactFilesRequestsAfter(events, dispatchedSequence, offerHash);
+        const expectedMaximum = descriptor.caseName === "disconnect" ? 2 : 1;
+        assert(
+          requests.length >= 1 && requests.length <= expectedMaximum,
+          `${descriptor.caseName}: expected 1-${expectedMaximum} exact-files wire attempts, got ${requests.length}`,
+        );
+        assert(
+          requests.every((candidate) => eventSequence(candidate) > dispatchedSequence),
+          `${descriptor.caseName}: an exact-files wire attempt preceded swap arrival`,
+        );
+        const request = requests[0]!;
+        const response = matchingResponse(events, request);
+        const mutations = walletMutationEventsAfter(events, identity, dispatchedSequence);
+        assert(mutations.length === 0, `${descriptor.caseName}: wallet mutation occurred after exact-files refusal`);
+        refusalEvidence.push({
+          caseName: descriptor.caseName,
+          jobId,
+          reason: String(terminal.reason),
+          swapSequence: dispatchedSequence,
+          exactRequestCount: requests.length,
+          exactRequestSequence: eventSequence(request),
+          exactResponseSequence: response === undefined ? null : eventSequence(response),
+          walletMutationEvents: mutations.length,
+        });
+      } finally {
+        await setFault(session as unknown as HarnessSession, "backend", null);
+      }
+      await waitForRelayQuote(relay, quote, 60_000);
+    }
+
+    const validJobId = "en3-valid-submit-failed";
+    const validDispatch = await relayControlJson(relay, "/__n6/job", "POST", { jobId: validJobId, ...quote });
+    const validSwapSequence = Number(validDispatch.value.recorderSequence);
+    assert(
+      validDispatch.status === 202 && Number.isSafeInteger(validSwapSequence) && validSwapSequence > 0,
+      "EN3 valid job was not dispatched by the pinned relay",
+    );
+    const swapTx = await waitForRelayJob(relay, validJobId, "swap-tx", 900_000);
+    const txHex = String(swapTx.txBytes ?? "");
+    assert(/^(?:[0-9a-f]{2})+$/i.test(txHex), "EN3 relay received malformed swap-tx bytes");
+    const txBytes = Buffer.from(txHex, "hex");
+    const afterSwap = await recorderEvents(session as unknown as HarnessSession);
+    const exactRequests = exactFilesRequestsAfter(afterSwap, validSwapSequence, offerHash);
+    assert(exactRequests.length === 1, `EN3 valid job made ${exactRequests.length} exact-files requests`);
+    const exactRequest = exactRequests[0]!;
+    const exactResponse = matchingResponse(afterSwap, exactRequest);
+    assert(exactResponse !== undefined && Number(exactResponse.status) === 200, "EN3 valid exact-files response is absent");
+    const walletEvents = walletMutationEventsAfter(afterSwap, identity, validSwapSequence);
+    assert(walletEvents.length > 0, "EN3 valid job recorded no real wallet boundary");
+    const firstWallet = walletEvents[0]!;
+    assert(
+      validSwapSequence < eventSequence(exactRequest) && eventSequence(exactRequest) < eventSequence(exactResponse) &&
+        eventSequence(exactResponse) < eventSequence(firstWallet),
+      "EN3 exact-files-after-job-before-wallet order is not total",
+    );
+    assert(
+      !afterSwap.some((event) =>
+        eventSequence(event) > validSwapSequence && isSolverEvent(event, identity!.runId) &&
+        (event.phase === "submission" || (event.phase === "wallet-boundary" && event.method === "submitTransaction"))
+      ),
+      "EN3 solver submitted a transaction instead of returning only swap-tx",
+    );
+
+    const submitFailed = await relayControlJson(
+      relay,
+      `/__n6/job/${encodeURIComponent(validJobId)}/submit-failed`,
+      "POST",
+      { reason: "en3_verified_relay_refusal" },
+    );
+    assert(submitFailed.status === 202, "EN3 relay did not send submit-failed");
+    await waitForRelayJob(relay, validJobId, "submit-failed-sent", 60_000);
+    const revertEvent = await waitForRecorderEvent(
+      session,
+      eventSequence(firstWallet),
+      "EN3 submit-failed wallet revert",
+      (event) => isPhaseEvent(event, identity!.runId, "wallet-boundary", "revert-succeeded") &&
+        event.method === "revert",
+      360_000,
+    );
+    await waitForRelayQuote(relay, quote, 60_000);
+
+    const solverLogs = await stopRealSolverCase(session, config, identity, activeSolver);
+    activeSolver = "";
+    const allEvents = await recorderEvents(session as unknown as HarnessSession);
+    const startSequence = Math.min(...refusalEvidence.map((entry) => entry.swapSequence), validSwapSequence) - 1;
+    const slice = allEvents.filter((event) =>
+      eventSequence(event) > startSequence &&
+      (isSolverEvent(event, identity!.runId) || event.channel === "backend" || event.channel === "relay-control")
+    );
+    const sealed = await sealRealE1Case(
+      session, config, identity, outputDirectory, startSequence, slice, offerHash, solverLogs,
+    );
+    const calls = walletBoundaryCalls(sealed.runtime);
+    const revertCalls = calls.revert ?? 0;
+    assert(revertCalls === 1, `EN3 submit-failed expected one wallet revert, got ${revertCalls}`);
+    assert(Number(sealed.runtime.submissionCount) === 0, "EN3 solver submission count is nonzero");
+    assertReleasedStock(sealed.runtime, offerHash, "EN3 terminal");
+    const reverts = slice.filter((event) =>
+      isPhaseEvent(event, identity!.runId, "wallet-boundary", "revert-succeeded") && event.method === "revert"
+    );
+    assert(reverts.length === 1, `EN3 central evidence contains ${reverts.length} successful reverts`);
+    await waitForRelayEmpty(relay, "EN3 graceful withdrawal");
+
+    const evidenceBase = {
+      schema: "zswap-offer-files-en3/v1",
+      project: session.project,
+      relayProject: relay.project,
+      relayRevision: relay.revision,
+      network,
+      recorderPort: session.recorderPort,
+      offerHash,
+      publicationSha256: createHash("sha256").update(publicationBytes).digest("hex"),
+      quote,
+      refusals: refusalEvidence,
+      valid: {
+        jobId: validJobId,
+        swapSequence: validSwapSequence,
+        exactRequestSequence: eventSequence(exactRequest),
+        exactResponseSequence: eventSequence(exactResponse),
+        firstWalletSequence: eventSequence(firstWallet),
+        transactionBytes: txBytes.byteLength,
+        transactionSha256: createHash("sha256").update(txBytes).digest("hex"),
+        revertSequence: eventSequence(revertEvent),
+        revertCalls,
+        submissionCount: Number(sealed.runtime.submissionCount),
+      },
+    };
+    const evidenceBytes = Buffer.from(`${JSON.stringify(evidenceBase, null, 2)}\n`);
+    assertNoGeneratedSecrets("EN3 evidence", evidenceBytes.toString("utf8"), config.secrets);
+    const evidencePath = join(session.files.runtimeDirectory, "en3", "evidence.json");
+    await writeFile(evidencePath, evidenceBytes, { mode: 0o600, flag: "wx" });
+    await assertPrivateArtifact(evidencePath);
+    result = {
+      ...evidenceBase,
+      evidenceSha256: createHash("sha256").update(evidenceBytes).digest("hex"),
+    };
+  } finally {
+    await setFault(session as unknown as HarnessSession, "backend", null).catch(() => undefined);
+    if (activeSolver && config !== undefined && identity !== undefined) {
+      await stopRealSolverCase(session, config, identity, activeSolver).catch(() => undefined);
+      activeSolver = "";
+    }
+    if (relayAttachedToControl || networkCreated) await cleanupBoundary();
+    const profiledDown = await runCompose(
+      session,
+      ["--profile", "acceptance-manual", "down", "--volumes", "--remove-orphans", "--timeout", "3"],
+      { timeoutMs: 90_000, allowFailure: true },
+    );
+    acceptanceCleanup = await session.cleanup();
+    if (profiledDown.code !== 0) {
+      acceptanceCleanup.errors.push(`profiled Compose down exited ${profiledDown.code}: ${profiledDown.stderr.trim()}`);
+    }
+    if (relayCleanup === undefined) await cleanupBoundary();
+  }
+  assert(result !== undefined && acceptanceCleanup !== undefined && relayCleanup !== undefined, "EN3 did not seal evidence");
+  assert(acceptanceCleanup.errors.length === 0, `EN3 acceptance cleanup failed: ${acceptanceCleanup.errors.join("; ")}`);
+  assert(
+    relayCleanup.containers.length === 0 && relayCleanup.networks.length === 0 &&
+      relayCleanup.volumes.length === 0 && relayCleanup.images.length === 0,
+    `EN3 relay cleanup retained resources: ${JSON.stringify(relayCleanup)}`,
+  );
+  const remainingNetwork = await runCommand(
+    "docker", ["network", "inspect", network], session.children, { timeoutMs: 30_000, allowFailure: true },
+  );
+  assert(remainingNetwork.code !== 0, `EN3 external network ${network} survived teardown`);
+  return {
+    ...result,
+    cleanup: {
+      acceptanceErrors: acceptanceCleanup.errors,
+      relay: relayCleanup,
+      externalNetworkRemoved: true,
+    },
+  };
+}
+
+interface En4MarkerRow {
+  marker: string;
+  txHash: string | null;
+  height: number;
+}
+
+interface En4NodeBinding {
+  scanFromHeight: number;
+  scanToHeight: number;
+  blockHeight: number;
+  blockHash: string;
+  extrinsicCount: number;
+  relayExtrinsicIndex: number;
+  relayExtrinsicHash: string;
+  callSection: string;
+  callMethod: string;
+}
+
+interface En4FinalizedHead {
+  height: number;
+  hash: string;
+}
+
+interface En4DatabaseSettlement {
+  liveCount: number;
+  historyCount: number;
+  offer: {
+    offerHash: string;
+    transactionHex: string;
+    l2BlockHeight: string;
+    archiveReason: string;
+  } | null;
+  makerNullifiers: En4MarkerRow[];
+  makerCommitments: En4MarkerRow[];
+  takerNullifiers: En4MarkerRow[];
+}
+
+interface En4Result {
+  project: string;
+  relayProject: string;
+  relayRevision: string;
+  relayBootMode: string;
+  network: string;
+  recorderPort: number;
+  nodePort: number;
+  offerHash: string;
+  publicationSha256: string;
+  intentSha256: string;
+  storyAssets: { A: string; B: string; fixtureMapping: string };
+  quote: { tokenIn: string; tokenOut: string; amountIn: string; amountOut: string; quoteId: string };
+  job: { jobId: string; statuses: string[]; txId: string };
+  ordering: { exactRequestSequence: number; exactResponseSequence: number; firstWalletSequence: number };
+  settlement: En4DatabaseSettlement & {
+    ledgerTransactionHash: string;
+    distinctTransactionHashes: string[];
+    distinctBlockHeights: number[];
+    relayNodeBinding: En4NodeBinding;
+  };
+  wallet: {
+    evidenceSha256: string;
+    takerDelta: { A: string; B: string };
+    makerDelta: { A: string; B: string };
+    fee: { asset: string; delta: string; interpretation: string };
+    stableObservations: number;
+  };
+  solver: { submissionCount: number; revertCalls: number; relayAcceptedLog: boolean; backendConfirmedLog: boolean };
+  relayLogSha256: string;
+  evidenceSha256: string;
+  cleanup: {
+    acceptanceErrors: string[];
+    relay: RelayCleanupEvidence;
+    externalNetworkRemoved: boolean;
+    nodePortReleased: boolean;
+  };
+}
+
+function canonicalEn4TransactionHash(value: unknown, label: string): string {
+  const canonical = String(value ?? "").replace(/^0x/i, "").toLowerCase();
+  assert(/^[0-9a-f]{64}$/.test(canonical), `${label}: malformed transaction hash ${String(value)}`);
+  return canonical;
+}
+
+function canonicalEn4Markers(value: unknown, label: string): En4MarkerRow[] {
+  assert(Array.isArray(value), `${label}: marker rows are not an array`);
+  return value.map((entry, index) => {
+    assert(entry && typeof entry === "object" && !Array.isArray(entry), `${label}[${index}]: malformed row`);
+    const row = entry as Record<string, unknown>;
+    const marker = String(row.marker ?? "").toLowerCase();
+    assert(/^[0-9a-f]{64}$/.test(marker), `${label}[${index}]: malformed marker`);
+    return {
+      marker,
+      txHash: row.txHash === null ? null : canonicalEn4TransactionHash(row.txHash, `${label}[${index}].txHash`),
+      height: Number(row.height),
+    };
+  });
+}
+
+async function queryEn4DatabaseSettlement(
+  session: RealE1Session,
+  offerHash: string,
+  takerNullifiers: readonly string[],
+): Promise<En4DatabaseSettlement> {
+  assert(/^[0-9a-f]{64}$/.test(offerHash), "EN4 database offer hash is malformed");
+  assert(
+    takerNullifiers.length > 0 && takerNullifiers.every((marker) => /^[0-9a-f]{64}$/.test(marker)),
+    "EN4 database taker-nullifier oracle is malformed",
+  );
+  const takerArray = takerNullifiers.map((marker) => `'${marker}'`).join(",");
+  const sql = `WITH selected AS (
+  SELECT id, offer_hash, transaction_hex, celestia_height::text AS l2_block_height, archive_reason
+  FROM offer_file_history WHERE offer_hash = '${offerHash}' ORDER BY id LIMIT 1
+), maker_nullifiers AS (
+  SELECT h.nullifier AS marker, n.tx_hash AS "txHash", n.height::int AS height
+  FROM offer_file_nullifiers_history h JOIN selected s ON s.id = h.offer_file_id
+  LEFT JOIN nullifiers n ON n.nullifier = h.nullifier ORDER BY h.nullifier, n.tx_hash NULLS FIRST
+), maker_commitments AS (
+  SELECT h.commitment AS marker, c.tx_hash AS "txHash", c.height::int AS height
+  FROM offer_file_commitments_history h JOIN selected s ON s.id = h.offer_file_id
+  LEFT JOIN commitments c ON c.commitment = h.commitment ORDER BY h.commitment, c.tx_hash NULLS FIRST
+), taker_nullifiers AS (
+  SELECT n.nullifier AS marker, n.tx_hash AS "txHash", n.height::int AS height
+  FROM nullifiers n WHERE n.nullifier = ANY(ARRAY[${takerArray}]::text[])
+  ORDER BY n.nullifier, n.tx_hash NULLS FIRST
+)
+SELECT jsonb_build_object(
+  'liveCount', (SELECT count(*)::int FROM offer_file WHERE offer_hash = '${offerHash}'),
+  'historyCount', (SELECT count(*)::int FROM offer_file_history WHERE offer_hash = '${offerHash}'),
+  'offer', (SELECT jsonb_build_object('offerHash', offer_hash, 'transactionHex', transaction_hex,
+    'l2BlockHeight', l2_block_height, 'archiveReason', archive_reason) FROM selected),
+  'makerNullifiers', COALESCE((SELECT jsonb_agg(to_jsonb(maker_nullifiers)) FROM maker_nullifiers), '[]'::jsonb),
+  'makerCommitments', COALESCE((SELECT jsonb_agg(to_jsonb(maker_commitments)) FROM maker_commitments), '[]'::jsonb),
+  'takerNullifiers', COALESCE((SELECT jsonb_agg(to_jsonb(taker_nullifiers)) FROM taker_nullifiers), '[]'::jsonb)
+)::text;`;
+  const result = await runCompose(
+    session,
+    [
+      "exec", "--no-TTY", "postgres", "psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1",
+      "-U", "postgres", "-d", "postgres", "-c", sql,
+    ],
+    { timeoutMs: 30_000, maxOutputBytes: 1024 * 1024 },
+  );
+  const output = lines(result.stdout).at(-1);
+  assert(output !== undefined, "EN4 database settlement query returned no JSON");
+  const parsed = JSON.parse(output) as Record<string, unknown>;
+  const offer = parsed.offer;
+  return {
+    liveCount: Number(parsed.liveCount),
+    historyCount: Number(parsed.historyCount),
+    offer: offer === null
+      ? null
+      : {
+          offerHash: String((offer as Record<string, unknown>).offerHash ?? "").toLowerCase(),
+          transactionHex: String((offer as Record<string, unknown>).transactionHex ?? ""),
+          l2BlockHeight: String((offer as Record<string, unknown>).l2BlockHeight ?? ""),
+          archiveReason: String((offer as Record<string, unknown>).archiveReason ?? ""),
+        },
+    makerNullifiers: canonicalEn4Markers(parsed.makerNullifiers, "EN4 maker nullifiers"),
+    makerCommitments: canonicalEn4Markers(parsed.makerCommitments, "EN4 maker commitments"),
+    takerNullifiers: canonicalEn4Markers(parsed.takerNullifiers, "EN4 taker nullifiers"),
+  };
+}
+
+async function queryEn4RelayNodeBinding(
+  session: RealE1Session,
+  relayContainer: string,
+  relayTxId: string,
+  finalizedHeadBeforeIntent: En4FinalizedHead,
+): Promise<En4NodeBinding> {
+  assert(/^[0-9a-f]{12,64}$/.test(relayContainer), "EN4 relay container identity is malformed");
+  const script = `import { ApiPromise, WsProvider } from '@polkadot/api';
+const scanFromHeight=${String(finalizedHeadBeforeIntent.height)};
+const expected=${JSON.stringify(`0x${relayTxId}`)};
+const provider=new WsProvider(process.env.MIDNIGHT_NODE_URL);
+const api=await ApiPromise.create({provider,noInitWarn:true});
+try {
+  const finalizedHash=await api.rpc.chain.getFinalizedHead();
+  const finalizedHeader=await api.rpc.chain.getHeader(finalizedHash);
+  const scanToHeight=finalizedHeader.number.toNumber();
+  if(scanToHeight<scanFromHeight||scanToHeight-scanFromHeight>256)throw new Error('invalid finalized scan window '+scanFromHeight+'..'+scanToHeight);
+  let match=null;
+  for(let height=scanFromHeight;height<=scanToHeight&&match===null;height++){
+    const blockHash=(await api.rpc.chain.getBlockHash(height)).toHex().toLowerCase();
+    const signed=await api.rpc.chain.getBlock(blockHash);
+    const extrinsics=signed.block.extrinsics;
+    const relayExtrinsicIndex=extrinsics.findIndex(value=>value.hash.toHex().toLowerCase()===expected);
+    if(relayExtrinsicIndex>=0){const matched=extrinsics[relayExtrinsicIndex];match={scanFromHeight,scanToHeight,blockHeight:height,blockHash,extrinsicCount:extrinsics.length,relayExtrinsicIndex,relayExtrinsicHash:expected,callSection:matched.method.section,callMethod:matched.method.method};}
+  }
+  if(match===null)throw new Error('done tx extrinsic not found in finalized scan window '+scanFromHeight+'..'+scanToHeight);
+  console.log(JSON.stringify(match));
+} finally { await api.disconnect(); }`;
+  const result = await runCommand(
+    "docker",
+    ["exec", relayContainer, "node", "--input-type=module", "--eval", script],
+    session.children,
+    { timeoutMs: 120_000, maxOutputBytes: 1024 * 1024 },
+  );
+  const output = lines(result.stdout).at(-1);
+  assert(output !== undefined, "EN4 node binding query returned no JSON");
+  const parsed = JSON.parse(output) as Record<string, unknown>;
+  const binding = {
+    scanFromHeight: Number(parsed.scanFromHeight),
+    scanToHeight: Number(parsed.scanToHeight),
+    blockHeight: Number(parsed.blockHeight),
+    blockHash: String(parsed.blockHash ?? "").toLowerCase(),
+    extrinsicCount: Number(parsed.extrinsicCount),
+    relayExtrinsicIndex: Number(parsed.relayExtrinsicIndex),
+    relayExtrinsicHash: canonicalEn4TransactionHash(parsed.relayExtrinsicHash, "EN4 relay extrinsic hash"),
+    callSection: String(parsed.callSection ?? ""),
+    callMethod: String(parsed.callMethod ?? ""),
+  };
+  assert(
+    binding.scanFromHeight === finalizedHeadBeforeIntent.height &&
+      binding.scanToHeight >= binding.scanFromHeight && binding.scanToHeight - binding.scanFromHeight <= 256 &&
+      binding.blockHeight >= binding.scanFromHeight && binding.blockHeight <= binding.scanToHeight &&
+      /^0x[0-9a-f]{64}$/.test(binding.blockHash) &&
+      Number.isSafeInteger(binding.extrinsicCount) && binding.extrinsicCount > 0 &&
+      Number.isSafeInteger(binding.relayExtrinsicIndex) && binding.relayExtrinsicIndex >= 0 &&
+      binding.relayExtrinsicIndex < binding.extrinsicCount && binding.relayExtrinsicHash === relayTxId &&
+      /^[a-zA-Z][a-zA-Z0-9_]*$/.test(binding.callSection) && /^[a-zA-Z][a-zA-Z0-9_]*$/.test(binding.callMethod),
+    `EN4 done.txId is absent from the bounded finalized intent window: ${JSON.stringify(binding)}`,
+  );
+  return binding;
+}
+
+async function queryEn4RelayFinalizedHead(
+  session: RealE1Session,
+  relayContainer: string,
+): Promise<En4FinalizedHead> {
+  const script = `import { ApiPromise, WsProvider } from '@polkadot/api';
+const provider=new WsProvider(process.env.MIDNIGHT_NODE_URL);
+const api=await ApiPromise.create({provider,noInitWarn:true});
+try { const hash=await api.rpc.chain.getFinalizedHead(); const header=await api.rpc.chain.getHeader(hash); console.log(JSON.stringify({height:header.number.toNumber(),hash:hash.toHex().toLowerCase()})); } finally { await api.disconnect(); }`;
+  const result = await runCommand(
+    "docker", ["exec", relayContainer, "node", "--input-type=module", "--eval", script], session.children,
+    { timeoutMs: 120_000, maxOutputBytes: 1024 * 1024 },
+  );
+  const output = lines(result.stdout).at(-1);
+  assert(output !== undefined, "EN4 pre-intent finalized-head query returned no JSON");
+  const parsed = JSON.parse(output) as Record<string, unknown>;
+  const head = { height: Number(parsed.height), hash: String(parsed.hash ?? "").toLowerCase() };
+  assert(
+    Number.isSafeInteger(head.height) && head.height > 0 && /^0x[0-9a-f]{64}$/.test(head.hash),
+    `EN4 pre-intent finalized head is malformed: ${JSON.stringify(head)}`,
+  );
+  return head;
+}
+
+async function waitForEn4DatabaseSettlement(
+  session: RealE1Session,
+  offerHash: string,
+  takerNullifiers: readonly string[],
+  expectedMakerNullifiers: readonly string[],
+  expectedMakerCommitments: readonly string[],
+  timeoutMs = 360_000,
+): Promise<En4DatabaseSettlement> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const observed = await queryEn4DatabaseSettlement(session, offerHash, takerNullifiers);
+    const markerCountsReady =
+      observed.makerNullifiers.length === expectedMakerNullifiers.length &&
+      observed.makerCommitments.length === expectedMakerCommitments.length &&
+      observed.takerNullifiers.length === takerNullifiers.length;
+    const hashesReady = [...observed.makerNullifiers, ...observed.makerCommitments, ...observed.takerNullifiers]
+      .every((row) => row.txHash !== null);
+    if (observed.historyCount === 1 && observed.offer?.archiveReason !== "CONSUMED") {
+      throw new Error(`EN4 maker offer archived as ${String(observed.offer?.archiveReason)}, not CONSUMED`);
+    }
+    if (
+      observed.liveCount === 0 && observed.historyCount === 1 &&
+      observed.offer?.archiveReason === "CONSUMED" && markerCountsReady && hashesReady
+    ) return observed;
+    await sleep(1_000);
+  } while (Date.now() < deadline);
+  throw new Error("EN4 database settlement/nullifier watch did not finalize before the deadline");
+}
+
+async function postEn4Intent(
+  relay: StartedPinnedRelayFixture,
+  quoteId: string,
+  bytes: Buffer,
+): Promise<string> {
+  const response = await fetch(
+    `http://127.0.0.1:${String(relay.httpPort)}/intent?quoteId=${encodeURIComponent(quoteId)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: Uint8Array.from(bytes).buffer,
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
+  const body = await response.json() as Record<string, unknown>;
+  assert(response.status === 202, `EN4 relay rejected proved intent: ${response.status} ${JSON.stringify(body)}`);
+  const jobId = String(body.jobId ?? "");
+  assert(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId),
+    `EN4 relay returned malformed jobId ${jobId}`,
+  );
+  return jobId;
+}
+
+async function waitForEn4RelayDone(
+  relay: StartedPinnedRelayFixture,
+  jobId: string,
+  timeoutMs = 900_000,
+): Promise<{ statuses: string[]; txId: string }> {
+  const deadline = Date.now() + timeoutMs;
+  const statuses: string[] = [];
+  do {
+    const response = await fetch(`http://127.0.0.1:${String(relay.httpPort)}/jobs/${encodeURIComponent(jobId)}`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const value = await response.json() as Record<string, unknown>;
+    assert(response.status === 200, `EN4 relay job poll returned ${response.status}: ${JSON.stringify(value)}`);
+    const status = String(value.status ?? "");
+    if (statuses.at(-1) !== status) statuses.push(status);
+    if (status === "error") throw new Error(`EN4 relay job failed: ${String(value.reason)}`);
+    if (status === "done") return { statuses, txId: canonicalEn4TransactionHash(value.txId, "EN4 done.txId") };
+    assert(status === "pending" || status === "solving", `EN4 relay returned unknown job status ${status}`);
+    await sleep(250);
+  } while (Date.now() < deadline);
+  throw new Error(`EN4 relay job ${jobId} did not reach done within ${timeoutMs} ms`);
+}
+
+async function waitForSolverLogMessages(
+  telemetryPath: string,
+  expectedMessages: readonly string[],
+  timeoutMs = 360_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await pathExists(telemetryPath)) {
+      const events = lines(await readFile(telemetryPath, "utf8")).map((line) => JSON.parse(line) as Record<string, unknown>);
+      const messages = events.filter((event) => event.kind === "solver-log").map((event) => {
+        const data = event.data as Record<string, unknown> | undefined;
+        return String(data?.message ?? "");
+      });
+      if (expectedMessages.every((message) => messages.some((candidate) => candidate.includes(message)))) return;
+    }
+    await sleep(500);
+  } while (Date.now() < deadline);
+  throw new Error(`EN4 solver telemetry did not record: ${expectedMessages.join(" | ")}`);
+}
+
+async function runEn4(): Promise<En4Result> {
+  const sourceRepository = process.env.RELAY_FIXTURE_SOURCE_REPO ??
+    "/Users/edwardalvarado/todo/COW Solver/resources/midnight-intents-swaps";
+  const recorderReservation = await reserveRandomPort(new Set());
+  const nodeReservation = await reserveRandomPort(new Set([recorderReservation.port]));
+  let nodeReservationReleased = false;
+  let session: RealE1Session;
+  try {
+    session = await createRealE1Session(recorderReservation);
+  } catch (error) {
+    await nodeReservation.release();
+    throw error;
+  }
+  const nodePort = nodeReservation.port;
+  const network = `cow-en4-${randomBytes(6).toString("hex")}`;
+  const relayAuthToken = randomBytes(32).toString("hex");
+  let networkCreated = false;
+  let relay: StartedPinnedRelayFixture | undefined;
+  let relayContainer = "";
+  let relayCleanup: RelayCleanupEvidence | undefined;
+  let acceptanceCleanup: RealE1CleanupEvidence | undefined;
+  let config: RealE1AcceptanceConfig | undefined;
+  let identity: RealE1AcceptanceIdentity | undefined;
+  let activeSolver = "";
+  let result: Omit<En4Result, "cleanup"> | undefined;
+  const relayChainNetwork = `${session.project}_midnight_contract_clients`;
+  const boundaryCleanupKey = `en4-boundary-${session.project}`;
+  let boundaryCleanupPromise: Promise<CleanupEvidence> | undefined;
+  let relayChainDisconnected = false;
+  const disconnectRelayChain = async (): Promise<void> => {
+    if (relayChainDisconnected || relayContainer === "") return;
+    const disconnected = await runCommand(
+      "docker", ["network", "disconnect", "--force", relayChainNetwork, relayContainer], session.children,
+      { timeoutMs: 30_000, allowFailure: true },
+    );
+    if (
+      disconnected.code !== 0 &&
+      !/No such (?:container|network)|is not connected|not found/i.test(disconnected.stderr)
+    ) {
+      throw new Error(`could not disconnect EN4 relay from E1 chain network: ${disconnected.stderr.trim()}`);
+    }
+    relayChainDisconnected = true;
+  };
+  const cleanupBoundary = (): Promise<CleanupEvidence> => {
+    boundaryCleanupPromise ??= (async () => {
+      await nodeReservation.release();
+      nodeReservationReleased = true;
+      await disconnectRelayChain();
+      const evidence = relay === undefined
+        ? { containers: [], networks: [], volumes: [], images: [] }
+        : await relay.cleanup();
+      relayCleanup = evidence;
+      if (networkCreated) await removeExternalNetwork(network, session, "EN4");
+      emergencyCleanups.delete(boundaryCleanupKey);
+      return {
+        downCode: 0,
+        containers: evidence.containers,
+        networks: evidence.networks,
+        volumes: evidence.volumes,
+        listenerReleased: true,
+        activeDriverProcesses: 0,
+        temporaryDirectoryRemoved: true,
+        errors: [],
+      };
+    })();
+    return boundaryCleanupPromise;
+  };
+  emergencyCleanups.set(boundaryCleanupKey, cleanupBoundary);
+
+  try {
+    await runCommand(
+      "docker",
+      ["network", "create", "--label", `org.zswap.n6.run=${session.project}`, network],
+      session.children,
+      { timeoutMs: 30_000 },
+    );
+    networkCreated = true;
+    config = await configureRealE1AcceptanceSession(session, {
+      relayNetwork: network,
+      relayAuthToken,
+      relayNodeHostPort: nodePort,
+    });
+    identity = acceptanceIdentity(config, "valid-fill");
+    await mkdir(join(session.files.runtimeDirectory, "en4"), { mode: 0o700 });
+    await prepareGeneratedSecretBoundary(session);
+    await assertAcceptanceComposeIsManualSafe(session);
+    await buildRealE1Images(session);
+    await Promise.all([
+      inspectRealE1Image(
+        session, session.appImage, session.files.appImageId, "arm64",
+        session.files.appDockerfile, REAL_E1_APP_IMAGE_LABELS,
+      ),
+      inspectRealE1Image(
+        session, session.celestiaImage, session.files.celestiaImageId, "amd64",
+        session.files.celestiaDockerfile, REAL_E1_CELESTIA_IMAGE_LABELS,
+      ),
+      assertRealE1ImageSelfChecks(session),
+    ]);
+    await assertGeneratedSecretsAbsentFromBuiltImages(session);
+    await nodeReservation.release();
+    nodeReservationReleased = true;
+    await runCompose(
+      session,
+      [
+        "up", "--detach", "--wait", "--wait-timeout", "1200",
+        "backend-proxy", "telemetry-relay", "publisher-celestia-proxy", "solver-isolation-probe",
+      ],
+      { timeoutMs: 1_260_000 },
+    );
+    relay = await startPinnedRelayFixture(sourceRepository, "cow-en4-relay", {
+      authToken: relayAuthToken,
+      chainNodeUrl: "ws://midnight-node-gateway:9944",
+      chainNetwork: relayChainNetwork,
+    });
+    assert(relay.bootMode === "chain-backed", `EN4 relay booted as ${relay.bootMode}`);
+    relayContainer = await dockerContainerFor(relay.project, "relay-fixture", session.children);
+    await runCommand(
+      "docker",
+      ["network", "connect", "--alias", "relay-fixture", network, relayContainer],
+      session.children,
+      { timeoutMs: 30_000 },
+    );
+
+    await assertRealE1CelestiaCadence(session);
+    await fundRealE1CelestiaSigner(session);
+    await runAcceptanceOneShot(
+      session, config, "actor-provisioner",
+      join(session.files.runtimeDirectory, "actor", "actor-provisioner.log"), 900_000,
+    );
+    await runAcceptanceCommandOverride(
+      session,
+      config,
+      "actor-provisioner",
+      {
+        E1_INTENT_PATH: "/outputs/actor/taker-intent.json",
+        E1_INTENT_RUNTIME_PATH: "/outputs/actor/taker-intent-runtime.json",
+        E1_INTENT_TTL_MS: "1800000",
+      },
+      ["bun", "packages/tests/grand-e2e/lib/solver-offerfiles-real-actors.ts", "build-intent"],
+      join(session.files.runtimeDirectory, "actor", "taker-intent-builder.log"),
+      900_000,
+    );
+    const actorManifestPath = join(session.files.runtimeDirectory, "actor", "actor-manifest.json");
+    const actorManifestBytes = await assertPrivateArtifact(actorManifestPath);
+    const actorManifest = JSON.parse(actorManifestBytes.toString("utf8")) as {
+      tokens?: { A?: unknown; B?: unknown };
+      balances?: { expectedAfterSettlement?: unknown };
+      offer?: {
+        offerBlob?: unknown;
+        offerHash?: unknown;
+        expectedNullifiers?: unknown;
+        expectedCommitments?: unknown;
+        gives?: Array<{ token?: unknown; amount?: unknown; kind?: unknown }>;
+        wants?: Array<{ token?: unknown; amount?: unknown; kind?: unknown }>;
+      };
+    };
+    const offerHash = String(actorManifest.offer?.offerHash ?? "").toLowerCase();
+    const offerBlob = String(actorManifest.offer?.offerBlob ?? "");
+    const give = actorManifest.offer?.gives?.[0];
+    const want = actorManifest.offer?.wants?.[0];
+    const quote = {
+      tokenIn: String(want?.token ?? "").toLowerCase(),
+      tokenOut: String(give?.token ?? "").toLowerCase(),
+      amountIn: String(want?.amount ?? ""),
+      amountOut: String(give?.amount ?? ""),
+    };
+    const expectedMakerNullifiers = (actorManifest.offer?.expectedNullifiers as unknown[] | undefined ?? [])
+      .map(String).map((value) => value.toLowerCase()).sort();
+    const expectedMakerCommitments = (actorManifest.offer?.expectedCommitments as unknown[] | undefined ?? [])
+      .map(String).map((value) => value.toLowerCase()).sort();
+    assert(
+      /^[0-9a-f]{64}$/.test(offerHash) && offerBlob.startsWith("swapoffer1") &&
+        /^[0-9a-f]{64}$/.test(quote.tokenIn) && /^[0-9a-f]{64}$/.test(quote.tokenOut) &&
+        /^[1-9][0-9]*$/.test(quote.amountIn) && /^[1-9][0-9]*$/.test(quote.amountOut) &&
+        quote.tokenIn === String(actorManifest.tokens?.B ?? "").toLowerCase() &&
+        quote.tokenOut === String(actorManifest.tokens?.A ?? "").toLowerCase() &&
+        give?.kind === "SHIELDED" && want?.kind === "SHIELDED" &&
+        expectedMakerNullifiers.length > 0 && expectedMakerCommitments.length > 0 &&
+        [...expectedMakerNullifiers, ...expectedMakerCommitments].every((value) => /^[0-9a-f]{64}$/.test(value)),
+      "EN4 actor manifest does not expose the exact maker/Story-direction oracle",
+    );
+    const environment = (await readFile(session.files.environment, "utf8")).replace(
+      /^N6_TARGET_OFFER_HASH=.*$/m,
+      `N6_TARGET_OFFER_HASH=${offerHash}`,
+    );
+    await atomicPrivateText(session.files.environment, environment);
+
+    const intentBytes = await assertPrivateArtifact(join(session.files.runtimeDirectory, "actor", "taker-intent.json"));
+    const intent = JSON.parse(intentBytes.toString("utf8")) as {
+      schema?: unknown;
+      runId?: unknown;
+      proofBoundary?: unknown;
+      quote?: Record<string, unknown>;
+      transaction?: Record<string, unknown>;
+    };
+    const rawIntent = Buffer.from(String(intent.transaction?.rawBase64 ?? ""), "base64");
+    const takerNullifiers = (intent.transaction?.inputNullifiers as unknown[] | undefined ?? [])
+      .map(String).map((value) => value.toLowerCase()).sort();
+    assert(
+      intent.schema === "zswap-offer-files-real-taker-intent/v1" && intent.runId === config.runId &&
+        intent.proofBoundary === "wallet.finalizeRecipe" &&
+        JSON.stringify(intent.quote) === JSON.stringify(quote) &&
+        rawIntent.byteLength > 0 && rawIntent.byteLength === Number(intent.transaction?.bytes) &&
+        createHash("sha256").update(rawIntent).digest("hex") === intent.transaction?.sha256 &&
+        takerNullifiers.length > 0 && takerNullifiers.every((value) => /^[0-9a-f]{64}$/.test(value)) &&
+        new Set(takerNullifiers).size === takerNullifiers.length,
+      "EN4 taker intent is not a byte-bound real proof of the exact relay quote",
+    );
+
+    await runAcceptanceOneShot(
+      session, config, "offer-publisher",
+      join(session.files.runtimeDirectory, "publication", "offer-publisher.log"), 180_000,
+    );
+    const publicationBytes = await assertPrivateArtifact(
+      join(session.files.runtimeDirectory, "publication", "offer-publication.json"),
+    );
+    await execAcceptanceJson(
+      session,
+      `(async()=>{const id=${JSON.stringify(offerHash)};const end=Date.now()+300000;for(;;){const r=await fetch('http://backend-proxy:8080/v1/offers/files',{method:'POST',headers:{accept:'application/json','content-type':'application/json'},body:JSON.stringify({schemaVersion:1,profile:'offer-files-solver-v1',offerIds:[id]}),signal:AbortSignal.timeout(15000)});if(r.status===200){const v=await r.json();if(v.schemaVersion===1&&v.profile==='offer-files-solver-v1'&&Array.isArray(v.files)&&v.files.length===1&&v.files[0]?.offerId===id&&v.files[0]?.verdict?.valid===true&&v.files[0]?.verdict?.live===true){console.log(JSON.stringify(v));return}}if(Date.now()>=end)throw new Error('exact file did not become available');await new Promise(resolve=>setTimeout(resolve,1000))}})().catch(e=>{console.error(e);process.exit(1)})`,
+      330_000,
+    );
+
+    const outputDirectory = join(session.files.runtimeDirectory, "solver", "en4");
+    await activateRealE1Identity(
+      session,
+      config,
+      identity,
+      outputDirectory,
+      { outputDirectory: join(session.files.runtimeDirectory, "publication", "inactive-en4"), label: "inactive", rawBase64: "AQ==" },
+    );
+    activeSolver = await startRealSolverCase(session, identity, network);
+    await waitForRuntimeReady(join(outputDirectory, "solver-runtime.json"), 600_000);
+    await waitForRelayQuote(relay, quote, 360_000);
+    const quoted = await relayJson(relay, "/quote", {
+      tokenIn: quote.tokenIn,
+      tokenOut: quote.tokenOut,
+      amountIn: quote.amountIn,
+    });
+    const quoteId = String(quoted.value.quoteId ?? "");
+    assert(
+      quoted.status === 200 && quoted.value.amountOut === quote.amountOut &&
+        /^[0-9a-f-]{36}$/i.test(quoteId),
+      `EN4 exact relay quote failed: ${JSON.stringify(quoted.value)}`,
+    );
+    const beforeIntentEvents = await recorderEvents(session as unknown as HarnessSession);
+    const startSequence = beforeIntentEvents.length === 0 ? 0 : eventSequence(beforeIntentEvents.at(-1)!);
+    const finalizedHeadBeforeIntent = await queryEn4RelayFinalizedHead(session, relayContainer);
+    const jobId = await postEn4Intent(relay, quoteId, rawIntent);
+    const job = await waitForEn4RelayDone(relay, jobId);
+    await waitForBackendConsumed(session, offerHash);
+    await waitForSolverLogMessages(
+      join(outputDirectory, "solver-telemetry.jsonl"),
+      [
+        `relay submitted ${jobId} as`,
+        `backend confirmed submitted maker consumption for ${jobId}`,
+      ],
+      360_000,
+    );
+    const database = await waitForEn4DatabaseSettlement(
+      session,
+      offerHash,
+      takerNullifiers,
+      expectedMakerNullifiers,
+      expectedMakerCommitments,
+      360_000,
+    );
+    assert(
+      database.liveCount === 0 && database.historyCount === 1 &&
+        database.offer?.offerHash === offerHash && database.offer.transactionHex === offerBlob &&
+        /^[1-9][0-9]*$/.test(database.offer.l2BlockHeight),
+      "EN4 database did not retain exactly one consumed, byte-identical maker offer",
+    );
+    assert(
+      JSON.stringify(database.makerNullifiers.map((row) => row.marker).sort()) === JSON.stringify(expectedMakerNullifiers) &&
+        JSON.stringify(database.makerCommitments.map((row) => row.marker).sort()) === JSON.stringify(expectedMakerCommitments) &&
+        JSON.stringify(database.takerNullifiers.map((row) => row.marker).sort()) === JSON.stringify(takerNullifiers),
+      "EN4 finalized transaction marker multisets differ from the exact maker/taker proofs",
+    );
+    const distinctTransactionHashes = [...new Set(
+      [...database.makerNullifiers, ...database.makerCommitments, ...database.takerNullifiers]
+        .map((row) => row.txHash!),
+    )].sort();
+    assert(
+      distinctTransactionHashes.length === 1,
+      `EN4 exact maker+taker inputs span ledger transactions: ${JSON.stringify(distinctTransactionHashes)}`,
+    );
+    const ledgerTransactionHash = distinctTransactionHashes[0]!;
+    const distinctBlockHeights = [...new Set(
+      [...database.makerNullifiers, ...database.makerCommitments, ...database.takerNullifiers]
+        .map((row) => row.height),
+    )].sort((left, right) => left - right);
+    assert(
+      distinctBlockHeights.length === 1 && Number.isSafeInteger(distinctBlockHeights[0]) && distinctBlockHeights[0]! > 0,
+      `EN4 exact maker+taker markers span finalized block heights: ${JSON.stringify(distinctBlockHeights)}`,
+    );
+    const relayNodeBinding = await queryEn4RelayNodeBinding(
+      session, relayContainer, job.txId, finalizedHeadBeforeIntent,
+    );
+
+    const afterSettlementEvents = await recorderEvents(session as unknown as HarnessSession);
+    const exactRequests = exactFilesRequestsAfter(afterSettlementEvents, startSequence, offerHash);
+    assert(exactRequests.length === 1, `EN4 job made ${exactRequests.length} exact-files requests`);
+    const exactRequest = exactRequests[0]!;
+    const exactResponse = matchingResponse(afterSettlementEvents, exactRequest);
+    assert(exactResponse !== undefined && Number(exactResponse.status) === 200, "EN4 exact-files response is absent");
+    const walletEvents = walletMutationEventsAfter(afterSettlementEvents, identity, startSequence);
+    assert(walletEvents.length > 0, "EN4 job recorded no real wallet boundary");
+    const firstWallet = walletEvents[0]!;
+    assert(
+      eventSequence(exactRequest) < eventSequence(exactResponse) &&
+        eventSequence(exactResponse) < eventSequence(firstWallet),
+      "EN4 exact-files 200 did not precede the first real wallet boundary",
+    );
+
+    const solverLogs = await stopRealSolverCase(session, config, identity, activeSolver);
+    activeSolver = "";
+    const solverEvents = await recorderEvents(session as unknown as HarnessSession);
+    const slice = solverEvents.filter((event) =>
+      eventSequence(event) > startSequence &&
+      (isSolverEvent(event, identity!.runId) || event.channel === "backend")
+    );
+    const sealed = await sealRealE1Case(
+      session, config, identity, outputDirectory, startSequence, slice, offerHash, solverLogs,
+    );
+    const calls = walletBoundaryCalls(sealed.runtime);
+    const submissionCount = Number(sealed.runtime.submissionCount);
+    const revertCalls = calls.revert ?? 0;
+    assert(submissionCount === 0, "EN4 production solver submitted instead of returning only its half");
+    assert(revertCalls === 0, `EN4 tx-submitted path unexpectedly reverted ${revertCalls} cached half/halves`);
+    assertReleasedStock(sealed.runtime, offerHash, "EN4 terminal");
+    const telemetry = lines(await readFile(join(outputDirectory, "solver-telemetry.jsonl"), "utf8"))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const solverMessages = telemetry.filter((event) => event.kind === "solver-log").map((event) => {
+      const data = event.data as Record<string, unknown> | undefined;
+      return String(data?.message ?? "");
+    });
+    const relayAcceptedLog = solverMessages.some((message) =>
+      message.includes(`relay submitted ${jobId} as`) && message.includes(job.txId) &&
+      message.includes("awaiting backend consumption")
+    );
+    const backendConfirmedLog = solverMessages.some((message) =>
+      message.includes(`backend confirmed submitted maker consumption for ${jobId}`)
+    );
+    assert(relayAcceptedLog && backendConfirmedLog, "EN4 solver lifecycle logs are incomplete");
+
+    await runAcceptanceOneShot(
+      session, config, "settlement-verifier",
+      join(session.files.runtimeDirectory, "wallet-settlement", "settlement-verifier.log"), 900_000,
+    );
+    const walletBytes = await assertPrivateArtifact(
+      join(session.files.runtimeDirectory, "wallet-settlement", "settlement-evidence.json"),
+    );
+    const wallet = JSON.parse(walletBytes.toString("utf8")) as {
+      delta?: {
+        user?: { shielded?: Record<string, unknown> };
+        solver?: { shielded?: Record<string, unknown> };
+      };
+      finality?: { requiredStableObservations?: unknown; observations?: unknown };
+      netDustBalanceDelta?: { asset?: unknown; delta?: unknown; interpretation?: unknown };
+    };
+    const storyAssets = {
+      A: quote.tokenIn,
+      B: quote.tokenOut,
+      fixtureMapping: "story.A=fixture.B;story.B=fixture.A",
+    };
+    const takerDelta = {
+      A: String(wallet.delta?.solver?.shielded?.[storyAssets.A] ?? ""),
+      B: String(wallet.delta?.solver?.shielded?.[storyAssets.B] ?? ""),
+    };
+    const makerDelta = {
+      A: String(wallet.delta?.user?.shielded?.[storyAssets.A] ?? ""),
+      B: String(wallet.delta?.user?.shielded?.[storyAssets.B] ?? ""),
+    };
+    assert(
+      takerDelta.A === `-${quote.amountIn}` && takerDelta.B === quote.amountOut &&
+        makerDelta.A === quote.amountIn && makerDelta.B === `-${quote.amountOut}`,
+      `EN4 finalized story deltas differ: taker=${JSON.stringify(takerDelta)} maker=${JSON.stringify(makerDelta)}`,
+    );
+    assert(
+      wallet.finality?.requiredStableObservations === 3 &&
+        Array.isArray(wallet.finality.observations) && wallet.finality.observations.length === 3 &&
+        wallet.netDustBalanceDelta?.asset === "DUST" &&
+        wallet.netDustBalanceDelta.interpretation === "net-balance-delta-not-exact-fee" &&
+        /^-?(?:0|[1-9][0-9]*)$/.test(String(wallet.netDustBalanceDelta.delta)),
+      "EN4 wallet reconciliation lacks strict three-observation finality or separate DUST fee evidence",
+    );
+
+    const relayLog = await runCommand(
+      "docker", ["logs", "--timestamps", relayContainer], session.children,
+      { timeoutMs: 30_000, maxOutputBytes: 8 * 1024 * 1024 },
+    );
+    const relayLogText = `${relayLog.stdout}${relayLog.stderr}`;
+    assertNoGeneratedSecrets("EN4 relay logs", relayLogText, config.secrets);
+    assert(
+      relayLogText.includes(jobId) && relayLogText.toLowerCase().includes(job.txId) &&
+        relayLogText.includes("[relay] tx submitted"),
+      "EN4 pinned relay logs do not bind merge/submission to jobId and done.txId",
+    );
+    await waitForRelayEmpty(relay, "EN4 post-consumption withdrawal");
+
+    const evidenceBase = {
+      schema: "zswap-offer-files-en4/v1",
+      project: session.project,
+      relayProject: relay.project,
+      relayRevision: relay.revision,
+      relayBootMode: relay.bootMode,
+      network,
+      recorderPort: session.recorderPort,
+      nodePort,
+      offerHash,
+      publicationSha256: createHash("sha256").update(publicationBytes).digest("hex"),
+      intentSha256: createHash("sha256").update(intentBytes).digest("hex"),
+      storyAssets,
+      quote: { ...quote, quoteId },
+      job: { jobId, statuses: job.statuses, txId: job.txId },
+      ordering: {
+        exactRequestSequence: eventSequence(exactRequest),
+        exactResponseSequence: eventSequence(exactResponse),
+        firstWalletSequence: eventSequence(firstWallet),
+      },
+      settlement: {
+        ...database,
+        ledgerTransactionHash,
+        distinctTransactionHashes,
+        distinctBlockHeights,
+        relayNodeBinding,
+      },
+      wallet: {
+        evidenceSha256: createHash("sha256").update(walletBytes).digest("hex"),
+        takerDelta,
+        makerDelta,
+        fee: {
+          asset: String(wallet.netDustBalanceDelta.asset),
+          delta: String(wallet.netDustBalanceDelta.delta),
+          interpretation: String(wallet.netDustBalanceDelta.interpretation),
+        },
+        stableObservations: (wallet.finality.observations as unknown[]).length,
+      },
+      solver: { submissionCount, revertCalls, relayAcceptedLog, backendConfirmedLog },
+      relayLogSha256: createHash("sha256").update(relayLogText).digest("hex"),
+    };
+    const evidenceBytes = Buffer.from(`${JSON.stringify(evidenceBase, null, 2)}\n`);
+    assertNoGeneratedSecrets("EN4 evidence", evidenceBytes.toString("utf8"), config.secrets);
+    const evidencePath = join(session.files.runtimeDirectory, "en4", "evidence.json");
+    await writeFile(evidencePath, evidenceBytes, { mode: 0o600, flag: "wx" });
+    await assertPrivateArtifact(evidencePath);
+    result = {
+      ...evidenceBase,
+      evidenceSha256: createHash("sha256").update(evidenceBytes).digest("hex"),
+    };
+  } finally {
+    await nodeReservation.release().catch(() => undefined);
+    nodeReservationReleased = true;
+    if (activeSolver && config !== undefined && identity !== undefined) {
+      await stopRealSolverCase(session, config, identity, activeSolver).catch(() => undefined);
+      activeSolver = "";
+    }
+    await disconnectRelayChain().catch(() => undefined);
+    const profiledDown = await runCompose(
+      session,
+      ["--profile", "acceptance-manual", "down", "--volumes", "--remove-orphans", "--timeout", "3"],
+      { timeoutMs: 90_000, allowFailure: true },
+    );
+    acceptanceCleanup = await session.cleanup();
+    if (profiledDown.code !== 0) {
+      acceptanceCleanup.errors.push(`profiled Compose down exited ${profiledDown.code}: ${profiledDown.stderr.trim()}`);
+    }
+    await cleanupBoundary();
+  }
+  assert(result !== undefined && acceptanceCleanup !== undefined && relayCleanup !== undefined, "EN4 did not seal evidence");
+  assert(acceptanceCleanup.errors.length === 0, `EN4 acceptance cleanup failed: ${acceptanceCleanup.errors.join("; ")}`);
+  assert(
+    relayCleanup.containers.length === 0 && relayCleanup.networks.length === 0 &&
+      relayCleanup.volumes.length === 0 && relayCleanup.images.length === 0,
+    `EN4 relay cleanup retained resources: ${JSON.stringify(relayCleanup)}`,
+  );
+  const remainingNetwork = await runCommand(
+    "docker", ["network", "inspect", network], session.children, { timeoutMs: 30_000, allowFailure: true },
+  );
+  assert(remainingNetwork.code !== 0, `EN4 external network ${network} survived teardown`);
+  await assertPortCanBind(nodePort);
+  return {
+    ...result,
+    cleanup: {
+      acceptanceErrors: acceptanceCleanup.errors,
+      relay: relayCleanup,
+      externalNetworkRemoved: true,
+      nodePortReleased: nodeReservationReleased,
+    },
+  };
+}
+
 async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
   const session = await createRealE1Session(await reserveRandomPort(new Set()));
   let config: RealE1AcceptanceConfig | undefined;
@@ -7355,6 +9271,21 @@ async function main(): Promise<void> {
     );
     return;
   }
+  if (mode === "--verify-en2") {
+    const result = await runEn2();
+    console.log(JSON.stringify({ gate: mode, status: "PASS", run: result }, null, 2));
+    return;
+  }
+  if (mode === "--verify-en3") {
+    const result = await runEn3();
+    console.log(JSON.stringify({ gate: mode, status: "PASS", run: result }, null, 2));
+    return;
+  }
+  if (mode === "--verify-en4") {
+    const result = await runEn4();
+    console.log(JSON.stringify({ gate: mode, status: "PASS", run: result }, null, 2));
+    return;
+  }
   if (mode === "--run-e1") {
     const result = await runRealE1Acceptance();
     console.log(
@@ -7384,7 +9315,7 @@ async function main(): Promise<void> {
   else if (mode === "--force-failure-probe") results = [await dryBoot(true)];
   else {
     throw new Error(
-      `unknown mode ${mode}; use --verify-e0, --verify-e1-foundation, --verify-e1-topology, --verify-e1-services, --run-e1, --probe-e1-outer-cleanup-signal, --dry-boot, or --force-failure-probe`,
+      `unknown mode ${mode}; use --verify-e0, --verify-e1-foundation, --verify-e1-topology, --verify-e1-services, --verify-en2, --verify-en3, --verify-en4, --run-e1, --probe-e1-outer-cleanup-signal, --dry-boot, or --force-failure-probe`,
     );
   }
 

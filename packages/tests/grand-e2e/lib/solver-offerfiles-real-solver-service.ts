@@ -123,6 +123,15 @@ function requireHttpUrl(name: string, value: string | undefined): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
+function requireWsUrl(name: string, value: string | undefined): string {
+  if (!value) throw new Error(`${name} is required`);
+  const parsed = new URL(value);
+  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+    throw new Error(`${name} must be an absolute WS(S) URL`);
+  }
+  return parsed.toString();
+}
+
 function requireRecorderUrl(value: string | undefined): string {
   const canonical = requireHttpUrl("E1_SOLVER_RECORDER_URL", value);
   const parsed = new URL(value!);
@@ -147,6 +156,8 @@ export interface RealSolverServiceConfig {
   seed: string;
   api: string;
   authToken: string;
+  relayUrl?: string;
+  relayAuthToken?: string;
   ladderConfigPath: string;
   telemetryPath: string;
   runtimePath: string;
@@ -172,11 +183,15 @@ export function readRealSolverServiceConfig(
     ? undefined
     : requireRecorderUrl(env["E1_SOLVER_RECORDER_URL"]);
   const recorderToken = env["E1_SOLVER_RECORDER_TOKEN"];
+  const relayAuthToken = env["E1_SOLVER_RELAY_AUTH_TOKEN"];
   if (recorderToken !== undefined && recorderUrl === undefined) {
     throw new Error("E1_SOLVER_RECORDER_TOKEN requires E1_SOLVER_RECORDER_URL");
   }
   if (recorderToken !== undefined && (recorderToken.length < 16 || /\s/.test(recorderToken))) {
     throw new Error("E1_SOLVER_RECORDER_TOKEN must contain at least 16 non-whitespace characters");
+  }
+  if (relayAuthToken !== undefined && (relayAuthToken.length < 32 || /\s/.test(relayAuthToken))) {
+    throw new Error("E1_SOLVER_RELAY_AUTH_TOKEN must contain at least 32 non-whitespace characters");
   }
   const ladderConfigPath = requireAbsolutePath(
     "E1_SOLVER_LADDER_CONFIG",
@@ -198,6 +213,10 @@ export function readRealSolverServiceConfig(
     seed: requireSeed(env["E1_SOLVER_SEED"]),
     api: requireHttpUrl("E1_SOLVER_API", env["E1_SOLVER_API"]),
     authToken,
+    ...(env["E1_SOLVER_RELAY_WS_URL"] === undefined
+      ? {}
+      : { relayUrl: requireWsUrl("E1_SOLVER_RELAY_WS_URL", env["E1_SOLVER_RELAY_WS_URL"]) }),
+    ...(relayAuthToken === undefined ? {} : { relayAuthToken }),
     ladderConfigPath,
     telemetryPath,
     runtimePath,
@@ -803,6 +822,7 @@ export const REAL_WALLET_BOUNDARIES = [
   "finalizeRecipe",
   "submitTransaction",
   "revert",
+  "revertTransaction",
   "transferTransaction",
   "finalizeTransaction",
   "initSwap",
@@ -1257,11 +1277,8 @@ export async function startInstrumentedRealSolver(
       seed: config.seed,
       dryRun: false,
       ladderConfigPath: config.ladderConfigPath,
-      levelsAuthToken: config.authToken,
-      enableLevelsPublication: false,
-      enablePathB: false,
-      enableCycles: false,
-      enableResidualTopUps: false,
+      ...(config.relayUrl ? { relayUrl: config.relayUrl } : {}),
+      ...(config.relayAuthToken ? { relayAuthToken: config.relayAuthToken } : {}),
       startupTimeoutMs: config.startupTimeoutMs,
       walletOperationTimeoutMs: config.walletOperationTimeoutMs,
       stopTimeoutMs: config.stopTimeoutMs,

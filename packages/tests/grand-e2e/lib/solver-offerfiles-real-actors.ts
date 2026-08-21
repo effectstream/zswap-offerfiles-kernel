@@ -8,6 +8,7 @@
  *
  * CLI contract:
  *   bun packages/tests/grand-e2e/lib/solver-offerfiles-real-actors.ts provision
+ *   bun packages/tests/grand-e2e/lib/solver-offerfiles-real-actors.ts build-intent
  *   bun packages/tests/grand-e2e/lib/solver-offerfiles-real-actors.ts verify-settlement
  *
  * Required environment:
@@ -2020,12 +2021,135 @@ async function runSettlementVerificationCli(): Promise<void> {
   }
 }
 
+async function runBuildIntentCli(): Promise<void> {
+  if (net.id !== "undeployed") throw new Error(`real intent builder requires undeployed, got ${net.id}`);
+  const runId = requireRunId(process.env["E1_RUN_ID"]);
+  const solverSeed = requireSeed("E1_SOLVER_SEED", process.env["E1_SOLVER_SEED"]);
+  const manifestPath = requireAbsolutePath("E1_ACTOR_RESULT_PATH", process.env["E1_ACTOR_RESULT_PATH"]);
+  const intentPath = requireAbsolutePath("E1_INTENT_PATH", process.env["E1_INTENT_PATH"]);
+  const runtimePath = requireAbsolutePath("E1_INTENT_RUNTIME_PATH", process.env["E1_INTENT_RUNTIME_PATH"]);
+  const syncTimeoutMs = positiveSafeInteger("E1_SYNC_TIMEOUT_MS", process.env["E1_SYNC_TIMEOUT_MS"], 300_000);
+  const ttlMs = positiveSafeInteger("E1_INTENT_TTL_MS", process.env["E1_INTENT_TTL_MS"], 30 * 60_000);
+  if (new Set([manifestPath, intentPath, runtimePath]).size !== 3) {
+    throw new Error("intent manifest/result/runtime paths must be distinct");
+  }
+  const runtime = (state: string, extra: Record<string, unknown> = {}) => atomicJson(runtimePath, {
+    schema: "zswap-offer-files-real-intent-runtime/v1",
+    runId,
+    state,
+    updatedAt: nowIso(),
+    ...extra,
+  });
+  await runtime("starting");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as RealActorManifest;
+  const gives = manifest.offer?.gives?.[0];
+  const wants = manifest.offer?.wants?.[0];
+  if (
+    manifest.schema !== SCHEMA || manifest.runId !== runId || manifest.networkId !== "undeployed" ||
+    manifest.actors?.solver?.seedFingerprint !== seedFingerprint(solverSeed) ||
+    manifest.offer?.gives?.length !== 1 || manifest.offer.wants.length !== 1 ||
+    gives?.kind !== "SHIELDED" || wants?.kind !== "SHIELDED" ||
+    gives.token !== manifest.tokens.A || wants.token !== manifest.tokens.B ||
+    !/^[1-9][0-9]*$/.test(gives.amount) || !/^[1-9][0-9]*$/.test(wants.amount)
+  ) {
+    throw new Error("intent builder actor manifest is not the exact funded A/B oracle");
+  }
+  setNetworkId(net.id as any);
+  globalThis.WebSocket = WebSocket;
+  const solver = await buildWallet(solverSeed);
+  let recipe: unknown;
+  let failure: unknown;
+  try {
+    await runtime("working", { phase: "syncing-taker-wallet" });
+    await waitForSync(solver, { timeoutMs: syncTimeoutMs });
+    const amountIn = BigInt(wants.amount);
+    const amountOut = BigInt(gives.amount);
+    if ((await waitForShielded(solver, wants.token, amountIn, 120, 2_000)) < amountIn) {
+      throw new Error("taker wallet does not hold the exact token-B input");
+    }
+    const receiverAddress = await solver.wallet.shielded.getAddress();
+    const expiresAt = new Date(Date.now() + ttlMs);
+    await runtime("working", { phase: "proving-taker-intent", expiresAt: expiresAt.toISOString() });
+    recipe = await solver.wallet.initSwap(
+      { shielded: { [wants.token]: amountIn } },
+      [{
+        type: "shielded",
+        outputs: [{ type: gives.token, amount: amountOut, receiverAddress }],
+      } as never],
+      shieldedKeys(solver),
+      { ttl: expiresAt, payFees: false },
+    );
+    const finalized = await (solver.wallet as any).finalizeRecipe(recipe);
+    const serialized = Uint8Array.from(finalized.serialize());
+    if (serialized.length === 0 || serialized.length > MAX_OFFER_BYTES) {
+      throw new Error("proved taker intent bytes are empty or oversized");
+    }
+    const guaranteed = finalized.guaranteedOffer?.deltas;
+    if (!(guaranteed instanceof Map)) throw new Error("proved taker intent exposes no guaranteed deltas");
+    const guaranteedDeltas = [...guaranteed].map(([token, amount]) =>
+      [token, BigInt(String(amount))] as const
+    );
+    const positive = guaranteedDeltas.filter(([, amount]) => amount > 0n);
+    const negative = guaranteedDeltas.filter(([, amount]) => amount < 0n);
+    if (
+      positive.length !== 1 || negative.length !== 1 ||
+      String(positive[0]![0]).toLowerCase() !== wants.token || positive[0]![1] !== amountIn ||
+      String(negative[0]![0]).toLowerCase() !== gives.token || -negative[0]![1] !== amountOut
+    ) {
+      throw new Error("proved taker intent deltas differ from the exact relay quote");
+    }
+    const artifact = {
+      schema: "zswap-offer-files-real-taker-intent/v1",
+      runId,
+      networkId: net.id,
+      createdAt: nowIso(),
+      expiresAt: expiresAt.toISOString(),
+      actor: "solver-as-taker",
+      seedFingerprint: seedFingerprint(solverSeed),
+      proofBoundary: "wallet.finalizeRecipe",
+      quote: {
+        tokenIn: wants.token,
+        tokenOut: gives.token,
+        amountIn: amountIn.toString(),
+        amountOut: amountOut.toString(),
+      },
+      transaction: {
+        rawBase64: Buffer.from(serialized).toString("base64"),
+        bytes: serialized.length,
+        sha256: sha256(serialized),
+        transactionHash: txHash(finalized),
+        identifiers: txIdentifiers(finalized),
+        inputNullifiers: txInputNullifiers(finalized),
+      },
+    };
+    await Promise.resolve((solver.wallet as any).stop?.());
+    await sealedJson(intentPath, artifact);
+    await runtime("complete", {
+      intentSha256: artifact.transaction.sha256,
+      intentBytes: artifact.transaction.bytes,
+      inputNullifierCount: artifact.transaction.inputNullifiers.length,
+    });
+    return;
+  } catch (error) {
+    failure = error;
+  }
+  if (recipe !== undefined) await (solver.wallet as any).revert?.(recipe).catch(() => undefined);
+  try {
+    await Promise.resolve((solver.wallet as any).stop?.());
+  } catch (cleanupError) {
+    failure = new AggregateError([failure, cleanupError], "intent build and wallet cleanup both failed");
+  }
+  await runtime("failed", { error: failure instanceof Error ? failure.message : String(failure) }).catch(() => undefined);
+  throw failure;
+}
+
 async function runCli(): Promise<void> {
   const command = process.argv[2];
   if (command === "provision") return runProvisionCli();
+  if (command === "build-intent") return runBuildIntentCli();
   if (command === "verify-settlement") return runSettlementVerificationCli();
   throw new Error(
-    "usage: solver-offerfiles-real-actors.ts provision|verify-settlement",
+    "usage: solver-offerfiles-real-actors.ts provision|build-intent|verify-settlement",
   );
 }
 

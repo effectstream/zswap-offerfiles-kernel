@@ -105,6 +105,104 @@ const submitFn = async () => {
 
 const server = await buildServer(config, { logger: log });
 await registerAppRoutes(server, config, { wsServer, submitFn });
+
+// N6/EN3 may opt into a harness-only control surface. It is absent unless a
+// separate >=32-byte token is explicitly supplied by the generated Compose
+// session. The controls drive the pinned relay's exported job methods; they do
+// not replace or emulate its websocket implementation.
+const controlToken = process.env.N6_CONTROL_TOKEN;
+if (controlToken) {
+  if (controlToken.length < 32) throw new Error("N6_CONTROL_TOKEN must be at least 32 characters");
+  const outcomes = new Map();
+  const controlRecorderUrl = process.env.N6_CONTROL_RECORDER_URL;
+  const recordControl = async (event) => {
+    if (!controlRecorderUrl) throw new Error("N6_CONTROL_RECORDER_URL is required with controls");
+    const response = await fetch(controlRecorderUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ channel: "relay-control", ...event }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new Error("control recorder returned " + response.status);
+    return response.json();
+  };
+  const authorized = (request, reply) => {
+    if (request.headers.authorization !== "Bearer " + controlToken) {
+      reply.code(401).send({ error: "unauthorized" });
+      return false;
+    }
+    return true;
+  };
+  wsServer.onSwapResponse((jobId, txBytes) => {
+    outcomes.set(jobId, {
+      type: "swap-tx",
+      jobId,
+      txBytes: Buffer.from(txBytes).toString("hex"),
+      recordedAt: Date.now(),
+    });
+  });
+  wsServer.onJobError((jobId, reason) => {
+    outcomes.set(jobId, { type: "job-error", jobId, reason, recordedAt: Date.now() });
+    wsServer.finishJob(jobId);
+  });
+  server.post("/__n6/job", async (request, reply) => {
+    if (!authorized(request, reply)) return;
+    const body = request.body ?? {};
+    if (
+      typeof body.jobId !== "string" || typeof body.tokenIn !== "string" ||
+      typeof body.tokenOut !== "string" || typeof body.amountIn !== "string" ||
+      typeof body.amountOut !== "string"
+    ) return reply.code(400).send({ error: "invalid_job" });
+    let amountIn;
+    let amountOut;
+    try {
+      amountIn = BigInt(body.amountIn);
+      amountOut = BigInt(body.amountOut);
+    } catch {
+      return reply.code(400).send({ error: "invalid_amount" });
+    }
+    outcomes.set(body.jobId, { type: "sent", jobId: body.jobId, recordedAt: Date.now() });
+    const solverId = wsServer.startJob({
+      jobId: body.jobId,
+      quote: { tokenIn: body.tokenIn, tokenOut: body.tokenOut, dx: amountIn, requiredOutput: amountOut },
+    });
+    if (!solverId) {
+      outcomes.set(body.jobId, { type: "no-solver", jobId: body.jobId, recordedAt: Date.now() });
+      return reply.code(503).send({ error: "no_solver" });
+    }
+    const marker = await recordControl({
+      phase: "job",
+      event: "swap-arrived",
+      jobId: body.jobId,
+      tokenIn: body.tokenIn,
+      tokenOut: body.tokenOut,
+      amountIn: body.amountIn,
+      amountOut: body.amountOut,
+    });
+    wsServer.sendSwap(solverId, body.jobId, body.tokenIn, body.tokenOut, amountIn, amountOut);
+    return reply.code(202).send({ jobId: body.jobId, status: "sent", recorderSequence: marker.sequence });
+  });
+  server.get("/__n6/job/:jobId", async (request, reply) => {
+    if (!authorized(request, reply)) return;
+    const outcome = outcomes.get(request.params.jobId);
+    return outcome === undefined
+      ? reply.code(404).send({ error: "unknown_job" })
+      : reply.send(outcome);
+  });
+  server.post("/__n6/job/:jobId/submit-failed", async (request, reply) => {
+    if (!authorized(request, reply)) return;
+    const reason = typeof request.body?.reason === "string" ? request.body.reason : "n6_submit_failed";
+    wsServer.sendSubmitFailed(request.params.jobId, reason);
+    wsServer.finishJob(request.params.jobId);
+    outcomes.set(request.params.jobId, {
+      type: "submit-failed-sent",
+      jobId: request.params.jobId,
+      reason,
+      recordedAt: Date.now(),
+    });
+    return reply.code(202).send({ jobId: request.params.jobId, status: "submit-failed-sent" });
+  });
+}
 await server.listen({ port: config.port, host: config.bindHost });
 
 const shutdown = async () => {
@@ -170,7 +268,8 @@ USER relay
 RUN set -eux; \\
     test -f /app/packages/relay/dist/relay-ws.js; \\
     test -f /app/packages/relay/dist/router/index.js; \\
-    test -f /app/packages/relay/dist/config.js
+    test -f /app/packages/relay/dist/config.js; \\
+    test -f /app/packages/relay/dist/relay-main.js
 
 CMD ["node", "/app/relay-fixture-entrypoint.mjs"]
 `;
@@ -180,6 +279,9 @@ export interface RelayFixtureComposeOptions {
   image: string;
   httpHostPort: number;
   wsHostPort: number;
+  controls?: boolean;
+  chainNodeUrl?: string;
+  chainNetwork?: string;
 }
 
 /**
@@ -191,7 +293,13 @@ export function relayFixtureComposeSource({
   image,
   httpHostPort,
   wsHostPort,
+  controls = false,
+  chainNodeUrl,
+  chainNetwork,
 }: RelayFixtureComposeOptions): string {
+  if (chainNetwork !== undefined && chainNodeUrl === undefined) {
+    throw new Error("relay fixture chainNetwork requires chainNodeUrl");
+  }
   const readiness = JSON.stringify(
     `fetch('http://127.0.0.1:${RELAY_FIXTURE_PINS.containerHttpPort}/tokens')` +
       `.then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))`,
@@ -209,9 +317,9 @@ export function relayFixtureComposeSource({
       RELAY_PORT: "${RELAY_FIXTURE_PINS.containerHttpPort}"
       RELAY_WS_PORT: "${RELAY_FIXTURE_PINS.containerWsPort}"
       SOLVER_AUTH_TOKEN: \${SOLVER_AUTH_TOKEN:?SOLVER_AUTH_TOKEN must be set}
-      RATE_LIMIT_MAX: "0"
+${controls ? "      N6_CONTROL_TOKEN: ${N6_CONTROL_TOKEN:?N6_CONTROL_TOKEN must be set}\n      N6_CONTROL_RECORDER_URL: http://traffic-recorder:8080/record\n" : ""}${chainNodeUrl === undefined ? "" : `      MIDNIGHT_NODE_URL: ${JSON.stringify(chainNodeUrl)}\n      NETWORK_ID: undeployed\n`}      RATE_LIMIT_MAX: "0"
       RELAY_PUBLIC_DOCS_ENABLED: "false"
-    ports:
+${chainNodeUrl === undefined ? "" : "    command: [\"node\", \"/app/packages/relay/dist/relay-main.js\"]\n    extra_hosts: [\"host.docker.internal:host-gateway\"]\n"}    ports:
       - "127.0.0.1:${httpHostPort}:${RELAY_FIXTURE_PINS.containerHttpPort}"
       - "127.0.0.1:${wsHostPort}:${RELAY_FIXTURE_PINS.containerWsPort}"
     healthcheck:
@@ -220,9 +328,10 @@ export function relayFixtureComposeSource({
       timeout: 2s
       retries: 60
       start_period: 2s
-    networks: [relay_fixture]
+    networks: [relay_fixture${chainNetwork === undefined ? "" : ", chain_node"}]
 
 networks:
   relay_fixture: {}
+${chainNetwork === undefined ? "" : `  chain_node:\n    external: true\n    name: ${JSON.stringify(chainNetwork)}\n`}
 `;
 }

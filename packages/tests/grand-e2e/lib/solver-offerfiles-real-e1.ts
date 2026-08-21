@@ -96,14 +96,6 @@ RUN set -eux; \\
     bun install --frozen-lockfile --ignore-scripts; \\
     echo '${REAL_E1_PINS.nodeGypLockSha256}  bun.lock' | sha256sum -c -; \\
     test "$(./node_modules/.bin/node-gyp --version)" = 'v${REAL_E1_PINS.nodeGypVersion}'
-WORKDIR /work
-COPY source/ /work/
-RUN set -eux; \\
-    test "$(/opt/node-gyp/node_modules/.bin/node-gyp --version)" = 'v${REAL_E1_PINS.nodeGypVersion}'; \\
-    PATH=/opt/node-gyp/node_modules/.bin:$PATH npm_config_nodedir=/usr \\
-      bun install --frozen-lockfile --concurrent-scripts=1 2>&1 | tee /tmp/bun-install.log; \\
-    grep -E '(2235 packages installed|Installed 2235 packages)' /tmp/bun-install.log; \\
-    rm -f /tmp/bun-install.log
 RUN set -eux; \\
     curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 180 \\
       -o /tmp/compact-installer.sh \\
@@ -121,6 +113,14 @@ RUN set -eux; \\
     echo '${REAL_E1_PINS.compactArmBinarySha256}  '"$compiler" | sha256sum -c -; \\
     test "$(/root/.local/bin/compact compile +${REAL_E1_PINS.compactVersion} --version)" = '${REAL_E1_PINS.compactVersion}'; \\
     rm -f /tmp/compact-installer.sh
+WORKDIR /work
+COPY source/ /work/
+RUN set -eux; \\
+    test "$(/opt/node-gyp/node_modules/.bin/node-gyp --version)" = 'v${REAL_E1_PINS.nodeGypVersion}'; \\
+    PATH=/opt/node-gyp/node_modules/.bin:$PATH npm_config_nodedir=/usr \\
+      bun install --frozen-lockfile --concurrent-scripts=1 2>&1 | tee /tmp/bun-install.log; \\
+    grep -E '(2235 packages installed|Installed 2235 packages)' /tmp/bun-install.log; \\
+    rm -f /tmp/bun-install.log
 RUN set -eux; \\
     bun run --filter @zswap-da/contract-offer-files compact; \\
     managed='packages/contracts-midnight/contract-offer-files/src/managed'; \\
@@ -532,6 +532,8 @@ networks:
 
 export interface RealE1AcceptanceComposeInput extends RealE1ComposeInput {
   runtimeDirectory: string;
+  includeN6Services?: boolean;
+  n6RelayNodeHostPort?: number;
 }
 
 /**
@@ -573,6 +575,9 @@ export function realE1AcceptanceComposeSource(input: RealE1AcceptanceComposeInpu
   const celestiaForwarderHealth = quoteYaml(
     "const s=require('node:net').connect(26659,'127.0.0.1');const t=setTimeout(()=>process.exit(1),1500);s.on('connect',()=>{clearTimeout(t);s.end();process.exit(0)});s.on('error',()=>process.exit(1))",
   );
+  const en2BackendForwarderHealth = quoteYaml(
+    "const s=require('node:net').connect(9999,'127.0.0.1');const t=setTimeout(()=>process.exit(1),1500);s.on('connect',()=>{clearTimeout(t);s.end();process.exit(0)});s.on('error',()=>process.exit(1))",
+  );
   const copyContract = [
     "test \"$(stat -c '%a' /inputs/deployment/contract-offer-files.undeployed.json)\" = 600",
     "test \"$(stat -c '%a' /inputs/deployment/contract-offer-files.undeployed.sha256)\" = 600",
@@ -587,6 +592,62 @@ export function realE1AcceptanceComposeSource(input: RealE1AcceptanceComposeInpu
       MIDNIGHT_NODE_HTTP: http://midnight-node-gateway:9944
       MIDNIGHT_PROOF_SERVER_URL: http://midnight-proof-gateway:6300
       MIDNIGHT_STORAGE_PASSWORD: "\${MIDNIGHT_STORAGE_PASSWORD:?MIDNIGHT_STORAGE_PASSWORD must be set}"`;
+  const n6Services = input.includeN6Services
+    ? `
+  en2-backend-forwarder:
+    <<: *harness-service
+    depends_on:
+      traffic-recorder: { condition: service_healthy }
+      offerfiles-backend: { condition: service_healthy }
+    environment:
+      HARNESS_ROLE: tcp-forwarder
+      HARNESS_CHANNEL: solver-backend-tcp
+      HARNESS_COLLECTOR_URL: http://traffic-recorder:8080
+      HARNESS_PORT: "9999"
+      HARNESS_TCP_TARGET_HOST: offerfiles-backend
+      HARNESS_TCP_TARGET_PORT: "9999"
+    healthcheck:
+      test: ["CMD", "node", "-e", ${en2BackendForwarderHealth}]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 1s
+    networks: [offerfiles_private, solver_front, control]
+
+  en2-solver:
+    <<: *app-service
+    profiles: [acceptance-manual]
+    depends_on:
+      en2-backend-forwarder: { condition: service_healthy }
+    command:
+      - bun
+      - packages/tests/grand-e2e/lib/solver-offerfiles-en2-service.ts
+    environment:
+      EN2_RUN_ID: "\${E1_ACCEPTANCE_RUN_ID:?E1_ACCEPTANCE_RUN_ID must be set}"
+      EN2_API: http://en2-backend-forwarder:9999
+      EN2_RELAY_WS_URL: ws://relay-fixture:9001
+      EN2_RELAY_AUTH_TOKEN: "\${N6_RELAY_AUTH_TOKEN:?N6_RELAY_AUTH_TOKEN must be set}"
+      EN2_TARGET_OFFER_HASH: "\${N6_TARGET_OFFER_HASH:?N6_TARGET_OFFER_HASH must be set}"
+      EN2_RESULT_PATH: /outputs/en2/result.json
+      OFFER_TTL_SECONDS: "28800"
+      SOLVER_EXPIRY_MARGIN_SECONDS: "30"
+      SOLVER_RESYNC_INTERVAL_MS: "2000"
+      SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS: "500"
+      SOLVER_BACKEND_HEALTH_MAX_AGE_MS: "5000"
+      SOLVER_RELAY_PUSH_INTERVAL_MS: "500"
+    volumes:
+      - type: bind
+        source: ${quoteYaml(`${input.runtimeDirectory}/en2`)}
+        target: /outputs/en2
+    networks: [solver_front, n6_relay]
+`
+    : "";
+  const n6Networks = input.includeN6Services
+    ? `  n6_relay:
+    external: true
+    name: "\${N6_RELAY_NETWORK:?N6_RELAY_NETWORK must be set}"
+`
+    : "";
 
   return `x-complete-logging:
   ${COMPLETE_LOGGING.replaceAll("\n", "\n  ")}
@@ -783,7 +844,7 @@ services:
       timeout: 2s
       retries: 60
       start_period: 1s
-    networks: [midnight_private, midnight_contract_clients, midnight_backend_clients, midnight_actor_clients, midnight_solver_clients]
+${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1:${input.n6RelayNodeHostPort}:9944"\n`}    networks: [midnight_private, midnight_contract_clients, midnight_backend_clients, midnight_actor_clients, midnight_solver_clients]
 
   midnight-indexer-gateway:
     <<: *harness-service
@@ -1111,7 +1172,7 @@ services:
       E1_SOLVER_SEED: "\${E1_SOLVER_SEED:?E1_SOLVER_SEED must be set}"
       E1_SOLVER_API: http://backend-proxy:8080
       E1_SOLVER_AUTH_TOKEN: "\${E1_ACTIVE_SOLVER_TOKEN:?E1_ACTIVE_SOLVER_TOKEN must be set}"
-      E1_SOLVER_LADDER_CONFIG: /inputs/actor/solver-ladder.json
+${input.includeN6Services ? "      E1_SOLVER_RELAY_WS_URL: ws://relay-fixture:9001\n      E1_SOLVER_RELAY_AUTH_TOKEN: ${N6_RELAY_AUTH_TOKEN:?N6_RELAY_AUTH_TOKEN must be set}\n" : ""}      E1_SOLVER_LADDER_CONFIG: /inputs/actor/solver-ladder.json
       E1_SOLVER_TELEMETRY_PATH: /outputs/solver/solver-telemetry.jsonl
       E1_SOLVER_RUNTIME_PATH: /outputs/solver/solver-runtime.json
       E1_SOLVER_RECORDER_URL: http://telemetry-relay:8080/record
@@ -1142,7 +1203,9 @@ services:
       - type: bind
         source: ${solverRuntime}
         target: /outputs/solver
-    networks: [solver_front, midnight_solver_clients]
+    networks: [solver_front, midnight_solver_clients${input.includeN6Services ? ", n6_relay" : ""}]
+
+${n6Services}
 
   settlement-verifier:
     <<: *app-service
@@ -1241,5 +1304,5 @@ networks:
   control: { internal: true }
   host_access: {}
   proof_egress: {}
-`;
+${n6Networks}`;
 }

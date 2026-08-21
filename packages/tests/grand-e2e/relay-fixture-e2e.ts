@@ -1,15 +1,26 @@
 /**
- * N0 relay fixture runner — plan phase N0 of
+ * Relay fixture runner — plan phases N0 and N4 of
  * `plans/00001-zswap-posted-price-solver.md`.
  *
- * Boots the Midnight Intents relay at its PINNED revision in Docker and proves
- * the wire contract the COW solver has to speak against it: bearer-authenticated
- * WS upgrade, `solver-capabilities` and `price-levels` ingestion, `GET /tokens`,
- * `POST /quote` interpolation over the frozen ladder, and the drop-on-disconnect
- * behaviour that makes re-pushing mandatory after every reconnect (FR-012).
+ * Boots the Midnight Intents relay at its PINNED revision in Docker, and:
+ *
+ *   `--verify-n0` proves the wire contract the COW solver has to speak against
+ *   it — bearer-authenticated WS upgrade, `solver-capabilities` and
+ *   `price-levels` ingestion, `GET /tokens`, `POST /quote` interpolation over
+ *   the FROZEN fixtures, and the drop-on-disconnect behaviour that makes
+ *   re-pushing mandatory after every reconnect (FR-012).
+ *
+ *   `--verify-n4` drives the PRODUCTION relay client (`startRelayClient`) at
+ *   the same relay from a seeded book cache, and proves registration, quotes
+ *   equal to the derivation, "capabilities alone are not enough", the 1 s
+ *   cadence, the fail-closed empty publication, reconnect-and-re-push across a
+ *   relay restart, and the explicit withdrawal on a live socket.
  *
  *   RELAY_FIXTURE_SOURCE_REPO=/path/to/midnight-intents-swaps \
  *     bun run packages/tests/grand-e2e/relay-fixture-e2e.ts --verify-n0
+ *     bun run packages/tests/grand-e2e/relay-fixture-e2e.ts --verify-n4
+ *
+ * Each gate owns its own project, its own ports, and its own teardown.
  *
  * Discipline, on a shared host: host ports are randomly selected from verified
  * free ports at or above 10000; every Docker resource is project-prefixed;
@@ -31,6 +42,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { interpolateQuote } from "../../solver-core/relay-ws-contract.ts";
+import type { ApiZswap } from "../../solver-core/api-client.ts";
+import { Book, bookOfferFromApi } from "../../solver/src/book.ts";
+import { deriveLadderPush, type LadderCache } from "../../solver/src/ladder-source.ts";
+import {
+  startRelayClient,
+  type RelayClientEvent,
+  type RelayClientHandle,
+} from "../../solver/src/relay-client.ts";
+
 import {
   RELAY_FIXTURE_BOOT_MODE,
   RELAY_FIXTURE_PINS,
@@ -43,8 +64,9 @@ import {
 
 const MIN_HOST_PORT = 10_000;
 const MAX_HOST_PORT_EXCLUSIVE = 61_000;
-const TEMP_PREFIX = "cow-n0-relay-fixture-";
-const PROJECT_PREFIX = "cow-n0";
+const TEMP_PREFIX = "cow-relay-fixture-";
+/** Each gate labels its own Docker resources, so a leak is attributable. */
+const PROJECT_PREFIX = { n0: "cow-n0", n4: "cow-n4" } as const;
 const CLEAN_SETTLE_MS = 5_000;
 const READY_TIMEOUT_MS = 90_000;
 const BUILD_TIMEOUT_MS = 900_000;
@@ -103,8 +125,8 @@ function lines(value: string): string[] {
     .filter(Boolean);
 }
 
-function projectName(): string {
-  return `${PROJECT_PREFIX}-${process.pid}-${randomBytes(5).toString("hex")}`;
+function projectName(prefix: string): string {
+  return `${prefix}-${process.pid}-${randomBytes(5).toString("hex")}`;
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -426,12 +448,14 @@ function createCleanup(
   };
 }
 
-async function createSession(): Promise<{ session: Session; cleanup: () => Promise<CleanupEvidence>; reservations: PortReservation[] }> {
+async function createSession(
+  prefix: string,
+): Promise<{ session: Session; cleanup: () => Promise<CleanupEvidence>; reservations: PortReservation[] }> {
   const excluded = new Set<number>();
   const httpReservation = await reserveRandomPort(excluded);
   const wsReservation = await reserveRandomPort(excluded);
   const reservations = [httpReservation, wsReservation];
-  const project = projectName();
+  const project = projectName(prefix);
   const directory = await mkdtemp(join(tmpdir(), TEMP_PREFIX));
   const session: Session = {
     project,
@@ -714,7 +738,7 @@ async function verifyN0(): Promise<void> {
     `[n0] frozen wire fixtures: ${String(manifest.files)} files, aggregate SHA-256 ${manifest.aggregate}`,
   );
 
-  const { session, cleanup, reservations } = await createSession();
+  const { session, cleanup, reservations } = await createSession(PROJECT_PREFIX.n0);
   console.log(
     `[n0] project=${session.project} httpPort=${String(session.httpPort)} wsPort=${String(session.wsPort)}`,
   );
@@ -756,6 +780,391 @@ async function verifyN0(): Promise<void> {
   console.log("[n0] N0 GATE PASS");
 }
 
+// ── The N4 gate ─────────────────────────────────────────────────────────────
+//
+// Plan phase N4: the PRODUCTION relay client (`startRelayClient`) is driven
+// against the same pinned relay N0 froze the wire contract from. Nothing here
+// hand-builds a frame: every byte on the socket comes from the client, whose
+// frames come from `deriveLadderPush` over a seeded book cache. What the relay
+// then answers on `POST /quote` is the acceptance evidence.
+//
+// Deliberately NOT proven here (it belongs to N5/N6, and the fixture is
+// chainless — Q-N0-1: A): `POST /intent`, `userTx.merge(solverTx)`,
+// submission, and the `tx-submitted`/`submit-failed` broadcast path.
+
+/** Token ids: the frozen fixture's pair, plus a second pair used only for the
+ *  "capabilities alone are not enough" check. */
+const N4_TOKEN_A = `01${"00".repeat(31)}`;
+const N4_TOKEN_B = `02${"00".repeat(31)}`;
+const N4_TOKEN_D = `0d${"00".repeat(31)}`;
+const N4_TOKEN_E = `0e${"00".repeat(31)}`;
+
+const N4_NOW = Date.parse("2026-06-01T12:00:00.000Z");
+const N4_EXPIRES = "2026-06-01T13:00:00.000Z";
+const N4_EXPIRY_MARGIN_SECONDS = 60;
+const N4_MAX_PARALLEL_SWAPS = 8;
+
+const n4Row = (offerId: string, givesA: string, wantsB: string): ApiZswap =>
+  ({
+    version: 1,
+    offerId,
+    computed: {
+      gives: [{ token: N4_TOKEN_A, amount: givesA, type: "SHIELDED" }],
+      wants: [{ token: N4_TOKEN_B, amount: wantsB, type: "SHIELDED" }],
+      expiresAt: N4_EXPIRES,
+      firstSeenAt: "2026-06-01T11:00:00.000Z",
+      inputNullifiers: [offerId],
+      status: "live",
+    },
+  }) as ApiZswap;
+
+/** The canonical Q-R2-3 book: `-10A +10B`, `-5A +5B`, `-20A +10B`. */
+const N4_CANONICAL: ApiZswap[] = [
+  n4Row("11".repeat(32), "10", "10"),
+  n4Row("22".repeat(32), "5", "5"),
+  n4Row("33".repeat(32), "20", "10"),
+];
+
+interface N4Cache extends LadderCache {
+  setCurrent: (value: boolean) => void;
+}
+
+function n4Cache(rows: ApiZswap[]): { cache: N4Cache; book: Book } {
+  const book = new Book();
+  for (const entry of rows) {
+    const offer = bookOfferFromApi(entry);
+    assert(offer !== null, `seeded row ${entry.offerId} did not parse into the book`);
+    book.upsert(offer!);
+  }
+  let current = true;
+  return {
+    book,
+    cache: {
+      book,
+      isCurrent: () => current,
+      setCurrent: (value: boolean) => {
+        current = value;
+      },
+    },
+  };
+}
+
+const n4Derive = (cache: LadderCache) =>
+  deriveLadderPush(cache, {
+    nowMs: N4_NOW,
+    expiryMarginSeconds: N4_EXPIRY_MARGIN_SECONDS,
+    maxParallelSwaps: N4_MAX_PARALLEL_SWAPS,
+  });
+
+interface N4Evidence {
+  project: string;
+  httpPort: number;
+  wsPort: number;
+  revision: string;
+  bootMode: string;
+  registeredTokens: string[];
+  rungQuotes: Array<{ amountIn: string; amountOut: string }>;
+  interpolatedQuotes: Array<{ amountIn: string; amountOut: string; contract: string }>;
+  capabilitiesOnly: { tokens: string[]; withoutLadder: number; withLadder: string };
+  bookChange: { before: string; after: string };
+  failClosed: { quoteStatus: number; tokens: number };
+  reconnect: { connectionsBefore: number; connectionsAfter: number; quoteAfterRestart: string };
+  withdrawal: { quoteStatus: number; tokens: number; stillConnected: boolean };
+}
+
+async function assertRelayClientContract(session: Session): Promise<N4Evidence> {
+  const httpBase = `http://127.0.0.1:${String(session.httpPort)}`;
+  const { cache, book } = n4Cache(N4_CANONICAL);
+  const derived = n4Derive(cache);
+  const pair = derived.priceLevels.levels[0]!;
+  assert(
+    derived.capabilities.tokenIds.length === 2 && pair.levels.length === 3,
+    `the seeded book did not derive the canonical ladder: ${JSON.stringify(derived.priceLevels)}`,
+  );
+
+  const quoteFor = async (
+    tokenIn: string,
+    tokenOut: string,
+    amountIn: string,
+  ): Promise<JsonResponse> => postJson(`${httpBase}/quote`, { tokenIn, tokenOut, amountIn });
+  const quoteOnPair = (amountIn: string): Promise<JsonResponse> =>
+    quoteFor(pair.tokenIn, pair.tokenOut, amountIn);
+  const listTokens = async (): Promise<string[]> =>
+    ((await getJson(`${httpBase}/tokens`)).body as { tokens: string[] }).tokens;
+
+  const events: RelayClientEvent[] = [];
+  let client: RelayClientHandle | null = null;
+  try {
+    client = startRelayClient({
+      url: `ws://127.0.0.1:${String(session.wsPort)}/`,
+      authToken: session.authToken,
+      cache,
+      ladder: {
+        expiryMarginSeconds: N4_EXPIRY_MARGIN_SECONDS,
+        maxParallelSwaps: N4_MAX_PARALLEL_SWAPS,
+      },
+      // Injected clock: the published bytes must not depend on when the gate
+      // happens to run.
+      nowMs: () => N4_NOW,
+      onEvent: (event) => {
+        events.push(event);
+        if (event.severity !== "info") console.log(`[n4] ${event.severity}: ${event.message}`);
+      },
+    });
+
+    // 1. Registration: the client's capabilities frame reaches GET /tokens.
+    await waitFor("the client's capabilities to register", async () => {
+      const tokens = await listTokens();
+      return (
+        JSON.stringify(tokens.slice().sort()) ===
+        JSON.stringify([...derived.capabilities.tokenIds].sort())
+      );
+    });
+    const registeredTokens = await listTokens();
+
+    // 2. Every derived rung quotes exactly what the derivation promised, and
+    //    every interpolated size quotes exactly what the frozen contract's
+    //    `interpolateQuote` says over OUR ladder. This is the load-bearing
+    //    assertion: the relay's real behaviour reproduces the function the
+    //    derivation is held to.
+    await waitFor("the pushed ladder to become quotable", async () => {
+      const response = await quoteOnPair(pair.levels[0]!.input);
+      return response.status === 200;
+    });
+    const rungQuotes: N4Evidence["rungQuotes"] = [];
+    for (const rung of pair.levels) {
+      const response = await quoteOnPair(rung.input);
+      assert(response.status === 200, `rung ${rung.input} quoted ${String(response.status)}`);
+      const amountOut = (response.body as { amountOut: string }).amountOut;
+      assert(
+        amountOut === rung.output,
+        `rung ${rung.input} quoted ${amountOut}, the derivation published ${rung.output}`,
+      );
+      rungQuotes.push({ amountIn: rung.input, amountOut });
+    }
+    const interpolatedQuotes: N4Evidence["interpolatedQuotes"] = [];
+    for (const amountIn of ["12", "17", "23"]) {
+      const response = await quoteOnPair(amountIn);
+      assert(response.status === 200, `size ${amountIn} quoted ${String(response.status)}`);
+      const amountOut = (response.body as { amountOut: string }).amountOut;
+      const contract = interpolateQuote(pair.levels, BigInt(amountIn));
+      assert(
+        contract !== null && contract.toString() === amountOut,
+        `size ${amountIn}: relay said ${amountOut}, interpolateQuote says ${String(contract)}`,
+      );
+      interpolatedQuotes.push({ amountIn, amountOut, contract: String(contract) });
+    }
+    // Outside the ladder is a refusal, and the direction the book cannot back
+    // is not quotable at all (FR-014's omission rule, on the wire).
+    for (const outside of ["9", "26"]) {
+      const response = await quoteOnPair(outside);
+      assert(response.status === 422, `size ${outside} returned ${String(response.status)}`);
+    }
+    const reverse = await quoteFor(pair.tokenOut, pair.tokenIn, "12");
+    assert(
+      reverse.status === 503 && (reverse.body as { error: string }).error === "no_solver",
+      `the omitted direction returned ${String(reverse.status)} ${JSON.stringify(reverse.body)}`,
+    );
+
+    // 3. "Capabilities alone are not enough" (FR-012). A second solver
+    //    registers tokens with NO ladder: the relay lists its tokens but
+    //    refuses to quote the pair until a ladder for that DIRECTED pair
+    //    arrives. Driven from a raw socket on purpose — the production client
+    //    always pushes both, so only a hand-driven peer can separate them.
+    const capabilitiesOnly = await connectSolver(session.wsPort, session.authToken);
+    let capabilitiesOnlyEvidence: N4Evidence["capabilitiesOnly"];
+    try {
+      capabilitiesOnly.send({
+        type: "solver-capabilities",
+        tokenIds: [N4_TOKEN_D, N4_TOKEN_E],
+        maxParallelSwaps: 1,
+      });
+      await waitFor("the capability-only solver's tokens to be listed", async () => {
+        const tokens = await listTokens();
+        return tokens.includes(N4_TOKEN_D) && tokens.includes(N4_TOKEN_E);
+      });
+      const withoutLadder = await quoteFor(N4_TOKEN_D, N4_TOKEN_E, "10");
+      assert(
+        withoutLadder.status === 503 &&
+          (withoutLadder.body as { error: string }).error === "no_solver",
+        `capabilities alone were routable: ${String(withoutLadder.status)} ` +
+          `${JSON.stringify(withoutLadder.body)}`,
+      );
+      capabilitiesOnly.send({
+        type: "price-levels",
+        levels: [
+          {
+            tokenIn: N4_TOKEN_D,
+            tokenOut: N4_TOKEN_E,
+            levels: [
+              { input: "10", output: "20" },
+              { input: "20", output: "30" },
+            ],
+          },
+        ],
+      });
+      await waitFor("the same solver to become routable once its ladder arrives", async () => {
+        const response = await quoteFor(N4_TOKEN_D, N4_TOKEN_E, "10");
+        return response.status === 200;
+      });
+      const withLadder = await quoteFor(N4_TOKEN_D, N4_TOKEN_E, "10");
+      capabilitiesOnlyEvidence = {
+        tokens: [N4_TOKEN_D, N4_TOKEN_E],
+        withoutLadder: withoutLadder.status,
+        withLadder: (withLadder.body as { amountOut: string }).amountOut,
+      };
+    } finally {
+      await capabilitiesOnly.close();
+    }
+    await waitFor("the capability-only solver to disappear again", async () => {
+      const tokens = await listTokens();
+      return !tokens.includes(N4_TOKEN_D);
+    });
+
+    // 4. A book change reaches the relay in the next push (FR-014's cadence).
+    const before = (await quoteOnPair("25")).body as { amountOut: string };
+    book.upsert(bookOfferFromApi(n4Row("44".repeat(32), "40", "10"))!);
+    const grown = n4Derive(cache).priceLevels.levels[0]!;
+    assert(grown.levels.length === 4, "the changed book did not derive a deeper ladder");
+    await waitFor("the changed book to reach the relay", async () => {
+      const response = await quoteOnPair(grown.levels[3]!.input);
+      return (
+        response.status === 200 &&
+        (response.body as { amountOut: string }).amountOut === grown.levels[3]!.output
+      );
+    });
+    const after = (await quoteOnPair(grown.levels[3]!.input)).body as { amountOut: string };
+
+    // 5. Fail closed: a cache that stops being current publishes the explicit
+    //    EMPTY pair, so the relay stops quoting instead of serving a stale
+    //    ladder it has no way to expire (FR-005).
+    cache.setCurrent(false);
+    await waitFor("the fail-closed withdrawal to reach the relay", async () => {
+      const response = await quoteOnPair("12");
+      const tokens = await listTokens();
+      return response.status === 503 && tokens.length === 0;
+    });
+    const failClosed = {
+      quoteStatus: (await quoteOnPair("12")).status,
+      tokens: (await listTokens()).length,
+    };
+    cache.setCurrent(true);
+    await waitFor("the ladder to return once the cache is current again", async () => {
+      const response = await quoteOnPair("12");
+      return response.status === 200;
+    });
+
+    // 6. Disconnect/reconnect. The relay is restarted, so it forgets every
+    //    solver exactly as a dropped socket does; nothing re-pushes by hand.
+    const connectionsBefore = client.stats().connections;
+    await runCommand("docker", composeArgs(session, ["restart", "--timeout", "10", "relay-fixture"]), {
+      timeoutMs: 180_000,
+    });
+    await waitFor("the restarted relay to answer", async () => {
+      const response = await getJson(`${httpBase}/tokens`);
+      return response.status === 200;
+    }, 60_000);
+    await waitFor("the client to reconnect and re-push", async () => {
+      const tokens = await listTokens();
+      const response = await quoteOnPair("12");
+      return tokens.length === 2 && response.status === 200;
+    }, 60_000);
+    const quoteAfterRestart = ((await quoteOnPair("12")).body as { amountOut: string }).amountOut;
+    const connectionsAfter = client.stats().connections;
+    assert(
+      connectionsAfter > connectionsBefore,
+      `the client did not reconnect: ${connectionsBefore} → ${connectionsAfter} connections`,
+    );
+
+    // 7. R-41: the explicit withdrawal, observed on a socket that is STILL
+    //    OPEN. Proving it through `stop()` alone would be ambiguous — the
+    //    disconnect withdraws us too.
+    await client.withdraw();
+    await waitFor("the explicit withdrawal to stop quoting", async () => {
+      const response = await quoteOnPair("12");
+      const tokens = await listTokens();
+      return response.status === 503 && tokens.length === 0;
+    });
+    const withdrawal = {
+      quoteStatus: (await quoteOnPair("12")).status,
+      tokens: (await listTokens()).length,
+      stillConnected: client.stats().connected,
+    };
+    assert(
+      withdrawal.stillConnected,
+      "the withdrawal was not proven on a live socket — the client had already disconnected",
+    );
+
+    return {
+      project: session.project,
+      httpPort: session.httpPort,
+      wsPort: session.wsPort,
+      revision: RELAY_FIXTURE_REVISION,
+      bootMode: RELAY_FIXTURE_BOOT_MODE,
+      registeredTokens,
+      rungQuotes,
+      interpolatedQuotes,
+      capabilitiesOnly: capabilitiesOnlyEvidence,
+      bookChange: { before: before.amountOut, after: after.amountOut },
+      failClosed,
+      reconnect: { connectionsBefore, connectionsAfter, quoteAfterRestart },
+      withdrawal,
+    };
+  } finally {
+    if (client) await client.stop();
+  }
+}
+
+async function verifyN4(): Promise<void> {
+  const sourceRepository = process.env["RELAY_FIXTURE_SOURCE_REPO"];
+  assert(
+    sourceRepository && sourceRepository.trim() !== "",
+    "RELAY_FIXTURE_SOURCE_REPO must point at a local midnight-intents-swaps clone containing " +
+      `${RELAY_FIXTURE_REVISION}. It is opened read-only and is never checked out or written to.`,
+  );
+
+  const { session, cleanup, reservations } = await createSession(PROJECT_PREFIX.n4);
+  console.log(
+    `[n4] project=${session.project} httpPort=${String(session.httpPort)} wsPort=${String(session.wsPort)}`,
+  );
+  let evidence: N4Evidence | null = null;
+  let failure: unknown;
+  try {
+    await buildAndStart(session, sourceRepository!, async () => {
+      for (const reservation of reservations) await reservation.release();
+    });
+    evidence = await assertRelayClientContract(session);
+  } catch (error) {
+    failure = error;
+    const logs = await runCommand("docker", composeArgs(session, ["logs", "--no-color", "--tail", "200"]), {
+      allowFailure: true,
+    });
+    console.error(`[n4] failure diagnostics:\n${logs.stdout}\n${logs.stderr}`);
+  } finally {
+    const cleanupEvidence = await cleanup();
+    await sleep(CLEAN_SETTLE_MS);
+    const settled = await dockerResources(session.project);
+    if (!failure) {
+      assertCleanup(cleanupEvidence);
+      assertCleanup(settled);
+      await assertPortIsFree(session.httpPort, "http");
+      await assertPortIsFree(session.wsPort, "ws");
+    }
+    console.log(
+      `[n4] teardown: containers=${String(cleanupEvidence.containers.length)} ` +
+        `networks=${String(cleanupEvidence.networks.length)} ` +
+        `volumes=${String(cleanupEvidence.volumes.length)} ` +
+        `images=${String(cleanupEvidence.images.length)}; ` +
+        `after ${String(CLEAN_SETTLE_MS)}ms settle: containers=${String(settled.containers.length)} ` +
+        `networks=${String(settled.networks.length)} volumes=${String(settled.volumes.length)} ` +
+        `images=${String(settled.images.length)}`,
+    );
+  }
+  if (failure) throw failure;
+  console.log(`[n4] evidence: ${JSON.stringify(evidence)}`);
+  console.log("[n4] N4 GATE PASS");
+}
+
 async function handleSignal(signal: NodeJS.Signals): Promise<void> {
   if (handlingSignal) return;
   handlingSignal = true;
@@ -779,9 +1188,13 @@ const invokedDirectly = process.argv[1] !== undefined &&
 
 if (invokedDirectly) {
   const wanted = process.argv.slice(2);
-  if (wanted.length > 0 && !wanted.includes("--verify-n0")) {
-    console.error("usage: relay-fixture-e2e.ts [--verify-n0]");
+  const known = ["--verify-n0", "--verify-n4"];
+  if (wanted.some((argument) => !known.includes(argument))) {
+    console.error("usage: relay-fixture-e2e.ts [--verify-n0] [--verify-n4]");
     process.exit(2);
   }
-  await verifyN0();
+  // Each gate owns its own fixture session — separate projects, separate
+  // ports, separate teardown — so they never share relay state.
+  if (wanted.length === 0 || wanted.includes("--verify-n0")) await verifyN0();
+  if (wanted.includes("--verify-n4")) await verifyN4();
 }

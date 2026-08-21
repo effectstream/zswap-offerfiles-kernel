@@ -16,6 +16,19 @@ export const BATCHER_SUBMIT_URL = getEnv("BATCHER_SUBMIT_URL") ?? "http://127.0.
  * Midnight Intents relay under its own SOLVER_AUTH_TOKEN. */
 export const SOLVER_LEVELS_AUTH_TOKEN = getEnv("SOLVER_LEVELS_AUTH_TOKEN") ?? "";
 
+/**
+ * Midnight Intents relay client (FR-012).
+ *
+ * `SOLVER_RELAY_AUTH_TOKEN` is the SAME shared secret the relay deployment
+ * calls `SOLVER_AUTH_TOKEN` (and the reference solver reads under that name).
+ * It is prefixed here because this process already carries a different solver
+ * credential — `SOLVER_LEVELS_AUTH_TOKEN`, for the Offer Files backend — and a
+ * bare `SOLVER_AUTH_TOKEN` next to it would not say which boundary it
+ * authenticates. The relay refuses a token shorter than 32 characters.
+ */
+export const SOLVER_RELAY_WS_URL = getEnv("SOLVER_RELAY_WS_URL") ?? "";
+export const SOLVER_RELAY_AUTH_TOKEN = getEnv("SOLVER_RELAY_AUTH_TOKEN") ?? "";
+
 export const SOLVER_LADDER_CONFIG =
   getEnv("SOLVER_LADDER_CONFIG") ??
   // fileURLToPath, not URL.pathname: pathname percent-encodes, so a checkout
@@ -134,6 +147,64 @@ export function loadSolverRuntimeEnv(read: EnvReader = getEnv): SolverRuntimeEnv
     );
   }
   return env;
+}
+
+export interface RelayClientEnv {
+  /** FR-012's cadence: ladders are re-pushed once per second. */
+  pushIntervalMs: number;
+  /** FR-012's reconnect delay. */
+  reconnectDelayMs: number;
+  connectTimeoutMs: number;
+  /** Bound on the graceful withdrawal before stop (R-41). */
+  withdrawTimeoutMs: number;
+  /** Advertised in `solver-capabilities`; N5 enforces it (FR-019). */
+  maxParallelSwaps: number;
+}
+
+/**
+ * Numeric knobs for the relay client. Deliberately a function rather than
+ * module-level constants: the relay client is a process INDEPENDENT of the
+ * book mirror (FR-005/FR-012), so importing this module must not make a
+ * mirror-only entrypoint fail on relay configuration it never uses.
+ */
+export function loadRelayClientEnv(read: EnvReader = getEnv): RelayClientEnv {
+  return {
+    pushIntervalMs: parseBoundedIntegerEnv(
+      "SOLVER_RELAY_PUSH_INTERVAL_MS",
+      read("SOLVER_RELAY_PUSH_INTERVAL_MS"),
+      1_000,
+      50,
+      60_000,
+    ),
+    reconnectDelayMs: parseBoundedIntegerEnv(
+      "SOLVER_RELAY_RECONNECT_DELAY_MS",
+      read("SOLVER_RELAY_RECONNECT_DELAY_MS"),
+      2_000,
+      50,
+      300_000,
+    ),
+    connectTimeoutMs: parseBoundedIntegerEnv(
+      "SOLVER_RELAY_CONNECT_TIMEOUT_MS",
+      read("SOLVER_RELAY_CONNECT_TIMEOUT_MS"),
+      10_000,
+      100,
+      300_000,
+    ),
+    withdrawTimeoutMs: parseBoundedIntegerEnv(
+      "SOLVER_RELAY_WITHDRAW_TIMEOUT_MS",
+      read("SOLVER_RELAY_WITHDRAW_TIMEOUT_MS"),
+      2_000,
+      50,
+      60_000,
+    ),
+    maxParallelSwaps: parseBoundedIntegerEnv(
+      "SOLVER_RELAY_MAX_PARALLEL_SWAPS",
+      read("SOLVER_RELAY_MAX_PARALLEL_SWAPS"),
+      8,
+      1,
+      1_024,
+    ),
+  };
 }
 
 const runtime = loadSolverRuntimeEnv();

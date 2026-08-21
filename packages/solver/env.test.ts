@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 
-import { loadSolverRuntimeEnv, parseBooleanEnv, parseBoundedIntegerEnv } from "./env.ts";
+import {
+  loadRelayClientEnv,
+  loadSolverRuntimeEnv,
+  parseBooleanEnv,
+  parseBoundedIntegerEnv,
+} from "./env.ts";
 
 const reader = (values: Record<string, string>) => (name: string): string | undefined => values[name];
 
@@ -59,5 +64,32 @@ test("every bounded runtime variable rejects malformed startup input by name", (
     "SOLVER_STATUS_POLL_MS",
   ]) {
     expect(() => loadSolverRuntimeEnv(reader({ [name]: "not-an-integer" }))).toThrow(name);
+  }
+});
+
+test("relay client config accepts the bounded defaults", () => {
+  expect(loadRelayClientEnv(reader({}))).toEqual({
+    // FR-012's two contract cadences.
+    pushIntervalMs: 1_000,
+    reconnectDelayMs: 2_000,
+    connectTimeoutMs: 10_000,
+    withdrawTimeoutMs: 2_000,
+    maxParallelSwaps: 8,
+  });
+  expect(
+    loadRelayClientEnv(reader({ SOLVER_RELAY_PUSH_INTERVAL_MS: "250" })).pushIntervalMs,
+  ).toBe(250);
+});
+
+test("every bounded relay variable rejects malformed startup input by name", () => {
+  for (const name of [
+    "SOLVER_RELAY_PUSH_INTERVAL_MS",
+    "SOLVER_RELAY_RECONNECT_DELAY_MS",
+    "SOLVER_RELAY_CONNECT_TIMEOUT_MS",
+    "SOLVER_RELAY_WITHDRAW_TIMEOUT_MS",
+    "SOLVER_RELAY_MAX_PARALLEL_SWAPS",
+  ]) {
+    expect(() => loadRelayClientEnv(reader({ [name]: "not-an-integer" }))).toThrow(name);
+    expect(() => loadRelayClientEnv(reader({ [name]: "0" }))).toThrow(name);
   }
 });

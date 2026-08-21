@@ -799,7 +799,7 @@ test("a timed-out wallet call cannot advance beyond its quarantined generation",
   await h.executor.stop();
 });
 
-test("failed immediate rollback is cached and retried; relay signals cannot clear the quarantine", async () => {
+test("failed immediate rollback is outcome-ambiguous and is never retried", async () => {
   const h = harness({ failImbalance: true, revertFailures: 1 });
   expect(await h.executor.onSwap(job("cleanup"))).toEqual({
     type: "job-error",
@@ -812,12 +812,13 @@ test("failed immediate rollback is cached and retried; relay signals cannot clea
   expect(h.executor.stats().quarantined).toBe(1);
   h.advance(60_001);
   await h.executor.sweep();
-  expect(h.executor.stats()).toMatchObject({ quarantined: 0, reverted: 1 });
-  expect(h.stock.reserved(B)).toBe(0n);
+  expect(h.executor.stats()).toMatchObject({ quarantined: 1, reverted: 0, revertFailures: 1 });
+  expect(h.stock.isClaimed({ offerHashes: [H1], nullifiers: [N1] })).toBe(true);
+  expect(h.executor.unavailableOfferHashes()).not.toEqual([]);
   await h.executor.stop();
 });
 
-test("unfinalized mirror uncertainty occupies capacity until the sweeper gets a wallet acknowledgement", async () => {
+test("unfinalized mirror revert ambiguity remains fail-closed across sweeps", async () => {
   const h = harness({ mirrorRevertFailures: 2, maxParallelSwaps: 1 });
   expect(await h.executor.onSwap(job("mirror-uncertain"))).toEqual({
     type: "job-error",
@@ -831,6 +832,7 @@ test("unfinalized mirror uncertainty occupies capacity until the sweeper gets a 
     reason: JOB_AT_CAPACITY,
   });
   await h.executor.sweep();
-  expect(h.executor.stats()).toMatchObject({ quarantined: 0, reverted: 1 });
+  expect(h.executor.stats()).toMatchObject({ quarantined: 1, reverted: 0, revertFailures: 1 });
+  expect(h.stock.isClaimed({ offerHashes: [H1], nullifiers: [N1] })).toBe(true);
   await h.executor.stop();
 });

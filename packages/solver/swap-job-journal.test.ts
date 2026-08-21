@@ -26,6 +26,7 @@ const LEDGER_TX = "ef".repeat(32);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const JOURNAL_CHILD = new URL("./swap-job-journal-child.ts", import.meta.url).pathname;
+const RECOVERY_CHILD = new URL("./swap-job-recovery-revert-child.ts", import.meta.url).pathname;
 
 interface FakeTx {
   label: string;
@@ -37,20 +38,28 @@ const tx = (label: string): FakeTx => ({
   serialize: () => encoder.encode(label),
 });
 
-const operationKey = (generation: number, kind: JournalOperationKind, label: string): string =>
-  `job:restart-job:g${generation}:${kind}:${label}`;
+const operationKeyFor = (
+  jobId: string,
+  generation: number,
+  kind: JournalOperationKind,
+  label: string,
+): string => `job:${jobId}:g${generation}:${kind}:${label}`;
 
-const prepare = (
+const operationKey = (generation: number, kind: JournalOperationKind, label: string): string =>
+  operationKeyFor("restart-job", generation, kind, label);
+
+const prepareFor = (
   journal: SolverOperationJournal,
+  jobId: string,
   generation: number,
   kind: JournalOperationKind,
   label: string,
   artifact?: { kind: "FINALIZED_TRANSACTION" | "UNPROVEN_TRANSACTION"; value: string },
 ): string => {
-  const key = operationKey(generation, kind, label);
+  const key = operationKeyFor(jobId, generation, kind, label);
   journal.createPrepared({
     operationKey: key,
-    jobId: "restart-job",
+    jobId,
     generation,
     offerHashes: [H],
     claim: { inputs: [N], payouts: { [B]: "5" } },
@@ -65,6 +74,16 @@ const prepare = (
       : {}),
   });
   return key;
+};
+
+const prepare = (
+  journal: SolverOperationJournal,
+  generation: number,
+  kind: JournalOperationKind,
+  label: string,
+  artifact?: { kind: "FINALIZED_TRANSACTION" | "UNPROVEN_TRANSACTION"; value: string },
+): string => {
+  return prepareFor(journal, "restart-job", generation, kind, label, artifact);
 };
 
 const move = (
@@ -184,7 +203,220 @@ const withJournalPath = async (run: (path: string) => Promise<void>): Promise<vo
   }
 };
 
-test("reopen matrix retries only locally provable artifacts and tombstones the terminal generation", async () => {
+interface RecoveryChildResult {
+  calls: string[];
+  counter: number;
+  states: Array<{
+    operationKey: string;
+    generation: number;
+    state: JournalLifecycleState;
+    errorCode: string | null;
+  }>;
+  reserved: string;
+  unavailable: string[];
+  safetyLogs: string[];
+}
+
+const runRecoveryChild = async (
+  path: string,
+  counterPath: string,
+  mode: "clean" | "crash" | "fail",
+): Promise<{ exitCode: number; stdout: string; stderr: string; result?: RecoveryChildResult }> => {
+  const child = Bun.spawn([process.execPath, RECOVERY_CHILD, path, counterPath, mode], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return {
+    exitCode,
+    stdout,
+    stderr,
+    ...(exitCode === 0 ? { result: JSON.parse(stdout) as RecoveryChildResult } : {}),
+  };
+};
+
+const seedLocalRecovery = (
+  path: string,
+  artifact: "finalized" | "unproven",
+  options: { generation?: number; jobId?: string } = {},
+): void => {
+  const journal = SolverOperationJournal.open({ path });
+  const generation = options.generation ?? 1;
+  const jobId = options.jobId ?? "restart-job";
+  const settlement = prepareFor(journal, jobId, generation, "JOB_SETTLEMENT", "settlement");
+  move(journal, settlement, "APPLIED");
+  const source = artifact === "finalized"
+    ? prepareFor(journal, jobId, generation, "FINALIZED_CONTRIBUTION", "wallet", {
+      kind: "FINALIZED_TRANSACTION", value: `recovery-${artifact}-g${generation}`,
+    })
+    : prepareFor(journal, jobId, generation, "MIRROR_RESERVATION", "wallet", {
+      kind: "UNPROVEN_TRANSACTION", value: `recovery-${artifact}-g${generation}`,
+    });
+  move(journal, source, "APPLIED");
+  journal.close();
+};
+
+test("recovered wallet call crash is invoked once and remains fail-closed across two fresh reopens", async () => {
+  for (const artifact of ["finalized", "unproven"] as const) {
+    await withJournalPath(async (path) => {
+      const counterPath = `${path}.${artifact}.counter.sqlite`;
+      seedLocalRecovery(path, artifact);
+
+      const crashed = await runRecoveryChild(path, counterPath, "crash");
+      expect(crashed).toMatchObject({ exitCode: 86, stdout: "", stderr: "" });
+
+      const afterCrash = SolverOperationJournal.open({ path });
+      const recovery = afterCrash.list().find((row) =>
+        row.operationKey.startsWith(`job:restart-job:g1:JOB_REVERT:recovery-${artifact}-`));
+      expect(recovery?.lifecycleState).toBe("REVERTING");
+      afterCrash.close();
+
+      const first = await runRecoveryChild(path, counterPath, "clean");
+      expect(first).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(first.result).toMatchObject({
+        calls: [], counter: 1, reserved: "5", unavailable: [H],
+      });
+      expect(first.result!.states.every((row) => row.state === "QUARANTINED")).toBe(true);
+      expect(first.result!.states.some((row) => row.errorCode === "RECOVERY_REVERT_OUTCOME_UNKNOWN")).toBe(true);
+      expect(first.result!.safetyLogs.some((line) =>
+        line.includes("wallet mutation will not be repeated") && line.includes("remain unavailable"))).toBe(true);
+
+      const second = await runRecoveryChild(path, counterPath, "clean");
+      expect(second).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(second.result).toMatchObject({
+        calls: [], counter: 1, reserved: "5", unavailable: [H],
+      });
+      expect(second.result!.states.every((row) => row.state === "QUARANTINED")).toBe(true);
+      expect(second.result!.safetyLogs.length).toBeGreaterThan(0);
+    });
+  }
+});
+
+test("clean recovered revert releases only after terminal proof and is not repeated", async () => {
+  for (const artifact of ["finalized", "unproven"] as const) {
+    await withJournalPath(async (path) => {
+      const counterPath = `${path}.${artifact}.clean-counter.sqlite`;
+      seedLocalRecovery(path, artifact);
+
+      const first = await runRecoveryChild(path, counterPath, "clean");
+      expect(first).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(first.result).toMatchObject({
+        calls: [`${artifact}:recovery-${artifact}-g1`],
+        counter: 1,
+        reserved: "0",
+        unavailable: [],
+      });
+      expect(first.result!.states.every((row) => row.state === "REVERTED")).toBe(true);
+      expect(first.result!.states.some((row) =>
+        row.operationKey.startsWith(`job:restart-job:g1:JOB_REVERT:recovery-${artifact}-`) &&
+        row.state === "REVERTED")).toBe(true);
+
+      const second = await runRecoveryChild(path, counterPath, "clean");
+      expect(second.result).toMatchObject({ calls: [], counter: 1, reserved: "0", unavailable: [] });
+      expect(second.result!.states.every((row) => row.state === "REVERTED")).toBe(true);
+    });
+  }
+});
+
+test("failed recovered revert is not retried and retains durable authority", async () => {
+  for (const artifact of ["finalized", "unproven"] as const) {
+    await withJournalPath(async (path) => {
+      const counterPath = `${path}.${artifact}.failed-counter.sqlite`;
+      seedLocalRecovery(path, artifact);
+
+      const failed = await runRecoveryChild(path, counterPath, "fail");
+      expect(failed).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(failed.result).toMatchObject({
+        calls: [`${artifact}:recovery-${artifact}-g1`],
+        counter: 1,
+        reserved: "5",
+        unavailable: [H],
+      });
+      expect(failed.result!.states.every((row) => row.state === "QUARANTINED")).toBe(true);
+      expect(failed.result!.safetyLogs.length).toBeGreaterThan(0);
+
+      const reopened = await runRecoveryChild(path, counterPath, "clean");
+      expect(reopened.result).toMatchObject({
+        calls: [], counter: 1, reserved: "5", unavailable: [H],
+      });
+      expect(reopened.result!.states.every((row) => row.state === "QUARANTINED")).toBe(true);
+    });
+  }
+});
+
+test("recovery authority is generation-owned and odd job ids cannot spoof its discriminator", async () => {
+  await withJournalPath(async (path) => {
+    const journal = SolverOperationJournal.open({ path });
+    const stale = prepareFor(journal, "restart-job", 1, "JOB_SETTLEMENT", "settlement");
+    journal.transition(stale, "PREPARED", "REVERTED");
+    journal.close();
+    seedLocalRecovery(path, "finalized", { generation: 2 });
+
+    const result = await runRecoveryChild(path, `${path}.generation-counter.sqlite`, "clean");
+    expect(result.result).toMatchObject({ counter: 1, reserved: "0", unavailable: [] });
+    expect(result.result!.states.filter((row) => row.operationKey.includes(":JOB_REVERT:recovery-")))
+      .toEqual([expect.objectContaining({ generation: 2, state: "REVERTED" })]);
+    expect(result.result!.states.find((row) => row.operationKey === stale)?.state).toBe("REVERTED");
+  });
+
+  await withJournalPath(async (path) => {
+    const journal = SolverOperationJournal.open({ path });
+    const settlement = prepare(journal, 1, "JOB_SETTLEMENT", "settlement");
+    const unproven = prepare(journal, 1, "MIRROR_RESERVATION", "wallet", {
+      kind: "UNPROVEN_TRANSACTION", value: "same-generation-unproven",
+    });
+    const finalized = prepare(journal, 1, "FINALIZED_CONTRIBUTION", "wallet", {
+      kind: "FINALIZED_TRANSACTION", value: "same-generation-finalized",
+    });
+    move(journal, settlement, "APPLIED");
+    move(journal, unproven, "APPLIED");
+    move(journal, finalized, "APPLIED");
+    journal.close();
+
+    const result = await runRecoveryChild(path, `${path}.artifact-counter.sqlite`, "clean");
+    expect(result.result).toMatchObject({
+      calls: ["unproven:same-generation-unproven", "finalized:same-generation-finalized"],
+      counter: 2,
+      reserved: "0",
+      unavailable: [],
+    });
+    const recoveryKeys = result.result!.states
+      .filter((row) => row.operationKey.includes(":JOB_REVERT:recovery-"))
+      .map((row) => row.operationKey);
+    expect(new Set(recoveryKeys).size).toBe(2);
+    expect(recoveryKeys.some((key) => key.includes(":recovery-unproven-"))).toBe(true);
+    expect(recoveryKeys.some((key) => key.includes(":recovery-finalized-"))).toBe(true);
+  });
+
+  await withJournalPath(async (path) => {
+    const oddJobId = "odd:JOB_REVERT:recovery-marker";
+    const journal = SolverOperationJournal.open({ path });
+    const settlement = prepareFor(journal, oddJobId, 1, "JOB_SETTLEMENT", "settlement");
+    const contribution = prepareFor(journal, oddJobId, 1, "FINALIZED_CONTRIBUTION", "wallet", {
+      kind: "FINALIZED_TRANSACTION", value: "odd-primary-proof",
+    });
+    move(journal, settlement, "AWAITING_RELAY");
+    move(journal, contribution, "AWAITING_RELAY");
+    const primary = prepareFor(journal, oddJobId, 1, "JOB_REVERT", "wallet", {
+      kind: "FINALIZED_TRANSACTION", value: "odd-primary-proof",
+    });
+    journal.transition(primary, "PREPARED", "REVERTING");
+    journal.transition(primary, "REVERTING", "REVERTED");
+    journal.close();
+
+    const result = await runRecoveryChild(path, `${path}.odd-counter.sqlite`, "clean");
+    expect(result.result).toMatchObject({ calls: [], counter: 0, reserved: "0", unavailable: [] });
+    expect(result.result!.states.every((row) => row.state === "REVERTED")).toBe(true);
+    expect(result.result!.states.some((row) =>
+      row.operationKey.includes(":JOB_REVERT:recovery-finalized-"))).toBe(false);
+  });
+});
+
+test("reopen retries APPLIED artifacts but never replays an already-started primary revert", async () => {
   for (const state of ["APPLIED", "REVERTING", "QUARANTINED"] as const) {
     await withJournalPath(async (path) => {
       const seed = SolverOperationJournal.open({ path });
@@ -200,19 +432,31 @@ test("reopen matrix retries only locally provable artifacts and tombstones the t
 
       const first = start(path, { loggerThrows: true });
       await first.executor.ready;
-      expect(first.calls).toEqual([`final:artifact-${state}`]);
-      expect(first.stock.reserved(B)).toBe(0n);
-      expect(first.journal.list().every((row) => row.lifecycleState === "REVERTED")).toBe(true);
+      if (state === "APPLIED") {
+        expect(first.calls).toEqual([`final:artifact-${state}`]);
+        expect(first.stock.reserved(B)).toBe(0n);
+        expect(first.journal.list().every((row) => row.lifecycleState === "REVERTED")).toBe(true);
+      } else {
+        expect(first.calls).toEqual([]);
+        expect(first.stock.reserved(B)).toBe(5n);
+        expect(first.executor.unavailableOfferHashes()).toEqual([H]);
+        expect(first.journal.list().every((row) => row.lifecycleState === "QUARANTINED")).toBe(true);
+      }
       await first.executor.stop();
       first.journal.close();
 
       const second = start(path);
       await second.executor.ready;
       expect(second.calls).toEqual([]);
-      expect(await second.executor.onSwap({
-        type: "swap", jobId: "restart-job", tokenIn: A, tokenOut: B,
-        amountIn: "10", amountOut: "20",
-      })).toEqual({ type: "job-error", jobId: "restart-job", reason: JOB_DUPLICATE });
+      if (state === "APPLIED") {
+        expect(await second.executor.onSwap({
+          type: "swap", jobId: "restart-job", tokenIn: A, tokenOut: B,
+          amountIn: "10", amountOut: "20",
+        })).toEqual({ type: "job-error", jobId: "restart-job", reason: JOB_DUPLICATE });
+      } else {
+        expect(second.stock.reserved(B)).toBe(5n);
+        expect(second.executor.unavailableOfferHashes()).toEqual([H]);
+      }
       await second.executor.stop();
       second.journal.close();
     });
@@ -245,10 +489,15 @@ test("abrupt child-process exit reopens fail-closed at every lifecycle boundary"
 
       const reopened = start(path);
       await reopened.executor.ready;
-      if (state === "APPLIED" || state === "REVERTING" || state === "QUARANTINED") {
+      if (state === "APPLIED") {
         expect(reopened.calls).toEqual([`final:child-${state}`]);
         expect(reopened.journal.list().every((row) => row.lifecycleState === "REVERTED")).toBe(true);
         expect(reopened.stock.reserved(B)).toBe(0n);
+      } else if (state === "REVERTING" || state === "QUARANTINED") {
+        expect(reopened.calls).toEqual([]);
+        expect(reopened.journal.list().every((row) => row.lifecycleState === "QUARANTINED")).toBe(true);
+        expect(reopened.stock.reserved(B)).toBe(5n);
+        expect(reopened.executor.unavailableOfferHashes()).toEqual([H]);
       } else if (state === "REVERTED") {
         expect(reopened.calls).toEqual([]);
         expect(reopened.journal.list().every((row) => row.lifecycleState === "REVERTED")).toBe(true);

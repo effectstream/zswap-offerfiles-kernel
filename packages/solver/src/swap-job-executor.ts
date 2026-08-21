@@ -7,6 +7,7 @@
 // chain-TTL sweeper can revert exactly the solver's contribution.
 
 import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
+import { createHash } from "node:crypto";
 
 import {
   readExactOfferFiles,
@@ -253,6 +254,13 @@ export interface SwapJobExecutorOptions {
   /** Called only after positive tx-bound backend ledger evidence. */
   onOfferConsumed?: (offerHash: string) => void;
   refreshBalances?: () => Promise<void>;
+  /** Test-only crash seam. Production must leave this undefined. It runs
+   * after a recovered wallet revert returns and before terminal journal CAS. */
+  recoveryRevertTestHook?: (event: {
+    operationKey: string;
+    sourceOperationKeys: readonly string[];
+    walletArtifactKind: WalletArtifactKind;
+  }) => void | Promise<void>;
   log?: (message: string) => void;
 }
 
@@ -630,6 +638,31 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
   ): string => `job:${jobId}:g${generation}:${kind}:${label}`;
   const group = (jobId: string, generation: number): JournalOperation[] =>
     journal.list().filter((row) => row.jobId === jobId && row.generation === generation);
+  const recoveryRevertPrefix = (jobId: string, generation: number): string =>
+    `job:${jobId}:g${generation}:JOB_REVERT:recovery-`;
+  const isRecoveryRevert = (row: JournalOperation): boolean =>
+    row.operationKind === "JOB_REVERT" &&
+      row.operationKey.startsWith(recoveryRevertPrefix(row.jobId, row.generation));
+  const recoveryRevertKey = (
+    jobId: string,
+    generation: number,
+    sourceOperationKeys: readonly string[],
+    walletArtifactKind: WalletArtifactKind,
+    walletArtifactBytes: Uint8Array,
+  ): string => {
+    const digest = createHash("sha256")
+      .update(walletArtifactKind)
+      .update("\0")
+      .update([...sourceOperationKeys].sort().join("\0"))
+      .update("\0")
+      .update(walletArtifactBytes)
+      .digest("hex");
+    const artifact = walletArtifactKind === "FINALIZED_TRANSACTION" ? "finalized" : "unproven";
+    return operationKey(jobId, generation, "JOB_REVERT", `recovery-${artifact}-${digest}`);
+  };
+  const sameBytes = (left: Uint8Array | undefined, right: Uint8Array): boolean =>
+    left !== undefined && left.byteLength === right.byteLength &&
+      left.every((value, index) => value === right[index]);
   /** The job-level authority is always terminalized last. A crash may leave
    * child rows behind it, but can never expose terminal job authority before
    * the wallet-operation evidence that supports it. */
@@ -855,6 +888,133 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       row = journal.transition(key, row.lifecycleState, "REVERTING");
     }
     journal.transition(key, "REVERTING", "REVERTED");
+  };
+
+  interface RecoveryRevertTarget {
+    operationKey: string;
+    sourceOperationKeys: string[];
+    expectedSourceState: "PREPARED" | "APPLIED";
+    walletArtifactKind: WalletArtifactKind;
+    walletArtifactBytes: Uint8Array;
+    transaction: unknown;
+  }
+
+  const restoreRecoveryTargets = (
+    jobId: string,
+    generation: number,
+  ): {
+    targets: RecoveryRevertTarget[];
+    walletTransaction?: FinalizedTransaction;
+    artifactlessMutation: boolean;
+    ambiguity?: string;
+  } => {
+    const rows = group(jobId, generation);
+    const recoveryRows = rows.filter(isRecoveryRevert);
+    const primaryReverts = rows.filter((row) =>
+      row.operationKind === "JOB_REVERT" && !isRecoveryRevert(row));
+    if (primaryReverts.length > 1) {
+      return {
+        targets: [],
+        artifactlessMutation: false,
+        ambiguity: "multiple primary JOB_REVERT authorities exist for one generation",
+      };
+    }
+    const primaryRevert = primaryReverts[0];
+    const finalizedRows = primaryRevert === undefined ? rows.filter((row) =>
+      row.operationKind === "FINALIZED_CONTRIBUTION" &&
+      row.walletArtifactKind === "FINALIZED_TRANSACTION" && !terminal(row.lifecycleState)) : [primaryRevert];
+    const artifactlessMutation = rows.some((row) =>
+      row.operationKind !== "JOB_SETTLEMENT" && !isRecoveryRevert(row) &&
+      row.lifecycleState === "PREPARED" && row.walletArtifactBytes === undefined);
+    if (primaryRevert !== undefined &&
+        (primaryRevert.walletArtifactKind !== "FINALIZED_TRANSACTION" ||
+          primaryRevert.walletArtifactBytes === undefined)) {
+      return {
+        targets: [], artifactlessMutation,
+        ambiguity: "primary JOB_REVERT has no canonical finalized artifact",
+      };
+    }
+    const finalizedTransactions = finalizedRows.map((row) =>
+      dependencies.deserializeFinalized(row.walletArtifactBytes!));
+    const walletTransaction = finalizedTransactions.length === 0
+      ? undefined
+      : dependencies.mergeFinalized(finalizedTransactions);
+    const hasResidualFinal = finalizedRows.some((row) => row.operationKey.endsWith(":residual"));
+    const hasDustFinal = finalizedRows.some((row) => row.operationKey.endsWith(":dust"));
+    const rawRows = primaryRevert === undefined ? rows.filter((row) =>
+      row.walletArtifactKind === "UNPROVEN_TRANSACTION" && !terminal(row.lifecycleState) &&
+      (row.operationKind === "MIRROR_RESERVATION" ||
+        (row.operationKind === "RESIDUAL_BUILD" && !hasResidualFinal) ||
+        (row.operationKind === "DUST_BALANCE" && !hasDustFinal))) : [];
+    const targets: RecoveryRevertTarget[] = rawRows.map((row) => ({
+      operationKey: recoveryRevertKey(
+        jobId, generation, [row.operationKey], "UNPROVEN_TRANSACTION", row.walletArtifactBytes!),
+      sourceOperationKeys: [row.operationKey],
+      expectedSourceState: "APPLIED",
+      walletArtifactKind: "UNPROVEN_TRANSACTION",
+      walletArtifactBytes: row.walletArtifactBytes!,
+      transaction: dependencies.deserializeUnproven(row.walletArtifactBytes!),
+    }));
+    if (walletTransaction !== undefined) {
+      const bytes = dependencies.serializeFinalized(walletTransaction);
+      const sourceOperationKeys = finalizedRows.map((row) => row.operationKey).sort();
+      targets.push({
+        operationKey: recoveryRevertKey(
+          jobId, generation, sourceOperationKeys, "FINALIZED_TRANSACTION", bytes),
+        sourceOperationKeys,
+        expectedSourceState: primaryRevert === undefined ? "APPLIED" : "PREPARED",
+        walletArtifactKind: "FINALIZED_TRANSACTION",
+        walletArtifactBytes: bytes,
+        transaction: walletTransaction,
+      });
+    }
+
+    const byKey = new Map(targets.map((target) => [target.operationKey, target]));
+    for (const row of recoveryRows) {
+      const target = byKey.get(row.operationKey);
+      if (target === undefined) {
+        return { targets, walletTransaction, artifactlessMutation,
+          ambiguity: `recovery authority ${row.operationKey} no longer binds the selected artifact set` };
+      }
+      if (row.generation !== generation || row.jobId !== jobId ||
+          row.walletArtifactKind !== target.walletArtifactKind ||
+          !sameBytes(row.walletArtifactBytes, target.walletArtifactBytes)) {
+        return { targets, walletTransaction, artifactlessMutation,
+          ambiguity: `recovery authority ${row.operationKey} conflicts with its generation/artifact identity` };
+      }
+      if (row.lifecycleState !== "PREPARED" && row.lifecycleState !== "REVERTED") {
+        return { targets, walletTransaction, artifactlessMutation,
+          ambiguity: `recovery authority ${row.operationKey} is ${row.lifecycleState}; its wallet-call outcome is unprovable` };
+      }
+    }
+    for (const target of targets) {
+      const recovery = journal.get(target.operationKey);
+      if (recovery?.lifecycleState === "REVERTED") continue;
+      for (const sourceKey of target.sourceOperationKeys) {
+        const source = journal.require(sourceKey);
+        if (source.lifecycleState !== target.expectedSourceState) {
+          return { targets, walletTransaction, artifactlessMutation,
+            ambiguity: `${sourceKey} is ${source.lifecycleState}; a prior revert call may have started` };
+        }
+      }
+    }
+    return { targets, walletTransaction, artifactlessMutation };
+  };
+
+  const retainRecoveryAmbiguity = (
+    record: QuarantinedJob,
+    reason: unknown,
+  ): false => {
+    const message = `${detail(reason)}; wallet mutation will not be repeated and Stock/capacity/offers remain unavailable`;
+    try {
+      quarantineGroup(record.jobId, record.generation, "RECOVERY_REVERT_OUTCOME_UNKNOWN", message);
+    } catch { /* every pre-existing non-terminal row remains fail-closed */ }
+    record.locallyRevertible = false;
+    record.evidenceReconcile = false;
+    stats.revertFailures += 1;
+    log(`[SAFETY] recovery revert outcome unknown for ${record.jobId}: ${message}`);
+    refreshStats();
+    return false;
   };
 
   const revertWallet = async (record: AwaitingJob): Promise<boolean> => {
@@ -1601,10 +1761,50 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     if (record.reverting || !record.locallyRevertible || !owns(record)) return false;
     record.reverting = true;
     try {
-      const rawTransactions = record.rawTransactions ??
-        (record.rawTransaction === undefined ? [] : [record.rawTransaction]);
-      for (const transaction of rawTransactions) await options.wallet.revertTransaction(transaction);
-      if (record.walletTransaction !== undefined) await options.wallet.revert(record.walletTransaction);
+      const primaryProof = group(record.jobId, record.generation).find((row) =>
+        row.operationKind === "JOB_REVERT" && !isRecoveryRevert(row) &&
+        row.lifecycleState === "REVERTED");
+      if (primaryProof === undefined) {
+        const restored = restoreRecoveryTargets(record.jobId, record.generation);
+        if (restored.ambiguity !== undefined) return retainRecoveryAmbiguity(record, restored.ambiguity);
+        if (restored.artifactlessMutation || restored.targets.length === 0) {
+          return retainRecoveryAmbiguity(record, restored.artifactlessMutation
+            ? "a PREPARED wallet mutation has no durable public artifact"
+            : "no public wallet artifact remains to prove local recovery");
+        }
+        for (const target of restored.targets) {
+          let recovery = journal.get(target.operationKey);
+          if (recovery?.lifecycleState === "REVERTED") continue;
+          if (recovery === undefined) {
+            recovery = journal.createPrepared({
+              operationKey: target.operationKey,
+              jobId: record.jobId,
+              generation: record.generation,
+              offerHashes: [...record.offerHashes].sort(),
+              claim: claimToJournal(record.claim),
+              operationKind: "JOB_REVERT",
+              ttlExpiresAtMs: record.ttlExpiresAt,
+              deadlineAtMs: Math.min(record.ttlExpiresAt, now() + walletOperationTimeoutMs),
+              walletArtifactKind: target.walletArtifactKind,
+              walletArtifactBytes: target.walletArtifactBytes,
+            });
+          }
+          // This committed CAS is the authority boundary: after REVERTING,
+          // any exit or thrown call is outcome-ambiguous and is never replayed.
+          journal.transition(recovery.operationKey, "PREPARED", "REVERTING");
+          if (target.walletArtifactKind === "UNPROVEN_TRANSACTION") {
+            await options.wallet.revertTransaction(target.transaction);
+          } else {
+            await options.wallet.revert(target.transaction);
+          }
+          await options.recoveryRevertTestHook?.({
+            operationKey: target.operationKey,
+            sourceOperationKeys: target.sourceOperationKeys,
+            walletArtifactKind: target.walletArtifactKind,
+          });
+          journal.transition(recovery.operationKey, "REVERTING", "REVERTED");
+        }
+      }
       markReverted(record.jobId, record.generation);
       quarantined.delete(record.jobId);
       tombstones.set(record.jobId, retention(record));
@@ -1613,10 +1813,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       log(`released quarantined wallet mutation for ${record.jobId}`);
       return true;
     } catch (error) {
-      try { quarantineGroup(record.jobId, record.generation, "LOCAL_REVERT_FAILED", error); } catch { /* retained */ }
-      stats.revertFailures += 1;
-      log(`quarantine cleanup failed for ${record.jobId}; durable claim retained: ${errorMessage(error)}`);
-      return false;
+      return retainRecoveryAmbiguity(record, error);
     } finally {
       record.reverting = false;
       refreshStats();
@@ -1708,7 +1905,8 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       }
       const jobRows = group(settlement.jobId, settlement.generation);
       const provedRevert = jobRows.find((row) =>
-        row.operationKind === "JOB_REVERT" && row.lifecycleState === "REVERTED");
+        row.operationKind === "JOB_REVERT" && !isRecoveryRevert(row) &&
+        row.lifecycleState === "REVERTED");
       if (provedRevert && settlement.lifecycleState !== "RELAY_SUBMITTED" &&
         settlement.lifecycleState !== "CONFIRMING") {
         markReverted(settlement.jobId, settlement.generation);
@@ -1728,7 +1926,8 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         row.walletArtifactBytes === undefined);
       try {
         const revertArtifact = [...jobRows].reverse().find((row) =>
-          row.operationKind === "JOB_REVERT" && row.walletArtifactKind === "FINALIZED_TRANSACTION");
+          row.operationKind === "JOB_REVERT" && !isRecoveryRevert(row) &&
+          row.walletArtifactKind === "FINALIZED_TRANSACTION");
         const finalizedRows = revertArtifact ? [revertArtifact] : jobRows.filter((row) =>
           row.operationKind === "FINALIZED_CONTRIBUTION" &&
           row.walletArtifactKind === "FINALIZED_TRANSACTION" && !terminal(row.lifecycleState));

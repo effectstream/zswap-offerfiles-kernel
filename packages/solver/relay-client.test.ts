@@ -395,6 +395,123 @@ describe("relay client — against a raw RFC 6455 mock relay", () => {
     expect(connection.frames("swap-tx")[0]).toEqual({ type: "swap-tx", jobId, txBytes: "00" });
   });
 
+  test("a handler that resolves undefined gets a stable job-error on its source socket", async () => {
+    const relay = await liveRelay();
+    const jobId = "064e2561-1c89-4df6-a409-5f5373167c24";
+    connectTo(relay, cacheOf(seed(CANONICAL_ROWS)), {
+      // Runtime hardening: an untyped/injected handler can violate the closed
+      // contract even though TypeScript callers cannot.
+      onSwap: (async () => undefined) as unknown as NonNullable<
+        Parameters<typeof startRelayClient>[0]["onSwap"]
+      >,
+    });
+    await waitUntil(() => pushesOn(relay) >= 1, "the first push");
+    const source = relay.connections[0]!;
+    source.sendText({
+      type: "swap",
+      jobId,
+      tokenIn: B,
+      tokenOut: A,
+      amountIn: "12",
+      amountOut: "22",
+    });
+
+    await waitUntil(() => source.frames("job-error").length === 1, "the undefined-result job-error");
+    expect(source.frames("job-error")[0]).toEqual({
+      type: "job-error",
+      jobId,
+      reason: JOB_EXECUTION_UNAVAILABLE,
+    });
+    expect(source.frames("swap-tx")).toEqual([]);
+  });
+
+  test("an asynchronously rejecting handler gets a stable job-error on its source socket", async () => {
+    const relay = await liveRelay();
+    const jobId = "bf704e4e-e041-4f4b-a165-af7aa6669f90";
+    connectTo(relay, cacheOf(seed(CANONICAL_ROWS)), {
+      onSwap: async () => {
+        await Promise.resolve();
+        throw new Error("async execution failed");
+      },
+    });
+    await waitUntil(() => pushesOn(relay) >= 1, "the first push");
+    const source = relay.connections[0]!;
+    source.sendText({
+      type: "swap",
+      jobId,
+      tokenIn: B,
+      tokenOut: A,
+      amountIn: "12",
+      amountOut: "22",
+    });
+
+    await waitUntil(() => source.frames("job-error").length === 1, "the rejected-handler job-error");
+    expect(source.frames("job-error")[0]).toEqual({
+      type: "job-error",
+      jobId,
+      reason: JOB_EXECUTION_UNAVAILABLE,
+    });
+    expect(source.frames("swap-tx")).toEqual([]);
+  });
+
+  test("a synchronously throwing handler gets a stable job-error on its source socket", async () => {
+    const relay = await liveRelay();
+    const jobId = "d9309f8d-5ec4-4e19-8d34-4df47b72a824";
+    connectTo(relay, cacheOf(seed(CANONICAL_ROWS)), {
+      onSwap: () => {
+        throw new Error("synchronous execution failed");
+      },
+    });
+    await waitUntil(() => pushesOn(relay) >= 1, "the first push");
+    const source = relay.connections[0]!;
+    source.sendText({
+      type: "swap",
+      jobId,
+      tokenIn: B,
+      tokenOut: A,
+      amountIn: "12",
+      amountOut: "22",
+    });
+
+    await waitUntil(() => source.frames("job-error").length === 1, "the thrown-handler job-error");
+    expect(source.frames("job-error")[0]).toEqual({
+      type: "job-error",
+      jobId,
+      reason: JOB_EXECUTION_UNAVAILABLE,
+    });
+    expect(source.frames("swap-tx")).toEqual([]);
+  });
+
+  test("a malformed terminal result gets a stable job-error on its source socket", async () => {
+    const relay = await liveRelay();
+    const jobId = "b5fcbec5-bc1f-452d-881b-80d6feec3777";
+    connectTo(relay, cacheOf(seed(CANONICAL_ROWS)), {
+      onSwap: (async () => ({
+        type: "swap-tx",
+        jobId: "d1614d69-da7f-4351-8d13-3872f7cb8770",
+        txBytes: "00",
+      })) as NonNullable<Parameters<typeof startRelayClient>[0]["onSwap"]>,
+    });
+    await waitUntil(() => pushesOn(relay) >= 1, "the first push");
+    const source = relay.connections[0]!;
+    source.sendText({
+      type: "swap",
+      jobId,
+      tokenIn: B,
+      tokenOut: A,
+      amountIn: "12",
+      amountOut: "22",
+    });
+
+    await waitUntil(() => source.frames("job-error").length === 1, "the malformed-result job-error");
+    expect(source.frames("job-error")[0]).toEqual({
+      type: "job-error",
+      jobId,
+      reason: JOB_EXECUTION_UNAVAILABLE,
+    });
+    expect(source.frames("swap-tx")).toEqual([]);
+  });
+
   test("a mid-job socket drop never sends the late proof on the replacement socket", async () => {
     const relay = await liveRelay();
     const jobId = "4d858b1b-b00f-492e-ae48-593edb130a81";
@@ -433,6 +550,51 @@ describe("relay client — against a raw RFC 6455 mock relay", () => {
     await waitUntil(() => replacement.pongs.includes("late-proof-barrier"), "the post-proof pong");
     expect(replacement.frames("swap-tx")).toEqual([]);
     expect(replacement.frames("job-error")).toEqual([]);
+  });
+
+  test("a late handler rejection never sends job-error on the replacement socket", async () => {
+    const relay = await liveRelay();
+    const jobId = "d07500c1-e531-44bd-8f90-014494f82baa";
+    const events: RelayClientEvent[] = [];
+    let reject!: (error: Error) => void;
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const result = new Promise<never>((_resolve, rejectResult) => {
+      reject = rejectResult;
+    });
+    connectTo(relay, cacheOf(seed(CANONICAL_ROWS)), {
+      onEvent: (event) => events.push(event),
+      onSwap: () => {
+        started();
+        return result;
+      },
+    });
+    await waitUntil(() => pushesOn(relay) >= 1, "the first push");
+    relay.connections[0]!.sendText({
+      type: "swap",
+      jobId,
+      tokenIn: B,
+      tokenOut: A,
+      amountIn: "12",
+      amountOut: "22",
+    });
+    await didStart;
+    relay.connections[0]!.terminate();
+    await waitUntil(() => relay.connections.length >= 2, "the replacement connection");
+    await waitUntil(() => pushesOn(relay, 1) >= 1, "the replacement re-push");
+
+    reject(new Error("late async execution failed"));
+    await waitUntil(
+      () => events.some((event) => event.kind === "job-refused" && event.detail?.jobId === jobId),
+      "the rejected handler diagnostic",
+    );
+    const replacement = relay.connections[1]!;
+    replacement.ping("late-error-barrier");
+    await waitUntil(() => replacement.pongs.includes("late-error-barrier"), "the post-error pong");
+    expect(replacement.frames("job-error")).toEqual([]);
+    expect(replacement.frames("swap-tx")).toEqual([]);
   });
 
   test("tx-submitted and submit-failed are forwarded to their lifecycle handlers", async () => {

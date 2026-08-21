@@ -179,6 +179,11 @@ export interface RelayLadderOptions {
   unavailableOfferHashes?: () => Iterable<string>;
 }
 
+type RelaySwapTerminalMessage = Extract<
+  SolverToRelayMessage,
+  { type: "swap-tx" | "job-error" }
+>;
+
 export interface RelayClientOptions {
   /** `ws://` / `wss://` endpoint of the relay's solver socket. */
   url: string;
@@ -203,7 +208,7 @@ export interface RelayClientOptions {
   /** N5's seam. Without it, every routed job is answered `job-error`. */
   onSwap?: (
     job: Extract<RelayToSolverMessage, { type: "swap" }>,
-  ) => SolverToRelayMessage | void | Promise<SolverToRelayMessage | void>;
+  ) => RelaySwapTerminalMessage | Promise<RelaySwapTerminalMessage>;
   onTxSubmitted?: (
     message: Extract<RelayToSolverMessage, { type: "tx-submitted" }>,
   ) => void | Promise<void>;
@@ -588,43 +593,48 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
           `refusing swap job ${swap.jobId}: job execution is not wired`,
           { jobId: swap.jobId, reason: JOB_EXECUTION_UNAVAILABLE },
         );
-        void sendJobError(swap.jobId, JOB_EXECUTION_UNAVAILABLE);
+        void sendJobError(sourceSocket, swap.jobId, JOB_EXECUTION_UNAVAILABLE);
         return;
       }
       try {
         const handled = Promise.resolve(options.onSwap(swap));
-        void handled.then(async (response) => {
-          if (response === undefined) return;
-          const terminal = response.type === "swap-tx"
-            ? parseSwapTx(response)
-            : response.type === "job-error"
-            ? parseJobError(response)
-            : null;
-          if (terminal === null || terminal.jobId !== swap.jobId) {
+        void handled.then(
+          async (response) => {
+            const terminal = parseSwapTx(response) ?? parseJobError(response);
+            if (terminal === null || terminal.jobId !== swap.jobId) {
+              const outcome = response === undefined ? "no terminal result" : "a malformed terminal result";
+              emit(
+                "job-refused",
+                "error",
+                `swap handler returned ${outcome} for ${swap.jobId}`,
+                { jobId: swap.jobId, reason: JOB_EXECUTION_UNAVAILABLE },
+              );
+              await sendJobError(sourceSocket, swap.jobId, JOB_EXECUTION_UNAVAILABLE);
+              return;
+            }
+            try {
+              await sendOn(sourceSocket, terminal);
+            } catch (error) {
+              emit("job-refused", "warn", `could not answer job ${swap.jobId}: ${String(error)}`, {
+                jobId: swap.jobId,
+              });
+            }
+          },
+          async (error) => {
             emit(
               "job-refused",
               "error",
-              `swap handler returned a malformed terminal result for ${swap.jobId}`,
-              { jobId: swap.jobId },
+              `swap handler rejected for ${swap.jobId}: ${String(error)}`,
+              { jobId: swap.jobId, reason: JOB_EXECUTION_UNAVAILABLE },
             );
-            await sendOn(sourceSocket, {
-              type: "job-error",
-              jobId: swap.jobId,
-              reason: JOB_EXECUTION_UNAVAILABLE,
-            });
-            return;
-          }
-          await sendOn(sourceSocket, terminal);
-        }).catch((error) => {
-          emit("job-refused", "warn", `could not answer job ${swap.jobId}: ${String(error)}`, {
-            jobId: swap.jobId,
-          });
-        });
+            await sendJobError(sourceSocket, swap.jobId, JOB_EXECUTION_UNAVAILABLE);
+          },
+        );
       } catch (error) {
         emit("job-refused", "error", `swap handler threw for ${swap.jobId}: ${String(error)}`, {
-          jobId: swap.jobId,
+          jobId: swap.jobId, reason: JOB_EXECUTION_UNAVAILABLE,
         });
-        void sendJobError(swap.jobId, JOB_EXECUTION_UNAVAILABLE);
+        void sendJobError(sourceSocket, swap.jobId, JOB_EXECUTION_UNAVAILABLE);
       }
       return;
     }
@@ -657,9 +667,13 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     emit("message-refused", "warn", "ignoring an unrecognised relay frame");
   };
 
-  const sendJobError = async (jobId: string, reason: string): Promise<void> => {
+  const sendJobError = async (
+    sourceSocket: RelayWebSocketLike,
+    jobId: string,
+    reason: string,
+  ): Promise<void> => {
     try {
-      await send({ type: "job-error", jobId, reason });
+      await sendOn(sourceSocket, { type: "job-error", jobId, reason });
     } catch (error) {
       emit("message-refused", "warn", `could not answer job ${jobId}: ${String(error)}`);
     }

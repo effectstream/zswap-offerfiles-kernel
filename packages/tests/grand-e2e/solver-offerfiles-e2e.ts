@@ -12,6 +12,7 @@
  *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-en2
  *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-en3
  *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-en4
+ *   bun run packages/tests/grand-e2e/solver-offerfiles-e2e.ts --verify-n7-f2-assertion
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -7645,6 +7646,37 @@ interface En4FinalizedHead {
   hash: string;
 }
 
+const EN4_FINALIZED_CALL = Object.freeze({
+  section: "midnight",
+  method: "sendMnTransaction",
+});
+
+function assertEn4FinalizedCall(
+  binding: Pick<En4NodeBinding, "callSection" | "callMethod">,
+): void {
+  assert(
+    binding.callSection === EN4_FINALIZED_CALL.section &&
+      binding.callMethod === EN4_FINALIZED_CALL.method,
+    `EN4 done.txId finalized as ${binding.callSection}.${binding.callMethod}; expected ` +
+      `${EN4_FINALIZED_CALL.section}.${EN4_FINALIZED_CALL.method}`,
+  );
+}
+
+function verifyN7F2CallAssertion(): Readonly<Record<string, unknown>> {
+  assertEn4FinalizedCall({ callSection: "midnight", callMethod: "sendMnTransaction" });
+  let refusedWrongCall = false;
+  try {
+    assertEn4FinalizedCall({ callSection: "balances", callMethod: "transferKeepAlive" });
+  } catch {
+    refusedWrongCall = true;
+  }
+  assert(refusedWrongCall, "N7 F2 negative control accepted a non-Midnight finalized call");
+  return Object.freeze({
+    expected: `${EN4_FINALIZED_CALL.section}.${EN4_FINALIZED_CALL.method}`,
+    wrongCallRefused: true,
+  });
+}
+
 interface En4DatabaseSettlement {
   liveCount: number;
   historyCount: number;
@@ -7843,6 +7875,7 @@ try {
       /^[a-zA-Z][a-zA-Z0-9_]*$/.test(binding.callSection) && /^[a-zA-Z][a-zA-Z0-9_]*$/.test(binding.callMethod),
     `EN4 done.txId is absent from the bounded finalized intent window: ${JSON.stringify(binding)}`,
   );
+  assertEn4FinalizedCall(binding);
   return binding;
 }
 
@@ -9286,6 +9319,10 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ gate: mode, status: "PASS", run: result }, null, 2));
     return;
   }
+  if (mode === "--verify-n7-f2-assertion") {
+    console.log(JSON.stringify({ gate: mode, status: "PASS", run: verifyN7F2CallAssertion() }, null, 2));
+    return;
+  }
   if (mode === "--run-e1") {
     const result = await runRealE1Acceptance();
     console.log(
@@ -9315,7 +9352,7 @@ async function main(): Promise<void> {
   else if (mode === "--force-failure-probe") results = [await dryBoot(true)];
   else {
     throw new Error(
-      `unknown mode ${mode}; use --verify-e0, --verify-e1-foundation, --verify-e1-topology, --verify-e1-services, --verify-en2, --verify-en3, --verify-en4, --run-e1, --probe-e1-outer-cleanup-signal, --dry-boot, or --force-failure-probe`,
+      `unknown mode ${mode}; use --verify-e0, --verify-e1-foundation, --verify-e1-topology, --verify-e1-services, --verify-en2, --verify-en3, --verify-en4, --verify-n7-f2-assertion, --run-e1, --probe-e1-outer-cleanup-signal, --dry-boot, or --force-failure-probe`,
     );
   }
 

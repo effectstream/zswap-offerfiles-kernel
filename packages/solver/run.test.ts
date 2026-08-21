@@ -12,6 +12,8 @@ import {
 import type { SyncDependencies } from "./src/book-sync.ts";
 import { RELAY_WS_OPEN, type RelayWebSocketLike } from "./src/relay-client.ts";
 import { Stock } from "./src/stock.ts";
+import { SolverOperationJournal } from "./src/operation-journal.ts";
+import { JOB_RECONCILING } from "./src/swap-job-executor.ts";
 
 const TOKEN = "a".repeat(64);
 
@@ -216,6 +218,129 @@ const merge = (transactions: any[]): FakeTx => tx(
   transactions.flatMap((transaction) => transaction.rows ?? []),
 );
 
+test("journal validation failure happens before wallet acquisition", async () => {
+  let walletBuilds = 0;
+  await expect(runSolver({
+    dryRun: false,
+    relayUrl: "ws://relay.test/solver",
+    relayAuthToken: "r".repeat(64),
+    journalOptions: { path: "/unused/solver.sqlite" },
+    journalOpen: (() => { throw new Error("injected journal validation failure"); }) as any,
+    walletDependencies: {
+      buildWallet: async () => { walletBuilds += 1; throw new Error("must not build"); },
+    } as any,
+    log: () => {},
+  })).rejects.toThrow("injected journal validation failure");
+  expect(walletBuilds).toBe(0);
+});
+
+test("relay publishes empty and rejects jobs until journal reconciliation finishes", async () => {
+  const lifecycle: string[] = [];
+  const journal = SolverOperationJournal.open({ path: ":memory:", allowMemory: true });
+  const ttl = Date.now() + 60_000;
+  journal.createPrepared({
+    operationKey: "job:reopen:g1:settlement",
+    jobId: "reopen",
+    generation: 1,
+    offerHashes: [OFFER_HASH],
+    claim: { inputs: [NULLIFIER], payouts: { [B]: "5" } },
+    operationKind: "JOB_SETTLEMENT",
+    ttlExpiresAtMs: ttl,
+    deadlineAtMs: ttl - 1,
+  });
+  journal.transition("job:reopen:g1:settlement", "PREPARED", "APPLIED");
+  journal.createPrepared({
+    operationKey: "job:reopen:g1:wallet",
+    jobId: "reopen",
+    generation: 1,
+    offerHashes: [OFFER_HASH],
+    claim: { inputs: [NULLIFIER], payouts: { [B]: "5" } },
+    operationKind: "FINALIZED_CONTRIBUTION",
+    ttlExpiresAtMs: ttl,
+    deadlineAtMs: ttl - 1,
+    walletArtifactKind: "FINALIZED_TRANSACTION",
+    walletArtifactBytes: new TextEncoder().encode("restart-final"),
+  });
+  journal.transition("job:reopen:g1:wallet", "PREPARED", "APPLIED");
+
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  let revertStarted = false;
+  let relayConstructions = 0;
+  let reconciliationSocket: RunSocket | null = null;
+  const wallet = {
+    shielded: { getAddress: async () => "solver-address" },
+    dust: { balanceTransactions: async () => tx("dust") },
+    initSwap: async () => ({ transaction: tx("raw") }),
+    finalizeTransaction: async () => tx("final"),
+    revertTransaction: async () => {},
+    revert: async () => {
+      revertStarted = true;
+      await barrier;
+    },
+    stop: async () => { lifecycle.push("wallet-stop"); },
+  };
+  const startup = runSolver({
+    dryRun: false,
+    api: "http://backend.test",
+    relayUrl: "ws://relay.test/solver",
+    relayAuthToken: "r".repeat(64),
+    relayPushIntervalMs: 60_000,
+    relayReconnectDelayMs: 60_000,
+    relayConnectTimeoutMs: 1_000,
+    relayWithdrawTimeoutMs: 100,
+    jobSweepIntervalMs: 60_000,
+    resyncIntervalMs: 60_000,
+    backendHealthCheckIntervalMs: 30_000,
+    backendHealthMaxAgeMs: 60_000,
+    startupTimeoutMs: 1_000,
+    stopTimeoutMs: 1_000,
+    journalOptions: { path: ":memory:", allowMemory: true },
+    journalOpen: () => journal,
+    syncDependencies: syncHarness(lifecycle),
+    relayCreateWebSocket: () => {
+      relayConstructions += 1;
+      reconciliationSocket = new RunSocket(lifecycle);
+      queueMicrotask(() => reconciliationSocket?.open());
+      return reconciliationSocket;
+    },
+    walletDependencies: {
+      buildWallet: async () => ({ wallet }),
+      waitForSync: async () => {},
+      shieldedBalances: async () => ({ [B]: 1_000n }),
+      shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
+    } as any,
+    jobDependencies: {
+      mergeFinalized: merge as any,
+      serializeUnproven: (transaction: any) => transaction.serialize(),
+      deserializeUnproven: (bytes) => tx(new TextDecoder().decode(bytes)),
+      serializeFinalized: (transaction: any) => transaction.serialize(),
+      deserializeFinalized: (bytes) => tx(new TextDecoder().decode(bytes)) as any,
+    },
+    log: () => {},
+  });
+  await waitFor(() => revertStarted, "journal reconciliation revert");
+  expect(relayConstructions).toBe(1);
+  await waitFor(() => reconciliationSocket?.sent.some((frame) =>
+    frame.type === "price-levels" && Array.isArray(frame.levels) && frame.levels.length === 0) ?? false,
+  "empty reconciliation ladder");
+  reconciliationSocket!.receive({
+    type: "swap", jobId: "during-reconcile", tokenIn: A, tokenOut: B,
+    amountIn: "10", amountOut: "20",
+  });
+  await waitFor(() => reconciliationSocket?.sent.some((frame) =>
+    frame.type === "job-error" && frame.jobId === "during-reconcile" &&
+    frame.reason === JOB_RECONCILING) ?? false,
+  "reconciliation job refusal");
+  release();
+  const handle = await startup;
+  expect(relayConstructions).toBe(1);
+  await waitFor(() => reconciliationSocket?.sent.some((frame) =>
+    frame.type === "price-levels" && Array.isArray(frame.levels) && frame.levels.length > 0) ?? false,
+  "post-reconciliation ladder");
+  await handle.stop();
+});
+
 test("runSolver starts relay beside the mirror, executes a job, and shuts down in authority order", async () => {
   const lifecycle: string[] = [];
   const socket = new RunSocket(lifecycle);
@@ -250,6 +375,7 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
     backendHealthMaxAgeMs: 60_000,
     startupTimeoutMs: 1_000,
     stopTimeoutMs: 1_000,
+    journalOptions: { path: ":memory:", allowMemory: true },
     syncDependencies: syncHarness(lifecycle),
     relayCreateWebSocket: () => {
       queueMicrotask(() => socket.open());
@@ -300,6 +426,10 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
       mergeFinalized: merge as any,
       tokenImbalances: ((transaction: FakeTx) => transaction.rows) as any,
       getOfferStatus: async (offerId) => ({ offerId, status: "live" }),
+      serializeUnproven: (transaction: any) => transaction.serialize(),
+      deserializeUnproven: (bytes) => tx(new TextDecoder().decode(bytes)),
+      serializeFinalized: (transaction: any) => transaction.serialize(),
+      deserializeFinalized: (bytes) => tx(new TextDecoder().decode(bytes)) as any,
     },
     log: () => {},
   });

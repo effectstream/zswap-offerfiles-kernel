@@ -9,6 +9,7 @@ import { MAX_EXACT_FILES_PER_READ } from "@zswap-da/solver-core/exact-files-cont
 import {
   isDryRun,
   loadRelayClientEnv,
+  loadSolverJournalEnv,
   SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS,
   SOLVER_BACKEND_HEALTH_MAX_AGE_MS,
   SOLVER_EXPIRY_MARGIN_SECONDS,
@@ -30,6 +31,10 @@ import {
   type SyncHandle,
 } from "./book-sync.ts";
 import { Stock } from "./stock.ts";
+import {
+  SolverOperationJournal,
+  type SolverOperationJournalOptions,
+} from "./operation-journal.ts";
 import {
   startRelayClient,
   type CreateRelayWebSocket,
@@ -92,6 +97,10 @@ export interface SolverOptions {
   relayTimers?: RelayClientTimers;
   jobTimers?: SwapJobTimers;
   jobDependencies?: Partial<SwapJobDependencies>;
+  /** Explicit harness seam. Production omits this and must provide the
+   * mandatory SOLVER_JOURNAL_PATH environment boundary. */
+  journalOptions?: SolverOperationJournalOptions;
+  journalOpen?: typeof SolverOperationJournal.open;
   /** Deadline applied to wallet build/sync/first balance and, separately, to
    * the initial authoritative book snapshot plus buffered SSE drain. */
   startupTimeoutMs?: number;
@@ -463,6 +472,28 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     throw asError(opts.signal.reason, "solver startup aborted");
   }
   const stock = new Stock();
+  const journalConfig = dryRun
+    ? null
+    : opts.journalOptions ?? loadSolverJournalEnv(undefined, {
+      relayExecutionEnabled: true,
+      warn: log,
+    });
+  let operationJournal: SolverOperationJournal | null = null;
+  if (journalConfig) {
+    operationJournal = (opts.journalOpen ?? SolverOperationJournal.open)({
+      ...journalConfig,
+      warn: log,
+    });
+    // Force canonical row hydration before the wallet is even acquired. SQLite
+    // integrity alone cannot detect malformed canonical JSON or claim fields.
+    try {
+      operationJournal.list();
+    } catch (error) {
+      operationJournal.close();
+      operationJournal = null;
+      throw error;
+    }
+  }
 
   log(
     `[solver] network=${net.id} api=${api}${dryRun ? " DRY-RUN (mirror only)" : " RFQ relay mode"}`,
@@ -513,6 +544,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     } catch (err) {
       inventory.stop();
       balanceWallet = null;
+      operationJournal?.close();
       throw err;
     }
     log(
@@ -665,21 +697,43 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     }
     await Promise.all(cleanups);
     balanceWallet = null;
+    operationJournal?.close();
     throw err;
   }
   if (!sync) throw new Error("book synchronization failed to initialize");
   const activeSync = sync;
+
+  // Durable claims must be rebuilt against a current authoritative balance,
+  // not the deliberately emptied Stock used while backend currentness is
+  // unknown. The relay is connected only after these upstream authorities are
+  // ready; its cache remains gated empty through journal reconciliation.
+  if (!dryRun) {
+    try {
+      await solverReady;
+    } catch (error) {
+      inventory.stop();
+      await Promise.allSettled([
+        activeSync.stop(),
+        Promise.resolve().then(() => (wallet?.wallet as any)?.stop?.()),
+      ]);
+      balanceWallet = null;
+      operationJournal?.close();
+      throw error;
+    }
+  }
 
   // Q-N4-1 option A: one deployable process, two independent lifecycles. The
   // relay client consumes `activeSync` only through the cache interface and
   // cannot start, stop or resnapshot the mirror.
   if (!dryRun) {
     if (!wallet) throw new Error("wallet initialization did not produce a wallet");
+    if (!operationJournal) throw new Error("live solver did not open its operation journal");
     const ownedWallet = wallet;
     jobExecutor = startSwapJobExecutor({
       cache: activeSync,
       stock,
       wallet: ownedWallet.wallet as any,
+      journal: operationJournal,
       keys: walletDependencies.shieldedKeys(ownedWallet) as any,
       api,
       maxParallelSwaps,
@@ -688,6 +742,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       walletOperationTimeoutMs,
       sweepIntervalMs: opts.jobSweepIntervalMs ?? SOLVER_STATUS_POLL_MS,
       ...(opts.jobTimers ? { timers: opts.jobTimers } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.jobDependencies ? { dependencies: opts.jobDependencies } : {}),
       onOfferConsumed: (offerHash) => {
         if (activeSync.book.remove(offerHash)) {
@@ -703,29 +758,47 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     });
 
     const activeJobs = jobExecutor;
-    relayClient = startRelayClient({
-      url: relayUrl,
-      authToken: relayAuthToken,
-      cache: activeSync,
-      ladder: {
-        expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
-        maxParallelSwaps,
-        // One swap job is one bounded exact-files read. Never advertise a rung
-        // whose whole-offer prefix cannot fit that read.
-        maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
-        unavailableOfferHashes: activeJobs.unavailableOfferHashes,
-      },
-      pushIntervalMs: opts.relayPushIntervalMs ?? relayEnv.pushIntervalMs,
-      reconnectDelayMs: opts.relayReconnectDelayMs ?? relayEnv.reconnectDelayMs,
-      connectTimeoutMs: opts.relayConnectTimeoutMs ?? relayEnv.connectTimeoutMs,
-      withdrawTimeoutMs: opts.relayWithdrawTimeoutMs ?? relayEnv.withdrawTimeoutMs,
-      ...(opts.relayCreateWebSocket ? { createWebSocket: opts.relayCreateWebSocket } : {}),
-      ...(opts.relayTimers ? { timers: opts.relayTimers } : {}),
-      onSwap: activeJobs.onSwap,
-      onTxSubmitted: activeJobs.onTxSubmitted,
-      onSubmitFailed: activeJobs.onSubmitFailed,
-      log,
-    });
+    let journalReconciled = false;
+    try {
+      relayClient = startRelayClient({
+        url: relayUrl,
+        authToken: relayAuthToken,
+        cache: {
+          book: activeSync.book,
+          isCurrent: () => journalReconciled && activeSync.isCurrent(),
+        },
+        ladder: {
+          expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
+          maxParallelSwaps,
+          // One swap job is one bounded exact-files read. Never advertise a rung
+          // whose whole-offer prefix cannot fit that read.
+          maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
+          unavailableOfferHashes: activeJobs.unavailableOfferHashes,
+        },
+        pushIntervalMs: opts.relayPushIntervalMs ?? relayEnv.pushIntervalMs,
+        reconnectDelayMs: opts.relayReconnectDelayMs ?? relayEnv.reconnectDelayMs,
+        connectTimeoutMs: opts.relayConnectTimeoutMs ?? relayEnv.connectTimeoutMs,
+        withdrawTimeoutMs: opts.relayWithdrawTimeoutMs ?? relayEnv.withdrawTimeoutMs,
+        ...(opts.relayCreateWebSocket ? { createWebSocket: opts.relayCreateWebSocket } : {}),
+        ...(opts.relayTimers ? { timers: opts.relayTimers } : {}),
+        onSwap: activeJobs.onSwap,
+        onTxSubmitted: activeJobs.onTxSubmitted,
+        onSubmitFailed: activeJobs.onSubmitFailed,
+        log,
+      });
+      await jobExecutor.ready;
+      journalReconciled = true;
+      await relayClient.push();
+    } catch (error) {
+      await Promise.allSettled([relayClient?.stop(), jobExecutor.stop()]);
+      await Promise.allSettled([
+        activeSync.stop(),
+        Promise.resolve().then(() => (ownedWallet.wallet as any)?.stop?.()),
+      ]);
+      balanceWallet = null;
+      operationJournal.close();
+      throw error;
+    }
   }
 
   const balanceRetryTimer = dryRun
@@ -771,16 +844,21 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       const ownedWallet = wallet;
       const ownedJobs = jobExecutor;
       const ownedRelay = relayClient;
+      const ownedJournal = operationJournal;
       // Withdraw first while the socket is still open. Only after the client
       // can no longer accept jobs do we settle/revert executor state, then
       // release the mirror and wallet in parallel.
-      const shutdown = Promise.resolve()
-        .then(() => ownedRelay?.stop())
-        .then(() => ownedJobs?.stop())
-        .then(() => Promise.allSettled([
+      const shutdown = (async (): Promise<void> => {
+        await Promise.allSettled([Promise.resolve().then(() => ownedRelay?.stop())]);
+        await Promise.allSettled([Promise.resolve().then(() => ownedJobs?.stop())]);
+        try { ownedJournal?.close(); } catch (error) {
+          log(`[solver] journal close failed: ${asError(error, "unknown error").message}`);
+        }
+        await Promise.allSettled([
           Promise.resolve().then(() => activeSync.stop()),
           Promise.resolve().then(() => (ownedWallet?.wallet as any)?.stop?.()),
-        ]));
+        ]);
+      })();
       const tasks: Promise<unknown>[] = [shutdown];
       for (const task of tasks) observe(task);
       balanceWallet = null;
@@ -797,7 +875,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         if (!completed) {
           log(
             `[solver] stop deadline elapsed after ${stopTimeoutMs} ms; ` +
-              "unacknowledged wallet work remains quarantined in memory only",
+              "unacknowledged wallet work remains quarantined in the durable journal",
           );
         }
       })();

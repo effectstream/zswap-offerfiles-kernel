@@ -6,6 +6,7 @@ import type { Imbalance } from "@zswap-da/solver-core/batcher";
 import type { SwapMessage } from "@zswap-da/solver-core/relay-ws-contract";
 
 import { Book, type BookOffer } from "./src/book.ts";
+import { SolverOperationJournal } from "./src/operation-journal.ts";
 import { Stock } from "./src/stock.ts";
 import {
   JOB_AT_CAPACITY,
@@ -188,10 +189,12 @@ function harness(options: {
     })),
   }));
 
-  const executor = startSwapJobExecutor({
+  const journal = SolverOperationJournal.open({ path: ":memory:", allowMemory: true });
+  const activeExecutor = startSwapJobExecutor({
     cache: { book, isCurrent: () => current },
     stock,
     wallet,
+    journal,
     keys: { dustSecretKey: "dust-key" },
     maxParallelSwaps: options.maxParallelSwaps ?? 2,
     expiryMarginSeconds: 120,
@@ -224,12 +227,27 @@ function harness(options: {
         if (options.failImbalance) throw new Error("imbalance inspection failed");
         return transaction.rows;
       }) as any,
+      serializeUnproven: (transaction: any) => transaction.serialize(),
+      deserializeUnproven: (bytes) => fakeTx(new TextDecoder().decode(bytes)),
+      serializeFinalized: (transaction: any) => transaction.serialize(),
+      deserializeFinalized: (bytes) => fakeTx(new TextDecoder().decode(bytes)) as any,
     },
     onOfferConsumed: (offerHash) => book.remove(offerHash),
     ...(options.walletOperationTimeoutMs === undefined
       ? {}
       : { walletOperationTimeoutMs: options.walletOperationTimeoutMs }),
   });
+  let closed = false;
+  const executor = {
+    ...activeExecutor,
+    stop: async () => {
+      await activeExecutor.stop();
+      if (!closed) {
+        closed = true;
+        journal.close();
+      }
+    },
+  };
 
   return {
     executor,
@@ -237,6 +255,7 @@ function harness(options: {
     stock,
     calls,
     reverts,
+    journal,
     setCurrent: (value: boolean) => { current = value; },
     advance: (ms: number) => { now += ms; },
     blockExact: () => {
@@ -260,6 +279,13 @@ test("exact-boundary job fetches exact files after arrival, funds DUST, and retu
     "finalize:dust-unproven",
   ]);
   expect(h.executor.stats()).toMatchObject({ building: 0, awaitingRelay: 1, refused: 0 });
+  expect(h.journal.list().map((row) => [row.operationKind, row.lifecycleState])).toEqual([
+    ["JOB_SETTLEMENT", "AWAITING_RELAY"],
+    ["MIRROR_RESERVATION", "REVERTED"],
+    ["MIRROR_REVERT", "REVERTED"],
+    ["DUST_BALANCE", "AWAITING_RELAY"],
+    ["FINALIZED_CONTRIBUTION", "AWAITING_RELAY"],
+  ]);
   await h.executor.stop();
 });
 
@@ -269,6 +295,8 @@ test("between-rung job uses whole exact offers plus bounded solver residual", as
   expect(result.type).toBe("swap-tx");
   expect(h.calls).toContain("residual");
   expect(h.stock.reserved(B)).toBe(5n);
+  expect(h.journal.list().filter((row) => row.operationKey.endsWith(":residual"))
+    .map((row) => row.operationKind)).toEqual(["RESIDUAL_BUILD", "FINALIZED_CONTRIBUTION"]);
   await h.executor.stop();
 });
 
@@ -441,7 +469,7 @@ test("tx-submitted racing a TTL status read can never revert the submitted walle
   await h.executor.stop();
 });
 
-test("wallet timeout retains the slot until late proof work is reverted", async () => {
+test("wallet timeout retains the slot until the late generation is durably terminal", async () => {
   const h = harness({ blockWallet: true, walletOperationTimeoutMs: 5, maxParallelSwaps: 1 });
   expect(await h.executor.onSwap(job("timeout"))).toEqual({
     type: "job-error",
@@ -456,12 +484,13 @@ test("wallet timeout retains the slot until late proof work is reverted", async 
   });
   h.releaseWallet();
   await h.executor.idle();
-  expect(h.executor.stats()).toMatchObject({ building: 0, awaitingRelay: 0, reverted: 1 });
-  expect(h.reverts).toHaveLength(1);
+  expect(h.executor.stats()).toMatchObject({ building: 0, awaitingRelay: 0, quarantined: 0 });
+  expect(h.executor.unavailableOfferHashes()).toEqual([]);
+  expect(h.journal.list().every((row) => ["REVERTED", "FAILED"].includes(row.lifecycleState))).toBe(true);
   await h.executor.stop();
 });
 
-test("a timed-out build whose late cleanup fails stays quarantined for the TTL sweeper", async () => {
+test("a timed-out wallet call cannot advance beyond its quarantined generation", async () => {
   const h = harness({
     blockWallet: true,
     walletOperationTimeoutMs: 5,
@@ -471,10 +500,10 @@ test("a timed-out build whose late cleanup fails stays quarantined for the TTL s
   expect((await h.executor.onSwap(job("late-cleanup"))).type).toBe("job-error");
   h.releaseWallet();
   await h.executor.idle();
-  expect(h.executor.stats()).toMatchObject({ building: 0, awaitingRelay: 1 });
-  h.advance(60_001);
-  await h.executor.sweep();
-  expect(h.executor.stats()).toMatchObject({ awaitingRelay: 0, reverted: 1 });
+  expect(h.executor.stats()).toMatchObject({ building: 0, awaitingRelay: 0, quarantined: 0 });
+  const generations = new Set(h.journal.list().map((row) => row.generation));
+  expect([...generations]).toEqual([1]);
+  expect(h.journal.list().every((row) => ["REVERTED", "FAILED"].includes(row.lifecycleState))).toBe(true);
   await h.executor.stop();
 });
 
@@ -485,13 +514,13 @@ test("failed immediate rollback is cached and retried; relay signals cannot clea
     jobId: "cleanup",
     reason: JOB_WALLET_FAILED,
   });
-  expect(h.executor.stats()).toMatchObject({ awaitingRelay: 1, revertFailures: 0 });
+  expect(h.executor.stats()).toMatchObject({ quarantined: 1, revertFailures: 0 });
   h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "cleanup", txId: "should-be-ignored" });
   h.executor.onSubmitFailed({ type: "submit-failed", jobId: "cleanup", reason: "should-be-ignored" });
-  expect(h.executor.stats().awaitingRelay).toBe(1);
+  expect(h.executor.stats().quarantined).toBe(1);
   h.advance(60_001);
   await h.executor.sweep();
-  expect(h.executor.stats()).toMatchObject({ awaitingRelay: 0, reverted: 1 });
+  expect(h.executor.stats()).toMatchObject({ quarantined: 0, reverted: 1 });
   expect(h.stock.reserved(B)).toBe(0n);
   await h.executor.stop();
 });

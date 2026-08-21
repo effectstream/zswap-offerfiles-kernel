@@ -140,6 +140,73 @@ UNSET, but log a contained `[ADMISSION]` warning at startup and every configured
 warning interval. Malformed or partially-set groups fail startup; there is no
 silent coercion. For real-funds rollout, SET all three policy groups explicitly.
 
+## Effectstream whole-block fail-stop operations
+
+This release accepts an availability limitation in the pinned Effectstream
+0.103.1 runtime: one scheduled application input that throws after a write, or
+one SQL statement that fails, rolls back the **entire L2 block** and leaves the
+scheduled input retained. This preserves database integrity—no partial block,
+pre-fault application write, or successful-input result commits—but progress
+halts at that block until an operator resolves the poison input. It is not
+per-input isolation and must be treated as an incident, not an automatic skip.
+
+Use this operating sequence:
+
+1. **Detect and contain.** Treat a repeatedly failing block, a stalled
+   `effectstream.effectstream_blocks` height, or an application-transition
+   failure followed by PostgreSQL `25P02` as a fail-stop incident. Stop the
+   affected node and its restart loop. Stop solver job execution that depends
+   on that backend and confirm it is no longer publishing routable ladders
+   before touching state.
+2. **Preserve evidence.** Record the deployed commit and Effectstream version,
+   the last committed and failing heights, the exception/SQLSTATE, and the
+   suspected scheduled-input identity and payload. Take a storage snapshot or
+   backup before any state-changing remediation.
+3. **Inspect read-only.** Against the stopped instance, use a read-only
+   transaction to inspect the committed boundary and retained inputs, for
+   example:
+
+   ```sql
+   BEGIN TRANSACTION READ ONLY;
+   SELECT block_height
+     FROM effectstream.effectstream_blocks
+    ORDER BY block_height DESC
+    LIMIT 5;
+   SELECT id, input_data
+     FROM effectstream.rollup_inputs
+    ORDER BY id;
+   ROLLBACK;
+   ```
+
+   Correlate the exact input with logs and inspect every application table the
+   transition could have written. The failed block and its pre-fault writes
+   must be absent, while the authoritative scheduled input remains.
+4. **Remediate deliberately.** Prefer correcting the application, runtime, or
+   configuration so the retained input can replay unchanged. If an invalid or
+   hostile input can never succeed, its quarantine or removal requires an
+   incident-specific, reviewed migration/tool that pins the exact input
+   identity and expected payload, checks the backup, runs transactionally, and
+   records the disposition. Do **not** run an ad-hoc `DELETE` against
+   `effectstream.rollup_inputs`; the direct deletion in the regression test is
+   test-only and is not a production procedure.
+5. **Recover in isolation.** Apply the reviewed fix while all writers remain
+   stopped. Start one node first, with solver execution still withdrawn, and
+   let it replay from the last committed boundary. Restore replicas only after
+   that node is current and stable; restore the solver only after its backend
+   mirror re-establishes currentness and its normal journal reconciliation
+   completes.
+6. **Verify replay before closing the incident.** Confirm the blocked height
+   commits exactly once and later heights advance; the retained input either
+   completes normally or has the reviewed disposition; no pre-fault partial
+   row or duplicate application event exists; and backend health, offer
+   liveness, solver empty-to-current ladder recovery, and durable wallet-job
+   reconciliation are all healthy. Archive the queries, logs, backup identity,
+   remediation artifact, and verification results with the incident.
+
+The long-term fix is upstream savepoint-based per-input database and rejected-
+promise isolation. This branch deliberately does not fork Effectstream or
+pretend the current whole-block mode provides that availability guarantee.
+
 ## Testing
 
 ```bash

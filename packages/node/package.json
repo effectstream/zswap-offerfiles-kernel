@@ -34,7 +34,7 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "@scure/base": "^2.0.0",
-    "@sinclair/typebox": "^0.34.30",
+    "@sinclair/typebox": "0.34.41",
     "effection": "^3.5.0",
     "@effectstream/mip-zswap-offer": "0.3.0",
     "@fastify/rate-limit": "^10.0.0",
@@ -44,6 +44,7 @@
     "@zswap-da/solver-core": "workspace:*"
   },
   "devDependencies": {
+    "@types/ws": "8.18.1",
     "fastify": "^5.0.0",
     "pg": "^8.16.3"
   }

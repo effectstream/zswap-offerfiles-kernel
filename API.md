@@ -13,6 +13,15 @@ settle via the batcher's `midnight-balancer` target, and connect a wallet to
 inspect balances / mint test tokens (`VITE_PROOF_SERVER_URL`, default
 `http://localhost:6300`).
 
+**Repository validation scope.** `bun run typecheck:backend` is the strict,
+no-emit TypeScript gate for the 27 production `packages/node` roots only; it
+excludes node tests and the grand-E2E entrypoint, builds the real dependency
+graph without modifying it, and fails all node-owned or fileless compiler
+diagnostics. It is deliberately not advertised as a workspace-wide typecheck.
+CI also bundles API examples 01, 03, 05, 07, and 11 before running the docs
+playground typecheck. Example 11's Midnight network-id and ledger-v8 imports
+are direct root dependencies, not transitive assumptions.
+
 ---
 
 ## Environments

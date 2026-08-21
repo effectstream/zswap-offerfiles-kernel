@@ -748,6 +748,9 @@ addTransition("celestia-zswap", function* (data) {
       ? Number(new Date(intentTtl))
       : data.blockTimestamp + OFFER_TTL_SECONDS * 1000;
   }
+  if (layerDeadlineMs == null) {
+    throw new Error("offer expiry deadline was not derived");
+  }
   // The indexer's retention policy is a CEILING, never an extension: an offer
   // whose layer deadline falls sooner dies sooner, and one that would outlive
   // the policy is still swept at the policy horizon.

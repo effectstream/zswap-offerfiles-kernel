@@ -10,6 +10,7 @@
     "./exact-files-contract": "./exact-files-contract.ts",
     "./wallet": "./wallet.ts",
     "./offer-files": "./offer-files.ts",
+    "./ladder-derivation": "./ladder-derivation.ts",
     "./ladder-schema": "./ladder-schema.ts",
     "./offer-updates-contract": "./offer-updates-contract.ts",
     "./relay-ws-contract": "./relay-ws-contract.ts",

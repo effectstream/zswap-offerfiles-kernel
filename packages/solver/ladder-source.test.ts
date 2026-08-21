@@ -1,0 +1,183 @@
+import { describe, expect, test } from "bun:test";
+
+import type { ApiZswap } from "@zswap-da/solver-core/api-client";
+import { parsePriceLevels, parseSolverCapabilities } from "@zswap-da/solver-core/relay-ws-contract";
+
+import { Book, bookOfferFromApi } from "./src/book.ts";
+import { LadderBook, interpolateQuote } from "./src/ladder.ts";
+import { deriveLadderPush, type LadderCache } from "./src/ladder-source.ts";
+
+// The frozen wire fixture's token ids, so the cache-driven ladder is directly
+// comparable with the pinned relay contract.
+const A = `01${"00".repeat(31)}`;
+const B = `02${"00".repeat(31)}`;
+
+const NOW = Date.parse("2026-06-01T12:00:00.000Z");
+const EXPIRES = "2026-06-01T13:00:00.000Z";
+const OPTIONS = { nowMs: NOW, expiryMarginSeconds: 60 };
+
+const hash = (byte: string): string => byte.repeat(32);
+const O1 = hash("11");
+const O2 = hash("22");
+const O3 = hash("33");
+
+/** A REST row exactly as the backend serves it, so the ladder is derived from
+ *  the real cache projection rather than a hand-built book object. */
+const row = (offerId: string, givesA: string, wantsB: string): ApiZswap =>
+  ({
+    version: 1,
+    offerId,
+    computed: {
+      gives: [{ token: A, amount: givesA, type: "SHIELDED" }],
+      wants: [{ token: B, amount: wantsB, type: "SHIELDED" }],
+      expiresAt: EXPIRES,
+      firstSeenAt: "2026-06-01T11:00:00.000Z",
+      inputNullifiers: [offerId],
+      status: "live",
+    },
+  }) as ApiZswap;
+
+/** The Q-R2-3 canonical book: `-10A +10B`, `-5A +5B`, `-20A +10B`. */
+const CANONICAL_ROWS: ApiZswap[] = [
+  row(O1, "10", "10"),
+  row(O2, "5", "5"),
+  row(O3, "20", "10"),
+];
+
+const seed = (rows: ApiZswap[]): Book => {
+  const book = new Book();
+  for (const entry of rows) book.upsert(bookOfferFromApi(entry)!);
+  return book;
+};
+
+const cache = (book: Book, current = true): LadderCache => ({ book, isCurrent: () => current });
+
+describe("ladder source — the cache is the only input", () => {
+  test("a seeded book pushes exactly the canonical ladder and its capabilities", () => {
+    const push = deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, maxParallelSwaps: 8 });
+
+    expect(push.withheld).toBeNull();
+    expect(push.priceLevels.levels).toEqual([
+      {
+        tokenIn: B,
+        tokenOut: A,
+        levels: [
+          { input: "10", output: "20" },
+          { input: "20", output: "30" },
+          { input: "25", output: "35" },
+        ],
+      },
+    ]);
+    expect(push.capabilities).toEqual({
+      type: "solver-capabilities",
+      tokenIds: [A, B],
+      maxParallelSwaps: 8,
+    });
+    // Both frames are what the relay itself would admit.
+    expect(parsePriceLevels(push.priceLevels)).toEqual(push.priceLevels);
+    expect(parseSolverCapabilities(push.capabilities)).toEqual(push.capabilities);
+  });
+
+  test("byte-reproducible from the same cache state, whatever order it was built in", () => {
+    const forward = deriveLadderPush(cache(seed(CANONICAL_ROWS)), OPTIONS);
+    const reverse = deriveLadderPush(cache(seed([...CANONICAL_ROWS].reverse())), OPTIONS);
+    expect(JSON.stringify(forward.priceLevels)).toBe(JSON.stringify(reverse.priceLevels));
+    expect(JSON.stringify(forward.capabilities)).toBe(JSON.stringify(reverse.capabilities));
+  });
+
+  test("the derived ladder loads into the engine's own LadderBook and quotes identically", () => {
+    const push = deriveLadderPush(cache(seed(CANONICAL_ROWS)), OPTIONS);
+    // `ladder.ts`/`ladder-schema` were retained by N1 for exactly this: one
+    // rung/interpolation vocabulary, so what the solver publishes and what it
+    // prices against cannot drift apart.
+    const ladders = LadderBook.fromPairs(push.priceLevels.levels);
+    for (const size of [10n, 12n, 15n, 20n, 25n]) {
+      expect(ladders.maxPayout(B, A, size)).toBe(
+        interpolateQuote(push.priceLevels.levels[0]!.levels, size),
+      );
+    }
+    expect(ladders.maxPayout(B, A, 12n)).toBe(22n);
+    expect(ladders.maxPayout(A, B, 12n)).toBeNull();
+  });
+});
+
+describe("ladder source — book changes and fail-closed withholding", () => {
+  test("a consumed offer is gone from the very next derivation (FR-014 cadence)", () => {
+    const book = seed(CANONICAL_ROWS);
+    expect(deriveLadderPush(cache(book), OPTIONS).priceLevels.levels[0]!.levels).toHaveLength(3);
+
+    // The mirror applies `offer_consumed` by nullifier; the best-rate rung
+    // disappears with it.
+    expect(book.removeByNullifier(O3)).toEqual([O3]);
+    const after = deriveLadderPush(cache(book), OPTIONS);
+    expect(after.priceLevels.levels[0]!.levels).toEqual([
+      { input: "10", output: "10" },
+      { input: "15", output: "15" },
+    ]);
+    expect(after.derived.provenance[0]!.rungs.map((rung) => rung.offerHash)).toEqual([O1, O2]);
+  });
+
+  test("an emptied book withdraws instead of publishing a stale ladder", () => {
+    const book = seed(CANONICAL_ROWS);
+    for (const offerHash of [O1, O2, O3]) book.remove(offerHash);
+    const push = deriveLadderPush(cache(book), OPTIONS);
+    expect(push.withheld).toBeNull();
+    expect(push.priceLevels).toEqual({ type: "price-levels", levels: [] });
+    expect(push.capabilities.tokenIds).toEqual([]);
+  });
+
+  test("a cache that is not current publishes nothing at all (FR-005, downstream half)", () => {
+    const book = seed(CANONICAL_ROWS);
+    const push = deriveLadderPush(cache(book, false), { ...OPTIONS, maxParallelSwaps: 8 });
+
+    expect(push.withheld).toBe("cache-not-current");
+    // Not silence: the relay has no version or tombstone concept, so a stale
+    // ladder would keep quoting. Withholding IS the explicit empty push.
+    expect(push.priceLevels).toEqual({ type: "price-levels", levels: [] });
+    expect(push.capabilities).toEqual({
+      type: "solver-capabilities",
+      tokenIds: [],
+      maxParallelSwaps: 8,
+    });
+    expect(push.derived.levels).toEqual([]);
+    expect(parsePriceLevels(push.priceLevels)).toEqual(push.priceLevels);
+    // The book itself is untouched — currentness gates publication, not the
+    // cache, so it recovers without a resnapshot.
+    expect(book.size).toBe(3);
+    expect(deriveLadderPush(cache(book), OPTIONS).priceLevels.levels).toHaveLength(1);
+  });
+
+  test("offers claimed by an in-flight fill do not back a published rung", () => {
+    // The claim set comes from `Stock` at push time (N4 wires it); derivation
+    // stays pure and takes it as a parameter.
+    const push = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
+      ...OPTIONS,
+      unavailableOfferHashes: [O3],
+    });
+    expect(push.priceLevels.levels[0]!.levels).toEqual([
+      { input: "10", output: "10" },
+      { input: "15", output: "15" },
+    ]);
+    expect(push.derived.excluded).toEqual([{ offerHash: O3, reason: "unavailable" }]);
+  });
+
+  test("an offer inside the expiry margin stops backing rungs before it dies", () => {
+    const book = seed(CANONICAL_ROWS);
+    const justInsideMargin = Date.parse(EXPIRES) - 60_000;
+    const push = deriveLadderPush(cache(book), {
+      nowMs: justInsideMargin,
+      expiryMarginSeconds: 60,
+    });
+    expect(push.priceLevels.levels).toEqual([]);
+    expect(push.derived.excluded.map((entry) => entry.reason)).toEqual([
+      "expiring",
+      "expiring",
+      "expiring",
+    ]);
+    // One millisecond earlier they are all still publishable.
+    expect(
+      deriveLadderPush(cache(book), { nowMs: justInsideMargin - 1, expiryMarginSeconds: 60 })
+        .priceLevels.levels[0]!.levels,
+    ).toHaveLength(3);
+  });
+});

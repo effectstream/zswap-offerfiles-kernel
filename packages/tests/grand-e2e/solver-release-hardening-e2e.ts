@@ -21,7 +21,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { closeTestPglite } from "../../database/test-pglite.ts";
 import { registerOfferConsumptionRoute } from "../../node/offer-consumption-read.ts";
@@ -48,6 +48,9 @@ const LEDGER_B = "ef".repeat(32);
 const EXPECTED_RELAY_REVISION = "d444c8379415093460d83a6ba27536af396f759d";
 const FIXTURE_ROOT = new URL("../../solver-core/fixtures/relay-ws/v1/", import.meta.url);
 const JOURNAL_MODULE = new URL("../../solver/src/operation-journal.ts", import.meta.url).href;
+const RECOVERY_CHILD = fileURLToPath(
+  new URL("../../solver/swap-job-recovery-revert-child.ts", import.meta.url),
+);
 const NODE_REQUIRE = createRequire(new URL("../../node/package.json", import.meta.url));
 
 type CrashState = "AWAITING_RELAY" | "RELAY_SUBMITTED" | "CONFIRMING";
@@ -64,6 +67,20 @@ interface PinnedRelayEvidence {
   jobId: string;
   txId: string;
   manifestHash: string;
+}
+
+interface RecoveryChildResult {
+  calls: string[];
+  counter: number;
+  states: Array<{
+    operationKey: string;
+    generation: number;
+    state: string;
+    errorCode: string | null;
+  }>;
+  reserved: string;
+  unavailable: string[];
+  safetyLogs: string[];
 }
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -195,6 +212,64 @@ async function seedAbruptJournal(
   assertEqual(exitCode, 0, `abrupt ${state} writer exit (${stderr})`);
   assertEqual(stdout, "", `abrupt ${state} writer stdout`);
   assertEqual(stderr, "", `abrupt ${state} writer stderr`);
+}
+
+function seedRecoveryJournal(path: string, artifact: "finalized" | "unproven"): void {
+  const journal = SolverOperationJournal.open({ path });
+  const jobId = "restart-job";
+  const expires = Date.now() + 120_000;
+  const prepare = (
+    kind: "JOB_SETTLEMENT" | "FINALIZED_CONTRIBUTION" | "MIRROR_RESERVATION",
+    label: string,
+    artifactKind?: "FINALIZED_TRANSACTION" | "UNPROVEN_TRANSACTION",
+  ): string => {
+    const operationKey = `job:${jobId}:g1:${kind}:${label}`;
+    journal.createPrepared({
+      operationKey,
+      jobId,
+      generation: 1,
+      offerHashes: [OFFER_A],
+      claim: { inputs: [NULLIFIER], payouts: { [TOKEN_OUT]: "5" } },
+      operationKind: kind,
+      ttlExpiresAtMs: expires,
+      deadlineAtMs: expires - 1_000,
+      ...(artifactKind === undefined ? {} : {
+        walletArtifactKind: artifactKind,
+        walletArtifactBytes: new TextEncoder().encode(`recovery-${artifact}-g1`),
+      }),
+    });
+    journal.transition(operationKey, "PREPARED", "APPLIED");
+    return operationKey;
+  };
+  prepare("JOB_SETTLEMENT", "settlement");
+  if (artifact === "finalized") {
+    prepare("FINALIZED_CONTRIBUTION", "wallet", "FINALIZED_TRANSACTION");
+  } else {
+    prepare("MIRROR_RESERVATION", "wallet", "UNPROVEN_TRANSACTION");
+  }
+  journal.close();
+}
+
+async function runRecoveryChild(
+  journalPath: string,
+  counterPath: string,
+  mode: "clean" | "crash",
+): Promise<{ exitCode: number; stdout: string; stderr: string; result?: RecoveryChildResult }> {
+  const child = Bun.spawn([process.execPath, RECOVERY_CHILD, journalPath, counterPath, mode], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return {
+    exitCode,
+    stdout,
+    stderr,
+    ...(exitCode === 0 ? { result: JSON.parse(stdout) as RecoveryChildResult } : {}),
+  };
 }
 
 async function seedConsumedOffer(
@@ -419,6 +494,63 @@ async function main(): Promise<void> {
       "split evidence double restart released durable stock");
     await stopReopened(splitTwice);
 
+    let recoveryRevertAbruptProcesses = 0;
+    let recoveryRevertReopens = 0;
+    const recoveryRevertMutationCounters: Record<"finalized" | "unproven", number> = {
+      finalized: 0,
+      unproven: 0,
+    };
+    for (const artifact of ["finalized", "unproven"] as const) {
+      const path = join(directory, `recovery-${artifact}.sqlite`);
+      const counterPath = join(directory, `recovery-${artifact}-counter.sqlite`);
+      seedRecoveryJournal(path, artifact);
+
+      const crashed = await runRecoveryChild(path, counterPath, "crash");
+      recoveryRevertAbruptProcesses += 1;
+      assertEqual(crashed.exitCode, 86, `${artifact} recovery crash exit`);
+      assertEqual(crashed.stdout, "", `${artifact} recovery crash stdout`);
+      assertEqual(crashed.stderr, "", `${artifact} recovery crash stderr`);
+
+      const afterCrash = SolverOperationJournal.open({ path });
+      const recoveryStateAfterCrash = afterCrash.list().find((row) =>
+        row.operationKey.startsWith(
+          `job:restart-job:g1:JOB_REVERT:recovery-${artifact}-`,
+        ))?.lifecycleState;
+      afterCrash.close();
+
+      const first = await runRecoveryChild(path, counterPath, "clean");
+      recoveryRevertReopens += 1;
+      const second = await runRecoveryChild(path, counterPath, "clean");
+      recoveryRevertReopens += 1;
+      assertEqual(first.exitCode, 0, `${artifact} first recovery reopen exit (${first.stderr})`);
+      assertEqual(second.exitCode, 0, `${artifact} second recovery reopen exit (${second.stderr})`);
+      assert(first.result !== undefined, `${artifact} first recovery reopen emitted no result`);
+      assert(second.result !== undefined, `${artifact} second recovery reopen emitted no result`);
+
+      // Keep these assertions after both reopens. If the pre-call CAS is
+      // moved after the wallet call, the same combined runner reaches the
+      // auditor's duplicate-call/release outcome before failing here.
+      recoveryRevertMutationCounters[artifact] = second.result.counter;
+      assertEqual(first.result.counter, 1, `${artifact} first reopen mutation counter`);
+      assertEqual(second.result.counter, 1, `${artifact} second reopen mutation counter`);
+      assertEqual(recoveryStateAfterCrash, "REVERTING", `${artifact} pre-call authority`);
+      for (const [label, result] of [["first", first.result], ["second", second.result]] as const) {
+        assertEqual(result.calls.length, 0, `${artifact} ${label} reopen repeated wallet mutation`);
+        assertEqual(result.reserved, "5", `${artifact} ${label} reopen released Stock`);
+        assertEqual(result.unavailable.join(","), OFFER_A,
+          `${artifact} ${label} reopen released offer unavailability`);
+        assert(result.states.every((row) => row.state === "QUARANTINED"),
+          `${artifact} ${label} reopen escaped durable quarantine`);
+        assert(result.states.some((row) =>
+          row.errorCode === "RECOVERY_REVERT_OUTCOME_UNKNOWN"),
+        `${artifact} ${label} reopen omitted the durable ambiguity reason`);
+        assert(result.safetyLogs.some((line) =>
+          line.includes("wallet mutation will not be repeated") &&
+          line.includes("remain unavailable")),
+        `${artifact} ${label} reopen omitted [SAFETY] evidence`);
+      }
+    }
+
     console.log(JSON.stringify({
       gate: "RF7A_RELEASE_HARDENING",
       status: "PASS",
@@ -427,10 +559,19 @@ async function main(): Promise<void> {
       relayExtrinsicHash: pinned.txId,
       ledgerHashes: [LEDGER_A, LEDGER_B],
       hashesDistinct: true,
-      abruptFreshProcesses: freshProcesses,
+      abruptFreshProcesses: freshProcesses + recoveryRevertAbruptProcesses,
+      relayEvidenceAbruptFreshProcesses: freshProcesses,
       positiveReconciliations: positiveRestarts,
       quarantinedSplitReconciliations: 2,
-      walletMutations: 0,
+      relayEvidenceWalletMutations: 0,
+      recoveryRevertAbruptFreshProcesses: recoveryRevertAbruptProcesses,
+      recoveryRevertFreshProcessReopens: recoveryRevertReopens,
+      recoveryRevertMutationCounters,
+      recoveryRevertWalletMutations:
+        recoveryRevertMutationCounters.finalized + recoveryRevertMutationCounters.unproven,
+      totalWalletMutations:
+        recoveryRevertMutationCounters.finalized + recoveryRevertMutationCounters.unproven,
+      recoveryRevertQuarantinedReconciliations: recoveryRevertReopens,
       routeReads,
       ports: { pglite: pglitePort, evidenceHttp: apiPort },
     }));

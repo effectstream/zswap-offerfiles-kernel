@@ -23,6 +23,7 @@ const H = "11".repeat(32);
 const N = "31".repeat(32);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const JOURNAL_CHILD = new URL("./swap-job-journal-child.ts", import.meta.url).pathname;
 
 interface FakeTx {
   label: string;
@@ -202,6 +203,56 @@ test("reopen matrix retries only locally provable artifacts and tombstones the t
       })).toEqual({ type: "job-error", jobId: "restart-job", reason: JOB_DUPLICATE });
       await second.executor.stop();
       second.journal.close();
+    });
+  }
+});
+
+test("abrupt child-process exit reopens fail-closed at every lifecycle boundary", async () => {
+  for (const state of [
+    "ARTIFACTLESS",
+    "APPLIED",
+    "AWAITING_RELAY",
+    "RELAY_SUBMITTED",
+    "CONFIRMING",
+    "REVERTING",
+    "QUARANTINED",
+    "REVERTED",
+    "SETTLED",
+  ] as const) {
+    await withJournalPath(async (path) => {
+      const child = Bun.spawn([process.execPath, JOURNAL_CHILD, path, state], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect({ stdout, stderr, exitCode }).toEqual({ stdout: "", stderr: "", exitCode: 0 });
+
+      const reopened = start(path);
+      await reopened.executor.ready;
+      if (state === "APPLIED" || state === "REVERTING" || state === "QUARANTINED") {
+        expect(reopened.calls).toEqual([`final:child-${state}`]);
+        expect(reopened.journal.list().every((row) => row.lifecycleState === "REVERTED")).toBe(true);
+        expect(reopened.stock.reserved(B)).toBe(0n);
+      } else if (state === "REVERTED") {
+        expect(reopened.calls).toEqual([]);
+        expect(reopened.journal.list().every((row) => row.lifecycleState === "REVERTED")).toBe(true);
+        expect(reopened.stock.reserved(B)).toBe(0n);
+      } else if (state === "SETTLED") {
+        expect(reopened.calls).toEqual([]);
+        expect(reopened.journal.list().every((row) => row.lifecycleState === "SETTLED")).toBe(true);
+        expect(reopened.stock.reserved(B)).toBe(0n);
+      } else {
+        expect(reopened.calls).toEqual([]);
+        expect(reopened.journal.list().every((row) => row.lifecycleState === "QUARANTINED")).toBe(true);
+        expect(reopened.stock.reserved(B)).toBe(5n);
+        expect(reopened.executor.unavailableOfferHashes()).toEqual([H]);
+      }
+      await reopened.executor.stop();
+      reopened.journal.close();
     });
   }
 });

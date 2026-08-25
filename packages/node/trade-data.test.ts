@@ -70,6 +70,11 @@ beforeAll(async () => {
     database: "postgres",
   });
   await client.connect();
+  // @effectstream/db 0.200.1: startPglite's close() DESTROYS live sockets
+  // (0.103.1 closed politely). afterAll deliberately never sends a client
+  // Terminate (PGlite WASM throws on it), so the destroy surfaces here as a
+  // 'error' event — expected at teardown, not a test failure. Swallow it.
+  client.on("error", () => {});
   for (const migration of migrationTable) {
     await client.query(migration.sql);
   }

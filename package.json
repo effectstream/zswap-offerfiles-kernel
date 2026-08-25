@@ -24,12 +24,12 @@
     "test:held-open": "bun test ./packages/database/held-open-transaction.pgtest.ts"
   },
   "dependencies": {
-    "@effectstream/celestia": "0.103.1",
-    "@effectstream/midnight-contracts": "0.103.1",
-    "@effectstream/mip-zswap-offer": "0.3.0",
-    "@effectstream/orchestrator": "0.103.1",
+    "@effectstream/celestia": "0.200.1",
+    "@effectstream/midnight-contracts": "0.200.1",
+    "@effectstream/mip-zswap-offer": "0.4.0-v9.0",
+    "@effectstream/orchestrator": "0.200.1",
     "@electric-sql/pglite": "^0.3.14",
-    "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
+    "@midnightntwrk/wallet-sdk-address-format": "4.0.0-beta.2",
     "@scure/bip39": "^2.2.0",
     "wait-on": "8.0.3"
   },
@@ -40,6 +40,6 @@
     "@types/bun": "^1.3.13"
   },
   "overrides": {
-    "@midnight-ntwrk/ledger-v8": "8.1.0"
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3"
   }
 }

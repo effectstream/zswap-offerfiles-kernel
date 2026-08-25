@@ -54,7 +54,7 @@
 // compares state, so a winner chosen by a local id would diverge there rather
 // than fail here.
 
-import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
+import type { UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 import { collectOutputCommitments, collectUnshieldedOutputs } from "@zswap-da/validator";
 
 /**

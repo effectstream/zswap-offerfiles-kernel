@@ -1,5 +1,5 @@
-import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction } from "@midnightntwrk/ledger-v9";
+import type { UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles, OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
 import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 

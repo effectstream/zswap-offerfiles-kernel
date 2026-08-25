@@ -22,7 +22,7 @@
 import * as fs from "node:fs";
 import type { Client } from "pg";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { Transaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -209,7 +209,7 @@ export async function selfSplit(
     const maybeSigned = shielded
       ? recipe
       : await (pw.wr.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-          pw.wr.unshieldedKeystore.signData(p),
+          pw.wr.unshieldedKeystore.signDataAsync(p),
         );
     tx = await withProveSlot(() => pw.wr.wallet.finalizeRecipe(maybeSigned));
   } catch (e) {
@@ -376,7 +376,7 @@ async function genesisTransferOnce(
     const maybeSigned = shielded
       ? recipe
       : await (genesis.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-          genesis.unshieldedKeystore.signData(p),
+          genesis.unshieldedKeystore.signDataAsync(p),
         );
     const finalized = await withProveSlot(() => genesis.wallet.finalizeRecipe(maybeSigned));
     try {
@@ -704,13 +704,13 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
         } catch {
           // Mixed offers (unshielded want) may need the recipe/signing path.
           const signed = await (pw.wr.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-            pw.wr.unshieldedKeystore.signData(p),
+            pw.wr.unshieldedKeystore.signDataAsync(p),
           );
           finalized = await withProveSlot(() => pw.wr.wallet.finalizeRecipe(signed));
         }
       } else {
         const signed = await (pw.wr.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-          pw.wr.unshieldedKeystore.signData(p),
+          pw.wr.unshieldedKeystore.signDataAsync(p),
         );
         finalized = await withProveSlot(() => pw.wr.wallet.finalizeRecipe(signed));
       }
@@ -1044,7 +1044,7 @@ export async function buildSameIntentWrapperPair(
 
       const sign = async (tx: any) => {
         const signed = await (pw.wr.wallet as any).signUnprovenTransaction(
-          tx, (data: Uint8Array) => pw.wr.unshieldedKeystore.signData(data),
+          tx, (data: Uint8Array) => pw.wr.unshieldedKeystore.signDataAsync(data),
         );
         return withProveSlot(() => pw.wr.wallet.finalizeTransaction(signed));
       };
@@ -1209,7 +1209,7 @@ async function prepareSettlementOnce(
     let recipe = balRecipe;
     if (kinds.has("unshielded")) {
       recipe = await (taker.wr.wallet as any).signRecipe(balRecipe, (p: Uint8Array) =>
-        taker.wr.unshieldedKeystore.signData(p),
+        taker.wr.unshieldedKeystore.signDataAsync(p),
       );
     }
     settleTx = await withProveSlot(() => taker.wr.wallet.finalizeRecipe(recipe));

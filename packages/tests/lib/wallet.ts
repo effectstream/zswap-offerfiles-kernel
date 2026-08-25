@@ -4,7 +4,7 @@
 // template's contracts-midnight scripts use).
 
 import * as Rx from "rxjs";
-import { UnshieldedAddress } from "@midnight-ntwrk/wallet-sdk-address-format";
+import { UnshieldedAddress } from "@midnightntwrk/wallet-sdk-address-format";
 import { buildWalletFacade } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
@@ -54,6 +54,66 @@ export async function waitForSync(
       }),
     ),
   );
+}
+
+/**
+ * Wait until a facade is fully SETTLED — not merely synced. `isSynced` /
+ * strict-complete progress only proves catch-up to the previously observed
+ * tip, NOT that the wallet has replayed its own just-finalized transaction
+ * (proven by the 00016 ledger-v9 migration's lifecycle diagnostic). Reusing a
+ * facade for a second prove+submit while its DUST state is stale is exactly
+ * what node rc.4 rejects with `1010: Invalid Transaction: Custom error: 170`
+ * (= MalformedError::InvalidDustSpendProof). Gate on: zero pending
+ * transactions, zero pending coins on all three subtrees, strict-complete
+ * progress. Port of the settlement gate that took the effectstream e2e from
+ * a timing-sensitive 170 to a deterministic pass.
+ */
+export async function waitForWalletSettlement(
+  w: WalletResult,
+  opts: { timeoutMs?: number; label?: string } = {},
+): Promise<void> {
+  const { timeoutMs = 180_000, label = "wallet-settlement" } = opts;
+  const progress = (part: any) => part?.progress ?? part?.state?.progress;
+  const strictlyComplete = (part: any) => progress(part)?.isStrictlyComplete?.() === true;
+  const pendingCoins = (part: any) =>
+    (part?.pendingCoins ?? part?.state?.pendingCoins)?.length ?? 0;
+  // DELIBERATELY NOT the full-quiescence gate the effectstream e2e uses
+  // (pending.all == 0 && every subtree's pendingCoins == 0): in THIS repo the
+  // wallet finalizes offer transactions that are never submitted on-chain —
+  // they are published to Celestia and only land when a taker settles — so
+  // pending.all and the shielded pendingCoins stay non-zero BY DESIGN and a
+  // full-quiescence gate deadlocks (measured: 180s timeout on the first run).
+  // Error 170 is InvalidDustSpendProof, a DUST-state disagreement — so the
+  // gate is DUST-subtree quiescence (the fee-paying state the next
+  // balance+prove will declare) plus strict-complete progress everywhere.
+  let last: any = null;
+  try {
+    await Rx.firstValueFrom(
+      (w.wallet as any).state().pipe(
+        Rx.tap((s: any) => { last = s; }),
+        Rx.filter((s: any) =>
+          strictlyComplete(s.shielded) &&
+          strictlyComplete(s.unshielded) &&
+          strictlyComplete(s.dust) &&
+          pendingCoins(s.dust) === 0,
+        ),
+        Rx.timeout({
+          each: timeoutMs,
+          with: () =>
+            Rx.throwError(() => new Error(`${label}: settlement timeout after ${timeoutMs}ms`)),
+        }),
+      ),
+    );
+  } catch (e) {
+    // Dump what the gate saw so a timeout is diagnosable from the log alone.
+    console.error(`[${label}] last state: ` + JSON.stringify({
+      pendingAll: last?.pending?.all?.length ?? null,
+      shielded: { strict: strictlyComplete(last?.shielded), pendingCoins: pendingCoins(last?.shielded) },
+      unshielded: { strict: strictlyComplete(last?.unshielded), pendingCoins: pendingCoins(last?.unshielded) },
+      dust: { strict: strictlyComplete(last?.dust), pendingCoins: pendingCoins(last?.dust) },
+    }));
+    throw e;
+  }
 }
 
 /** Read the current shielded balances (color → amount). */
@@ -120,4 +180,8 @@ export async function transferShielded(
   );
   const finalized = await from.wallet.finalizeRecipe(recipe);
   await from.wallet.submitTransaction(finalized);
+  // Never leave the facade with stale DUST state: a caller that immediately
+  // sends again (serial transfers are common in these tests) would hit rc.4
+  // error 170 (InvalidDustSpendProof). See waitForWalletSettlement.
+  await waitForWalletSettlement(from, { label: "post-transfer" });
 }

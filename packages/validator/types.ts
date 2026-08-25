@@ -1,4 +1,4 @@
-import type { LedgerState, UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
+import type { LedgerState, UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 
 // Why an offer is rejected. Ordered roughly cheap → expensive in the pipeline.
 export type OfferRejectCode =

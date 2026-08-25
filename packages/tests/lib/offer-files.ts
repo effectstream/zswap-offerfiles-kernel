@@ -11,7 +11,7 @@ import { dirname, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { CompiledContract } from "@midnight-ntwrk/compact-js";
-import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
+import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import { configureMidnightNodeProviders } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";

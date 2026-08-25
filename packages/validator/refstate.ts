@@ -1,4 +1,4 @@
-import { LedgerState, WellFormedStrictness } from "@midnight-ntwrk/ledger-v8";
+import { LedgerState, WellFormedStrictness } from "@midnightntwrk/ledger-v9";
 
 // Reference state for `Transaction.wellFormed`. The security-critical
 // `stateless_check` (ZK proof + signature verification) is STATE-INDEPENDENT —

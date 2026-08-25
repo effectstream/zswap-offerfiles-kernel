@@ -12,9 +12,9 @@
 // MQTT_*_PORT) — the MQTT ports matter because they default to fixed values
 // that instance A already holds.
 
-import "@midnight-ntwrk/onchain-runtime-v3";
+import "@midnightntwrk/onchain-runtime-v4";
 
-import { ZswapChainState } from "@midnight-ntwrk/ledger-v8";
+import { ZswapChainState } from "@midnightntwrk/ledger-v9";
 
 // Same ZSwap tryApply guard as main.dev.ts — required for identical STF
 // behavior between the two instances.

@@ -8,9 +8,9 @@ import {
   type CoinPublicKey,
   type EncPublicKey,
   type FinalizedTransaction,
-  Transaction as LedgerV8Transaction,
+  Transaction as LedgerV9Transaction,
   type TransactionId,
-} from '@midnight-ntwrk/ledger-v8'
+} from '@midnightntwrk/ledger-v9'
 import {
   type MidnightProvider,
   type MidnightProviders,
@@ -67,7 +67,7 @@ function createWalletProvider(
     async balanceTx(tx: UnboundTransaction): Promise<FinalizedTransaction> {
       const serialized = toHex(tx.serialize())
       const { tx: balancedHex } = await connectedApi.balanceUnsealedTransaction(serialized, { payFees: false })
-      return LedgerV8Transaction.deserialize('signature', 'proof', 'binding', fromHex(balancedHex)) as FinalizedTransaction
+      return LedgerV9Transaction.deserialize('signature', 'proof', 'binding', fromHex(balancedHex)) as FinalizedTransaction
     },
     async submitTx(tx: FinalizedTransaction): Promise<TransactionId> {
       const serializedHex = toHex(tx.serialize())

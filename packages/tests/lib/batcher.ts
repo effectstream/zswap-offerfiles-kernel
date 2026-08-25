@@ -6,7 +6,7 @@
 // transaction before it is handed to the batcher; the batcher then only adds
 // dust, proves, and submits. No swap participant needs dust — only the batcher.
 
-import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
+import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 
 const BALANCER_URL = process.env["BATCHER_SUBMIT_URL"] ?? "http://127.0.0.1:3334";
 

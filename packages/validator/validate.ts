@@ -93,13 +93,31 @@ function maxEncodedChars(maxBytes: number): number {
  */
 export function verifyOfferCrypto(
   tx: UnprovenTransaction,
-  opts: Pick<ValidateOpts, "refState" | "tblock">,
-): { ok: true } | { ok: false; code: OfferRejectCode; reason: string } {
+  opts: Pick<ValidateOpts, "refState" | "tblock" | "contractMakerRetry">,
+): { ok: true; contractMaker?: boolean } | { ok: false; code: OfferRejectCode; reason: string } {
   try {
     tx.wellFormed(opts.refState, buildStrictness(), opts.tblock);
     return { ok: true };
   } catch (e) {
     const m = errMsg(e);
+    // Contract-maker lane (see ValidateOpts.contractMakerRetry): strict ran
+    // first, and ONLY the exact missing-contract failure class widens — a
+    // blank reference state cannot hold the maker contract's verifier keys.
+    // Native proofs and signatures are still verified on the retry; the
+    // contract-call proof is verified by the node at settlement.
+    if (opts.contractMakerRetry && /non-existant contract|non-existent contract/i.test(m)) {
+      try {
+        tx.wellFormed(opts.refState, buildStrictness({ verifyContractProofs: false }), opts.tblock);
+        return { ok: true, contractMaker: true };
+      } catch (e2) {
+        const m2 = errMsg(e2);
+        return {
+          ok: false,
+          code: /signature/i.test(m2) ? "SIGNATURE_INVALID" : "PROOF_INVALID",
+          reason: `wellFormed failed (contract-maker retry): ${m2}`,
+        };
+      }
+    }
     return {
       ok: false,
       code: /signature/i.test(m) ? "SIGNATURE_INVALID" : "PROOF_INVALID",

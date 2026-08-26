@@ -88,6 +88,7 @@ import {
   OFFER_MAX_BYTES,
   OFFER_TTL_SECONDS,
   ROOT_WINDOW_SECONDS,
+  ALLOW_CONTRACT_MAKER_OFFERS,
 } from "./env.ts";
 
 // Normalize a value that may be a Uint8Array or a hex string into lowercase
@@ -582,6 +583,7 @@ addTransition("celestia-zswap", function* (data) {
   const crypto = verifyOfferCrypto(result.tx!, {
     refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(data.blockTimestamp),
+    contractMakerRetry: ALLOW_CONTRACT_MAKER_OFFERS,
   });
   if (!crypto.ok) {
     yield* rejectOffer(crypto.code, crypto.reason, { offerHash });

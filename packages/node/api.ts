@@ -26,7 +26,7 @@ import {
   findActiveOfferByUnshieldedOutput,
 } from "@zswap-da/database";
 
-import { isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WINDOW_SECONDS, midnightContract } from "./env.ts";
+import { ALLOW_CONTRACT_MAKER_OFFERS, isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WINDOW_SECONDS, midnightContract } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
@@ -745,6 +745,7 @@ export const apiRouter: StartConfigApiRouter = async function (
       const crypto = verifyOfferCrypto(validation.tx!, {
         refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
         tblock: new Date(),
+        contractMakerRetry: ALLOW_CONTRACT_MAKER_OFFERS,
       });
       if (!crypto.ok) {
         return reply.code(400).send({ error: crypto.code, reason: crypto.reason });

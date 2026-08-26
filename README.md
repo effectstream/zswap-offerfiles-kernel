@@ -102,8 +102,110 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `CELESTIA_POLLING_INTERVAL_MS` | optional | Sync cadence. Defaults: devnet 6 000 ms, mainnet 30 000 ms. |
 | `MIDNIGHT_START_BLOCK` | yes | Numeric block height to start Midnight sync from. |
 | `NTP_START_TIME` | optional | NTP reference timestamp; resumed from DB when unset. |
+| `BATCHER_SUBMIT_TIMEOUT_MS` | optional | Absolute batcher fetch + receipt-body deadline; default 310 000 ms, bounded to 1 000–600 000 ms. |
+| `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
+| `API_UPDATES_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/updates` websocket cap; default 100. Excess clients are refused the connection (this endpoint's refusals are disconnects, not HTTP statuses — see API.md). |
+| `OFFER_FILES_READ_TIMEOUT_MS` | optional | Exact-files read decision budget, default 15 000 ms and capped at 60 000 ms. Native synchronous proof work cannot be preempted; a retained concurrency slot bounds unfinished work. |
+| `SOLVER_RELAY_WS_URL` / `SOLVER_RELAY_AUTH_TOKEN` | required for live solver mode | Outbound Midnight Intents solver WebSocket and its shared bearer. The backend exact-files read is unauthenticated. |
+| `SOLVER_RELAY_HTTP_URL` | **required for relay job execution** | Explicit public relay HTTP base for durable `GET /jobs/:jobId` recovery. It is validated independently and is never derived by rewriting the websocket URL. |
+| `SOLVER_JOURNAL_PATH` | **required for relay job execution** | Absolute path to the solver-local SQLite wallet-operation journal on a persistent mounted volume. Startup fails closed if it is missing, unwritable, corrupt, locked, full, or schema-incompatible. |
+| `SOLVER_RELAY_MAX_PARALLEL_SWAPS` | optional | Advertised and enforced concurrent proof-build bound; default 8. |
+| `SOLVER_RELAY_PUSH_INTERVAL_MS` / `SOLVER_RELAY_RECONNECT_DELAY_MS` | optional | Complete ladder replacement cadence (default 1 000 ms) and reconnect delay (default 2 000 ms). |
+| `SOLVER_STATUS_POLL_MS` / `SOLVER_SETTLE_TTL_MINUTES` | optional | Backend-consumption backstop cadence and chain-TTL wallet rollback window. |
+| `SOLVER_SUPPORTED_PAIRS` | optional (UNSET is OPEN + warning) | Strict JSON array of unique directed lowercase `64hex->64hex` pairs. SET is enforced in both ladder publication and jobs. |
+| `SOLVER_MIN_JOB_OUTPUT` | optional (UNSET is OPEN + warning) | Strict JSON object from lowercase output-token `64hex` to positive canonical integer strings. A SET map omits tokens without a minimum and sub-minimum rungs/jobs. |
+| `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` / `SOLVER_DUST_WINDOW_MS` | optional as one group (UNSET is OPEN + warning) | All three must be SET together. Amounts are positive canonical decimal bigints; window is a positive safe integer in ms. Reservations are journal-durable and rolling-window bounded. |
+| `SOLVER_ADMISSION_WARNING_INTERVAL_MS` | optional | Startup/periodic warning cadence for every UNSET admission group; positive safe integer, default 900000. |
+| `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | Mainnet defaults to dry-run, which now requires and syncs the real funded wallet and loads read-only Stock while starting no relay jobs. Live settlement additionally requires the exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
 
 A complete dev → mainnet env template lives at `.env.mainnet.example`.
+
+> **BREAKING DEPLOYMENT REQUIREMENT (RF1/RF2):** relay job execution now requires
+> both a durable `SOLVER_JOURNAL_PATH` and an explicit
+> `SOLVER_RELAY_HTTP_URL`. Provision one persistent volume per solver
+> instance and mount it at a stable absolute path (for example,
+> `/var/lib/cow-solver/operations.sqlite`) before upgrading. Never share one
+> journal file between instances. `:memory:` is rejected by production code;
+> its explicit escape hatch exists only for isolated test harnesses. Configure
+> the relay's public HTTP base directly; do not infer it from the websocket URL.
+
+> **BREAKING DRY-RUN DEPLOYMENT CHANGE (RF3):** mainnet dry-run now refuses the
+> repository dev seed, opens and syncs the configured real wallet, and loads a
+> read-only inventory snapshot. It starts no relay socket/job executor and calls
+> no mutating wallet method. Operators must therefore provision `SOLVER_SEED`
+> and wallet/indexer/proof connectivity for dry-run as well as live mode.
+
+Admission groups deliberately preserve the pre-RF3 OPEN default when wholly
+UNSET, but log a contained `[ADMISSION]` warning at startup and every configured
+warning interval. Malformed or partially-set groups fail startup; there is no
+silent coercion. For real-funds rollout, SET all three policy groups explicitly.
+
+## Effectstream whole-block fail-stop operations
+
+This release accepts an availability limitation in the pinned Effectstream
+0.103.1 runtime: one scheduled application input that throws after a write, or
+one SQL statement that fails, rolls back the **entire L2 block** and leaves the
+scheduled input retained. This preserves database integrity—no partial block,
+pre-fault application write, or successful-input result commits—but progress
+halts at that block until an operator resolves the poison input. It is not
+per-input isolation and must be treated as an incident, not an automatic skip.
+
+Use this operating sequence:
+
+1. **Detect and contain.** Treat a repeatedly failing block, a stalled
+   `effectstream.effectstream_blocks` height, or an application-transition
+   failure followed by PostgreSQL `25P02` as a fail-stop incident. Stop the
+   affected node and its restart loop. Stop solver job execution that depends
+   on that backend and confirm it is no longer publishing routable ladders
+   before touching state.
+2. **Preserve evidence.** Record the deployed commit and Effectstream version,
+   the last committed and failing heights, the exception/SQLSTATE, and the
+   suspected scheduled-input identity and payload. Take a storage snapshot or
+   backup before any state-changing remediation.
+3. **Inspect read-only.** Against the stopped instance, use a read-only
+   transaction to inspect the committed boundary and retained inputs, for
+   example:
+
+   ```sql
+   BEGIN TRANSACTION READ ONLY;
+   SELECT block_height
+     FROM effectstream.effectstream_blocks
+    ORDER BY block_height DESC
+    LIMIT 5;
+   SELECT id, input_data
+     FROM effectstream.rollup_inputs
+    ORDER BY id;
+   ROLLBACK;
+   ```
+
+   Correlate the exact input with logs and inspect every application table the
+   transition could have written. The failed block and its pre-fault writes
+   must be absent, while the authoritative scheduled input remains.
+4. **Remediate deliberately.** Prefer correcting the application, runtime, or
+   configuration so the retained input can replay unchanged. If an invalid or
+   hostile input can never succeed, its quarantine or removal requires an
+   incident-specific, reviewed migration/tool that pins the exact input
+   identity and expected payload, checks the backup, runs transactionally, and
+   records the disposition. Do **not** run an ad-hoc `DELETE` against
+   `effectstream.rollup_inputs`; the direct deletion in the regression test is
+   test-only and is not a production procedure.
+5. **Recover in isolation.** Apply the reviewed fix while all writers remain
+   stopped. Start one node first, with solver execution still withdrawn, and
+   let it replay from the last committed boundary. Restore replicas only after
+   that node is current and stable; restore the solver only after its backend
+   mirror re-establishes currentness and its normal journal reconciliation
+   completes.
+6. **Verify replay before closing the incident.** Confirm the blocked height
+   commits exactly once and later heights advance; the retained input either
+   completes normally or has the reviewed disposition; no pre-fault partial
+   row or duplicate application event exists; and backend health, offer
+   liveness, solver empty-to-current ladder recovery, and durable wallet-job
+   reconciliation are all healthy. Archive the queries, logs, backup identity,
+   remediation artifact, and verification results with the incident.
+
+The long-term fix is upstream savepoint-based per-input database and rejected-
+promise isolation. This branch deliberately does not fork Effectstream or
+pretend the current whole-block mode provides that availability guarantee.
 
 ## Testing
 
@@ -240,11 +342,13 @@ There are **two ways** to post and read offers:
 | `GET` | `/v1/offers/:offerId` | One offer **including its `swapoffer1…` string** (`offerBech32`), by content hash. Resolves archived offers with their final status. |
 | `GET` | `/v1/offers/:offerId/status` | Lightweight status probe by content hash. |
 | `POST` | `/v1/offers/status` | Status by blob (`{offer}` or `{offers: […]}`, max 50) — POST body because real blobs are 16–25 KB. |
+| `POST` | `/v1/offers/files` | Exact-files read: 1–8 content identities in, exact indexed bytes out for the live+valid ones and a stable verdict for the rest. Side-effect-free; current state is re-read after proof verification. |
 | `GET` | `/v1/known-tokens` | Token color → name registry. |
 | `POST` | `/v1/known-tokens` | Register a token name/color/kind (dev/e2e only; off in production). |
 | `GET` | `/v1/midnight/config` | Public Midnight config the browser contract client needs. |
 | `POST` | `/v1/offers` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, `409` on duplicate, else forward to the batcher → Celestia. Returns the offer's `offerId`. |
 | `GET` | `/v1/offers/stream` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
+| `GET` | `/v1/offers/updates` | Websocket update stream carrying the same lifecycle events, plus a per-subscription sequence number so a consumer mirroring the book can prove it missed nothing. |
 
 Beyond the above, the node also serves `GET /health`, `GET /v1/health/sync`,
 `GET /v1/pairs`, `GET /v1/quote`, and

@@ -4,6 +4,7 @@
 // enforced (it ships as {} until a calibrated baseline is committed). Once
 // baseline.json carries numbers, each metric is enforced at baseline × 1.2.
 
+import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { apiTimings, getHealthSync, realNtpLagSeconds } from "./lib/api2.ts";
 import { pgrepF, rssKb, summarizeLatencies, writeOut } from "./lib/util.ts";
@@ -259,7 +260,7 @@ const MIN_TAIL_SAMPLES = 50;
 
 export function loadBaseline(): Baseline | null {
   try {
-    const raw = readFileSync(new URL("./baseline.json", import.meta.url).pathname, "utf-8");
+    const raw = readFileSync(fileURLToPath(new URL("./baseline.json", import.meta.url)), "utf-8");
     const parsed = JSON.parse(raw);
     return parsed && Object.keys(parsed).length > 0 ? (parsed as Baseline) : null;
   } catch {

@@ -42,6 +42,17 @@ import { EventEmitter } from "node:events";
 // This module is the in-process correctness fix; migrating the transport to
 // `data.emit` is the follow-up, and the two compose: the gate below becomes
 // redundant the moment every consumer reads from the runtime's feed.
+//
+// PORT NOTE (merge of 6c5ebab / PR #47). The previous port carried a
+// `StateMachineAppEvent` helper union whose only job was to widen upstream's
+// `AppEvent` with our `offerHash` on `offer_consumed` / `offer_expired`.
+// Upstream now declares those exact fields itself (a5393b2, "key lifecycle
+// event de-duplication on the offer hash") and reorders `identity()` to prefer
+// the hash for the same reason we added it. The derived union was therefore
+// field-for-field equal to upstream's, so the indirection is DELETED and
+// upstream's declaration is taken verbatim — one definition, upstream's, with
+// nothing of ours lost.
+
 export type AppEvent =
   | { type: "offer_indexed"; offerId: number; offerHash: string; blockHeight: number | string; gives: unknown[]; wants: unknown[] }
   // `offerId` is the local SERIAL row id, which diverges across deployments and

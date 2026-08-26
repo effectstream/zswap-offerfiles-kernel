@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { getEnv } from "@effectstream/utils/runtime";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { readMidnightContract } from "@effectstream/midnight-contracts/read-contract";
@@ -104,6 +106,66 @@ export const OFFER_MAX_BYTES = parseInt(
   getEnv("OFFER_MAX_BYTES") ?? String(1024 * 1024),
 );
 
+// Per-IP request budget for the /v1 API, and IPs exempt from it. A co-located
+// automated client (a solver mirroring the book) bursts well past the shared
+// default during an initial page-through plus a settlement's status polls, so
+// its host is allowlisted rather than the global budget being raised for
+// everyone. Empty allowlist by default — an operator opts in per deployment.
+//
+// Read per call, not once at import, so a caller that sets the vars before
+// building a router gets them — the same reason isTokenRegistryEnabled below
+// is a function.
+export const apiRateLimitMax = (): number =>
+  parseInt(getEnv("API_RATE_LIMIT_MAX") ?? "60");
+
+export const apiRateLimitAllowList = (): string[] =>
+  (getEnv("API_RATE_LIMIT_ALLOWLIST") ?? "")
+    .split(",")
+    .map((ip) => ip.trim())
+    .filter((ip) => ip.length > 0);
+
+// SSE requests remain open, so the per-minute request limiter cannot bound
+// their steady-state memory/socket cost. Cap concurrent streams per node.
+export const apiSseMaxConnections = (): number => {
+  const raw = getEnv("API_SSE_MAX_CONNECTIONS") ?? "100";
+  if (!/^[1-9][0-9]*$/.test(raw)) return 100;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 10_000 ? parsed : 100;
+};
+
+// The websocket update stream (`GET /v1/offers/updates`) never reaches the
+// router-wide request budget — an upgrade request bypasses Fastify's routing
+// entirely — so, exactly as for SSE, concurrent subscriptions are what has to
+// be capped. Excess clients are refused the upgrade with `503 UPDATES_CAPACITY`.
+export const apiUpdatesMaxConnections = (): number => {
+  const raw = getEnv("API_UPDATES_MAX_CONNECTIONS") ?? "100";
+  if (!/^[1-9][0-9]*$/.test(raw)) return 100;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 10_000 ? parsed : 100;
+};
+
+// Decision budget for one exact-files read. Keep a hard upper bound so an
+// operator typo cannot silently permit unbounded async read work. The route
+// observes it at async yields and between validation stages. The ledger's
+// synchronous native proof call blocks the event loop and therefore cannot be
+// preempted (or notice an elapsed timer) mid-call, so the route retains its
+// concurrency slot until any post-deadline read really settles.
+export const exactFilesReadTimeoutMs = (): number => {
+  const raw = getEnv("OFFER_FILES_READ_TIMEOUT_MS") ?? "15000";
+  if (!/^[1-9][0-9]*$/.test(raw)) return 15_000;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 60_000 ? parsed : 15_000;
+};
+
+// Unit tests can disable upstream's post-commit event gate poll (0358d9e)
+// explicitly. Its 1 s tick issues a getLatestEffectstreamBlock on the API's own
+// connection, which is indistinguishable from validation-path work to a test
+// that counts queries on that connection — and could even be the query a test
+// intends to hold. Deployed nodes keep it on: without the poll nothing the
+// state machine emits is ever published.
+export const isEventGatePollEnabled = (): boolean =>
+  (getEnv("EVENT_GATE_POLL_ENABLED") ?? "true") === "true";
+
 // Demo token registry (POST /api/known-tokens). known_tokens is a manually
 // curated convenience table: the Midnight token-metadata standard is not live,
 // so any name written here is unverified and any operator can claim any name
@@ -123,7 +185,9 @@ export const isTokenRegistryEnabled = (): boolean =>
 export const midnightContract = (() => {
   try {
     return readMidnightContract("contract-offer-files", {
-      baseDir: new URL("../contracts-midnight/", import.meta.url).pathname,
+      // fileURLToPath, not URL.pathname: pathname percent-encodes, breaking
+      // checkouts under a directory with a space.
+      baseDir: fileURLToPath(new URL("../contracts-midnight/", import.meta.url)),
       networkId: midnightNetworkConfig.id,
     });
   } catch (error) {

@@ -94,7 +94,7 @@ const unshieldedBalance = async (w: any, color: string): Promise<bigint> => {
 };
 
 const before = {
-  spent_nullifiers: await count("spent_nullifiers"),
+  spent_nullifiers: await count("nullifiers"),
   spent_unshielded: await count("spent_unshielded"),
   offers: await count("offer_file"),
 };
@@ -209,7 +209,7 @@ try {
   check("batcher settled merged shielded↔unshielded tx", settle.ok, `status=${settle.status} ${JSON.stringify(settle.body)?.slice(0, 200)}`);
 
   if (settle.ok) {
-    const spentN = await waitFor("spent_nullifiers grew", async () => (await count("spent_nullifiers")) > before.spent_nullifiers, 36);
+    const spentN = await waitFor("spent_nullifiers grew", async () => (await count("nullifiers")) > before.spent_nullifiers, 36);
     check("spent_nullifiers grew (shielded leg consumed)", spentN);
     const spentU = await waitFor("spent_unshielded grew", async () => (await count("spent_unshielded")) > before.spent_unshielded, 36);
     check("spent_unshielded grew (UnshieldedSpend primitive — unshielded leg consumed)", spentU, `before=${before.spent_unshielded} now=${await count("spent_unshielded")}`);

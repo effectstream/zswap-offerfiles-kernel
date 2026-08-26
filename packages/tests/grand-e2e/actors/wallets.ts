@@ -19,6 +19,7 @@
 // specialists never drift; only the `partial` shape consumes a coin, refilled
 // from genesis on demand.
 
+import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import type { Client } from "pg";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
@@ -1355,7 +1356,7 @@ export async function stopActors(a: Actors): Promise<void> {
 /** Persist the give-blob of each offer so cancels/settles can rebuild txs and
  *  the audit can recompute hashes without keeping every blob in memory. */
 export function blobStorePath(): string {
-  const dir = new URL("../out/blobs/", import.meta.url).pathname;
+  const dir = fileURLToPath(new URL("../out/blobs/", import.meta.url));
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

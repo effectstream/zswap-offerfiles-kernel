@@ -4,6 +4,7 @@
 // structural (no DB needed), so a fixture that starts rejecting for the WRONG
 // reason fails loudly here instead of silently passing a weaker assertion.
 
+import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { bech32m } from "@scure/base";
 import { OfferFiles, OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
@@ -78,7 +79,7 @@ function preVerify(fix: ApiFixture): ApiFixture {
  * and the gate rejects as expected. A much faster run would flake here.
  */
 export function foreignRootBlob(): string {
-  const p = new URL("../../../validator/fixtures/valid-offer.bech32", import.meta.url).pathname;
+  const p = fileURLToPath(new URL("../../../validator/fixtures/valid-offer.bech32", import.meta.url));
   return readFileSync(p, "utf-8").trim();
 }
 

@@ -13,6 +13,15 @@ settle via the batcher's `midnight-balancer` target, and connect a wallet to
 inspect balances / mint test tokens (`VITE_PROOF_SERVER_URL`, default
 `http://localhost:6300`).
 
+**Repository validation scope.** `bun run typecheck:backend` is the strict,
+no-emit TypeScript gate for the 27 production `packages/node` roots only; it
+excludes node tests and the grand-E2E entrypoint, builds the real dependency
+graph without modifying it, and fails all node-owned or fileless compiler
+diagnostics. It is deliberately not advertised as a workspace-wide typecheck.
+CI also bundles API examples 01, 03, 05, 07, and 11 before running the docs
+playground typecheck. Example 11's Midnight network-id and ledger-v8 imports
+are direct root dependencies, not transitive assumptions.
+
 ---
 
 ## Environments
@@ -65,10 +74,14 @@ NTP_STEP_SIZE=1000
 # ── Node ──────────────────────────────────────────────────────────────────────
 EFFECTSTREAM_API_PORT=9999
 BATCHER_SUBMIT_URL=http://127.0.0.1:3334
+BATCHER_SUBMIT_TIMEOUT_MS=310000        # absolute fetch + receipt-body deadline
+API_SSE_MAX_CONNECTIONS=100             # persistent stream cap; excess gets 503
+API_UPDATES_MAX_CONNECTIONS=100         # websocket update-stream cap; excess is refused
 OFFER_TTL_SECONDS=                      # offer lifetime; DEFAULTS to ROOT_WINDOW_SECONDS
                                         # (shielded fillability tracks the root window)
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
+OFFER_FILES_READ_TIMEOUT_MS=15000        # exact-files read decision budget; max 60000
 ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
                                         # 3600 (1 h) on all currently deployed networks;
                                         # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
@@ -79,6 +92,16 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults
                                         # intent TTLs and moves independently. Too wide ⇒
                                         # phantom unfillable offers on the book; too narrow
                                         # ⇒ valid offers rejected ROOT_UNKNOWN.
+
+# ── Solver process (packages/solver) ───────────────────────────────────────────
+SOLVER_DRY_RUN=true                      # mainnet default; mirrors only, never settles
+                                        # current dry-run does NOT load inventory, so it is not Path-A decision parity
+SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
+SOLVER_RELAY_WS_URL=wss://relay/solver   # outbound Midnight Intents solver socket
+SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer; backend exact-files is unauthenticated
+SOLVER_RELAY_MAX_PARALLEL_SWAPS=8        # advertised and enforced proof-build capacity
+SOLVER_STATUS_POLL_MS=5000               # missed-signal backend-consumption backstop
+SOLVER_SETTLE_TTL_MINUTES=30             # wallet rollback window when no terminal signal arrives
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -143,6 +166,14 @@ curl http://host:9999/health
 
 ---
 
+#### `GET /v1/health`
+
+Compact protocol-readiness probe. It uses the same aggregate state as the
+detailed endpoint below and returns `{ "status": "ok|syncing|error", "synced":
+true|false }`. Unlike `/health`, this is not merely HTTP-process liveness.
+
+---
+
 #### `GET /v1/health/sync`
 
 Per-protocol sync progress. Use this to confirm the node is serving live data before submitting offers.
@@ -181,12 +212,15 @@ curl http://host:9999/v1/health/sync
 
 | Field | Description |
 |---|---|
-| `status` | `"ok"` — within 2 NTP blocks of real time (≤ 20 min lag); `"syncing"` — catching up; `"error"` — no blocks finalized yet |
+| `status` | `"ok"` only when NTP is within 2 configured blocks, both chain tips are reachable, Midnight is ≤12 blocks behind, and Celestia is ≤4 blocks behind; `"syncing"` when a chain is unknown/behind; `"error"` when no NTP block has finalized |
 | `ntp.lag_seconds` | Seconds of history remaining to process |
 | `midnight.tip` | Live Midnight chain tip (cached 60 s; `null` if unreachable) |
 | `celestia.tip` | Live Celestia chain tip (cached 60 s; `null` if unreachable) |
 | `sets.*` | Sizes of the ingested liveness sets (cached 15 s) |
 | `recent_rejections` | Blobs discarded at ingestion, as `{celestia_height, code, count}` for the 20 most recent heights. **`celestia_height` is the indexer's own L2 block height, not a Celestia height** (legacy column name). Rejected blob bodies are deleted, so this is how namespace spam stays visible — see [Ingestion pipeline](#ingestion-pipeline-the-critical-path) |
+
+The complete response is cached for 5 seconds with single-flight coalescing;
+rate-limit-exempt UI polling bursts therefore share one DB/RPC computation.
 
 On a fresh database the initial sync of 89 days of Midnight history takes approximately 4 hours.
 
@@ -234,6 +268,14 @@ Returns the current live offer book — offers published to Celestia, validated,
 ```
 
 Each row is a MIP-0006 `OffchainOfferPayload`. **`offerBech32` is omitted in list responses** — the spec's presence rule is "at least one of `offerId`/`offerBech32`", and a real offer's string is 16–25 KB, so a 100-row page carrying strings would be megabytes. Fetch the string per offer via `GET /v1/offers/:offerId`, which always includes it. `blobChars` sizes that fetch.
+
+`computed.expiresAt` is the earliest applicable ledger constraint: the
+proof-root last-seen time plus the root window and the earliest Intent TTL are
+both considered, including for mixed transactions. The publication TTL is a
+defensive fallback only when neither constraint exists. Cleanup executes on an
+L2 block and archives only when this persisted timestamp is at or before that
+block's timestamp, so an early or duplicate scheduled input cannot expire the
+offer prematurely.
 
 | Field | Description |
 |---|---|
@@ -335,6 +377,137 @@ curl -X POST http://host:9999/v1/offers/status \
 Batched requests return `{ "statuses": [ … ] }` in input order. `status` is one of `"live"` | `"consumed"` | `"cancelled"` | `"expired"` | `"not_found"` (see *Fill vs cancel* above). A blob that does not decode answers `{ "status": "not_found" }` with no `offerId`.
 
 Lookups resolve via the offer's content hash (an indexed probe). A blob that does not decode as a `swapoffer1…` string answers `"not_found"` **without touching the database** — undecodable blobs can never have been indexed, and this keeps junk submissions from costing more than a hash attempt.
+
+---
+
+#### `POST /v1/offers/files`
+
+The **exact-files read**: name content identities, get back the exact indexed
+bytes for the ones that are live and valid right now, and a stable
+machine-readable verdict for every other one. This is the read a solver uses at
+job time, when it must build a settlement out of the maker's real bytes rather
+than anything it cached.
+
+It is not the submission route, and it inverts the submission route's
+semantics: being already indexed and live is exactly what makes an offer
+usable here, never a duplicate error. It never calls the batcher, publishes to
+Celestia, pays a Celestia fee, schedules input, or changes lifecycle state.
+Every database operation on this path is a read.
+
+No authentication: this backend serves every client alike and keeps no
+per-solver state. Exposure is bounded by the router-wide request budget, the
+identity cap per request, one absolute deadline, and a small concurrency
+window.
+
+```bash
+curl -X POST http://host:9999/v1/offers/files \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "schemaVersion": 1,
+    "profile": "offer-files-solver-v1",
+    "offerIds": ["9f2c4a...e1"]
+  }'
+```
+
+The body is closed: all three fields are required and extra fields return
+`400`. `offerIds` holds 1–8 distinct identities, each exactly 64 lowercase hex
+characters (SHA-256 of the decoded raw transaction bytes).
+
+**Response `200`** — one entry per requested identity, in request order:
+
+```json
+{
+  "schemaVersion": 1,
+  "profile": "offer-files-solver-v1",
+  "files": [
+    {
+      "offerId": "9f2c4a...e1",
+      "offer": "swapoffer1...",
+      "verdict": {
+        "schemaVersion": 1,
+        "profile": "offer-files-solver-v1",
+        "valid": true,
+        "live": true,
+        "claimedOfferId": "9f2c4a...e1",
+        "computedOfferId": "9f2c4a...e1",
+        "stateVersion": "42",
+        "validatedAt": "2026-08-14T12:34:56.000Z",
+        "status": "live",
+        "code": "VALID",
+        "computed": {
+          "gives": [ { "token": "00...00", "amount": "1000000", "kind": "SHIELDED" } ],
+          "wants": [ { "token": "ff...ff", "amount": "5000000", "kind": "SHIELDED" } ],
+          "inputNullifiers": ["7c1d9b..."],
+          "expiresAt": "2026-08-14T13:34:56.000Z"
+        }
+      }
+    },
+    {
+      "offerId": "1b77aa...09",
+      "verdict": {
+        "schemaVersion": 1,
+        "profile": "offer-files-solver-v1",
+        "valid": false,
+        "live": false,
+        "claimedOfferId": "1b77aa...09",
+        "computedOfferId": null,
+        "stateVersion": "42",
+        "validatedAt": "2026-08-14T12:34:56.000Z",
+        "status": "not_indexed",
+        "code": "NOT_INDEXED",
+        "reason": "the requested offer identity is not indexed by this backend"
+      }
+    }
+  ]
+}
+```
+
+`offer` is present **if and only if** the entry's verdict is `VALID`, and the
+bytes always hash to the identity they are served under — the server re-derives
+that binding before answering, and callers must re-derive it on receipt. A
+refusal can never carry usable bytes.
+
+`valid`, current `live`, and stored lifecycle `status` are separate facts. An
+indexed live but unsupported shape can be `status:"live"` and `live:true` while
+`valid:false`; a spent input or stale root can retain stored `status:"live"`
+while current `live:false`. Expiry may also become current before the cleanup
+transition runs, producing `code:"EXPIRED"`, `status:"live"`, and
+`live:false`. Any non-live stored status must have `live:false`.
+
+Stable refusal codes include `UNSUPPORTED_PROFILE`, `HASH_MISMATCH`,
+`NOT_INDEXED`, `NOT_LIVE`, `EXPIRED`, `UNSUPPORTED_SHAPE`, and the canonical
+structure/crypto/liveness codes documented for submission. `HASH_MISMATCH`
+means the indexed row's stored bytes do not hash to the identity it is filed
+under — index corruption, reported per identity instead of as an outage. Every
+per-identity outcome uses `200`; malformed envelopes use `400`, oversized
+transports `413`, and `429` is the router-wide rate limit. Unsynchronized
+backend state, a full concurrency window, a deadline, a cancellation, or an
+internal read failure use `503 FILES_UNAVAILABLE`. None of the non-200
+responses is a verdict — in particular an unsynchronized node will not report
+an offer as absent.
+
+Per identity the backend proves its own positions current, validates structure
+and indexed liveness, and rejects unsupported transaction economics before
+native proof work. Supported shapes run canonical proof verification, re-fetch
+both external chain tips, then perform a fresh committed status/liveness read
+bound to the same L2 anchor. `stateVersion` and `validatedAt` identify that
+final backend state. The answer is point-in-time: it is not a reservation or a
+fill promise, and an offer can be consumed a moment later.
+
+The same canonical components serve HTTP submission, STM ingestion, and this
+read; contract tests drive all of them over one shared fixture matrix so their
+codes cannot drift apart.
+
+The decision timer is observed at async yields and between validation/read
+stages. The ledger's native proof verifier is synchronous and cannot be
+interrupted — or even let the event-loop timer fire — once it has started, so
+the deadline is not a hard wall-clock latency cap while proof verification
+runs. Identities are resolved serially, at most four reads run concurrently,
+and requests past that window are refused immediately rather than queued. If an
+HTTP deadline wins while a database read is still settling, that slot stays
+occupied until the underlying read-only operation actually finishes. An
+incomplete request-body abort or a response-socket close also cancels at the
+next cooperative boundary.
 
 ---
 
@@ -560,13 +733,22 @@ Validation consults the node's local state only — no live RPC calls are made. 
 
 ### Market data
 
+> **Breaking compatibility note:** quote amounts that were previously sanitized
+> (for example `1_000` or `-100`) now return `400`; send canonical decimal u256
+> strings. Solver-level publication now requires bearer authentication plus a
+> positive `version`, and `pairs` is interpreted as a complete replacement.
+> Solver-backed `/v1/quote` precedence is default-off until explicitly enabled.
+
 #### `GET /v1/quote`
 
 Price quote for a token swap, backed by the `token_prices` table. On first request the deterministic fallback price is written; subsequent calls are consistent. Operators can override rows directly in the DB.
 
 Unregistered colors quote at a **$1 demo fallback** (two unknown tokens ⇒ 1:1) instead of erroring — loudly logged server-side, never persisted to `token_prices`. This is a stopgap until token identity is chain-derived (TokenMint registry); do not treat fallback quotes as market data. Malformed colors answer `400`.
 
-**Query parameters:** `from_token`, `to_token` (64-hex, no `0x`), `from_amount` (base units), optional `to_amount`.
+**Query parameters:** `from_token`, `to_token` (distinct 64-hex values, no `0x`),
+`from_amount` (positive base units), and optional `to_amount`. Amounts use canonical
+decimal u256 grammar: digits only, no sign/separator/exponent/decimal/leading zeroes.
+Malformed input returns `400 VALIDATION`; it is never sanitized into a different amount.
 
 ```bash
 curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from_amount=1000000"
@@ -586,7 +768,8 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
   "discount":            0.025,
   "sponsored":           true,
   "from_usd":            1.46,
-  "to_usd":              1.42
+  "to_usd":              1.42,
+  "source":              "token-prices"
 }
 ```
 
@@ -599,6 +782,11 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 | `discount` | Fractional gap below `market_rate` (e.g. `0.025` = 2.5% under market) |
 | `sponsored` | `true` when the implied rate is at least the sponsorship discount below market (the batcher's fee-sponsorship policy hook) |
 | `from_usd`, `to_usd` | USD value of each leg at the reference price |
+| `source` | `token-prices` or `demo-fallback` |
+
+This backend holds no solver state, so nothing else can win the quote. Solver
+ladders are pushed to the Midnight Intents relay, which does its own
+interpolation; the backend's job is the indexed book and its reads.
 
 ---
 
@@ -643,7 +831,7 @@ Last 120 fills (consumed offers) for a pair, newest first. Basket offers never p
 
 #### `GET /v1/offers/stream`
 
-Server-Sent Events stream for real-time offer lifecycle notifications. A comment-only keepalive (`: heartbeat`) is sent every 30 seconds.
+Server-Sent Events stream for real-time offer lifecycle notifications. A comment-only keepalive (`: heartbeat`) is sent every 30 seconds. The node accepts at most `API_SSE_MAX_CONNECTIONS` concurrent streams (default 100); excess connections receive `503 SSE_CAPACITY` with `Retry-After: 5`. A client that stops consuming and applies response backpressure is disconnected instead of being buffered without bound. Reconnect with backoff and refresh `GET /v1/offers`; the stream has no replay cursor.
 
 ```bash
 curl -N http://host:9999/v1/offers/stream
@@ -654,13 +842,13 @@ curl -N http://host:9999/v1/offers/stream
 ```
 data: {"type":"connected","timestamp":1750800000000}
 
-data: {"type":"offer_indexed","offerId":42,"blockHeight":1281600,"gives":[...],"wants":[...],"timestamp":...}
+data: {"type":"offer_indexed","offerId":42,"offerHash":"9f2c...","blockHeight":1281600,"gives":[...],"wants":[...],"timestamp":...}
 
-data: {"type":"offer_consumed","offerId":42,"nullifier":"abc123...","timestamp":...}
+data: {"type":"offer_consumed","offerId":42,"offerHash":"9f2c...","nullifier":"abc123...","timestamp":...}
 
-data: {"type":"offer_expired","offerId":42,"timestamp":...}
+data: {"type":"offer_expired","offerId":42,"offerHash":"9f2c...","timestamp":...}
 
-data: {"type":"offer_rejected","code":"ROOT_UNKNOWN","reason":"...","blockHeight":...,"timestamp":...}
+data: {"type":"offer_rejected","code":"ROOT_UNKNOWN","reason":"...","offerHash":"9f2c...","blockHeight":...,"timestamp":...}
 
 data: {"type":"token_minted","name":"MYTOKEN","color":"...","kind":"shielded","timestamp":...}
 ```
@@ -668,7 +856,72 @@ data: {"type":"token_minted","name":"MYTOKEN","color":"...","kind":"shielded","t
 `timestamp` (ms epoch) is added by the server to every event. `offer_consumed`
 carries **either** `nullifier` (shielded input spent) **or** `unshieldedSpend`
 (`{owner, intentHash, outputNo}`, unshielded UTXO spent) depending on which coin
-was consumed — handle both.
+was consumed — handle both. REST uses the content-addressed `offerHash`; numeric
+`offerId` is a node-local row id. `offerHash` can be absent only for legacy rows
+inserted before hashes were persisted, or for a rejection too malformed to hash.
+
+---
+
+#### `GET /v1/offers/updates` (websocket)
+
+The same offer-lifecycle events as the SSE stream above, over a websocket, with
+the two extra signals a client that **mirrors the book** needs in order to prove
+it has missed nothing. Client-initiated like every other endpoint here: the node
+never connects to a client, and it keeps no per-client state beyond the socket —
+no registry, no cursor, no replay buffer, no credentials. Anyone may open it;
+nothing about it is solver-specific. `GET /v1/offers/stream` is unchanged and
+remains the right choice for browsers and dashboards.
+
+```bash
+websocat ws://host:9999/v1/offers/updates
+```
+
+**Frames.** Text frames only, one JSON object each, in the closed
+`offer-updates-v1` grammar. The client sends nothing at all.
+
+```json
+{"protocol":"offer-updates-v1","schemaVersion":1,"type":"ready","streamId":"6f1c…","seq":0,"ts":1750800000000,"blockL2Height":"128401"}
+{"protocol":"offer-updates-v1","schemaVersion":1,"type":"update","streamId":"6f1c…","seq":1,"ts":1750800000100,"event":{"type":"offer_indexed","offerId":42,"offerHash":"9f2c…","blockHeight":1281600,"gives":[],"wants":[],"timestamp":1750800000100}}
+```
+
+- `event` is **byte-identical to the SSE payload** — the node's lifecycle event
+  plus the server-stamped `timestamp` — so one event handler serves both
+  transports.
+- `streamId` (32 lowercase hex) identifies ONE subscription. A different value
+  is a different subscription: nothing carries over.
+- `seq` is per-subscription. `ready` is always `0`, and every following frame is
+  exactly the previous one plus one. **A skipped number means a mutation was not
+  delivered.** Treat it as a lost stream — reconnect and take a fresh full-book
+  read — never as an absence of news. The node never renumbers, never back-fills,
+  and never drops a frame silently: when it cannot deliver one it drops the
+  connection instead.
+- `blockL2Height` is the committed Effectstream (L2) height at or before the
+  moment this subscription was registered, or `null` when it could not be read.
+  It is a floor: heights only advance, so a later `GET /v1/health/sync` reporting
+  a LOWER `blockL2.height` is evidence the node has rewound (a restore, or a
+  lagging replica behind a load balancer). No snapshot repairs that, so a mirror
+  should stop treating its cache as current.
+
+**Ordering guarantee.** The node attaches its event listener BEFORE it writes
+`ready`, in the same synchronous step. `ready` therefore means "everything from
+here on reaches you", which is what makes the standard startup sequence sound:
+subscribe, buffer, read the full book with `GET /v1/offers`, replay the buffer,
+then apply increments live. (`GET /v1/offers/stream` writes its `connected`
+frame before subscribing, and has no sequence numbers with which to notice the
+difference.)
+
+**Keepalive.** The node sends a websocket ping every 30 seconds and requires a
+pong within two intervals.
+
+**Refusals are disconnects, not status codes.** This node runs on Bun, where an
+upgraded connection cannot carry an HTTP response body, and where a
+server-initiated websocket close leaves the HTTP server unable to shut down. So
+every refusal here — the `API_UPDATES_MAX_CONNECTIONS` cap (default 100), a
+malformed handshake, a client that sends data on this push-only stream, a peer
+that stops reading, a frame too large to deliver, a missing pong, node shutdown
+— ends the connection without a close code or reason. Reconnect with backoff and
+resynchronize; that is the same recovery an ordinary network drop needs, and a
+correct consumer of this stream already implements it.
 
 ---
 

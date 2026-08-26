@@ -108,7 +108,9 @@ export default {
       args: ["run", "packages/node/main.dev.ts"],
       waitToExit: false,
       type: "system-dependency",
-      env: { PGLITE: "true" },
+      // Local clients (the solver's book mirror, e2e scripts) burst past the
+      // shared per-IP budget during a page-through plus settlement polls.
+      env: { PGLITE: "true", API_RATE_LIMIT_ALLOWLIST: "127.0.0.1,::1" },
       dependsOn: [
         DbNames.PGLITE_WAIT,
         CelestiaNames.FUND,
@@ -130,6 +132,23 @@ export default {
       // indexer subscriptions with the mint wallet: the packaged indexer's
       // wallet DB pool can exhaust and kill the indexer mid-bootstrap.
       dependsOn: [...midnightDeps, midnightMintTestTokens],
+    },
+
+    {
+      name: "solver",
+      description: "ZSwap-DA posted-price solver (matches crossings, fills from inventory)",
+      args: ["run", "packages/solver/solver.dev.ts"],
+      waitToExit: false,
+      // Deliberately not a system-dependency: the stack is fully usable without
+      // a solver, and a solver fault must never tear the stack down.
+      //
+      // Waits on the mint bootstrap for the same reason the batcher does
+      // (52f104b): buildWallet() opens a wallet facade against the indexer and
+      // waitForSync() subscribes to its state stream, so an unsequenced solver
+      // adds a third wallet's subscriptions on top of the mint wallet's and can
+      // exhaust the packaged indexer's wallet DB pool mid-bootstrap. Upstream
+      // gated only the batcher because upstream has no solver.
+      dependsOn: [...midnightDeps, midnightMintTestTokens, "sync"],
     },
 
     // The frontend lives in paima-engine/templates/zswap-da — run it separately

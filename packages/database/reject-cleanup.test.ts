@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // The framework persists every fetched Celestia blob in
 // effectstream.primitive_accounting forever. Because the namespace is
@@ -23,7 +24,7 @@ const {
 } = await import("@zswap-da/database");
 
 const PORT = 54335;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 // Must match packages/node/env.ts CELESTIA_PRIMITIVE_NAME — the value the
@@ -93,9 +94,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 test("rejecting a blob removes its stored body entirely", async () => {

@@ -11,6 +11,7 @@
 // state-A dump is still written; a later full re-run with identical seeds can
 // diff against it via GRAND_PREV_STATE_DIR.
 
+import { fileURLToPath } from "node:url";
 import pg, { type Client } from "pg";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -29,7 +30,7 @@ import { diffStates, dumpPublicState, type StateDump } from "../lib/dump.ts";
 import { getHealth, getHealthSync } from "../lib/api2.ts";
 import { beginPhase, check, note, sleep, waitUntil, writeOut } from "../lib/util.ts";
 
-const REPO_ROOT = resolve(new URL("../../../..", import.meta.url).pathname);
+const REPO_ROOT = resolve(fileURLToPath(new URL("../../../..", import.meta.url)));
 
 export interface DeterminismOutcome {
   mode: "second-instance" | "prev-run-diff" | "fallback-documented";

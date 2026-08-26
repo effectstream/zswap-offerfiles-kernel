@@ -389,9 +389,13 @@ test("declared outputs persist their exact identity plus audit fields", async ()
   const intentA = "a".repeat(64);
   const intentB = "b".repeat(64);
   await client.query(
+    // metadata_expires_at is required by OUR TTL archive guard below
+    // (metadata_expires_at IS NOT NULL AND <= :expires_at_cutoff!); upstream's
+    // fixture predates it. Any past expiry works — this case is about archival
+    // copying the markers, not about TTL semantics.
     `INSERT INTO offer_file
-       (id, celestia_height, transaction_hex, offer_hash, first_seen_at)
-     VALUES ($1, 1, 'identity-blob', $2, NOW())`,
+       (id, celestia_height, transaction_hex, offer_hash, first_seen_at, metadata_expires_at)
+     VALUES ($1, 1, 'identity-blob', $2, NOW(), NOW() - INTERVAL '1 minute')`,
     [id, hashOf(id)],
   );
   await insertOfferFileUnshieldedOutput.run({
@@ -434,8 +438,13 @@ test("declared outputs persist their exact identity plus audit fields", async ()
     },
   ]);
 
+  // expires_at_cutoff is OUR addition to this query (the TTL archive refuses an
+  // early/duplicate schedule and archives at a deterministic cutoff — pinned by
+  // offer-expiry.test.ts). Upstream's call predates it; a far-future cutoff
+  // keeps this case about archival copying the markers, which is its subject.
   await archiveOfferByIdTtlWithHash.run({
     offer_file_id: id,
+    expires_at_cutoff: new Date("2999-01-01T00:00:00.000Z"),
     archived_at: new Date().toISOString(),
   }, client);
   const archived = (await client.query(

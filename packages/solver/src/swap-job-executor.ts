@@ -6,7 +6,7 @@
 // as one solver-owned FinalizedTransaction per job so `submit-failed` and the
 // chain-TTL sweeper can revert exactly the solver's contribution.
 
-import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction, type FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import { createHash } from "node:crypto";
 
 import {
@@ -377,7 +377,7 @@ const requireCanonicalJob = (job: SwapMessage): void => {
   const amountIn = BigInt(job.amountIn);
   const amountOut = BigInt(job.amountOut);
   if (amountIn <= 0n || amountOut <= 0n || amountIn > MAX_U256 || amountOut > MAX_U256) {
-    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "amount is outside the ledger-v8 u256 domain");
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "amount is outside the ledger-v9 u256 domain");
   }
 };
 

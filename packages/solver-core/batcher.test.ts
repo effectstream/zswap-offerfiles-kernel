@@ -2,7 +2,7 @@ import { afterEach, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { Transaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction } from "@midnightntwrk/ledger-v9";
 
 import {
   declaredLedgerSegments,
@@ -111,7 +111,7 @@ test("arbitrary declared intent and fallible segments are all enumerated", () =>
   expect(nonDust(tx).map((i) => [i.seg, i.amount])).toEqual([[7, 2n], [65_000, -2n]]);
 });
 
-test("a serialized ledger-v8 offer round-trip exposes every declared segment to the guard", () => {
+test("a serialized ledger-v9 offer round-trip exposes every declared segment to the guard", () => {
   const blob = readFileSync(
     new URL("../validator/fixtures/valid-offer.bech32", import.meta.url),
     "utf8",

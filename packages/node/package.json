@@ -16,7 +16,6 @@
     "@effectstream/concise": "0.200.2",
     "@effectstream/coroutine": "0.200.2",
     "@effectstream/db": "0.200.2",
-    "@effectstream/event-client": "0.200.2",
     "@effectstream/log": "0.200.2",
     "@effectstream/midnight-contracts": "0.200.2",
     "@effectstream/runtime": "0.200.2",

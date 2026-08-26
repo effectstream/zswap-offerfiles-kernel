@@ -61,6 +61,23 @@ import {
   midnightContract,
 } from "./env.ts";
 
+// Same env-first resolution as config.dev.ts (see the note there): the deploy
+// may be a separate one-shot, so the address has to be injectable. Kept
+// identical on purpose — grand-b-config-drift.test.ts asserts these two
+// configs do not diverge.
+const contractAddress =
+  process.env.MIDNIGHT_CONTRACT_ADDRESS ?? midnightContract?.contractAddress;
+
+if (!contractAddress) {
+  throw new Error(
+    `No Midnight contract address for network '${midnightNetworkConfig.id}'.\n` +
+      "Either:\n" +
+      "  1. Set MIDNIGHT_CONTRACT_ADDRESS, or\n" +
+      `  2. Provide packages/contracts-midnight/contract-offer-files.${midnightNetworkConfig.id}.json\n` +
+      "     (written by `bun run --filter @zswap-da/contracts-midnight midnight-contract:deploy`).",
+  );
+}
+
 const startTimeRaw = process.env["GRAND_NTP_START_TIME"];
 if (!startTimeRaw || !Number.isFinite(Number(startTimeRaw))) {
   throw new Error("main.grand-b.ts requires GRAND_NTP_START_TIME (ms epoch of instance A's NTP anchor)");
@@ -146,7 +163,7 @@ const config = new ConfigBuilder()
           name: "ZswapMidnightState",
           type: PrimitiveTypeMidnightGeneric,
           startBlockHeight: 1,
-          contractAddress: midnightContract!.contractAddress,
+          contractAddress,
           stateMachinePrefix: "midnight-zswap",
           contract: { ledger: OfferFilesContract.ledger },
           networkId: midnightNetworkConfig.id,

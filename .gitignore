@@ -18,3 +18,19 @@ docker/
 mnemonic-to-seed.ts
 packages/contracts-midnight/contract-offer-files.undeployed.json
 PLAN.md
+
+# The split-component Compose deployment under deploy/ IS a committed deliverable,
+# so it is exempted from the "Preview Docker test setup" block above (which ignores
+# `Dockerfile`, `.dockerignore` and `.env` at ANY depth). Un-ignored last so it wins.
+# The generated local `deploy/.env` stays ignored — only `deploy/.env.example` is
+# committed, and it carries no real secret.
+!deploy/**
+# …and re-ignore what the blanket exception above would otherwise pull back in.
+# `!deploy/**` overrides EVERY earlier rule for that subtree, including
+# `node_modules/` and `*-debug.log` — so state the exceptions to the exception.
+deploy/.env
+deploy/**/.env
+deploy/**/*.local.yml
+deploy/node_modules/
+deploy/**/node_modules/
+deploy/**/*-debug.log

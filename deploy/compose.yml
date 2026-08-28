@@ -1,0 +1,486 @@
+# deploy/compose.yml — the split-component deployment (spec FR-008).
+#
+# Run from THIS directory:  docker compose --env-file .env up -d
+#
+# ── Shape ────────────────────────────────────────────────────────────────────
+# One file, sectioned, rather than the `compose/{core,offerfiles,intents,solver,
+# e2e}.yml` fragment set the brief allowed as an option. At eleven services the
+# fragments would buy nothing but a mandatory `-f a -f b -f c …` incantation in
+# front of every command (and a way to bring up a subset that is missing its
+# dependencies). What the fragments were really for — starting only part of the
+# stack — is served here by native Compose `profiles:` on the two optional
+# components, and by naming services on `up`.
+#
+# ── The rule this file exists to enforce ─────────────────────────────────────
+# EVERY component is its own service with its own single process. The in-repo
+# orchestrator (`bun run dev`, `start.dev.ts`) never runs in a container:
+# `launchMidnight()`/`launchCelestia()` open with `stopProcessAtPort [9944,
+# 8088, 6300, 26657, 26658, 3334]`, which would kill the very chain services
+# this project runs as siblings, and their deploy step would mint a second
+# contract identity while the volumes still referenced the first.
+#
+# ── Ports ────────────────────────────────────────────────────────────────────
+# This is a SHARED host. Nothing binds a wildcard address and nothing takes a
+# well-known port: every published port comes from .env, defaults to >= 10000,
+# and binds ${BIND_ADDR} (127.0.0.1). Container-internal ports stay canonical
+# (9999, 3334, 9944, 8088, 6300, 26657, 26658, 5432, 3000, 9001) so the service
+# names read the same as in the code that dials them.
+
+name: ${COMPOSE_PROJECT_NAME:-cow00005_e2e}
+
+# ── shared anchors ───────────────────────────────────────────────────────────
+
+x-midnight-endpoints: &midnight-endpoints
+  # MIDNIGHT_NETWORK_ID is stated on EVERY service. `@effectstream/midnight-contracts`
+  # silently defaults it to `undeployed` with 127.0.0.1 endpoints, which inside a
+  # container means "nothing listening"; and R3's solver launch contract refuses
+  # to start without it precisely so that default can never be inherited by
+  # accident.
+  MIDNIGHT_NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
+  MIDNIGHT_NODE_HTTP: http://midnight-node:9944
+  MIDNIGHT_INDEXER_HTTP: http://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}
+  MIDNIGHT_INDEXER_WS: ws://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}/ws
+  MIDNIGHT_PROOF_SERVER_URL: http://proof-server:6300
+  MIDNIGHT_WALLET_SEED: ${MIDNIGHT_GENESIS_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
+
+x-celestia-endpoints: &celestia-endpoints
+  CELESTIA_RPC_URL: http://celestia:26658
+  CELESTIA_NETWORK: devnet
+  # A devnet's chain starts at height 1. Anything higher waits forever, in
+  # silence, because the reader simply never reaches the configured start.
+  CELESTIA_START_HEIGHT: "1"
+  # ONE shared namespace. Publisher and reader disagreeing here is invisible:
+  # blobs are written and nothing ever reads them. Unset means the MIP-0006
+  # shared default in @zswap-da/offer-guard, which is what we want.
+  CELESTIA_NAMESPACE: ${CELESTIA_NAMESPACE:-}
+  # The bridge runs with --rpc.skip-auth (as @effectstream/celestia does), so
+  # there is deliberately no token to distribute.
+  CELESTIA_AUTH_TOKEN: ""
+
+x-kernel-image: &kernel-image
+  image: ${KERNEL_IMAGE:-cow00005/kernel}:${IMAGE_TAG:-dev}
+  build:
+    context: ..
+    dockerfile: deploy/images/kernel/Dockerfile
+    args:
+      COMPACT_VERSION: ${COMPACT_VERSION:-0.30.0}
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+
+  # ══ chain ═══════════════════════════════════════════════════════════════════
+
+  midnight-node:
+    <<: *logging
+    image: ${MIDNIGHT_NODE_IMAGE:-cow00005/midnight-node}:${IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/images/midnight-node/Dockerfile
+    restart: unless-stopped
+    environment:
+      CFG_PRESET: dev
+      MIDNIGHT_STORAGE_PASSWORD: ${MIDNIGHT_STORAGE_PASSWORD:-YourPasswordMy1!}
+      MIDNIGHT_NODE_BASE_PATH: /data/midnight-node
+    volumes:
+      - midnight-node-data:/data/midnight-node
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_MIDNIGHT_NODE_RPC_PORT:-19944}:9944"
+    healthcheck:
+      # Answering RPC is not the same as having a chain: the indexer's bundled
+      # spo-indexer exits(1) if block #1 is missing, so block #1 IS the health
+      # condition, not merely a nicety.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf -m 5 -H 'Content-Type: application/json'
+          -d '{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[1]}'
+          http://127.0.0.1:9944 | grep -q '"result":"0x'
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+
+  proof-server:
+    <<: *logging
+    image: ${PROOF_SERVER_IMAGE:-cow00005/proof-server}:${IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/images/proof-server/Dockerfile
+    restart: unless-stopped
+    environment:
+      RUST_BACKTRACE: full
+      SUBSTRATE_NODE_WS_URL: ws://midnight-node:9944
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PROOF_SERVER_PORT:-16300}:6300"
+    healthcheck:
+      # The binary image has no shell tooling beyond what we installed; a plain
+      # TCP-ish probe via curl is enough — any HTTP answer means it is serving.
+      test: ["CMD-SHELL", "curl -sf -o /dev/null -m 5 http://127.0.0.1:6300/ || curl -s -o /dev/null -m 5 http://127.0.0.1:6300/"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  indexer:
+    <<: *logging
+    image: ${INDEXER_IMAGE:-cow00005/indexer}:${IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/images/indexer/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      midnight-node:
+        condition: service_healthy
+    environment:
+      LEDGER_NETWORK_ID: Undeployed
+      FEATURES_WALLET_ENABLED: "true"
+      # 32 random bytes, uppercase hex. Generated into .env by bootstrap.sh —
+      # it is the indexer's own wallet-encryption secret, not a shared secret.
+      APP__INFRA__SECRET: ${INDEXER_SECRET:?INDEXER_SECRET is required — run deploy/bootstrap.sh}
+      APP__INFRA__NODE__URL: ws://midnight-node:9944
+      SUBSTRATE_NODE_WS_URL: ws://midnight-node:9944
+      APP__INFRA__PROOF_SERVER__URL: http://proof-server:6300
+      # SPO/Cardano indexing is not exercised on an undeployed devnet. Pointed
+      # at a dead port with a practically infinite retry budget, exactly as this
+      # repo's own `midnight-indexer:start` script does, so the spo task neither
+      # connects nor gives up and kills the process.
+      APP__INFRA__SPO_NODE__URL: ws://127.0.0.1:1
+      APP__INFRA__SPO_NODE__RECONNECT_MAX_ATTEMPTS: "1000000000"
+      APP__INFRA__API__PORT: "8088"
+    volumes:
+      - indexer-data:/var/lib/indexer/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_INDEXER_PORT:-18088}:8088"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -o /dev/null -m 5 http://127.0.0.1:8088/ || curl -s -o /dev/null -m 5 http://127.0.0.1:8088/"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+
+  celestia:
+    <<: *logging
+    image: ${CELESTIA_IMAGE:-cow00005/celestia}:${IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/images/celestia/Dockerfile
+    # Release 0.3.120 has no celestia linux/arm64 asset (see the image's header
+    # comment), so on an arm64 host this one service runs emulated.
+    platform: ${CELESTIA_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    environment:
+      CELESTIA_HOME: /data/celestia-app
+      CELESTIA_BRIDGE_HOME: /data/celestia-bridge
+      CELESTIA_FORCE_NO_BBR: "1"
+    volumes:
+      - celestia-data:/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_CELESTIA_BRIDGE_PORT:-16658}:26658"
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_CELESTIA_RPC_PORT:-16657}:26657"
+    healthcheck:
+      # The BRIDGE is what the kernel and batcher talk to; a healthy consensus
+      # node with a dead bridge would be a lie.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf -m 5 -X POST -H 'Content-Type: application/json'
+          -d '{"jsonrpc":"2.0","id":1,"method":"header.NetworkHead","params":[]}'
+          http://127.0.0.1:26658 | grep -q '"result"'
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+
+  # ══ kernel-side infrastructure ══════════════════════════════════════════════
+
+  pglite:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-pglite.sh"]
+    restart: unless-stopped
+    environment:
+      PGLITE_DATA_DIR: /var/lib/pglite/data
+      DB_PORT: "5432"
+    volumes:
+      - pglite-data:/var/lib/pglite/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PGLITE_PORT:-15432}:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const s = await Bun.connect({hostname:"127.0.0.1",port:5432,socket:{data(){}}});
+          s.end(); process.exit(0);'
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 15s
+
+  # One-shot. Deploys the Compact contract exactly once per volume and publishes
+  # its address; everything downstream waits on service_completed_successfully.
+  offerfiles-deploy:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-deploy.sh"]
+    restart: "no"
+    depends_on:
+      midnight-node:
+        condition: service_healthy
+      proof-server:
+        condition: service_healthy
+      indexer:
+        condition: service_healthy
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      MIDNIGHT_STORAGE_PASSWORD: ${MIDNIGHT_STORAGE_PASSWORD:-YourPasswordMy1!}
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy
+
+  # ══ kernel components ═══════════════════════════════════════════════════════
+
+  kernel:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-kernel.sh"]
+    restart: unless-stopped
+    depends_on:
+      pglite:
+        condition: service_healthy
+      celestia:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      EFFECTSTREAM_API_PORT: "9999"
+      DB_HOST: pglite
+      DB_PORT: "5432"
+      # Client-side single-connection mode for the pg-gateway/PGlite server.
+      PGLITE: "true"
+      # PGlite ships no pg_ivm; the engine falls back to plain SQL views over
+      # the trigger-maintained tables. Fine for a devnet, and the same fallback
+      # the dev stack uses.
+      ALLOW_NO_PG_IVM: "true"
+      BATCHER_SUBMIT_URL: http://batcher:3334
+      # Co-located automated clients (the solver's book mirror, the E2E driver)
+      # burst well past the shared per-IP budget during a page-through plus
+      # settlement polls. This is a private network on a throwaway devnet.
+      API_RATE_LIMIT_ALLOWLIST: ${API_RATE_LIMIT_ALLOWLIST:-}
+      API_RATE_LIMIT_MAX: ${API_RATE_LIMIT_MAX:-6000}
+      ENABLE_TOKEN_REGISTRY: ${ENABLE_TOKEN_REGISTRY:-true}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_KERNEL_PORT:-19999}:9999"
+    healthcheck:
+      # bun images ship no curl; `bun -e fetch` is the probe.
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const r = await fetch("http://127.0.0.1:9999/v1/health");
+          process.exit(r.ok ? 0 : 1);'
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+
+  batcher:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-batcher.sh"]
+    restart: unless-stopped
+    depends_on:
+      celestia:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      BATCHER_PORT: "3334"
+      BATCHER_STORAGE_DIR: /var/lib/batcher
+      # …0003 by default (packages/batcher/config.ts). It must differ from every
+      # other wallet on the stack: two facades on one seed against one node
+      # force each other's connection down.
+      BATCHER_WALLET_SEED: ${BATCHER_WALLET_SEED:-0000000000000000000000000000000000000000000000000000000000000003}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - batcher-data:/var/lib/batcher
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_BATCHER_PORT:-13334}:3334"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const r = await fetch("http://127.0.0.1:3334/health");
+          process.exit(r.ok ? 0 : 1);'
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+
+  # ══ Midnight Intents relay (UNMODIFIED reference) ═══════════════════════════
+
+  relay:
+    <<: *logging
+    image: ${RELAY_IMAGE:-cow00005/relay}:${IMAGE_TAG:-dev}
+    build:
+      context: ./images/relay
+      dockerfile: Dockerfile
+      additional_contexts:
+        # The pinned, read-only reference clone. Nothing writes here.
+        # Relative paths here are resolved from the directory holding this file.
+        reference: ${RELAY_REFERENCE_DIR:-../../../resources/00003-midnight-intents-swaps-reference/phase1-native-swaps}
+    restart: unless-stopped
+    depends_on:
+      midnight-node:
+        condition: service_healthy
+      indexer:
+        condition: service_healthy
+      proof-server:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${RELAY_LOG_LEVEL:-info}
+      # 0.0.0.0 inside the container: the reference's preprod compose binds
+      # 127.0.0.1 because Caddy fronts it on the same host, but here the solver
+      # and the E2E driver reach it across the Compose network. Host exposure is
+      # still bounded — the published ports bind ${BIND_ADDR}.
+      BIND_HOST: 0.0.0.0
+      RELAY_PORT: "3000"
+      RELAY_WS_PORT: "9001"
+      RELAY_PUBLIC_URL: http://127.0.0.1:${HOST_RELAY_HTTP_PORT:-13000}
+      RELAY_PUBLIC_DOCS_ENABLED: ${RELAY_PUBLIC_DOCS_ENABLED:-true}
+      NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
+      # Mode B (explicit URLs). Mode A (MIDNIGHT_HOST + *_PORT) is deliberately
+      # NOT used: it hard-codes the indexer path to /api/v4/graphql, and which
+      # API version indexer-standalone v4.3.3 actually serves is exactly what
+      # must stay switchable from .env (see MIDNIGHT_INDEXER_API_PATH).
+      MIDNIGHT_NODE_URL: ws://midnight-node:9944
+      INDEXER_HTTP_URL: http://indexer:8088${RELAY_INDEXER_API_PATH:-/api/v3/graphql}
+      INDEXER_WS_URL: ws://indexer:8088${RELAY_INDEXER_API_PATH:-/api/v3/graphql}/ws
+      PROOF_SERVER_URL: http://proof-server:6300
+      # The relay calls the shared solver bearer SOLVER_AUTH_TOKEN; the candidate
+      # calls the same secret SOLVER_RELAY_AUTH_TOKEN. Both read ${SOLVER_AUTH_TOKEN}
+      # so they cannot drift. Refused by BOTH sides below 32 characters.
+      SOLVER_AUTH_TOKEN: ${SOLVER_AUTH_TOKEN:?SOLVER_AUTH_TOKEN is required (>= 32 chars) — run deploy/bootstrap.sh}
+      INTENT_TIMEOUT_MS: ${INTENT_TIMEOUT_MS:-300000}
+      SUBMIT_TIMEOUT_MS: ${SUBMIT_TIMEOUT_MS:-180000}
+      # 0 disables rate limiting. The E2E driver polls job status in a tight
+      # loop; the public default of 60/min would throttle the proof itself.
+      RATE_LIMIT_MAX: ${RELAY_RATE_LIMIT_MAX:-0}
+      WALLET_CACHE_DIR: /app/data/wallet-sync-cache
+      NODE_OPTIONS: ${RELAY_NODE_OPTIONS:---max-old-space-size=4096}
+    volumes:
+      - relay-wallet-cache:/app/data/wallet-sync-cache
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_RELAY_HTTP_PORT:-13000}:3000"
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_RELAY_WS_PORT:-19001}:9001"
+    healthcheck:
+      # The relay has NO /health route. GET /tokens is the only unauthenticated
+      # public route; it answers 200 with an empty array when no solver is
+      # connected, which is exactly the "serving but idle" state we want to
+      # call healthy.
+      test: ["CMD-SHELL", "wget -q -O /dev/null -T 5 http://127.0.0.1:3000/tokens || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  # ══ COW solver ══════════════════════════════════════════════════════════════
+
+  solver:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-solver.sh"]
+    # on-failure, NOT unless-stopped: a solver that exits 1 because its
+    # configuration is incomplete must stay down and visible. `start.solver.ts`
+    # reports every problem at once, so one restart shows the whole list — but a
+    # perpetual loop would bury it. `SOLVER_ENABLED=false` exits 0 and is
+    # therefore not restarted at all.
+    restart: on-failure:3
+    depends_on:
+      kernel:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      # ── the seven mandatory boundaries of `bun run start.solver.ts` ────────
+      # (MIDNIGHT_NETWORK_ID arrives via *midnight-endpoints.) Omitting ANY of
+      # these is a deterministic exit 1 listing all of them — SC-004's
+      # fail-fast negative control. All seven are stated explicitly here even
+      # where a default exists, because every one of those defaults is a
+      # developer convenience that would be wrong in a deployment.
+      ZSWAP_API: http://kernel:9999
+      SOLVER_RELAY_WS_URL: ws://relay:9001
+      SOLVER_RELAY_HTTP_URL: http://relay:3000
+      SOLVER_RELAY_AUTH_TOKEN: ${SOLVER_AUTH_TOKEN:?SOLVER_AUTH_TOKEN is required (>= 32 chars) — run deploy/bootstrap.sh}
+      SOLVER_JOURNAL_PATH: /var/lib/cow-solver/operations.sqlite
+      SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
+      # ── mode ───────────────────────────────────────────────────────────────
+      # Strict "true"/"false" strings — a typo is a startup failure, never a
+      # silent "enabled".
+      SOLVER_ENABLED: ${SOLVER_ENABLED:-true}
+      SOLVER_DRY_RUN: ${SOLVER_DRY_RUN:-false}
+      SOLVER_SUPPORTED_PAIRS: ${SOLVER_SUPPORTED_PAIRS:-}
+      SOLVER_MIN_JOB_OUTPUT: ${SOLVER_MIN_JOB_OUTPUT:-}
+      SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      # Per-instance and chain-keyed: a journal that outlives the genesis it was
+      # written against is worse than no journal, so this volume is torn down
+      # together with the chain volumes (see deploy/down.sh).
+      - solver-journal:/var/lib/cow-solver
+
+  # ══ provisioning / E2E driver (E1 owns the driver itself) ═══════════════════
+
+  scripts:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-scripts.sh"]
+    restart: "no"
+    profiles: ["e2e"]
+    depends_on:
+      kernel:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+      batcher:
+        condition: service_healthy
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      ZSWAP_API: http://kernel:9999
+      BATCHER_SUBMIT_URL: http://batcher:3334
+      RELAY_HTTP_URL: http://relay:3000
+      RELAY_WS_URL: ws://relay:9001
+      SOLVER_AUTH_TOKEN: ${SOLVER_AUTH_TOKEN:-}
+      SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
+      MAKER_SEED: ${MAKER_SEED:-0000000000000000000000000000000000000000000000000000000000000031}
+      TAKER_SEED: ${TAKER_SEED:-0000000000000000000000000000000000000000000000000000000000000032}
+      E2E_EVIDENCE_DIR: /var/lib/e2e
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - e2e-evidence:/var/lib/e2e
+
+volumes:
+  # Chain-keyed. These MUST be wiped together: a kernel ledger mirror, a solver
+  # journal or an indexer database that survives a chain reset refers to
+  # nullifiers, offers and contract addresses that no longer exist, and every
+  # symptom of that shows up somewhere else entirely. deploy/down.sh removes the
+  # whole set.
+  midnight-node-data:
+  indexer-data:
+  celestia-data:
+  pglite-data:
+  offerfiles-deploy:
+  batcher-data:
+  solver-journal:
+  relay-wallet-cache:
+  e2e-evidence:

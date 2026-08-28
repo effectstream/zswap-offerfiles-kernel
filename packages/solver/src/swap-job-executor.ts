@@ -44,7 +44,7 @@ import {
 import {
   collectNullifiers,
   deriveLegs,
-} from "@zswap-da/validator";
+} from "@zswap-da/validator/derive";
 
 import type { Book, BookOffer } from "./book.ts";
 import {

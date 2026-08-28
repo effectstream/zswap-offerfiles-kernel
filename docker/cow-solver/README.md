@@ -1,6 +1,7 @@
 # COW Solver container handoff
 
-This directory and `Dockerfile.solver` are the complete infrastructure handoff.
+This directory is the complete infrastructure handoff. Run every command below
+from the repository root; the image definition is `docker/cow-solver/Dockerfile`.
 The image runs only the solver. Midnight node, indexer, proof server, Offer
 Files backend, and relay stay external. The solver is outbound-only, so no
 application port is exposed or published.
@@ -28,7 +29,7 @@ PLATFORM="linux/amd64" # or linux/arm64
 
 docker build \
   --platform "${PLATFORM}" \
-  --file Dockerfile.solver \
+  --file docker/cow-solver/Dockerfile \
   --build-arg "SOURCE_REVISION=${SOURCE_REVISION}" \
   --build-arg "SOLVER_VERSION=${SOLVER_VERSION}" \
   --tag "cow-solver:sha-${SOURCE_ALIAS}" \
@@ -57,7 +58,7 @@ alone until an intentional version bump.
 
 ## Configure and dry-run
 
-Copy `deploy/solver/solver.env.example` to an infrastructure-owned secret/config
+Copy `docker/cow-solver/solver.env.example` to an infrastructure-owned secret/config
 location and replace every active placeholder. Do not commit the populated
 file. `ZSWAP_API` must not contain credentials because the current solver logs
 that URL. Mount the ladder as a read-only file.

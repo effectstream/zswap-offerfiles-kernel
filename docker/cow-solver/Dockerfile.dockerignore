@@ -1,7 +1,9 @@
 **
 
-!Dockerfile.solver
-!Dockerfile.solver.dockerignore
+!docker/
+!docker/cow-solver/
+!docker/cow-solver/Dockerfile
+!docker/cow-solver/Dockerfile.dockerignore
 !package.json
 !bun.lock
 

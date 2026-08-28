@@ -12,7 +12,9 @@ midnight-level-db*
 # Preview Docker test setup — not for commit
 Dockerfile
 docker-compose.yml
-docker/
+docker/**
+!docker/cow-solver/
+!docker/cow-solver/**
 .env
 .dockerignore
 mnemonic-to-seed.ts

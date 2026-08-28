@@ -27,11 +27,15 @@ export const SOLVER_RELAY_WS_URL = getEnv("SOLVER_RELAY_WS_URL") ?? "";
 export const SOLVER_RELAY_HTTP_URL = getEnv("SOLVER_RELAY_HTTP_URL") ?? "";
 export const SOLVER_RELAY_AUTH_TOKEN = getEnv("SOLVER_RELAY_AUTH_TOKEN") ?? "";
 
-export const SOLVER_LADDER_CONFIG =
-  getEnv("SOLVER_LADDER_CONFIG") ??
+/** Ladder file used when `SOLVER_LADDER_CONFIG` is unset. Exported so an
+ * entrypoint can report the effective path from an injected environment reader
+ * without going through this module's process-wide constant. */
+export const DEFAULT_SOLVER_LADDER_CONFIG =
   // fileURLToPath, not URL.pathname: pathname percent-encodes, so a checkout
   // under a directory with a space yields a path readFile cannot open.
   fileURLToPath(new URL("./config/ladders.dev.json", import.meta.url));
+
+export const SOLVER_LADDER_CONFIG = getEnv("SOLVER_LADDER_CONFIG") ?? DEFAULT_SOLVER_LADDER_CONFIG;
 
 type EnvReader = (name: string) => string | undefined;
 
@@ -171,8 +175,13 @@ export interface SolverRelayHttpEnvOptions {
   relayExecutionEnabled: boolean;
 }
 
-export function parseSolverRelayHttpUrl(raw: string): string {
-  const name = "SOLVER_RELAY_HTTP_URL";
+/**
+ * One canonical HTTP(S) base URL. Shared by every mandatory HTTP boundary of
+ * the solver process (the relay's public status base and the kernel API) so a
+ * deployment cannot pass a credential-bearing, query-bearing, or
+ * trailing-slash-inconsistent URL to one of them and a strict one to the other.
+ */
+export function parseHttpBaseUrl(name: string, raw: string): string {
   if (raw.length === 0 || raw.trim() !== raw || raw.includes("\0")) {
     throw new Error(`${name} must be a non-empty canonical HTTP(S) URL without whitespace or NUL`);
   }
@@ -194,6 +203,9 @@ export function parseSolverRelayHttpUrl(raw: string): string {
   parsed.pathname = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/$/, "");
   return parsed.toString().replace(/\/$/, "");
 }
+
+export const parseSolverRelayHttpUrl = (raw: string): string =>
+  parseHttpBaseUrl("SOLVER_RELAY_HTTP_URL", raw);
 
 /** The public relay status authority is configured explicitly. It is never
  * guessed by rewriting the websocket URL because the deployed HTTP prefix may

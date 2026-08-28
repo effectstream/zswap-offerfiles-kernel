@@ -15,7 +15,9 @@ import {
   JOB_DUPLICATE,
   startSwapJobExecutor,
   type SwapJobExecutorHandle,
+  type SwapJobWallet,
 } from "./src/swap-job-executor.ts";
+import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 
 const A = "aa".repeat(32);
 const B = "bb".repeat(32);
@@ -144,17 +146,20 @@ const start = (
   stock.setBalances({ [B]: 100n });
   const calls: string[] = [];
   const book = new Book();
-  const wallet = {
+  // Typed as the executor's own wallet boundary: the doubles must satisfy the
+  // real signatures (opaque `unknown` transactions in, a finalized transaction
+  // out), so a change to that interface fails here instead of at runtime.
+  const wallet: SwapJobWallet = {
     shielded: { getAddress: async () => "address" },
     dust: { balanceTransactions: async () => tx("dust") },
     initSwap: async () => ({ transaction: tx("raw") }),
-    finalizeTransaction: async () => tx("final"),
-    revertTransaction: async (value: FakeTx) => {
-      calls.push(`raw:${value.label}`);
+    finalizeTransaction: async () => tx("final") as unknown as FinalizedTransaction,
+    revertTransaction: async (value) => {
+      calls.push(`raw:${(value as FakeTx).label}`);
       await options.blockRevert;
     },
-    revert: async (value: FakeTx) => {
-      calls.push(`final:${value.label}`);
+    revert: async (value) => {
+      calls.push(`final:${(value as FakeTx).label}`);
       await options.blockRevert;
     },
   };

@@ -8,6 +8,7 @@ import {
   deriveLadder,
   withdrawalPriceLevelsFrame,
   worstCaseIntervalResidual,
+  type LadderExclusionReason,
   type LadderSourceOffer,
 } from "./ladder-derivation.ts";
 import { rejectLevels } from "./ladder-schema.ts";
@@ -354,7 +355,9 @@ describe("ladder derivation — fail closed", () => {
 
   test("unsupported offer shapes are excluded, never guessed at", () => {
     const base = offer(hash("55"), A, 10n, B, 10n);
-    const cases: Array<[string, LadderSourceOffer]> = [
+    // Typed by the reason union, not `string`: a renamed or mistyped reason
+    // must fail the gate here rather than silently assert nothing.
+    const cases: Array<[LadderExclusionReason, LadderSourceOffer]> = [
       ["multi-leg", { ...base, wants: [...base.wants, { token: C, amount: 1n, kind: "SHIELDED" }] }],
       ["non-shielded-leg", { ...base, gives: [{ token: A, amount: 10n, kind: "UNSHIELDED" }] }],
       ["non-shielded-leg", { ...base, wants: [{ token: B, amount: 10n, kind: "UNSHIELDED" }] }],

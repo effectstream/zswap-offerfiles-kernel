@@ -40,12 +40,19 @@ import {
   type SolverWalletDependencies,
 } from "../../../solver/src/run.ts";
 
-/** Historical E1 telemetry shape retained only until N6 replaces this pre-R2
- * harness. The production validation gate it described was deleted by N5. */
-type ValidationGateTrace =
-  | { kind: string; offerHash: string; [key: string]: unknown }
-  | { kind: string; [key: string]: unknown };
-
+/**
+ * R3/FR-006 removal note. This harness used to pass `onValidationTrace`,
+ * `onOutcome` and `onMatchOutcome` to `runSolver`, plus the
+ * `ValidationGateTrace` shape and `recordRealValidationTraceEvidence` helper
+ * that fed them. `SolverOptions` has had none of those options since N5 deleted
+ * the pre-match validation gate, so the callbacks were never invoked at
+ * runtime — they only survived because nothing typechecked this file. They are
+ * gone; the evidence they would have produced (per-offer stock rows keyed by
+ * the offers a fill selected) needs a live source from the current solver, and
+ * that is N6's replacement of this pre-R2 harness, not a type fix.
+ * `stockSnapshot(hashes)` still produces those rows for any caller that knows
+ * the hashes, and the terminal snapshot still records solver-wide token rows.
+ */
 const SCHEMA = "zswap-offer-files-real-solver/v1";
 
 type JsonPrimitive = string | number | boolean | null;
@@ -891,31 +898,6 @@ export function buildRealStockSnapshot(
   return { tokens: Object.freeze(tokens), offers: Object.freeze(offerRows) };
 }
 
-export interface RealValidationTraceEvidenceHooks {
-  recordTrace: (event: ValidationGateTrace) => void;
-  rememberOffer: (offerHash: string) => void;
-  recordExecutionStartStock: (offerHash: string) => void;
-}
-
-/**
- * Preserve the validation gate's synchronous diagnostic-observer boundary
- * while imposing one local/central recorder order for dequeue evidence. An
- * `execution-start` trace is raised by the gate only after Executor.fill has
- * reserved its claim, so the immediately following Stock snapshot observes
- * that reservation before the dequeue validation response can be handled.
- */
-export function recordRealValidationTraceEvidence(
-  event: ValidationGateTrace,
-  hooks: RealValidationTraceEvidenceHooks,
-): void {
-  hooks.recordTrace(event);
-  if (!("offerHash" in event)) return;
-  hooks.rememberOffer(event.offerHash);
-  if (event.kind === "execution-start") {
-    hooks.recordExecutionStartStock(event.offerHash);
-  }
-}
-
 export interface InstrumentedRealSolverHandle {
   readonly solver: SolverHandle;
   readonly ready: Promise<void>;
@@ -1010,8 +992,6 @@ export async function startInstrumentedRealSolver(
   const boundaryAvailability = Object.fromEntries(
     REAL_WALLET_BOUNDARIES.map((method) => [method, false]),
   ) as Record<RealWalletBoundaryName, boolean>;
-  const rememberedOffers = new Map<string, { offerHash: string; inputNullifiers: string[] }>();
-  const selectedOfferHashes = new Set<string>();
   let activeSolver: SolverHandle | null = null;
   let stopping: Promise<void> | null = null;
   let walletBoundaryEvidenceAbandoned = false;
@@ -1033,26 +1013,18 @@ export async function startInstrumentedRealSolver(
       ]),
     ) as RealWalletBoundarySnapshot["methods"],
   });
-  const rememberOffer = (offerHash: string): void => {
-    const normalized = offerHash.toLowerCase();
-    selectedOfferHashes.add(normalized);
-    const offer = activeSolver?.validatedBook.get(normalized) ?? activeSolver?.book.get(normalized);
-    if (offer) {
-      rememberedOffers.set(normalized, {
-        offerHash: normalized,
-        inputNullifiers: [...offer.inputNullifiers].sort(),
-      });
-    }
-  };
-  const stockSnapshot = (offerHashes = [...selectedOfferHashes]): RealStockSnapshot => {
+  // Offer rows come from the live book. The removed outcome callbacks were the
+  // only thing that ever pre-recorded a selected offer, and their cache was
+  // consulted second anyway (`remembered ?? live`), so reading the book is what
+  // this always did in practice.
+  const stockSnapshot = (offerHashes: readonly string[] = []): RealStockSnapshot => {
     try {
       const offers = [...new Set(offerHashes.map((hash) => hash.toLowerCase()))].sort().map(
         (offerHash) => {
-          const remembered = rememberedOffers.get(offerHash);
           const live = activeSolver?.validatedBook.get(offerHash) ?? activeSolver?.book.get(offerHash);
-          const offer = remembered ?? (live
+          const offer = live
             ? { offerHash, inputNullifiers: [...live.inputNullifiers].sort() }
-            : undefined);
+            : undefined;
           return {
             offerHash,
             ...(offer ? { inputNullifiers: offer.inputNullifiers } : {}),
@@ -1290,27 +1262,9 @@ export async function startInstrumentedRealSolver(
           recorder.enqueue("execution", "candidate-selected", { message });
         }
       },
-      onValidationTrace: (event) => {
-        recordRealValidationTraceEvidence(event, {
-          recordTrace: (trace) => {
-            recordMilestone("validation-trace", trace, "validation", trace.kind);
-          },
-          rememberOffer,
-          recordExecutionStartStock: (offerHash) => {
-            emitStockSnapshot("execution-start", [offerHash]);
-          },
-        });
-      },
-      onOutcome: (outcome) => {
-        rememberOffer(outcome.offerHash);
-        recordMilestone("fill-outcome", outcome, "execution", outcome.kind);
-        emitStockSnapshot("post-outcome", [outcome.offerHash]);
-      },
-      onMatchOutcome: (outcome) => {
-        for (const offerHash of outcome.offerHashes) rememberOffer(offerHash);
-        recordMilestone("match-outcome", outcome, "execution-match", outcome.kind);
-        emitStockSnapshot("post-match-outcome", outcome.offerHashes);
-      },
+      // No onValidationTrace/onOutcome/onMatchOutcome: `SolverOptions` has not
+      // had them since N5, so they were dead weight the type system could not
+      // see. See the removal note at the top of this file.
     });
     activeSolver = solver;
   } catch (error) {
@@ -1372,7 +1326,9 @@ export async function startInstrumentedRealSolver(
         restoreWalletInstrumentation?.();
         restoreWalletInstrumentation = null;
       }
-      const terminalStock = emitStockSnapshot("terminal", [...selectedOfferHashes]);
+      // Solver-wide token rows only: the per-offer rows needed a selected-offer
+      // source that the removed outcome callbacks never actually supplied.
+      const terminalStock = emitStockSnapshot("terminal", []);
       recordMilestone("service-stopped", {
         reason,
         submissionCount,

@@ -11,7 +11,10 @@ import {
   parseSolverRelayHttpUrl,
 } from "./env.ts";
 
-const reader = (values: Record<string, string>) => (name: string): string | undefined => values[name];
+// `string | undefined` values, matching a real environment: the negative
+// tables below set one variable per row and leave the rest unset.
+const reader = (values: Record<string, string | undefined>) =>
+  (name: string): string | undefined => values[name];
 const A = "a".repeat(64);
 const B = "b".repeat(64);
 

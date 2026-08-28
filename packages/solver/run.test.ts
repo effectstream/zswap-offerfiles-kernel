@@ -161,7 +161,7 @@ function syncHarness(lifecycle: string[]): SyncDependencies {
       midnight: { current: 7, fetched: 7, tip: 7, pct: 100, lagBlocks: 0 },
       celestia: { current: 7, fetched: 7, tip: 7, pct: 100, lagBlocks: 0 },
     }),
-    openUpdatesStream: (_handler, options) => {
+    openUpdatesStream: (_handler, options = {}) => {
       queueMicrotask(() => options.onOpen?.({ streamId: "00".repeat(16), blockL2Height: null }));
       return { close: async () => { lifecycle.push("mirror-stop"); } };
     },

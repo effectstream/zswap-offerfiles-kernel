@@ -1820,7 +1820,15 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         return;
       }
       log(`relay submit failed for ${record.jobId}: ${reason}; backend has no consumption proof`);
-      awaiting.set(record.jobId, { ...record, relayAccepted: true });
+      // The guard above narrowed the artifact, but the spread of a union whose
+      // quarantined member declares `walletTransaction?:` would widen it back
+      // to optional. Re-stating the narrowed value keeps the AwaitingJob
+      // contract ("an awaiting record always has a restorable artifact") a
+      // type-level fact instead of a comment. Every other field, including a
+      // quarantined record's `locallyRevertible`/`evidenceReconcile`, is
+      // carried through unchanged as before.
+      const walletTransaction = record.walletTransaction;
+      awaiting.set(record.jobId, { ...record, walletTransaction, relayAccepted: true });
       quarantined.delete(record.jobId);
       confirmations.delete(record.jobId);
       await revertWallet(awaiting.get(record.jobId)!);
@@ -1865,11 +1873,18 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     return reconcileFromHttp(record);
   };
 
+  // `reverting` exists on awaiting and quarantined records but not on a
+  // confirmation, where the runtime read was `undefined` (falsy) and the guard
+  // therefore fell through. `"reverting" in record` states that exactly, in the
+  // same shape as the two guards next to it: a confirmation is never reverting.
+  const isReverting = (record: AwaitingJob | ConsumptionJob | QuarantinedJob): boolean =>
+    "reverting" in record && record.reverting;
+
   const onTxSubmitted = (message: TxSubmittedMessage): Promise<void> =>
     enqueueTerminal(message.jobId, async () => {
       const record = activeReceiptRecord(message.jobId);
       if (!record || ("relayAccepted" in record && !record.relayAccepted) ||
-          ("locallyRevertible" in record && record.locallyRevertible) || record.reverting) return;
+          ("locallyRevertible" in record && record.locallyRevertible) || isReverting(record)) return;
       await reconcileRelayDone(record, message.txId);
     });
 
@@ -1877,7 +1892,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     enqueueTerminal(message.jobId, async () => {
       const record = activeReceiptRecord(message.jobId);
       if (!record || ("relayAccepted" in record && !record.relayAccepted) ||
-          ("locallyRevertible" in record && record.locallyRevertible) || record.reverting) return;
+          ("locallyRevertible" in record && record.locallyRevertible) || isReverting(record)) return;
       await reconcileRelayFailure(record, message.reason);
     });
 

@@ -5,6 +5,14 @@
 // uncertain boundary fails closed with `job-error`. Wallet mutations are kept
 // as one solver-owned FinalizedTransaction per job so `submit-failed` and the
 // chain-TTL sweeper can revert exactly the solver's contribution.
+//
+// ACCEPTANCE (P4-F01, FR-001). The relay dispatches the taker's exact demand,
+// which it only guarantees to be AT MOST the interpolated output of the
+// published ladder. A job is therefore admitted whenever
+// `0 < amountOut <= interpolateQuote(levels, amountIn)`; the taker is paid
+// exactly `amountOut` and the solver retains any surplus the whole-offer maker
+// prefix pays over it (the pinned reference solver keeps `dy - requiredOutput`
+// the same way). Demanding MORE than the published curve stays refused.
 
 import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 import { createHash } from "node:crypto";
@@ -293,10 +301,32 @@ export interface SwapJobExecutorHandle {
   stats: () => SwapJobExecutorStats;
 }
 
+/**
+ * What the current derivation says one job settles as.
+ *
+ * The relay dispatches the taker's EXACT demand, which may be anywhere in
+ * `0 < amountOut <= interpolateQuote(levels, amountIn)` (reference
+ * `relay-ws.ts` solverAcceptsPrice + `router/jobId.ts` sendSwap). The maker
+ * prefix is whole-offer only, so the difference between the prefix and the job
+ * lands on the solver in one of two directions, never both:
+ *
+ *   `residualOut` — tokenOut the solver PAYS out of its own inventory because
+ *                   the taker's demand sits above the prefix payout. Reserved
+ *                   against `Stock` and bounded by the published
+ *                   `residualBound`.
+ *   `surplusOut`  — tokenOut the maker prefix pays OVER the taker's demand and
+ *                   the solver therefore RETAINS. Inflow only: no Stock
+ *                   reservation exists or is needed (`Stock` budgets payouts).
+ *
+ * `residualIn` is the tokenIn the taker paid above the prefix's wants and the
+ * solver likewise retains; the makers' wants are always funded by the taker,
+ * since the prefix is chosen with `input <= amountIn`.
+ */
 interface ResolvedRoute {
   offers: BookOffer[];
   residualIn: bigint;
   residualOut: bigint;
+  surplusOut: bigint;
   claim: Claim;
 }
 
@@ -432,12 +462,18 @@ export function resolveSwapJobRoute(
 
   const amountIn = BigInt(job.amountIn);
   const amountOut = BigInt(job.amountOut);
+  // The relay promises the taker AT MOST the interpolated output and dispatches
+  // whatever the taker actually demanded, so the honourable admission test is
+  // `0 < amountOut <= quoted`, not equality (`amountOut > 0` is already proved
+  // by `requireCanonicalJob`). Refusing a lowered demand refused every real
+  // reference job (P4-F01); demanding MORE than the published curve is still
+  // refused, and that refusal is the negative control the suite pins.
   const quoted = interpolateQuote(pair.levels.levels, amountIn);
-  if (quoted === null || quoted !== amountOut) {
-    throw new JobRefusal(
-      JOB_ROUTE_NOT_CURRENT,
-      quoted === null ? "size is outside the current ladder" : `current output is ${quoted}`,
-    );
+  if (quoted === null) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "size is outside the current ladder");
+  }
+  if (amountOut > quoted) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, `current output is ${quoted}`);
   }
 
   const selected = pair.provenance.rungs.filter((rung) => BigInt(rung.input) <= amountIn);
@@ -449,10 +485,24 @@ export function resolveSwapJobRoute(
   }
   const prefix = selected[selected.length - 1]!;
   const residualIn = amountIn - BigInt(prefix.input);
-  const residualOut = amountOut - BigInt(prefix.output);
-  if (residualIn < 0n || residualOut < 0n || (residualIn === 0n) !== (residualOut === 0n)) {
+  // Signed by construction: positive means the demand sits ABOVE what the whole
+  // maker prefix pays (solver tops it up from inventory), non-positive means the
+  // prefix pays at or over the demand (solver retains the difference).
+  const delta = amountOut - BigInt(prefix.output);
+  const residualOut = delta > 0n ? delta : 0n;
+  const surplusOut = delta > 0n ? 0n : -delta;
+  // The one still-illegal combination, and it is an assertion of a derivation
+  // invariant rather than a policy: `interpolateQuote` returns exactly
+  // `rung.output` when `amountIn` equals that rung's input, so `residualIn == 0`
+  // forces `quoted == prefix.output` and hence `amountOut <= prefix.output`.
+  // A payout obligation with nothing left of the taker's input to fund the
+  // makers with therefore cannot arise from a current ladder; if it ever does,
+  // the derivation and this router disagree and the job must fail closed.
+  if (residualIn < 0n || (residualIn === 0n && residualOut > 0n)) {
     throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "route residual is inconsistent");
   }
+  // Depth only: `residualOut < out[k+1] - out[k] <= residualBound` already
+  // follows from `amountOut <= quoted` on a concave ladder.
   if (residualOut > BigInt(pair.provenance.residualBound)) {
     throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "route residual exceeds its published bound");
   }
@@ -462,6 +512,10 @@ export function resolveSwapJobRoute(
     if (offer === undefined) throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "route offer disappeared");
     return snapshotOffer(offer);
   });
+  // Only the payout direction consumes budget. `surplusOut` and `residualIn` are
+  // value the solver RECEIVES, so they are deliberately absent from the claim:
+  // reserving them would block unrelated jobs against inventory the solver is
+  // not spending, and `Stock.reserve` refuses non-positive payout entries.
   const payouts = new Map<string, bigint>();
   if (residualOut > 0n) payouts.set(job.tokenOut.toLowerCase(), residualOut);
   const claim = claimFor(offers, payouts);
@@ -471,7 +525,7 @@ export function resolveSwapJobRoute(
   if (!stock.reserve(claim)) {
     throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "route is already claimed or inventory changed");
   }
-  return { offers, residualIn, residualOut, claim };
+  return { offers, residualIn, residualOut, surplusOut, claim };
 }
 
 const canonicalAmount = (value: string | bigint): bigint => BigInt(value);
@@ -507,6 +561,17 @@ const aggregateTokenImbalances = (imbalances: Imbalance[]): Map<string, bigint> 
   return result;
 };
 
+/**
+ * The half handed to the relay must be exactly the numeric inverse of the job:
+ * it supplies `amountOut` tokenOut and claims `amountIn` tokenIn, so merging it
+ * with the taker's intent balances to zero.
+ *
+ * This stays a strict EQUALITY even though a lowered demand now leaves the
+ * solver a surplus: retained surplus and retained input are outputs to the
+ * solver's OWN address inside the same half, so they cancel there and never
+ * reach this aggregate. Widening the expectation to admit them would give up
+ * the property that the relay can only ever be handed the exact inverse job.
+ */
 function assertInverseHalf(
   job: SwapMessage,
   transaction: FinalizedTransaction,
@@ -1194,18 +1259,40 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       journal.transition(mirrorKey, "REVERTING", "REVERTED");
       mirrorReverted = true;
 
-      if (route.residualOut > 0n) {
+      // The solver's own balancing leg: everything the whole-offer maker prefix
+      // does not already move. What the solver KEEPS is expressed as an output
+      // to its own shielded address (the imbalance convention is inputs minus
+      // outputs), so a leg that only keeps value has no inputs at all — a
+      // legitimate unbalanced zswap half that the maker offers balance on merge.
+      //
+      //   residualOut > 0 → pay tokenOut from inventory (demand above prefix)
+      //   surplusOut  > 0 → keep tokenOut over the demand (demand at/below it)
+      //   residualIn  > 0 → keep the tokenIn paid above the prefix's wants
+      //
+      // At most one of residualOut/surplusOut is positive, and residualOut > 0
+      // implies residualIn > 0 (see `resolveSwapJobRoute`), so the outputs list
+      // is empty only when the prefix already equals the job exactly — the
+      // historic exact-rung path, which needs no leg at all.
+      //
+      // Journal identity stays `RESIDUAL_BUILD` / `:residual` in BOTH directions
+      // on purpose: `restoreRecoveryTargets` pairs the unproven leg with its
+      // finalized contribution by that key suffix, so a sign-dependent label
+      // would mis-pair rows written before an upgrade.
+      const legOutputs = [
+        ...(route.residualIn > 0n
+          ? [{ type: job.tokenIn.toLowerCase(), amount: route.residualIn, receiverAddress }]
+          : []),
+        ...(route.surplusOut > 0n
+          ? [{ type: job.tokenOut.toLowerCase(), amount: route.surplusOut, receiverAddress }]
+          : []),
+      ];
+      if (legOutputs.length > 0) {
         const residualKey = prepareMutation(record, "RESIDUAL_BUILD", "residual");
         const residual = await options.wallet.initSwap(
-          { shielded: { [job.tokenOut.toLowerCase()]: route.residualOut } },
-          [{
-            type: "shielded",
-            outputs: [{
-              type: job.tokenIn.toLowerCase(),
-              amount: route.residualIn,
-              receiverAddress,
-            }],
-          }],
+          route.residualOut > 0n
+            ? { shielded: { [job.tokenOut.toLowerCase()]: route.residualOut } }
+            : { shielded: {} },
+          [{ type: "shielded", outputs: legOutputs }],
           options.keys,
           { ttl, payFees: false },
         );

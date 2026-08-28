@@ -3,6 +3,8 @@ import { isAbsolute } from "node:path";
 
 import { getEnv } from "@effectstream/utils/runtime";
 
+import type { JobAdmissionPolicy } from "@zswap-da/solver-core/admission-policy";
+
 // Dev seed. Must avoid every other wallet on the dev stack — genesis, the
 // batcher's (…0003/…0004), and the ring-maker range (…0005+) — because two
 // facades on one seed against one node force each other's connection down.
@@ -42,7 +44,17 @@ export interface SolverDustAdmissionEnv {
   windowMs: number;
 }
 
-export interface SolverAdmissionEnv {
+/**
+ * The parsed admission configuration.
+ *
+ * EXTENDS the shared `JobAdmissionPolicy` (FR-002) so config, publication and
+ * executor admission all declare the same fields under the same names — the
+ * policy is carried between layers by `forwardAdmissionPolicy`, never
+ * re-listed. The two policy fields are redeclared here only to make them
+ * REQUIRED: a loader must decide open-versus-configured explicitly, whereas a
+ * consumer may legitimately leave them out.
+ */
+export interface SolverAdmissionEnv extends JobAdmissionPolicy {
   /** null means intentionally OPEN under Q-RF-2, with a recurring warning. */
   supportedPairs: ReadonlySet<string> | null;
   /** null means intentionally OPEN under Q-RF-2, with a recurring warning. */

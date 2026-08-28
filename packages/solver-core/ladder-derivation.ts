@@ -35,9 +35,30 @@
 // `floor(rate_{k+1} * (x - input[k]))` of `tokenOut` out of solver inventory —
 // i.e. the solver self-fills the partial offer at that offer's own price,
 // never worse. The residual payout is strictly less than one offer's `gives`.
-// That is best-effort: if the inventory is not there at job time the job fails
-// CLOSED with `job-error` (N5 owns that assertion; see `deriveLadder`'s
-// `residualBound` for the number N5 checks against).
+// If the inventory is not there at job time the job fails CLOSED with
+// `job-error` (N5 owns that assertion; see `deriveLadder`'s `residualBound` for
+// the number N5 checks against).
+//
+// EXECUTABILITY BUDGETS (spec 00005 FR-003/FR-004, findings P4-F03/P4-F04).
+// Failing closed at job time is safe but dishonest: the relay keeps quoting a
+// rung the solver will always refuse, and the taker's job is the thing that
+// pays for the discovery. So `spendableInventory` lets the caller hand in what
+// the solver can actually move (`Stock.available`) and the ladder is TRUNCATED
+// at the first rung that is not executable:
+//
+//   * tokenOut (FR-003) — publishing a rung opens the interpolation interval
+//     below it, whose worst-case solver payout is
+//     `worstCaseIntervalResidual(offer)`. The FIRST rung opens no interval and
+//     so needs no inventory at all.
+//   * tokenIn  (FR-004) — a routed job makes the executor build a fee-sizing
+//     mirror that spends the job's FULL `amountIn` of tokenIn from the solver
+//     wallet, and `interpolateQuote` caps a job's `amountIn` at the last
+//     published rung's cumulative input. So the published rung list is capped
+//     by the solver's own spendable tokenIn.
+//
+// Both are per-rung, not aggregate across pairs or across concurrent jobs:
+// `Stock.reserve` decides and commits aggregate admission in one step at
+// execution, and remains the authority.
 //
 // DETERMINISM. No wall clock (`nowMs` is a parameter, as in `engine.ts`), no
 // randomness, no dependence on input order or on any Map's iteration order:
@@ -50,6 +71,11 @@
 // recorded reason rather than guessed at. A pair with nothing behind it is
 // omitted entirely — never published as an empty or padded ladder.
 
+import {
+  admissionPairKey,
+  type JobAdmissionPolicy,
+  type SpendableInventory,
+} from "./admission-policy.ts";
 import {
   MAX_PAIRS_PER_PUSH,
   MAX_RUNGS_PER_PAIR,
@@ -121,6 +147,15 @@ export type LadderExclusionReason =
   /** RF3 static policy has no minimum for the output token, or total depth
    *  cannot reach that minimum. */
   | "minimum-output"
+  /** FR-003: opening this rung's interpolation interval could require more
+   *  tokenOut payout than the solver can currently reserve. The ladder stops
+   *  here — every later rung's cumulative sums assume this offer is consumed. */
+  | "residual-budget"
+  /** FR-004: a job at this rung's cumulative input would need the solver to
+   *  spend more tokenIn on the fee-sizing mirror than it can prove spendable.
+   *  The ladder stops here, since the last rung's input is the largest size the
+   *  relay can quote at all. */
+  | "mirror-budget"
   /** The assembled pair failed local wire validation and was dropped whole. */
   | "invalid-pair";
 
@@ -148,18 +183,26 @@ export interface LadderPairProvenance {
   residualBound: string;
 }
 
-export interface DeriveLadderOptions {
+export interface DeriveLadderOptions extends JobAdmissionPolicy {
   /** Passed in, never read from the clock, so derivation stays reproducible. */
   nowMs: number;
   /** Same margin the engine/executor enforce at dequeue (R-38). */
   expiryMarginSeconds: number;
   /** Offers spoken for elsewhere (in-flight claims). Excluded as `unavailable`. */
   unavailableOfferHashes?: Iterable<string>;
-  /** null/undefined is OPEN; a supplied set is an enforced directed allowlist. */
-  supportedPairs?: ReadonlySet<string> | null;
-  /** null/undefined is OPEN; a supplied map requires each output token to have
-   *  a minimum and suppresses rungs below it. */
-  minJobOutput?: ReadonlyMap<string, bigint> | null;
+  /**
+   * FR-003/FR-004: token → amount the solver can actually move right now
+   * (`Stock.available`), snapshotted by the caller once per push so derivation
+   * stays pure and reproducible.
+   *
+   * `null`/absent is OPEN — no budget is enforced. That is deliberate and it is
+   * the only fail-open default here: it keeps this module's pre-existing
+   * contract for dry-run and for derivation tests, the LIVE push always
+   * supplies a snapshot, and the executor re-checks both numbers against the
+   * same `Stock` before any wallet mutation. Publication is the
+   * availability-honesty layer; the executor is the safety layer.
+   */
+  spendableInventory?: SpendableInventory | null;
   maxPairs?: number;
   maxRungsPerPair?: number;
 }
@@ -212,6 +255,30 @@ const byMarginalRateThenHash = (a: Crossable, b: Crossable): number => {
   if (left < right) return 1;
   return byOfferHash(a, b);
 };
+
+/**
+ * The most tokenOut inventory the solver can be asked to pay to honour ANY
+ * interpolated size inside the interval that adding `offer` as the next rung
+ * opens (FR-003).
+ *
+ * Derived from the relay's own arithmetic, not estimated. Between rungs `k` and
+ * `k+1` the relay promises
+ * `out[k] + floor((out[k+1] − out[k]) · (x − in[k]) / (in[k+1] − in[k]))`
+ * (`interpolateQuote`), the maker prefix pays `out[k]`, and the largest
+ * quotable interior size is `in[k+1] − 1`. Since `out[k+1] − out[k]` and
+ * `in[k+1] − in[k]` are exactly this offer's own `amountOut`/`amountIn`, the
+ * worst case collapses to a per-offer number, independent of where in the
+ * ladder the offer sits. `amountIn === 1` yields 0: that offer opens no
+ * interior size at all.
+ *
+ * NOT the same quantity as `LadderPairProvenance.residualBound`, which is the
+ * loosest bound over a whole pair (the largest single `gives`) and is what the
+ * executor re-checks a resolved route against.
+ */
+export const worstCaseIntervalResidual = (
+  offer: { amountIn: bigint; amountOut: bigint },
+): bigint =>
+  offer.amountIn <= 0n ? 0n : (offer.amountOut * (offer.amountIn - 1n)) / offer.amountIn;
 
 /** Reduce a cache offer to the one shape a directed ladder can describe, or say
  *  why it cannot. Unsupported shapes are excluded, never coerced. */
@@ -325,18 +392,39 @@ export function deriveLadder(
   // Sorted keys, so no Map iteration order reaches the output.
   for (const key of [...byPair.keys()].sort()) {
     const bucket = [...byPair.get(key)!].sort(byMarginalRateThenHash);
-    const directedPolicyKey = `${bucket[0]!.tokenIn}->${bucket[0]!.tokenOut}`;
-    if (options.supportedPairs != null && !options.supportedPairs.has(directedPolicyKey)) {
+    const tokenIn = bucket[0]!.tokenIn;
+    const tokenOut = bucket[0]!.tokenOut;
+    if (
+      options.supportedPairs != null &&
+      !options.supportedPairs.has(admissionPairKey(tokenIn, tokenOut))
+    ) {
       for (const offer of bucket) excluded.push({ offerHash: offer.offerHash, reason: "unsupported-pair" });
       continue;
     }
+
+    // FR-003/FR-004 executability budgets. `null` is OPEN for BOTH, and an
+    // absent token in a supplied snapshot is zero, not open: the snapshot is
+    // the complete view of what the solver can move.
+    const inventory = options.spendableInventory ?? null;
+    const residualBudget = inventory === null ? null : inventory.get(tokenOut) ?? 0n;
+    const mirrorBudget = inventory === null ? null : inventory.get(tokenIn) ?? 0n;
+
     const levels: PriceLevel[] = [];
     const rungs: LadderRungProvenance[] = [];
     let cumulativeIn = 0n;
     let cumulativeOut = 0n;
     let residualBound = 0n;
+    /** Set by the first budget that stops the ladder. Every LATER offer is
+     *  excluded for the same reason: a rung's cumulative totals assume all
+     *  earlier offers are consumed, so a whole-offer concave ladder can be
+     *  truncated but never punctured. */
+    let truncatedBy: LadderExclusionReason | null = null;
 
     for (const offer of bucket) {
+      if (truncatedBy !== null) {
+        excluded.push({ offerHash: offer.offerHash, reason: truncatedBy });
+        continue;
+      }
       if (levels.length >= maxRungs) {
         excluded.push({ offerHash: offer.offerHash, reason: "rung-cap" });
         continue;
@@ -350,6 +438,28 @@ export function deriveLadder(
         excluded.push({ offerHash: offer.offerHash, reason: "rung-cap" });
         continue;
       }
+      // FR-004 (P4-F04), checked FIRST so a wallet that cannot fund the mirror
+      // at all publishes nothing rather than publishing a residual-affordable
+      // rung it must then refuse. `interpolateQuote` refuses any size above the
+      // LAST rung's input, so this rung's cumulative input is the largest
+      // tokenIn the fee-sizing mirror could ever be asked to spend once it is
+      // published.
+      if (mirrorBudget !== null && nextIn > mirrorBudget) {
+        truncatedBy = "mirror-budget";
+        excluded.push({ offerHash: offer.offerHash, reason: truncatedBy });
+        continue;
+      }
+      // FR-003 (P4-F03). Only a rung with a predecessor opens an interpolation
+      // interval: below the first rung the relay quotes nothing, and AT it the
+      // quote is exactly that rung's output, so the first rung needs no
+      // inventory whatsoever (which is what keeps FR-001's retained-surplus
+      // path publishable by a solver holding no tokenOut at all).
+      if (levels.length > 0 && residualBudget !== null &&
+          worstCaseIntervalResidual(offer) > residualBudget) {
+        truncatedBy = "residual-budget";
+        excluded.push({ offerHash: offer.offerHash, reason: truncatedBy });
+        continue;
+      }
       cumulativeIn = nextIn;
       cumulativeOut = nextOut;
       if (offer.amountOut > residualBound) residualBound = offer.amountOut;
@@ -359,7 +469,12 @@ export function deriveLadder(
     }
 
     if (levels.length === 0) continue;
-    const [tokenIn, tokenOut] = [bucket[0]!.tokenIn, bucket[0]!.tokenOut];
+    // NOTE (deliberate, FR-003): the budget checks above run BEFORE this
+    // minimum filter. When a minimum hides the low rungs the surviving first
+    // rung no longer needs its residual budget, so a rung can be truncated that
+    // the filtered ladder would not have needed. Conservative on purpose —
+    // re-deriving executability after an unrelated policy filter would couple
+    // the two.
     const minimum = options.minJobOutput?.get(tokenOut);
     if (options.minJobOutput != null && minimum === undefined) {
       for (const rung of rungs) excluded.push({ offerHash: rung.offerHash, reason: "minimum-output" });

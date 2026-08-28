@@ -13,10 +13,25 @@
 // exactly `amountOut` and the solver retains any surplus the whole-offer maker
 // prefix pays over it (the pinned reference solver keeps `dy - requiredOutput`
 // the same way). Demanding MORE than the published curve stays refused.
+//
+// SOLVENCY (P4-F03/P4-F04, FR-003/FR-004). Two inventory facts decide a job
+// before any wallet call happens, both against live `Stock`: the residual
+// tokenOut the solver would PAY, and the full `amountIn` of tokenIn the
+// mandatory fee-sizing mirror SPENDS. Publication now caps the advertised
+// ladder by the same two numbers (`deriveLadder`'s `spendableInventory`), so
+// these are the fail-closed depth checks for the gap between a push and a
+// dispatch rather than the only guard — but they remain the only guard when the
+// publication budget is left open, and they are what keeps an unfundable job
+// from failing part-way through a wallet mutation.
 
 import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 import { createHash } from "node:crypto";
 
+import {
+  admissionPairKey,
+  forwardAdmissionPolicy,
+  type JobAdmissionPolicy,
+} from "@zswap-da/solver-core/admission-policy";
 import {
   readExactOfferFiles,
   reconstructOffer,
@@ -231,7 +246,7 @@ const DEFAULT_TIMERS: SwapJobTimers = {
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
-export interface SwapJobExecutorOptions {
+export interface SwapJobExecutorOptions extends JobAdmissionPolicy {
   cache: SwapJobCache;
   stock: Stock;
   wallet: SwapJobWallet;
@@ -242,8 +257,6 @@ export interface SwapJobExecutorOptions {
   relayHttpUrl: string;
   maxParallelSwaps: number;
   expiryMarginSeconds: number;
-  supportedPairs?: ReadonlySet<string> | null;
-  minJobOutput?: ReadonlyMap<string, bigint> | null;
   dustAdmission?: {
     maxPerJob: bigint;
     maxPerWindow: bigint;
@@ -429,19 +442,17 @@ export function resolveSwapJobRoute(
   job: SwapMessage,
   cache: SwapJobCache,
   stock: Stock,
-  options: {
+  options: JobAdmissionPolicy & {
     nowMs: number;
     expiryMarginSeconds: number;
     unavailableOfferHashes: Iterable<string>;
-    supportedPairs?: ReadonlySet<string> | null;
-    minJobOutput?: ReadonlyMap<string, bigint> | null;
   },
 ): ResolvedRoute {
   requireCanonicalJob(job);
   if (!cache.isCurrent()) throw new JobRefusal(JOB_CACHE_NOT_CURRENT);
   const tokenIn = job.tokenIn.toLowerCase();
   const tokenOut = job.tokenOut.toLowerCase();
-  if (options.supportedPairs != null && !options.supportedPairs.has(`${tokenIn}->${tokenOut}`)) {
+  if (options.supportedPairs != null && !options.supportedPairs.has(admissionPairKey(tokenIn, tokenOut))) {
     throw new JobRefusal(JOB_PAIR_UNSUPPORTED);
   }
   const minimum = options.minJobOutput?.get(tokenOut);
@@ -449,13 +460,18 @@ export function resolveSwapJobRoute(
     throw new JobRefusal(JOB_MIN_OUTPUT);
   }
 
+  // Deliberately derived WITHOUT `spendableInventory`: the publication budgets
+  // (FR-003/FR-004) shape what the solver advertises, but a job already in hand
+  // must be judged against the whole current book and then against live `Stock`
+  // below. Deriving with a budget here would turn an inventory dip into
+  // `route_not_current` ("the ladder moved"), hiding a solvency refusal behind
+  // a staleness one.
   const derived = deriveLadder(cache.book.all(), {
     nowMs: options.nowMs,
     expiryMarginSeconds: options.expiryMarginSeconds,
     unavailableOfferHashes: options.unavailableOfferHashes,
     maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
-    ...(options.supportedPairs === undefined ? {} : { supportedPairs: options.supportedPairs }),
-    ...(options.minJobOutput === undefined ? {} : { minJobOutput: options.minJobOutput }),
+    ...forwardAdmissionPolicy(options),
   });
   const pair = matchingPair(derived.levels, derived.provenance, job);
   if (pair === null) throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "directed pair is absent");
@@ -517,10 +533,32 @@ export function resolveSwapJobRoute(
   // reserving them would block unrelated jobs against inventory the solver is
   // not spending, and `Stock.reserve` refuses non-positive payout entries.
   const payouts = new Map<string, bigint>();
-  if (residualOut > 0n) payouts.set(job.tokenOut.toLowerCase(), residualOut);
+  if (residualOut > 0n) payouts.set(tokenOut, residualOut);
   const claim = claimFor(offers, payouts);
-  if (residualOut > stock.available(job.tokenOut.toLowerCase())) {
+  if (residualOut > stock.available(tokenOut)) {
     throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "residual solver inventory is insufficient");
+  }
+  // FR-004 (P4-F04), fail-closed and BEFORE any wallet mutation, journal row,
+  // or reservation exists.
+  //
+  // `buildHalf` opens with a mandatory fee-sizing mirror that calls
+  // `initSwap({shielded: {[tokenIn]: amountIn}}, …)` — it selects real coins for
+  // the taker's FULL input out of the solver's own wallet and reverts them
+  // immediately. So a job the wallet cannot fund does not merely fail; it fails
+  // half-way through a wallet mutation, and a revert that is itself uncertain
+  // sends the job to `WalletMutationUncertain` quarantine, stranding the claim
+  // and a capacity slot. Publication now caps rung inputs by the same number
+  // (FR-004 in `deriveLadder`), which makes this the depth check for the window
+  // between a push and a dispatch — and the only check at all when the operator
+  // runs with the publication budget open.
+  //
+  // `tokenIn !== tokenOut` is guaranteed by `requireCanonicalJob`, so the
+  // residual reservation taken below can never consume this budget.
+  if (amountIn > stock.available(tokenIn)) {
+    throw new JobRefusal(
+      JOB_ROUTE_UNAVAILABLE,
+      "fee-sizing mirror cannot be funded from spendable tokenIn",
+    );
   }
   if (!stock.reserve(claim)) {
     throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "route is already claimed or inventory changed");
@@ -1489,8 +1527,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         nowMs: now(),
         expiryMarginSeconds: options.expiryMarginSeconds,
         unavailableOfferHashes: unavailableOfferHashes(),
-        ...(options.supportedPairs === undefined ? {} : { supportedPairs: options.supportedPairs }),
-        ...(options.minJobOutput === undefined ? {} : { minJobOutput: options.minJobOutput }),
+        ...forwardAdmissionPolicy(options),
       });
     } catch (error) {
       const refusal = error instanceof JobRefusal ? error : new JobRefusal(JOB_ROUTE_NOT_CURRENT);

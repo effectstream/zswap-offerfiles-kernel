@@ -3,6 +3,7 @@
 
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
+import { forwardAdmissionPolicy } from "@zswap-da/solver-core/admission-policy";
 import { buildWallet, shieldedBalances, shieldedKeys, waitForSync } from "@zswap-da/solver-core/wallet";
 import { MAX_EXACT_FILES_PER_READ } from "@zswap-da/solver-core/exact-files-contract";
 
@@ -611,13 +612,32 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     }
   };
 
+  /** Publish NOW instead of waiting for the next tick. Used where inventory
+   *  authority changes, so a withdrawal is not delayed by up to one push
+   *  interval and a recovery is not either. Never throws and never blocks: the
+   *  relay client coalesces this into any push already in flight. */
+  const republishLadder = (reason: string): void => {
+    void relayClient?.push().catch((error) => {
+      log(`[solver] ${reason} republication failed: ${asError(error, "unknown error").message}`);
+    });
+  };
+
   // A failed/started refresh empties Stock, which withdraws residual inventory
-  // authority. Maker-backed rungs still come from the current book cache.
+  // authority. Maker-backed rungs still come from the current book cache — but
+  // FR-003/FR-004 bound the PUBLISHED rungs by that same authority, so an
+  // emptied Stock now also withdraws every rung whose interpolation interval
+  // needs a residual payout and every rung above what the fee-sizing mirror can
+  // spend. Both directions are republished immediately rather than at the next
+  // tick: withdrawing late would keep advertising liquidity the executor has
+  // already started refusing, and recovering late would strand the solver
+  // unquotable for a full interval after each settlement (every terminal
+  // outcome triggers a refresh).
   inventoryChanged = (ready): void => {
     if (ready && !backendCurrent) {
       inventory.invalidate(new Error("inventory read completed outside backend readiness"));
       return;
     }
+    republishLadder(ready ? "inventory readiness" : "inventory withdrawal");
     if (ready && backendCurrent) maybeResolveSolverReady();
   };
 
@@ -766,8 +786,8 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       maxParallelSwaps,
       expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
       settleTtlMinutes: SOLVER_SETTLE_TTL_MINUTES,
-      supportedPairs: admission.supportedPairs,
-      minJobOutput: admission.minJobOutput,
+      // FR-002: the same policy object publication gets, forwarded whole.
+      ...forwardAdmissionPolicy(admission),
       dustAdmission: admission.dust,
       walletOperationTimeoutMs,
       sweepIntervalMs: opts.jobSweepIntervalMs ?? SOLVER_STATUS_POLL_MS,
@@ -810,8 +830,15 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
           // whose whole-offer prefix cannot fit that read.
           maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
           unavailableOfferHashes: activeJobs.unavailableOfferHashes,
-          supportedPairs: admission.supportedPairs,
-          minJobOutput: admission.minJobOutput,
+          // FR-002: ONE policy object, the same one the executor admits with, so
+          // a field cannot reach admission without reaching the wire (P4-F02).
+          ...forwardAdmissionPolicy(admission),
+          // FR-003/FR-004: never advertise a rung this solver could not pay the
+          // residual for, or whose fee-sizing mirror it could not fund. Read per
+          // push, so an inventory refresh — including the deliberate emptying
+          // that follows a lost backend authority — withdraws the affected rungs
+          // on the very next push.
+          spendableInventory: () => stock.spendable(),
         },
         pushIntervalMs: opts.relayPushIntervalMs ?? relayEnv.pushIntervalMs,
         reconnectDelayMs: opts.relayReconnectDelayMs ?? relayEnv.reconnectDelayMs,

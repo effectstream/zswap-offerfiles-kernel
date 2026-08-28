@@ -9,14 +9,11 @@ midnight-level-db*
 # Runtime logs from the dev stack
 *-debug.log
 
-# Preview Docker test setup — not for commit
-Dockerfile
-docker-compose.yml
-docker/**
-!docker/cow-solver/
-!docker/cow-solver/**
+# Repository-root preview Docker test setup — not for commit
+/Dockerfile
+/docker-compose.yml
 .env
-.dockerignore
+/.dockerignore
 mnemonic-to-seed.ts
 packages/contracts-midnight/contract-offer-files.undeployed.json
 PLAN.md

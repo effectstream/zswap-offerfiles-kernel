@@ -1,45 +1,57 @@
-**
+# Version-control metadata
+.git
+.git/**
+**/.git
+**/.git/**
 
-!docker/
-!docker/cow-solver/
-!docker/cow-solver/Dockerfile
-!docker/cow-solver/Dockerfile.dockerignore
-!package.json
-!bun.lock
+# Installed dependencies and local caches
+node_modules
+node_modules/**
+**/node_modules
+**/node_modules/**
+.bun
+.bun/**
+**/.bun
+**/.bun/**
+.cache
+.cache/**
+**/.cache
+**/.cache/**
 
-!packages/
-!packages/*/
-!packages/*/package.json
-!packages/solver/
-!packages/solver/package.json
-!packages/solver/solver.container.ts
-!packages/solver/solver.preview.ts
-!packages/solver/solver.mainnet.ts
-!packages/solver/env.ts
-!packages/solver/src/
-!packages/solver/src/*.ts
+# Test and coverage output
+coverage
+coverage/**
+**/coverage
+**/coverage/**
 
-!packages/solver-core/
-!packages/solver-core/package.json
-!packages/solver-core/api-client.ts
-!packages/solver-core/batcher.ts
-!packages/solver-core/exact-files-contract.ts
-!packages/solver-core/ladder-derivation.ts
-!packages/solver-core/ladder-schema.ts
-!packages/solver-core/offer-updates-contract.ts
-!packages/solver-core/receipt-client.ts
-!packages/solver-core/relay-ws-contract.ts
-!packages/solver-core/validation-contract.ts
-!packages/solver-core/wallet.ts
+# Local or secret environment files; checked-in examples remain available
+.env
+.env.*
+**/.env
+**/.env.*
+!*.env.example
+!**/*.env.example
+!*.env.*.example
+!**/*.env.*.example
 
-!packages/validator/
-!packages/validator/package.json
-!packages/validator/derive.ts
-!packages/validator/types.ts
+# Runtime logs
+*.log
+**/*.log
+logs
+logs/**
+**/logs
+**/logs/**
 
-!packages/contracts-midnight/
-!packages/contracts-midnight/contract-offer-files/
-!packages/contracts-midnight/contract-offer-files/package.json
-
-!docs/
-!docs/package.json
+# Host and editor noise
+.DS_Store
+**/.DS_Store
+Thumbs.db
+**/Thumbs.db
+.idea
+.idea/**
+**/.idea
+**/.idea/**
+.vscode
+.vscode/**
+**/.vscode
+**/.vscode/**

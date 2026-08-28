@@ -10,7 +10,6 @@
     "dev": "bun run solver.dev.ts",
     "start:preview": "bun run solver.preview.ts",
     "start:mainnet": "bun run solver.mainnet.ts",
-    "start:container": "bun --no-install --no-env-file solver.container.ts",
     "test": "bun test"
   },
   "dependencies": {

@@ -18,6 +18,24 @@
 # namespace) if a deployment ever wants it.
 set -euo pipefail
 
+# ── cwd is load-bearing ──────────────────────────────────────────────────────
+# The node resolves its configuration as `current_dir()/res/cfg/` (the release
+# zip's own `res/src/lib.rs`: CFG_ROOT is only ever set programmatically, so the
+# fallback is the process working directory). Launched from anywhere else it
+# panics before opening a socket:
+#   failed reading default.toml at path /res/cfg/default.toml
+# `@effectstream/npm-midnight-node` hides this by spawning the binary with `cwd`
+# set to its extracted directory; nothing in the flag set hints at it. We do the
+# same, and check rather than assume.
+RES_HOME="${MIDNIGHT_NODE_RES_HOME:-/opt/midnight-node}"
+if [ ! -f "${RES_HOME}/res/cfg/default.toml" ]; then
+  echo "[midnight-node] ${RES_HOME}/res/cfg/default.toml is missing." >&2
+  echo "[midnight-node] The binary reads res/cfg/ relative to its working" >&2
+  echo "[midnight-node] directory; without that tree it panics at startup." >&2
+  exit 78 # EX_CONFIG
+fi
+cd "${RES_HOME}"
+
 DATA_DIR="${MIDNIGHT_NODE_BASE_PATH:-/data/midnight-node}"
 RPC_PORT="${MIDNIGHT_NODE_RPC_PORT:-9944}"
 P2P_PORT="${MIDNIGHT_NODE_P2P_PORT:-30333}"
@@ -33,6 +51,7 @@ fi
 echo "[midnight-node] data   : ${DATA_DIR}" >&2
 echo "[midnight-node] rpc    : 0.0.0.0:${RPC_PORT} (${EXTERNAL_FLAG})" >&2
 echo "[midnight-node] preset : ${CFG_PRESET:-dev}" >&2
+echo "[midnight-node] res    : ${RES_HOME}/res (cwd $(pwd))" >&2
 
 exec /usr/local/bin/midnight-node \
   --dev \

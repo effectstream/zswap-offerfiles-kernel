@@ -36,6 +36,19 @@ RUN set -eux; \
     unzip -q /tmp/node.zip -d /tmp/node; \
     install -m 0755 "/tmp/node/midnight-node-linux-${TARGETARCH}-${MIDNIGHT_NODE_VERSION}" \
       /usr/local/bin/midnight-node; \
+    # The zip is NOT just a binary: it also carries a `res/` resource tree, and
+    # the binary needs it. `res/src/lib.rs` resolves its configuration as
+    # `current_dir()/res/cfg/` (CFG_ROOT is only ever set programmatically), so
+    # the node panics at startup with
+    #   failed reading default.toml at path /res/cfg/default.toml
+    # unless it is launched from a directory that contains `res/`. That is
+    # exactly why `@effectstream/npm-midnight-node`'s run_midnight_node.js
+    # spawns the binary with `cwd` set to its own extracted directory — the
+    # requirement is invisible in the flag set and only shows up at runtime.
+    # We reproduce the wrapper's layout: res/ next to the binary, and the
+    # entrypoint cd's there before exec.
+    mkdir -p /opt/midnight-node; \
+    cp -a /tmp/node/res /opt/midnight-node/res; \
     rm -rf /tmp/node.zip /tmp/node
 
 # Link check + smoke. Two of the four chain binaries in release 0.3.120 need
@@ -50,6 +63,17 @@ RUN set -eux; \
     fi; \
     rm -f /tmp/ldd.txt; \
     /usr/local/bin/midnight-node --version
+
+# The resource tree the node resolves from its cwd. Asserted at BUILD time
+# because its absence is a startup panic, not a build error: D1's image kept
+# only the binary and every `--version` gate still passed.
+WORKDIR /opt/midnight-node
+RUN set -eux; \
+    test -f res/cfg/default.toml; \
+    test -f res/cfg/dev.toml; \
+    test -f res/genesis/genesis_block_undeployed.mn; \
+    test -f res/genesis/genesis_state_undeployed.mn; \
+    echo "res/ tree present relative to WORKDIR $(pwd)"
 
 # `MC__SLOT_DURATION_MILLIS` and `MOCK_REGISTRATIONS_FILE` are applied by
 # `@effectstream/npm-midnight-node`'s `run_midnight_node.js` before it spawns the

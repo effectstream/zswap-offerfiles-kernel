@@ -73,11 +73,36 @@ if [ -f "${MINT_MARKER}" ]; then
   exit 0
 fi
 
-if bun run mint-test-tokens.ts; then
+MINTED_FILE="${CONTRACT_SHARE_DIR}/minted-tokens.json"
+MINT_LOG="$(mktemp)"
+
+if bun run mint-test-tokens.ts 2>&1 | tee "${MINT_LOG}"; then
   date -u +%FT%TZ > "${MINT_MARKER}"
   log "mint-test-tokens succeeded; marker written"
+
+  # ── Publish the minted COLORS, not just the fact that minting happened ─────
+  # A token's color is derived from the deployed contract address plus a domain
+  # separator, so it is different for every fresh stack and cannot be written
+  # down anywhere in advance. `mint-test-tokens.ts` only prints it — the one
+  # line `[mint-test-tokens] MINTED {"shieldedA":…}` — and returns it to
+  # in-process callers. Anything downstream that has to name a token (the maker
+  # offer, any funding step, an operator reading the book) would otherwise have
+  # to scrape container logs, which stop existing the moment the one-shot is
+  # pruned. Publish it next to the contract address instead, atomically and by
+  # the same rule: the address file is the stack's identity, and these colors
+  # are part of it.
+  if MINTED_JSON="$(grep -o '{"shielded.*}' "${MINT_LOG}" | tail -1)" && [ -n "${MINTED_JSON}" ]; then
+    TMP_MINTED="${CONTRACT_SHARE_DIR}/.minted-tokens.json.$$"
+    printf '%s\n' "${MINTED_JSON}" > "${TMP_MINTED}"
+    mv -f "${TMP_MINTED}" "${MINTED_FILE}"
+    log "published ${MINTED_FILE}: ${MINTED_JSON}"
+  else
+    log "WARNING: could not extract the MINTED line; ${MINTED_FILE} not written"
+    log "WARNING: downstream provisioning must be given GIVE_TOKEN/WANT_TOKEN explicitly"
+  fi
 else
   log "WARNING: mint-test-tokens failed — continuing (non-fatal, no marker written)"
 fi
+rm -f "${MINT_LOG}"
 
 exit 0

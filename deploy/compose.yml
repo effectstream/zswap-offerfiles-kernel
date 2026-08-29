@@ -323,6 +323,76 @@ services:
       retries: 60
       start_period: 60s
 
+  # ══ devnet seeding (one-shots) ══════════════════════════════════════════════
+  #
+  # These two exist because of a silent failure mode, not for convenience. Since
+  # R2, ladder publication is bounded by the solver's own spendable inventory,
+  # and the ladder itself is derived from the mirrored maker book. With an
+  # unfunded solver or an empty book the stack reaches all-services-healthy, the
+  # solver authenticates to the relay, and it publishes empty capabilities and
+  # empty levels forever — with nothing logged as an error. Both halves are
+  # therefore provisioned by the deployment, and both fail LOUDLY.
+  #
+  # DEVNET ONLY: they mint to public dev seeds on a throwaway chain. Set
+  # SOLVER_PROVISION_ENABLED=false / MAKER_OFFER_ENABLED=false for a deployment
+  # that funds its solver and sources its book out of band.
+
+  solver-provision:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-solver-provision.sh"]
+    restart: "no"
+    depends_on:
+      midnight-node:
+        condition: service_healthy
+      proof-server:
+        condition: service_healthy
+      indexer:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      SOLVER_PROVISION_ENABLED: ${SOLVER_PROVISION_ENABLED:-true}
+      # Drives a wallet on this seed, which is why `solver` must wait for this
+      # service to COMPLETE: two facades on one seed against one node force
+      # each other's connection down.
+      SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
+      SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-/srv/solver-config/ladders.dev.json}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - solver-config:/srv/solver-config
+
+  maker-offer:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-maker-offer.sh"]
+    restart: "no"
+    depends_on:
+      kernel:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      MAKER_OFFER_ENABLED: ${MAKER_OFFER_ENABLED:-true}
+      ZSWAP_API: http://kernel:9999
+      # The genesis wallet by default: `mint-test-tokens` credits exactly that
+      # wallet, so it is the one that can actually give a test token away.
+      MAKER_SEED: ${MAKER_OFFER_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
+      # Unset ⇒ read from minted-tokens.json, published on the shared volume by
+      # the deploy one-shot. Colors derive from the deployed contract address,
+      # so they differ on every fresh stack and cannot be written down here.
+      GIVE_TOKEN: ${MAKER_OFFER_GIVE_TOKEN:-}
+      WANT_TOKEN: ${MAKER_OFFER_WANT_TOKEN:-}
+      GIVE_AMOUNT: ${MAKER_OFFER_GIVE_AMOUNT:-500000}
+      WANT_AMOUNT: ${MAKER_OFFER_WANT_AMOUNT:-750000}
+      TTL_MINUTES: ${MAKER_OFFER_TTL_MINUTES:-120}
+      MAKER_OFFER_MARKER_DIR: /var/lib/maker-offer
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - maker-offer-state:/var/lib/maker-offer
+
   # ══ Midnight Intents relay (UNMODIFIED reference) ═══════════════════════════
 
   relay:
@@ -409,6 +479,11 @@ services:
         condition: service_healthy
       offerfiles-deploy:
         condition: service_completed_successfully
+      # NOT just ordering: solver-provision drives a wallet on SOLVER_SEED, and
+      # two facades on one seed against one node force each other's connection
+      # down. It also writes the ladder config this service reads.
+      solver-provision:
+        condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
       CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
@@ -431,9 +506,16 @@ services:
       SOLVER_DRY_RUN: ${SOLVER_DRY_RUN:-false}
       SOLVER_SUPPORTED_PAIRS: ${SOLVER_SUPPORTED_PAIRS:-}
       SOLVER_MIN_JOB_OUTPUT: ${SOLVER_MIN_JOB_OUTPUT:-}
-      SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-}
+      # The GENERATED ladder, not the in-repo one. Token colors derive from the
+      # deployed contract address, so the checked-in `ladders.dev.json` names
+      # colors from an older deployment; `solver-provision` rewrites it with
+      # this stack's real ones onto the shared volume. (Publication itself
+      # derives from the mirrored book and ignores this file — but the
+      # direct-fill engine's `ladders.maxPayout()` does not.)
+      SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-/srv/solver-config/ladders.dev.json}
     volumes:
       - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - solver-config:/srv/solver-config:ro
       # Per-instance and chain-keyed: a journal that outlives the genesis it was
       # written against is worse than no journal, so this volume is torn down
       # together with the chain volumes (see deploy/down.sh).
@@ -484,3 +566,9 @@ volumes:
   solver-journal:
   relay-wallet-cache:
   e2e-evidence:
+  # The ladder config generated against THIS chain's contract address, and the
+  # marker recording that the solver was funded. Chain-keyed like the rest:
+  # carrying either across a chain reset would point the solver at token colors
+  # that no longer exist.
+  solver-config:
+  maker-offer-state:

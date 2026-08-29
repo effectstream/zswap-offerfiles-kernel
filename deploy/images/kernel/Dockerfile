@@ -1,4 +1,4 @@
-# deploy/images/kernel/Dockerfile — ONE image, SIX single-process entrypoints.
+# deploy/images/kernel/Dockerfile — ONE image, EIGHT single-process entrypoints.
 #
 # Build context: the repository ROOT of this working clone (never a git clone of
 # it: the branch this deployment belongs to is deliberately unpushed, so a
@@ -19,6 +19,14 @@
 #   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.dev.ts (:3334)
 #   entrypoint-solver.sh    exec bun run start.solver.ts
 #   entrypoint-scripts.sh   the E1 provisioning / assertion driver
+#   entrypoint-solver-provision.sh  one-shot: fund + mint the solver BOTH tokens
+#   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
+#
+# The last two are devnet SEEDING steps, and they are services rather than
+# README steps for one reason: without them every container reports healthy, the
+# solver connects to the relay, and it publishes an empty ladder forever with no
+# error logged anywhere (R2 made publication bounded by the solver's own
+# spendable inventory, and the ladder derives from the maker book).
 #
 # bun pin rationale: 1.3.11 is the bun the R1–R3 remediation phases were built
 # and tested on in this clone, and it is the version the sibling
@@ -100,6 +108,10 @@ COPY deploy/images/kernel/entrypoint-kernel.sh   /usr/local/bin/entrypoint-kerne
 COPY deploy/images/kernel/entrypoint-batcher.sh  /usr/local/bin/entrypoint-batcher.sh
 COPY deploy/images/kernel/entrypoint-solver.sh   /usr/local/bin/entrypoint-solver.sh
 COPY deploy/images/kernel/entrypoint-scripts.sh  /usr/local/bin/entrypoint-scripts.sh
+# Devnet seeding one-shots. Without these the stack comes up entirely healthy
+# and quotes nothing — see each script's header.
+COPY deploy/images/kernel/entrypoint-solver-provision.sh /usr/local/bin/entrypoint-solver-provision.sh
+COPY deploy/images/kernel/entrypoint-maker-offer.sh      /usr/local/bin/entrypoint-maker-offer.sh
 COPY deploy/images/kernel/wait-for.sh            /usr/local/bin/wait-for.sh
 RUN chmod +x /usr/local/bin/entrypoint-*.sh /usr/local/bin/wait-for.sh
 

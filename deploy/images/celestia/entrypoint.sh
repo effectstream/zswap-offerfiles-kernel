@@ -5,6 +5,7 @@
 # (`initGenesis()` / `run()` / `fund()`), which is what `bun run dev` executes
 # through `launchCelestia()`. Constants are that module's, not invented here:
 #   CHAIN_ID='test', KEY_NAME='validator', KEYRING_BACKEND='test', FEES='500utia'
+#   (block cadence excepted — see CELESTIA_BLOCK_TIME below)
 #   genesis account 1000000000000000utia, gentx 5000000000utia,
 #   voting period patched 604800s -> 30s, RPC laddr patched to 0.0.0.0:26657,
 #   indexer "null" -> "kv", discard_abci_responses false,
@@ -32,6 +33,28 @@ CONSENSUS_RPC_PORT="${CELESTIA_CONSENSUS_RPC_PORT:-26657}"
 BRIDGE_RPC_PORT="${CELESTIA_BRIDGE_RPC_PORT:-26658}"
 BRIDGE_FUND_AMOUNT="${CELESTIA_BRIDGE_FUND_AMOUNT:-100000000utia}"
 BRIDGE_FUND_FEES="${CELESTIA_BRIDGE_FUND_FEES:-2000utia}"
+# Block cadence, and the ONE deliberate departure from the packaged wrapper's
+# constants below.
+#
+# `@effectstream/celestia@0.103.1` hardcodes `--delayed-precommit-timeout 1s`,
+# giving ~1 block/s. The kernel's Celestia projection cannot hold that: it runs
+# a persistent ~10-13 block deficit, while `deriveSyncStatus` calls anything
+# past `MAX_CELESTIA_LAG_BLOCKS = 4` "syncing". Everything gated on
+# `requireCurrentBackend` then refuses — including `POST /v1/offers/files`, the
+# read the solver makes at job time to rebuild a maker's exact bytes, so every
+# dispatched swap dies `exact_files_unavailable` and nothing can ever settle.
+# Measured at 1s: 60/60 exact-files reads answered 503 "backend is not
+# synchronized".
+#
+# 3s is this repo's own answer to the same problem: its acceptance harness
+# (`packages/tests/grand-e2e/lib/solver-offerfiles-real-e1.ts`) pins
+# `celestiaBlockTime: "3s"` with the note that at 1s the backend "could never
+# stay inside the production threshold MAX_CELESTIA_LAG_BLOCKS = 4 — see e2e
+# open question E1-Q4", and calls 3s the cadence "matching current Celestia
+# mainnet". The same source records that `timeout_commit` in config.toml is
+# deprecated and INERT on celestia-app 6.4.10, so this flag is the only control
+# that works.
+CELESTIA_BLOCK_TIME="${CELESTIA_BLOCK_TIME:-3s}"
 
 log() { echo "[celestia] $*" >&2; }
 
@@ -90,7 +113,7 @@ celestia-appd start \
   --grpc.enable \
   --rpc.unsafe \
   --grpc-web.enable \
-  --delayed-precommit-timeout 1s \
+  --delayed-precommit-timeout "${CELESTIA_BLOCK_TIME}" \
   ${CELESTIA_FORCE_NO_BBR:+--force-no-bbr} &
 APPD_PID=$!
 

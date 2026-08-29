@@ -56,6 +56,15 @@ x-celestia-endpoints: &celestia-endpoints
   # The bridge runs with --rpc.skip-auth (as @effectstream/celestia does), so
   # there is deliberately no token to distribute.
   CELESTIA_AUTH_TOKEN: ""
+  # How often the kernel's Celestia fetcher advances its projection.
+  #
+  # `packages/node/env.ts` defaults this to 6000 ms for a devnet, which is one
+  # poll per six Celestia blocks at the packaged 1s cadence — so between polls
+  # the projection falls further behind than `MAX_CELESTIA_LAG_BLOCKS = 4`
+  # tolerates. The cadence itself is the real fix (see CELESTIA_BLOCK_TIME on
+  # the celestia service); matching the poll to the block time on top of it
+  # removes the remaining sawtooth, which costs one local RPC per second.
+  CELESTIA_POLLING_INTERVAL_MS: ${CELESTIA_POLLING_INTERVAL_MS:-1000}
 
 x-kernel-image: &kernel-image
   image: ${KERNEL_IMAGE:-cow00005/kernel}:${IMAGE_TAG:-dev}
@@ -178,6 +187,11 @@ services:
       CELESTIA_HOME: /data/celestia-app
       CELESTIA_BRIDGE_HOME: /data/celestia-bridge
       CELESTIA_FORCE_NO_BBR: "1"
+      # Settlement-critical: at the packaged wrapper's 1s the kernel's Celestia
+      # projection never gets inside MAX_CELESTIA_LAG_BLOCKS = 4 and the
+      # solver's job-time exact-files read is permanently 503. Full reasoning in
+      # images/celestia/entrypoint.sh.
+      CELESTIA_BLOCK_TIME: ${CELESTIA_BLOCK_TIME:-3s}
     volumes:
       - celestia-data:/data
     ports:
@@ -544,12 +558,31 @@ services:
       RELAY_WS_URL: ws://relay:9001
       SOLVER_AUTH_TOKEN: ${SOLVER_AUTH_TOKEN:-}
       SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
-      MAKER_SEED: ${MAKER_SEED:-0000000000000000000000000000000000000000000000000000000000000031}
+      # The MAKER is the genesis wallet: `mint-test-tokens` credits exactly that
+      # wallet, so it is the only one holding a test token to give away — and
+      # the driver posts its own extra offers (one per case, since a settled
+      # case consumes the one it used).
+      MAKER_SEED: ${MAKER_OFFER_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
       TAKER_SEED: ${TAKER_SEED:-0000000000000000000000000000000000000000000000000000000000000032}
       E2E_EVIDENCE_DIR: /var/lib/e2e
+      # The solver's own journal, so the driver can assert the SETTLED terminal
+      # and that no operation is left holding a claim. Mounted rw (not ro)
+      # because the journal is a WAL database: a reader has to be able to touch
+      # the -shm sidecar. The driver copies the fileset before opening it, so it
+      # never writes through this mount.
+      SOLVER_JOURNAL_PATH: /var/lib/cow-solver/operations.sqlite
+      # Which lower-demand shape case B proves, as a fraction of the relay's own
+      # quote (see deploy/scripts/e2e.ts).
+      E2E_CASE_B_DEMAND_NUM: ${E2E_CASE_B_DEMAND_NUM:-4}
+      E2E_CASE_B_DEMAND_DEN: ${E2E_CASE_B_DEMAND_DEN:-5}
+      E2E_CASE_C_DEMAND_NUM: ${E2E_CASE_C_DEMAND_NUM:-6}
+      E2E_CASE_C_DEMAND_DEN: ${E2E_CASE_C_DEMAND_DEN:-5}
+      E2E_CASES: ${E2E_CASES:-A,B,C,D}
+      E2E_SKIP_PROVISION: ${E2E_SKIP_PROVISION:-false}
     volumes:
       - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - e2e-evidence:/var/lib/e2e
+      - solver-journal:/var/lib/cow-solver
 
 volumes:
   # Chain-keyed. These MUST be wiped together: a kernel ledger mirror, a solver

@@ -89,16 +89,25 @@ COPY packages/validator/package.json                                packages/val
 
 RUN bun install --frozen-lockfile
 
-# Source. `.dockerignore` (see Dockerfile.dockerignore next to this file) keeps
-# node_modules — 839 MB in a working checkout — out of the context entirely.
-COPY . .
-
 # Compile the Compact contract. `src/managed/` is gitignored, so it exists only
 # because of this step; the deploy one-shot, the kernel's `readMidnightContract`
 # and the mint script all read `contract-offer-files/src/managed/{compiler,
-# contract,keys,zkir}` at runtime. Slow (proving-key generation) and cached.
+# contract,keys,zkir}` at runtime.
+#
+# Its inputs are copied on their own, ahead of the rest of the source, because
+# this step generates proving keys and takes ~20 minutes. Under a single
+# `COPY . .` every edit anywhere in the repository — an entrypoint, the E2E
+# driver, a README — invalidated it. The later `COPY . .` re-lands these same
+# files, and `src/managed/` survives it because the generated tree is gitignored
+# and therefore not in the build context at all.
+COPY packages/contracts-midnight ./packages/contracts-midnight
 RUN bun run build:midnight \
  && test -d packages/contracts-midnight/contract-offer-files/src/managed
+
+# The rest of the source. `.dockerignore` (see Dockerfile.dockerignore next to
+# this file) keeps node_modules — 839 MB in a working checkout — out of the
+# context entirely.
+COPY . .
 
 # Entrypoints last: editing one must not invalidate the install or the compile.
 COPY deploy/images/kernel/entrypoint-common.sh   /usr/local/bin/entrypoint-common.sh

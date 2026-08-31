@@ -194,9 +194,10 @@ export interface RelayLadderOptions extends JobAdmissionPolicy {
    *  by the next one. A function, not a snapshot, precisely because the loop
    *  outlives any single view of executor state. */
   unavailableOfferHashes?: () => Iterable<string>;
-  /** FR-003/FR-004: `Stock.available` per token, read per push for the same
-   *  reason — a balance refresh or a new reservation between two pushes must
-   *  change what the next one advertises. */
+  /** FR-003: `Stock.available` per token, read per push for the same reason — a
+   *  balance refresh or a new reservation between two pushes must change what
+   *  the next one advertises. Only the pair's tokenOut is read (the residual
+   *  payout); since 00006-R2 nothing bounds publication by tokenIn. */
   spendableInventory?: () => SpendableInventory;
 }
 
@@ -301,18 +302,23 @@ const sameTruncation = (a: TruncationSignal, b: TruncationSignal): boolean =>
   a.pairCapOffers === b.pairCapOffers && a.rungCapOffers === b.rungCapOffers;
 
 /**
- * Rungs withheld because the solver could not EXECUTE them (FR-003/FR-004), as
- * counts.
+ * Rungs withheld because the solver could not EXECUTE them (FR-003), as counts.
  *
  * Reported separately from the cap signal above, not folded into it: a cap is a
  * configured ceiling and this is inventory, so the operator's remedy is
  * different (fund the wallet / free a reservation, not raise a limit). It is
  * every bit as loud, because withheld liquidity is invisible at the relay —
  * takers simply stop being quoted.
+ *
+ * ONE count since 00006-R2. 00005-R2 also reported `mirrorBudgetOffers`, the
+ * rungs withheld because the solver could not spend the tokenIn the fee-sizing
+ * mirror needed; fee sizing spends no tokenIn any more, so that bound and its
+ * count are gone (FR-003). The event kinds are unchanged, so an operator's
+ * alerting on `ladder-budget-limited` / `ladder-budget-cleared` still fires —
+ * only the `detail` object lost a field that is now always 0.
  */
 interface BudgetSignal {
   residualBudgetOffers: number;
-  mirrorBudgetOffers: number;
 }
 
 const countExcluded = (
@@ -322,15 +328,12 @@ const countExcluded = (
 
 const budgetOf = (excluded: readonly LadderExclusion[]): BudgetSignal => ({
   residualBudgetOffers: countExcluded(excluded, "residual-budget"),
-  mirrorBudgetOffers: countExcluded(excluded, "mirror-budget"),
 });
 
-const limitsLiquidity = (signal: BudgetSignal): boolean =>
-  signal.residualBudgetOffers > 0 || signal.mirrorBudgetOffers > 0;
+const limitsLiquidity = (signal: BudgetSignal): boolean => signal.residualBudgetOffers > 0;
 
 const sameBudget = (a: BudgetSignal, b: BudgetSignal): boolean =>
-  a.residualBudgetOffers === b.residualBudgetOffers &&
-  a.mirrorBudgetOffers === b.mirrorBudgetOffers;
+  a.residualBudgetOffers === b.residualBudgetOffers;
 
 const rungCount = (push: LadderPush): number =>
   push.priceLevels.levels.reduce((total, pair) => total + pair.levels.length, 0);
@@ -380,7 +383,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   const terminalTasks = new Set<Promise<void>>();
   let queued = false;
   let lastTruncation: TruncationSignal = { pairCapOffers: 0, rungCapOffers: 0 };
-  let lastBudget: BudgetSignal = { residualBudgetOffers: 0, mirrorBudgetOffers: 0 };
+  let lastBudget: BudgetSignal = { residualBudgetOffers: 0 };
   let lastCurrent: boolean | null = null;
 
   const stats: RelayClientStats = {
@@ -487,8 +490,8 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         // that used to live here is what dropped `supportedPairs`/
         // `minJobOutput` between config and the wire (P4-F02).
         ...forwardAdmissionPolicy(options.ladder),
-        // FR-003/FR-004: read the executability budget per push, like the
-        // claim set above.
+        // FR-003: read the executability budget per push, like the claim set
+        // above.
         ...(options.ladder.spendableInventory === undefined
           ? {}
           : { spendableInventory: options.ladder.spendableInventory() }),
@@ -576,8 +579,8 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   };
 
   /**
-   * FR-003/FR-004's operator half: liquidity the solver OWNS but withheld
-   * because it could not execute it.
+   * FR-003's operator half: liquidity the solver OWNS but withheld because it
+   * could not execute it.
    *
    * Change-triggered like the cap signal, and at error severity, because the
    * relay shows nothing at all when a rung is withheld — the failure mode is a
@@ -593,12 +596,8 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         "ladder-budget-limited",
         "error",
         `solver inventory withheld real liquidity: ${signal.residualBudgetOffers} offer(s) ` +
-          `past the residual tokenOut budget, ${signal.mirrorBudgetOffers} past the ` +
-          "fee-sizing tokenIn budget",
-        {
-          residualBudgetOffers: signal.residualBudgetOffers,
-          mirrorBudgetOffers: signal.mirrorBudgetOffers,
-        },
+          "past the residual tokenOut budget",
+        { residualBudgetOffers: signal.residualBudgetOffers },
       );
     } else if (wasLimiting) {
       emit(

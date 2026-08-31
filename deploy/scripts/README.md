@@ -15,13 +15,14 @@ from doing nothing is the one failure mode it must not have.
 
 ## What the driver owes (spec FR-009 / SC-005)
 
-1. **Provision.** Fund maker, taker and solver dev wallets.
-   The solver needs **both** tokens of every pair it should quote, not just the
-   payout token — publication is bounded by spendable tokenIn as well as
-   reservable tokenOut, so an inventory-light solver publishes an empty ladder
-   while looking perfectly healthy. `mint-test-tokens` (run by the
+1. **Provision.** Fund maker and taker dev wallets. Since 00006 the solver needs
+   **no swap-token inventory** to quote or settle whole-maker rungs — fee sizing
+   no longer spends its tokenIn, and the publication cap that forced is gone.
+   tokenOut still buys *interior* (interpolated) sizes: with none, the solver
+   publishes each pair's first rung and no more. `mint-test-tokens` (run by the
    `offerfiles-deploy` one-shot) credits the **genesis** wallet only, so moving
-   the tokens is this driver's job.
+   any tokens the cases need is this driver's job. 00006-V1 reruns exactly this
+   flow with solver token provisioning DISABLED as its real-boundary proof.
 2. **Maker offer.** Post a real zswap Offer File into the kernel; assert it
    appears in `GET /v1/offers` and in the solver's ladder at the relay
    (`GET /tokens` cross-container, `GET /state` from inside the relay container).

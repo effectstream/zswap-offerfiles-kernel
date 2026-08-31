@@ -4,10 +4,10 @@
 # WHY THIS IS A SERVICE AND NOT A README STEP
 # -------------------------------------------
 # Since R2 (`c4ac2bb`), ladder publication is bounded by what the solver can
-# actually move: a rung whose cumulative INPUT exceeds spendable tokenIn is
+# actually move: a rung whose cumulative INPUT exceeds spendable tokenIn was
 # withheld along with every rung above it, and a rung whose worst-case residual
 # exceeds available tokenOut is withheld too. So a solver with an empty wallet
-# publishes NOTHING, however deep the maker book behind it is.
+# published NOTHING, however deep the maker book behind it was.
 #
 # The failure that produces is silent and expensive. D2 reproduced it exactly:
 # every service healthy, the solver connected and authenticated to the relay,
@@ -15,6 +15,16 @@
 # empty token list. Nothing is logged as an error anywhere. Leaving that to a
 # documented manual step would mean the default `docker compose up` produces a
 # stack that looks perfect and quotes nothing.
+#
+# 00006-R2 REMOVED THE tokenIn HALF of that bound: fee sizing no longer spends
+# the job's amountIn, so a solver holding no tokenIn now publishes every
+# whole-maker rung. Minting the solver its tokenIn is therefore no longer needed
+# for the stack to quote — only tokenOut still extends a ladder past its first
+# rung, and only for interpolated sizes. THIS SERVICE IS UNCHANGED ANYWAY, on
+# purpose: 00006-V1 needs the funded path intact as the control it compares its
+# unfunded rerun against, and turning provisioning off is what
+# `SOLVER_PROVISION_ENABLED=false` already does. Retiring or slimming this
+# one-shot is V1's call, not R2's.
 #
 # WHAT IT RUNS
 # ------------

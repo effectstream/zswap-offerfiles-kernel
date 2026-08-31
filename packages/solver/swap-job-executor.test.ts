@@ -149,9 +149,13 @@ function harness(options: {
   minJobOutput?: ReadonlyMap<string, bigint> | null;
   dustAdmission?: { maxPerJob: bigint; maxPerWindow: bigint; windowMs: number } | null;
   dustAmount?: bigint | null;
-  /** tokenOut funds a residual payout. tokenIn funds nothing any more (00006
-   *  FR-001 removed the fee-sizing mirror) but is still bounded by the
-   *  publication cap 00006-R2 removes, so tests must still stock it. */
+  /** tokenOut funds a residual payout, and that is the ONLY thing inventory
+   *  funds. The default deliberately stocks NO tokenIn (00006-R2 / SC-002): every
+   *  executor test in this file therefore runs against a wallet that holds none
+   *  of the job's input token, which together with `refuseTokenInSelection`
+   *  makes "the solver needs no tokenIn" a standing control rather than one
+   *  test. Was `{[A]: 1_000n, [B]: 1_000n}` while the tokenIn publication cap
+   *  existed — tests had to stock tokenIn just to get past the admission guard. */
   balances?: Record<string, bigint>;
   journalPath?: string;
   /** 00006 FR-001 / SC-001. `false` lets `initSwap` accept a tokenIn spend so a
@@ -174,7 +178,7 @@ function harness(options: {
   let now = Date.now();
   let backendStatus = options.status ?? "live";
   const stock = new Stock();
-  stock.setBalances(options.balances ?? { [A]: 1_000n, [B]: 1_000n });
+  stock.setBalances(options.balances ?? { [B]: 1_000n });
   const calls: string[] = [];
   const reverts: unknown[] = [];
   /** Every `initSwap` call, so a test can assert the exact leg the solver built. */
@@ -508,7 +512,9 @@ const routeFor = (
   const book = new Book();
   for (const source of options.offers ?? LADDER()) book.upsert(source);
   const stock = new Stock();
-  stock.setBalances(options.balances ?? { [A]: 1_000n, [B]: 1_000n });
+  // No tokenIn by default (00006-R2 / SC-002): nothing in a route decision reads
+  // it any more, so every matrix in this file is a zero-tokenIn control.
+  stock.setBalances(options.balances ?? { [B]: 1_000n });
   const route = resolveSwapJobRoute(
     job("route", amountIn, amountOut),
     { book, isCurrent: () => true },
@@ -601,28 +607,29 @@ test("FR-001 above-advertised, out-of-ladder, and non-positive demands stay refu
   expect(routeFor("15", "30", { minJobOutput: minimum }).route.surplusOut).toBe(0n);
 });
 
-// R2/FR-004 amendment: this test used to run with `{A: 0n, B: 0n}`. A is the
-// job's tokenIn, and the retained tokenIn depth bound (00006-R2 removes it)
-// refuses a zero-A solver for a reason that has nothing to do with surplus
-// (asserted separately below). The property this test exists for — retained
-// surplus needs no tokenOUT inventory — is unchanged and still asserted with
-// `B: 0n`.
-test("FR-001 retained surplus needs no tokenOut inventory while a residual payout still gates on Stock", () => {
-  // Surplus is inflow-only: a solver with zero tokenOut inventory can still
-  // serve every at/below-prefix demand.
+// R2/FR-004 amendment REVERTED at 00006-R2. 00005-R2 had to weaken this test to
+// `{A: 1_000n, B: 0n}`, because the tokenIn depth bound refused a zero-A solver
+// for a reason that had nothing to do with surplus. With that bound gone the
+// original, stronger form is restored: an EMPTY wallet — zero of both tokens —
+// serves every at/below-prefix demand, which is exactly what 00006 is for.
+test("FR-001 retained surplus needs NO inventory at all while a residual payout still gates on Stock", () => {
+  // Surplus is inflow-only: a solver with an empty token wallet can still serve
+  // every at/below-prefix demand.
   for (const [amountIn, amountOut, surplusOut] of [
     ["15", "30", 0n], ["15", "25", 5n], ["20", "45", 5n], ["10", "1", 29n],
   ] as const) {
-    const { route, stock } = routeFor(amountIn, amountOut, { balances: { [A]: 1_000n, [B]: 0n } });
+    const { route, stock } = routeFor(amountIn, amountOut, { balances: {} });
     expect(route.surplusOut).toBe(surplusOut);
     expect(route.residualOut).toBe(0n);
+    expect(stock.reserved(A)).toBe(0n);
     expect(stock.reserved(B)).toBe(0n);
   }
   // The payout direction is unchanged: fail closed when the residual is not
-  // affordable, and no claim survives the refusal.
-  expect(refusalReason(() => routeFor("15", "35", { balances: { [A]: 1_000n, [B]: 4n } })))
+  // affordable, and no claim survives the refusal. tokenIn is absent throughout,
+  // so the refusal can only be the residual.
+  expect(refusalReason(() => routeFor("15", "35", { balances: { [B]: 4n } })))
     .toBe(JOB_ROUTE_UNAVAILABLE);
-  const affordable = routeFor("15", "35", { balances: { [A]: 1_000n, [B]: 5n } });
+  const affordable = routeFor("15", "35", { balances: { [B]: 5n } });
   expect(affordable.route.residualOut).toBe(5n);
   expect(affordable.stock.available(B)).toBe(0n);
 });
@@ -1402,7 +1409,7 @@ test("FR-001 a missing or malformed networkId is refused at startup", () => {
   expect(() => harness({ networkId: "undeployed" }).executor.stop()).not.toThrow();
 });
 
-// ── FR-003 / FR-004: the tokenIn depth bound (00006-R2 removes it) ──────────
+// ── 00006-R2 / FR-003 / SC-002: the tokenIn depth bound is GONE ─────────────
 //
 // P4-F04's ORIGINAL reason: `buildHalf` opened with a MANDATORY fee-sizing
 // mirror that called `initSwap({shielded: {[tokenIn]: amountIn}}, …)`, selecting
@@ -1410,61 +1417,71 @@ test("FR-001 a missing or malformed networkId is refused at startup", () => {
 // reverting them immediately. Nothing at publication or admission proved the
 // wallet could spend that much, so an unfundable job failed HALF-WAY THROUGH a
 // wallet mutation, and an uncertain revert sent it to `WalletMutationUncertain`
-// quarantine, stranding the claim and a capacity slot.
+// quarantine, stranding the claim and a capacity slot. 00005-R2 therefore
+// refused such a job with `JOB_ROUTE_UNAVAILABLE` before any wallet call, and
+// capped publication by the same number.
 //
-// 00006-R1 REMOVED THAT MIRROR (FR-001): fee sizing spends no tokenIn at all,
-// so this bound no longer protects a wallet mutation and the solver no longer
-// needs tokenIn inventory to quote. The mechanism is nevertheless retained
-// UNCHANGED at this head so R1 is a pure fee-sizing change, and these tests are
-// retained with it — removing bound and tests together is 00006-R2's scope
-// (FR-003 / SC-002). Until then they pin a conservative depth check, not a
-// solvency fact, and the test names below say "mirror" for continuity with the
-// rows they still assert.
+// 00006-R1 REMOVED THE MIRROR (FR-001): fee sizing spends no tokenIn at all.
+// 00006-R2 removed the bound it protected, at both layers (FR-003). The three
+// tests below are the 00005-R2 tests RE-ENCODED as the new behaviour's controls,
+// one for one:
+//
+//   "an unfundable tokenIn bound is refused before any wallet call"
+//     → "a job whose tokenIn the solver does not hold SETTLES"
+//   "the tokenIn budget is AVAILABLE tokenIn, so another job's payout reduces it"
+//     → "no reservation and no balance on the tokenIn side can refuse a job"
+//   "publication withholds what it cannot execute, and admission refuses it again"
+//     → the same two-layer statement, with only the tokenOut half left.
 
-test("FR-004 an unfundable tokenIn bound is refused before any wallet call", async () => {
-  // Route level first: the check is inside `resolveSwapJobRoute`, so it is
-  // reached before a journal row or a reservation exists.
-  expect(refusalReason(() => routeFor("15", "25", { balances: { [A]: 14n, [B]: 1_000n } })))
-    .toBe(JOB_ROUTE_UNAVAILABLE);
-  // The boundary: exactly the taker's input is enough, one short is not. The
-  // requirement is the FULL amountIn, not the residual or the demand.
-  const funded = routeFor("15", "25", { balances: { [A]: 15n, [B]: 1_000n } });
-  expect(funded.route.surplusOut).toBe(5n);
-  expect(funded.stock.reserved(A)).toBe(0n);
+test("FR-003 a job whose tokenIn the solver does not hold SETTLES (SC-002)", async () => {
+  // Route level first, on the exact balances that used to refuse: 14 of tokenIn
+  // against an `amountIn` of 15. There is no tokenIn check left to fail.
+  const zeroTokenIn = { [A]: 0n, [B]: 1_000n };
+  for (const balances of [{ [A]: 14n, [B]: 1_000n }, zeroTokenIn]) {
+    const resolved = routeFor("15", "25", { balances });
+    expect(resolved.route.surplusOut).toBe(5n);
+    expect(resolved.route.residualOut).toBe(0n);
+    expect(resolved.stock.reserved(A)).toBe(0n);
+  }
+  // …and the resolved route is IDENTICAL to the one a fully funded wallet gets,
+  // which is the "byte-for-byte" half of FR-003: nothing else moved.
+  const funded = routeFor("15", "25", { balances: { [A]: 1_000n, [B]: 1_000n } });
+  const unfunded = routeFor("15", "25", { balances: zeroTokenIn });
+  for (const key of ["residualIn", "residualOut", "surplusOut"] as const) {
+    expect(unfunded.route[key], key).toBe(funded.route[key]);
+  }
+  expect(unfunded.route.offers.map((source) => source.offerHash))
+    .toEqual(funded.route.offers.map((source) => source.offerHash));
 
-  // End to end: zero wallet work, no journal row, nothing claimed.
-  const h = harness({ offers: LADDER(), balances: { [A]: 14n, [B]: 1_000n } });
-  expect(await h.executor.onSwap(job("mirror-unfundable", "15", "25"))).toEqual({
-    type: "job-error",
-    jobId: "mirror-unfundable",
-    reason: JOB_ROUTE_UNAVAILABLE,
-  });
-  expect(h.calls).toEqual([]);
-  expect(h.legs).toEqual([]);
-  expect(h.journal.list()).toEqual([]);
+  // End to end, where the old test asserted `job-error` + zero wallet calls:
+  // the job now settles from a wallet with NO tokenIn, and the wallet double is
+  // the standing SC-001 control that refuses every tokenIn coin selection.
+  const h = harness({ offers: LADDER(), balances: zeroTokenIn });
+  const settled = await h.executor.onSwap(job("no-tokenIn", "15", "25"));
+  expect(settled.type).toBe("swap-tx");
+  expect(h.calls).not.toContain("REFUSED-tokenIn-selection");
+  // Exactly one `initSwap`, and it is the solver's own leg — never a tokenIn one.
+  expect(h.legs.map((leg) => leg.label)).toEqual(["residual"]);
+  expect(h.legs[0]!.inputs[A]).toBeUndefined();
+  // Fee sizing happened, from a fabricated stand-in rather than a coin spend.
+  expect(h.standInSpecs).toHaveLength(1);
+  expect(h.stock.reserved(A)).toBe(0n);
   expect(h.stock.reserved(B)).toBe(0n);
-  expect(h.executor.unavailableOfferHashes()).toEqual([]);
-  expect(h.executor.stats()).toMatchObject({ building: 0, quarantined: 0, awaitingRelay: 0 });
   await h.executor.stop();
-
-  // One more unit of tokenIn and the same job settles, so the refusal is the
-  // budget and nothing else.
-  const fundedRun = harness({ offers: LADDER(), balances: { [A]: 15n, [B]: 1_000n } });
-  expect((await fundedRun.executor.onSwap(job("mirror-fundable", "15", "25"))).type)
-    .toBe("swap-tx");
-  expect(fundedRun.legs.map((leg) => leg.label)).toEqual(["residual"]);
-  await fundedRun.executor.stop();
 });
 
-test("FR-004 the tokenIn budget is AVAILABLE tokenIn, so another job's payout reduces it", () => {
-  // A reservation is a promise to pay that has not settled yet, so the coins
-  // behind it cannot also count toward this bound. Balance alone would
-  // double-count them.
+test("FR-003 no reservation or balance on the tokenIn side can refuse a job", () => {
+  // WAS: a live claim paying out tokenA reduced `available(A)` below `amountIn`
+  // and the job was refused `JOB_ROUTE_UNAVAILABLE`. tokenIn is not consulted
+  // any more, so neither the balance nor an outstanding reservation against it
+  // can decide a route. (A reservation on the tokenOUT side still can — see the
+  // residual tests.)
   const book = new Book();
   for (const source of LADDER()) book.upsert(source);
   const stock = new Stock();
   stock.setBalances({ [A]: 20n, [B]: 1_000n });
-  // A live claim on an unrelated offer, paying out tokenA.
+  // A live claim on an unrelated offer, paying out tokenA — exactly the state
+  // that used to make `available(A)` 14 and refuse the size-15 job.
   expect(stock.reserve({
     offerHashes: ["99".repeat(32)],
     nullifiers: ["98".repeat(32)],
@@ -1478,16 +1495,26 @@ test("FR-004 the tokenIn budget is AVAILABLE tokenIn, so another job's payout re
     stock,
     { nowMs: Date.now(), expiryMarginSeconds: 120, unavailableOfferHashes: [] },
   );
-  expect(refusalReason(() => resolve("15"))).toBe(JOB_ROUTE_UNAVAILABLE);
-  expect(resolve("10").residualIn).toBe(0n);
+  // One resolve per size: a second one would refuse "already claimed", which is
+  // the offer-reservation property and not this test's subject.
+  const fifteen = resolve("15");
+  expect(fifteen.residualIn).toBe(5n);
+  expect(fifteen.residualOut).toBe(0n);
+  // The tokenIn reservation is untouched by the route: only a payout reserves.
+  expect(stock.reserved(A)).toBe(6n);
+  expect(stock.reserved(B)).toBe(0n);
 });
 
-test("FR-003/FR-004 publication withholds what it cannot execute, and admission refuses it again", () => {
+test("FR-003 publication withholds what it cannot execute, and admission refuses it again", () => {
   // The two layers, and the honest statement of how they relate: publication is
   // bounded by each interval's WORST case, admission by the actual job. So a
   // withheld rung's worst job is refused twice, while a cheap job inside the
   // same withheld interval would still resolve — publication is deliberately
   // conservative, and admission is the fail-closed authority.
+  //
+  // ONE budget since 00006-R2. The tokenIn half of this test (tokenIn 19 →
+  // published tail 10, size 20 refused `JOB_ROUTE_UNAVAILABLE`) is inverted
+  // below: the same snapshot now publishes the whole ladder and admits the job.
   const book = new Book();
   for (const source of LADDER()) book.upsert(source);
   const published = (balances: Record<string, bigint>) => {
@@ -1499,22 +1526,25 @@ test("FR-003/FR-004 publication withholds what it cannot execute, and admission 
       spendableInventory: stock.spendable(),
     }).priceLevels.levels[0]?.levels ?? [];
   };
+  const FULL = [
+    { input: "10", output: "30" },
+    { input: "20", output: "50" },
+    { input: "30", output: "60" },
+  ];
 
-  // FR-004. tokenIn 19 cannot fund a job at the second rung's cumulative input
-  // (20), so that rung is withheld — and `interpolateQuote` then refuses every
-  // size above 10 outright, because the published tail IS the size ceiling.
-  const mirrorBalances = { [A]: 19n, [B]: 1_000n };
-  expect(published(mirrorBalances)).toEqual([{ input: "10", output: "30" }]);
-  // The worst size in the withheld interval is its top, and admission refuses
-  // exactly that one on the same number.
-  expect(refusalReason(() => routeFor("20", "1", { balances: mirrorBalances })))
-    .toBe(JOB_ROUTE_UNAVAILABLE);
-  // …while a cheaper size inside the same withheld interval is still fundable.
-  expect(routeFor("15", "1", { balances: mirrorBalances }).route.surplusOut).toBe(29n);
+  // WAS FR-004: `{A: 19n}` published only `[{10, 30}]` and refused size 20.
+  const noTokenInBound = { [A]: 19n, [B]: 1_000n };
+  expect(published(noTokenInBound)).toEqual(FULL);
+  expect(routeFor("20", "1", { balances: noTokenInBound }).route.surplusOut).toBe(49n);
+  expect(routeFor("15", "1", { balances: noTokenInBound }).route.surplusOut).toBe(29n);
+  // Zero tokenIn is the same ladder and the same admission.
+  expect(published({ [B]: 1_000n })).toEqual(FULL);
+  expect(routeFor("30", "1", { balances: { [B]: 1_000n } }).route.surplusOut).toBe(59n);
 
-  // FR-003. The interval (10, 20) can demand up to floor(20 · 9 / 10) = 18 of
-  // tokenOut, so 8 withholds the rung that opens it.
-  const residualBalances = { [A]: 1_000n, [B]: 8n };
+  // FR-003, UNCHANGED. The interval (10, 20) can demand up to
+  // floor(20 · 9 / 10) = 18 of tokenOut, so 8 withholds the rung that opens it —
+  // and it does so from a wallet holding no tokenIn at all.
+  const residualBalances = { [B]: 8n };
   expect(published(residualBalances)).toEqual([{ input: "10", output: "30" }]);
   // The worst job in that withheld interval: quote at 19 is 48, of which 18 is
   // a solver payout.
@@ -1523,6 +1553,8 @@ test("FR-003/FR-004 publication withholds what it cannot execute, and admission 
   // …while a cheap job in the same interval remains affordable. This is not a
   // gap: publication bounds the interval, admission bounds the job.
   expect(routeFor("19", "35", { balances: residualBalances }).route.residualOut).toBe(5n);
+  // SC-002's zero/zero corner, at this layer too: whole-maker first rung only.
+  expect(published({})).toEqual([{ input: "10", output: "30" }]);
 });
 
 test("FR-002 the policy the executor admits with is the policy publication used", () => {

@@ -14,13 +14,17 @@
 // prefix pays over it (the pinned reference solver keeps `dy - requiredOutput`
 // the same way). Demanding MORE than the published curve stays refused.
 //
-// SOLVENCY (P4-F03/P4-F04, FR-003/FR-004). Two inventory facts decide a job
-// before any wallet call happens, both against live `Stock`: the residual
-// tokenOut the solver would PAY, and the full `amountIn` of tokenIn. Publication
-// caps the advertised ladder by the same two numbers (`deriveLadder`'s
-// `spendableInventory`), so these are the fail-closed depth checks for the gap
-// between a push and a dispatch rather than the only guard — but they remain the
-// only guard when the publication budget is left open.
+// SOLVENCY (P4-F03, FR-003). ONE inventory fact decides a job before any wallet
+// call happens, against live `Stock`: the residual tokenOut the solver would
+// PAY. Publication caps the advertised ladder by the same number
+// (`deriveLadder`'s `spendableInventory`), so this is the fail-closed depth check
+// for the gap between a push and a dispatch rather than the only guard — but it
+// remains the only guard when the publication budget is left open.
+//
+// The solver needs NO tokenIn inventory. 00005-R2 also bounded a job (and
+// publication) by the solver's spendable tokenIn, because fee sizing spent it;
+// 00006-R2 removed both (FR-003) once 00006-R1 made fee sizing capital-free. See
+// the note in `resolveSwapJobRoute` where that guard used to stand.
 //
 // CAPITAL-FREE FEE SIZING (00006 FR-001/FR-002). Fee sizing used to open with a
 // MIRROR: `initSwap` selecting the taker's full `amountIn` of tokenIn out of the
@@ -30,9 +34,7 @@
 // function of transaction STRUCTURE only. Consequences:
 //   * fee sizing spends, reserves and mutates NOTHING — one fewer
 //     mutate-then-revert wallet class per job;
-//   * the tokenIn budget check below no longer protects a wallet mutation. It is
-//     retained unchanged in R1 as a conservative depth check and is 00006-R2's
-//     to remove (FR-003) together with the matching publication bound;
+//   * an empty token wallet can quote and settle every whole-maker rung;
 //   * new jobs write no `MIRROR_RESERVATION`/`MIRROR_REVERT` journal rows. The
 //     recovery filters still READ those kinds so pre-existing rows recover
 //     (FR-004).
@@ -511,9 +513,9 @@ export function resolveSwapJobRoute(
     throw new JobRefusal(JOB_MIN_OUTPUT);
   }
 
-  // Deliberately derived WITHOUT `spendableInventory`: the publication budgets
-  // (FR-003/FR-004) shape what the solver advertises, but a job already in hand
-  // must be judged against the whole current book and then against live `Stock`
+  // Deliberately derived WITHOUT `spendableInventory`: the publication budget
+  // (FR-003) shapes what the solver advertises, but a job already in hand must
+  // be judged against the whole current book and then against live `Stock`
   // below. Deriving with a budget here would turn an inventory dip into
   // `route_not_current` ("the ladder moved"), hiding a solvency refusal behind
   // a staleness one.
@@ -589,32 +591,26 @@ export function resolveSwapJobRoute(
   if (residualOut > stock.available(tokenOut)) {
     throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "residual solver inventory is insufficient");
   }
-  // FR-004 (P4-F04), fail-closed and BEFORE any wallet mutation, journal row,
-  // or reservation exists.
+  // NO tokenIn CHECK HERE, deliberately (00006 FR-003).
   //
-  // ORIGINAL REASON (superseded): `buildHalf` opened with a mandatory fee-sizing
-  // MIRROR that called `initSwap({shielded: {[tokenIn]: amountIn}}, …)`,
+  // 00005-R2 added one for P4-F04: `buildHalf` opened with a mandatory
+  // fee-sizing MIRROR that called `initSwap({shielded: {[tokenIn]: amountIn}}, …)`,
   // selecting real coins for the taker's FULL input out of the solver's own
-  // wallet and reverting them immediately. A job the wallet could not fund then
-  // failed half-way through a wallet mutation, and an uncertain revert sent it
-  // to `WalletMutationUncertain` quarantine, stranding the claim and a slot.
+  // wallet and reverting them immediately, so an unfundable job failed half-way
+  // through a wallet mutation and an uncertain revert sent it to
+  // `WalletMutationUncertain` quarantine, stranding the claim and a slot. The
+  // guard refused such a job with `JOB_ROUTE_UNAVAILABLE` before any wallet call.
   //
-  // AS OF 00006-R1 that mirror is gone: fee sizing models the taker half with a
-  // fabricated transaction and spends no tokenIn at all (FR-001), so this check
-  // no longer protects a wallet mutation and the solver no longer needs tokenIn
-  // inventory to quote. It is retained UNCHANGED here, and its publication
-  // counterpart in `deriveLadder`, only so R1 is a pure fee-sizing change:
-  // removing both is 00006-R2's scope (FR-003), together with the tests that pin
-  // them. Until then it is a conservative depth bound, not a solvency fact.
+  // 00006-R1 removed the mirror (FR-001): fee sizing models the taker half with
+  // a fabricated transaction and spends no tokenIn at all, so there is no
+  // tokenIn mutation left to protect and no tokenIn inventory the solver needs
+  // in order to quote. 00006-R2 removed the guard and its publication
+  // counterpart in `deriveLadder` together (FR-003) — keeping either would keep
+  // an uncapitalized solver unquotable for a mechanism that no longer exists.
   //
-  // `tokenIn !== tokenOut` is guaranteed by `requireCanonicalJob`, so the
-  // residual reservation taken below can never consume this budget.
-  if (amountIn > stock.available(tokenIn)) {
-    throw new JobRefusal(
-      JOB_ROUTE_UNAVAILABLE,
-      "tokenIn publication bound (00006-R2 removes it) exceeds spendable tokenIn",
-    );
-  }
+  // The residual check above is what remains, and it is the one that was ever a
+  // solvency fact: `residualOut` is tokenOut the solver actually PAYS. It stays
+  // as F03's defense in depth for the window between a push and a dispatch.
   if (!stock.reserve(claim)) {
     throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "route is already claimed or inventory changed");
   }

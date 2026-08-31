@@ -644,14 +644,17 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
 
   // A failed/started refresh empties Stock, which withdraws residual inventory
   // authority. Maker-backed rungs still come from the current book cache — but
-  // FR-003/FR-004 bound the PUBLISHED rungs by that same authority, so an
-  // emptied Stock now also withdraws every rung whose interpolation interval
-  // needs a residual payout and every rung above what the fee-sizing mirror can
-  // spend. Both directions are republished immediately rather than at the next
-  // tick: withdrawing late would keep advertising liquidity the executor has
-  // already started refusing, and recovering late would strand the solver
-  // unquotable for a full interval after each settlement (every terminal
-  // outcome triggers a refresh).
+  // FR-003 bounds the PUBLISHED rungs by that same authority, so an emptied
+  // Stock also withdraws every rung whose interpolation interval needs a
+  // residual payout. STILL LOAD-BEARING after 00006-R2 dropped the tokenIn
+  // bound: the tokenOut half alone changes what is publishable on both edges.
+  // (What changed is the floor — an emptied Stock now withdraws the interior
+  // rungs and keeps the whole-maker ones, instead of withdrawing everything.)
+  // Both directions are republished immediately rather than at the next tick:
+  // withdrawing late would keep advertising liquidity the executor has already
+  // started refusing, and recovering late would strand the solver unquotable
+  // for a full interval after each settlement (every terminal outcome triggers
+  // a refresh).
   inventoryChanged = (ready): void => {
     if (ready && !backendCurrent) {
       inventory.invalidate(new Error("inventory read completed outside backend readiness"));
@@ -857,11 +860,12 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
           // FR-002: ONE policy object, the same one the executor admits with, so
           // a field cannot reach admission without reaching the wire (P4-F02).
           ...forwardAdmissionPolicy(admission),
-          // FR-003/FR-004: never advertise a rung this solver could not pay the
-          // residual for, or whose fee-sizing mirror it could not fund. Read per
-          // push, so an inventory refresh — including the deliberate emptying
-          // that follows a lost backend authority — withdraws the affected rungs
-          // on the very next push.
+          // FR-003: never advertise a rung this solver could not pay the
+          // residual for. Read per push, so an inventory refresh — including the
+          // deliberate emptying that follows a lost backend authority —
+          // withdraws the affected rungs on the very next push. Whole-maker
+          // rungs survive an empty snapshot: 00006-R2 removed the tokenIn bound
+          // that used to withdraw them too.
           spendableInventory: () => stock.spendable(),
         },
         pushIntervalMs: opts.relayPushIntervalMs ?? relayEnv.pushIntervalMs,

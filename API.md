@@ -131,6 +131,9 @@ SOLVER_MIN_JOB_OUTPUT=                   # JSON {"<64hex out-token>":"<min>"}; s
 SOLVER_DUST_MAX_PER_JOB=                 # DUST admission budget; all three DUST values set together
 SOLVER_DUST_MAX_PER_WINDOW=
 SOLVER_DUST_WINDOW_MS=
+SOLVER_FEE_SIZING_TAKER_INPUTS=1          # taker zswap inputs the fee estimate models; [1,64]
+                                        # funds a real taker half of up to n+2 inputs
+                                        # each extra input costs 12-14% more DUST, actually spent
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -1007,8 +1010,13 @@ they are out of scope, not partially supported.
 [Encoding offers](#encoding-offers-swapoffer1)), so a maker's offer pays no fee
 itself. The settling side pays: for a relay job, the solver sizes and funds the
 DUST for the transaction it submits, bounded by the `SOLVER_DUST_*` admission
-budget. Sizing that fee currently requires the solver wallet to be able to spend
-the job's full `amountIn` of the input token (see the publication bounds below).
+budget. Sizing that fee requires **no swap-token inventory**: the taker's half is
+modelled by a synthetic transaction built from ledger primitives with the taker
+half's shape, because the DUST fee is a function of transaction structure only,
+not of any coin's value, token type or owner. Earlier builds spent — and
+immediately reverted — the job's full `amountIn` of the input token out of the
+solver's own wallet to do this. The solver still needs NIGHT/DUST for the fee
+itself. See `SOLVER_FEE_SIZING_TAKER_INPUTS` below.
 
 **Quotes are indicative.** A published ladder is authenticated market data for
 the relay's interpolation, not a reservation: nothing is held, and admission is
@@ -1032,22 +1040,39 @@ below-minimum outputs, unaffordable residuals and DUST-budget violations remain
 refusals. Lower demands used to be refused as `route_not_current`; they now
 settle.
 
-**Published liquidity is bounded by executability.** The solver withholds what it
-could not execute at the moment of publication:
+**Published liquidity is bounded by executability — on the output side only.**
+The solver withholds what it could not execute at the moment of publication:
 
+- **whole-maker rungs need no inventory at all.** A rung is an exact whole-offer
+  cumulative total, paid by the maker offers it consumes, so **a solver holding
+  none of either token publishes and settles every pair's first rung**;
 - a rung whose interpolation interval could demand more residual tokenOut than
-  its inventory can pay is withheld, and so is every rung above it;
-- published rung inputs are capped by the input-token amount the wallet can prove
-  spendable, because of the fee-sizing spend above — **a solver holding none of a
-  pair's input token publishes nothing for that pair**;
+  its inventory can pay is withheld, and so is every rung above it. This is what
+  tokenOut inventory buys: *interior* (interpolated) sizes;
 - `SOLVER_SUPPORTED_PAIRS` and `SOLVER_MIN_JOB_OUTPUT` bound publication as well
   as admission, and are re-applied after every reconnect;
 - withheld liquidity is surfaced once per change as `ladder-budget-limited` /
-  `ladder-budget-cleared` operator events.
+  `ladder-budget-cleared` operator events. Its `detail` carries
+  `residualBudgetOffers`; the `mirrorBudgetOffers` count an earlier build also
+  reported is gone with the bound it counted.
 
-Operators upgrading from an earlier build will therefore see advertised depth
-shrink, and must fund the solver wallet with **both** tokens of every pair it
-quotes.
+Operators upgrading from an earlier build will see advertised depth **grow**: the
+tokenIn cap that suppressed a whole pair when the solver held none of its input
+token has been removed. Funding the solver with a pair's input token is no longer
+required or useful; funding it with the **output** token is what extends the
+published ladder past its first rung.
+
+**`SOLVER_FEE_SIZING_TAKER_INPUTS`** (optional; integer `[1, 64]`, default `1`).
+The relay dispatches a numeric job and merges the taker's own half, so the solver
+cannot know how many zswap inputs the taker's coin selection produced. This is
+how many it models when sizing the fee. Measured coverage: a stand-in modelling
+`n` inputs funds a real taker half of up to **`n + 2`** inputs. Each extra
+modelled input costs **12–14 %** more DUST, actually spent (not merely reserved),
+and consumes `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` budget
+faster. Under-modelling is an availability failure — the chain rejects the merged
+transaction, the relay reports `submit-failed`, and the solver's contribution is
+reverted — never a loss of funds. A malformed value is a listed `start:solver`
+launch problem; the startup banner prints the effective model and its coverage.
 
 ---
 

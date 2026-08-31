@@ -1179,7 +1179,13 @@ describe("relay client — admission policy reaches the wire (FR-002)", () => {
   });
 });
 
-describe("relay client — executability budgets are read per push (FR-003/FR-004)", () => {
+// RE-ENCODED at 00006-R2 (FR-003 / SC-002). This block was written against TWO
+// budgets: the tokenOut residual and a tokenIn bound for the fee-sizing mirror.
+// Fee sizing spends no tokenIn since 00006-R1, so the tokenIn bound is gone and
+// every matrix below is driven from a wallet holding NO tokenIn — which is the
+// availability claim FR-003 makes. The old tokenIn expectations are inverted in
+// place rather than dropped, so the change of verdict is pinned.
+describe("relay client — the executability budget is read per push (FR-003)", () => {
   /** `Stock.available` as the push loop sees it: a function, so a test can move
    *  inventory between two pushes exactly as a refresh or a reservation does. */
   const movingInventory = (initial: Map<string, bigint>) => {
@@ -1201,28 +1207,34 @@ describe("relay client — executability budgets are read per push (FR-003/FR-00
     expect(wireRungs(socket.frames)).toHaveLength(3);
 
     // Inventory emptied — what an in-flight balance refresh does to Stock. The
-    // pair is B→A, so B is the fee-sizing mirror's budget: nothing is fundable.
+    // pair is B→A, so A is the residual budget and B is not read at all.
+    //
+    // WAS (00005-R2): `[]` rungs and `[]` tokens — an empty wallet withdrew
+    // EVERYTHING, because tokenIn also bounded publication. The whole-maker
+    // first rung now survives an empty wallet; only the interior rungs go.
     inventory.set(new Map());
     await client.push();
-    expect(wireRungs(socket.frames)).toEqual([]);
-    expect(wireTokens(socket.frames)).toEqual([]);
-
-    // tokenOut only: the first rung opens no interpolation interval, so it
-    // publishes again as soon as the mirror can be funded.
-    inventory.set(new Map([[A, 0n], [B, 1_000n]]));
-    await client.push();
     expect(wireRungs(socket.frames)).toEqual([{ input: "10", output: "20" }]);
+    expect(wireTokens(socket.frames)).toEqual([A, B]);
 
-    inventory.set(new Map([[A, 1_000n], [B, 1_000n]]));
+    // tokenOut ALONE restores the full ladder, with no tokenIn anywhere in the
+    // snapshot (SC-002). Was `[[A, 0n], [B, 1_000n]]` → one rung.
+    inventory.set(new Map([[A, 1_000n]]));
+    await client.push();
+    expect(wireRungs(socket.frames)).toHaveLength(3);
+
+    // Still the NEXT push that carries it, on the timer as well as on demand.
+    inventory.set(new Map([[A, 0n]]));
     await clock.advance(1_000);
     await client.idle();
-    expect(wireRungs(socket.frames)).toHaveLength(3);
+    expect(wireRungs(socket.frames)).toEqual([{ input: "10", output: "20" }]);
     expect(client.stats().pushFailures).toBe(0);
   });
 
   test("withheld liquidity is a LOUD operator signal, once per change, and its recovery too", async () => {
     const inventory = movingInventory(new Map([[A, 1_000n], [B, 1_000n]]));
-    const { socket, client, events } = harness(cacheOf(seed(CANONICAL_ROWS)), {
+    const book = seed(CANONICAL_ROWS);
+    const { socket, client, events } = harness(cacheOf(book), {
       ladder: policyLadder({ spendableInventory: inventory.seam }),
     });
     const budgetEvents = () => events.filter((event) =>
@@ -1233,34 +1245,37 @@ describe("relay client — executability budgets are read per push (FR-003/FR-00
     // Nothing withheld: no signal at all, so the signal stays meaningful.
     expect(budgetEvents()).toEqual([]);
 
-    inventory.set(new Map([[A, 0n], [B, 1_000n]]));
+    // Zero tokenOut AND zero tokenIn — the uncapitalized solver. Was
+    // `[[A, 0n], [B, 1_000n]]`; the tokenIn entry made no difference then to the
+    // residual count and makes no difference at all now.
+    inventory.set(new Map([[A, 0n], [B, 0n]]));
     await client.push();
     // A withheld rung is invisible at the relay — takers simply stop being
-    // quoted — so this is reported at error severity with counts.
+    // quoted — so this is reported at error severity with counts. One count
+    // since 00006-R2: `mirrorBudgetOffers` is gone from the detail.
     expect(budgetEvents()).toHaveLength(1);
     expect(budgetEvents()[0]!.kind).toBe("ladder-budget-limited");
     expect(budgetEvents()[0]!.severity).toBe("error");
-    expect(budgetEvents()[0]!.detail).toEqual({
-      residualBudgetOffers: 2,
-      mirrorBudgetOffers: 0,
-    });
+    expect(budgetEvents()[0]!.detail).toEqual({ residualBudgetOffers: 2 });
 
     // Change-triggered, not per-push: the loop runs once a second and an
     // unconditional error per second is noise an operator learns to ignore.
     await client.push();
     expect(budgetEvents()).toHaveLength(1);
 
-    // A different shape IS a change.
-    inventory.set(new Map([[A, 1_000n], [B, 24n]]));
+    // A different COUNT is a change. The old step moved tokenIn to 24 and
+    // expected `{residual: 0, mirror: 1}`; tokenIn withholds nothing now, so the
+    // count is moved by DEEPENING the book instead — one more rate-1 offer past
+    // the truncation point.
+    book.upsert(bookOfferFromApi(row(O4, { token: A, amount: "1" }, { token: B, amount: "1" }))!);
     await client.push();
     expect(budgetEvents()).toHaveLength(2);
-    expect(budgetEvents()[1]!.detail).toEqual({
-      residualBudgetOffers: 0,
-      mirrorBudgetOffers: 1,
-    });
+    expect(budgetEvents()[1]!.kind).toBe("ladder-budget-limited");
+    expect(budgetEvents()[1]!.detail).toEqual({ residualBudgetOffers: 3 });
 
-    // Recovery is reported too, so a cleared limit is not left looking permanent.
-    inventory.set(new Map([[A, 1_000n], [B, 1_000n]]));
+    // Recovery is reported too, so a cleared limit is not left looking
+    // permanent — and it needs tokenOut only, no tokenIn at all.
+    inventory.set(new Map([[A, 1_000n]]));
     await client.push();
     expect(budgetEvents()).toHaveLength(3);
     expect(budgetEvents()[2]!.kind).toBe("ladder-budget-cleared");
@@ -1274,9 +1289,12 @@ describe("relay client — executability budgets are read per push (FR-003/FR-00
     ])), {
       ladder: policyLadder({
         // Two pairs (B→A from the canonical book, A→C from the extra row) and
-        // room to publish one, with tokenIn B short of the B→A tail.
+        // room to publish one. The shortfall used to be tokenIn B short of the
+        // B→A tail; with that bound gone (00006-R2) it is tokenOut A at zero,
+        // which withholds the B→A interior rungs. Note the snapshot carries NO
+        // tokenIn for B at all and the pair is still publishable.
         maxPairs: 1,
-        spendableInventory: () => new Map([[A, 1_000n], [B, 19n], [C, 1_000n]]),
+        spendableInventory: () => new Map([[A, 0n], [C, 1_000n]]),
       }),
     });
     socket.onopen!();
@@ -1289,7 +1307,7 @@ describe("relay client — executability budgets are read per push (FR-003/FR-00
     expect(truncated).toHaveLength(1);
     expect(truncated[0]!.detail).toEqual({ pairCapOffers: 1, rungCapOffers: 0 });
     expect(limited).toHaveLength(1);
-    expect(limited[0]!.detail).toEqual({ residualBudgetOffers: 0, mirrorBudgetOffers: 2 });
+    expect(limited[0]!.detail).toEqual({ residualBudgetOffers: 2 });
   });
 
   test("no inventory seam at all keeps the pre-budget behaviour (dry-run parity)", async () => {

@@ -63,11 +63,11 @@ log "published ${PUBLISHED}: $(cat "${PUBLISHED}")"
 # perfectly usable without demo tokens, and failing here would block the kernel,
 # batcher, relay and solver on a convenience step.
 #
-# NOTE for E1: this funds the GENESIS wallet, not the solver. R2 made ladder
-# publication bounded by what the solver itself can spend, so the solver's own
-# wallet must hold BOTH tokens of every pair it should quote or it publishes an
-# empty ladder while looking perfectly healthy. Moving tokens to SOLVER_SEED is
-# E1's provisioning job (deploy/scripts/), not this one-shot's.
+# NOTE for E1: this funds the GENESIS wallet, not the solver. Moving tokens to
+# SOLVER_SEED is E1's provisioning job (deploy/scripts/), not this one-shot's.
+# Since 00006-R2 the solver needs NO tokenIn to publish a pair's whole-maker
+# rungs (fee sizing stopped spending it); tokenOut still extends a ladder past
+# its first rung, for interpolated sizes only.
 if [ -f "${MINT_MARKER}" ]; then
   log "mint marker present — skipping mint-test-tokens"
   exit 0

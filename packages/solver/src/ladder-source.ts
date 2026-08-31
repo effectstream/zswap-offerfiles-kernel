@@ -45,9 +45,11 @@ export interface LadderPushOptions extends JobAdmissionPolicy {
   /** Offers claimed by an in-flight fill, from `Stock`. Kept as a parameter so
    *  derivation stays pure and this file stays free of executor state. */
   unavailableOfferHashes?: Iterable<string>;
-  /** FR-003/FR-004: what the solver can actually move (`Stock.available`), so
+  /** FR-003: what the solver can actually move (`Stock.available`), so
    *  publication cannot advertise a rung it would refuse. Same reason it is a
-   *  parameter: no executor or wallet state reaches this file. */
+   *  parameter: no executor or wallet state reaches this file. Read for the
+   *  pair's tokenOut only — 00006-R2 removed the tokenIn bound (FR-003), so a
+   *  solver with an empty token wallet still publishes its whole-maker rungs. */
   spendableInventory?: SpendableInventory | null;
   maxParallelSwaps?: number;
   maxPairs?: number;

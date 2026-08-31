@@ -20,11 +20,13 @@
 // and WANTS `wantAmount` of `wantToken` routed back to the maker. That is what
 // an Offer File is, and it is what the solver mirrors and quotes against.
 //
-// Note the resulting direction, because it decides which tokens the SOLVER must
-// hold: an offer GIVING A / WANTING B is filled by a taker who pays B and
-// receives A, so for the solver that pair is tokenIn=B, tokenOut=A. The solver
-// needs BOTH (tokenIn for the fee-sizing mirror, tokenOut for residuals) —
-// `packages/solver/scripts/bootstrap-dev.ts` mints it both.
+// Note the resulting direction: an offer GIVING A / WANTING B is filled by a
+// taker who pays B and receives A, so for the solver that pair is tokenIn=B,
+// tokenOut=A. Since 00006-R2 the solver needs NEITHER to quote and settle this
+// offer as a whole rung — fee sizing stopped spending tokenIn, and the maker
+// offer itself pays the rung. tokenOut buys only INTERPOLATED sizes between
+// rungs. `packages/solver/scripts/bootstrap-dev.ts` still mints it both, which
+// 00006-V1's unfunded rerun is the control for.
 
 import { readFileSync } from "node:fs";
 

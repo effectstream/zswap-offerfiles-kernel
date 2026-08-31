@@ -19,6 +19,10 @@
  * SOLVER_RELAY_HTTP_URL, SOLVER_RELAY_AUTH_TOKEN, SOLVER_JOURNAL_PATH,
  * SOLVER_SEED. Mainnet additionally defaults to dry-run and requires
  * SOLVER_MAINNET_LIVE_TRADING_ACK=true for live settlement.
+ *
+ * Optional but validated the same way: SOLVER_FEE_SIZING_TAKER_INPUTS (00006
+ * FR-001; default 1, funds a real taker half of up to that many `+ 2` zswap
+ * inputs — the banner prints the effective coverage).
  */
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -74,6 +78,7 @@ await startWithSignalOwnership(
       relayHttpUrl: config.relayHttpUrl,
       relayAuthToken: config.relayAuthToken,
       ladderConfigPath: config.ladderConfigPath,
+      feeSizingTakerInputs: config.feeSizingTakerInputs,
       signal,
     }),
   {

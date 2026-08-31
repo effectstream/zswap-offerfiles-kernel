@@ -11,6 +11,7 @@ import {
   isDryRun,
   loadRelayClientEnv,
   loadSolverAdmissionEnv,
+  loadSolverFeeSizingTakerInputs,
   loadSolverRelayHttpEnv,
   loadSolverJournalEnv,
   parseSolverRelayHttpUrl,
@@ -28,6 +29,7 @@ import {
   type SolverAdmissionEnv,
 } from "../env.ts";
 import { startAdmissionWarnings, type AdmissionWarningTimers } from "./admission.ts";
+import { SOLVER_NETWORK_IDS } from "./launch.ts";
 import { Book, type BookOffer } from "./book.ts";
 import { loadLadderConfig, type LoadedLadders } from "./config.ts";
 import {
@@ -110,6 +112,8 @@ export interface SolverOptions {
   journalOptions?: SolverOperationJournalOptions;
   journalOpen?: typeof SolverOperationJournal.open;
   admission?: SolverAdmissionEnv;
+  /** 00006 FR-001. Defaults to SOLVER_FEE_SIZING_TAKER_INPUTS (1). */
+  feeSizingTakerInputs?: number;
   admissionWarningTimers?: AdmissionWarningTimers;
   /** Deadline applied to wallet build/sync/first balance and, separately, to
    * the initial authoritative book snapshot plus buffered SSE drain. */
@@ -449,6 +453,22 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   }
   const walletRequired = !dryRun || dryRunWalletMode === "real";
   const admission = opts.admission ?? loadSolverAdmissionEnv();
+  const feeSizingTakerInputs = opts.feeSizingTakerInputs ?? loadSolverFeeSizingTakerInputs();
+  // 00006 FR-001. `net.id` is the SINGLE source the wallet facade
+  // (`solver-core/wallet.ts` → `buildWalletFacade(…, net.id)`) and the fee-sizing
+  // stand-in both read, so they cannot disagree — but an unrecognized value is
+  // still a misconfiguration, and the ledger accepts ANY string as a network id
+  // and only refuses at merge time. Assert it here so every entrypoint fails at
+  // boot with one message instead of refusing each job as
+  // `wallet_build_failed`. `start:solver` checks the same thing earlier and more
+  // loudly; direct `runSolver` callers (solver.dev.ts, e2e harnesses) get it here.
+  if (!(SOLVER_NETWORK_IDS as readonly string[]).includes(net.id)) {
+    throw new Error(
+      `MIDNIGHT_NETWORK_ID resolved to ${JSON.stringify(net.id)}, which is not ` +
+        `one of ${SOLVER_NETWORK_IDS.join(", ")}; the wallet and the fee-sizing ` +
+        "stand-in would be built for a network that does not exist",
+    );
+  }
   const relayEnv = loadRelayClientEnv();
   const relayUrl = opts.relayUrl ?? SOLVER_RELAY_WS_URL;
   const relayHttpUrl = opts.relayHttpUrl === undefined
@@ -781,6 +801,10 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       wallet: ownedWallet.wallet as any,
       journal: operationJournal,
       keys: walletDependencies.shieldedKeys(ownedWallet) as any,
+      // FR-001: the same network id `buildWallet` handed the facade, so the
+      // fee-sizing stand-in can merge with the wallet's own half.
+      networkId: net.id,
+      modelledTakerInputs: feeSizingTakerInputs,
       api,
       relayHttpUrl: relayHttpUrl!,
       maxParallelSwaps,

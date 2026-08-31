@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { admissionPairKey } from "@zswap-da/solver-core/admission-policy";
+import {
+  DEFAULT_MODELLED_TAKER_INPUTS,
+  FEE_SIZING_PLACEHOLDER_AMOUNT,
+  MAX_MODELLED_TAKER_INPUTS,
+  type FeeSizingStandInSpec,
+} from "@zswap-da/solver-core/fee-sizing";
 import type { ExactFilesResponse } from "@zswap-da/solver-core/exact-files-contract";
 import type { OfferValidationVerdict } from "@zswap-da/solver-core/validation-contract";
 import type { Imbalance } from "@zswap-da/solver-core/batcher";
@@ -133,16 +139,33 @@ function harness(options: {
   walletOperationTimeoutMs?: number;
   blockWallet?: boolean;
   blockStatus?: boolean;
-  mirrorRevertFailures?: number;
+  /** Fail the first N `revertTransaction` calls on an UNPROVEN artifact. Before
+   *  00006 the only such artifact on the mandatory path was the fee-sizing
+   *  mirror; the DUST balancing transaction is now the one that can be applied
+   *  and then need rolling back. */
+  unprovenRevertFailures?: number;
   revertFailures?: number;
   supportedPairs?: ReadonlySet<string> | null;
   minJobOutput?: ReadonlyMap<string, bigint> | null;
   dustAdmission?: { maxPerJob: bigint; maxPerWindow: bigint; windowMs: number } | null;
   dustAmount?: bigint | null;
-  /** Both sides matter after FR-003/FR-004: tokenOut funds a residual payout,
-   *  tokenIn funds the mandatory fee-sizing mirror. */
+  /** tokenOut funds a residual payout. tokenIn funds nothing any more (00006
+   *  FR-001 removed the fee-sizing mirror) but is still bounded by the
+   *  publication cap 00006-R2 removes, so tests must still stock it. */
   balances?: Record<string, bigint>;
   journalPath?: string;
+  /** 00006 FR-001 / SC-001. `false` lets `initSwap` accept a tokenIn spend so a
+   *  test can prove the refusal is what makes the difference. The default is
+   *  `true`: EVERY executor test in this file runs against a wallet that cannot
+   *  select tokenIn coins at all, which is the standing control that fee sizing
+   *  is capital-free. */
+  refuseTokenInSelection?: boolean;
+  /** Fail the stand-in builder, to prove a fee-sizing failure needs no cleanup. */
+  standInFailure?: string;
+  /** 00006 FR-001 / Q-R0-1. How many taker zswap inputs fee sizing models. */
+  modelledTakerInputs?: number;
+  /** Overridable so the startup assertion can be driven directly. */
+  networkId?: string;
 } = {}) {
   const book = new Book();
   const sources = options.offers ?? [offer(H1, N1, 10n, 20n)];
@@ -168,15 +191,31 @@ function harness(options: {
   const statusBarrier = options.blockStatus
     ? new Promise<void>((resolve) => { releaseStatus = resolve; })
     : null;
-  let mirrorRevertFailures = options.mirrorRevertFailures ?? 0;
+  let unprovenRevertFailures = options.unprovenRevertFailures ?? 0;
   let revertFailures = options.revertFailures ?? 0;
   let dustWindowBlocks = 0;
+  const refuseTokenInSelection = options.refuseTokenInSelection ?? true;
+  /** Every spec the executor asked the fee-sizing stand-in builder for, and the
+   *  transactions the DUST balancer was handed alongside the merged base. */
+  const standInSpecs: FeeSizingStandInSpec[] = [];
+  const dustBalanceInputs: string[][] = [];
 
   const wallet: SwapJobWallet = {
-    shielded: { getAddress: async () => "solver-address" },
+    shielded: {
+      // `blockWallet` stalls the FIRST wallet call `buildHalf` makes, which is
+      // what the wallet-timeout tests need. Before 00006 that was the fee-sizing
+      // mirror's `initSwap`; FR-001 removed it, and the first wallet call is now
+      // the address read — still before any wallet mutation or journal artifact
+      // row exists, which is the condition those tests were written against.
+      getAddress: async () => {
+        if (walletBarrier) await walletBarrier;
+        return "solver-address";
+      },
+    },
     dust: {
-      balanceTransactions: async () => {
+      balanceTransactions: async (_dustSecretKey, transactions) => {
         calls.push("dust-balance");
+        dustBalanceInputs.push((transactions as FakeTx[]).map((entry) => entry.label));
         return fakeTx("dust-unproven", options.dustAmount === null ? [] : [
           { seg: 0, tag: "dust", raw: "dust", amount: options.dustAmount ?? 1n },
         ]);
@@ -188,8 +227,15 @@ function harness(options: {
     // call arguments rather than hardcoded, so the surplus legs FR-001 adds
     // (zero inputs, one or two outputs) are modelled instead of assumed.
     initSwap: async (inputs, outputs) => {
-      if (walletBarrier) await walletBarrier;
       const shielded = ((inputs as any).shielded ?? {}) as Record<string, bigint>;
+      // 00006 FR-001 / SC-001. A wallet holding no tokenIn cannot select tokenIn
+      // coins, and this double refuses to pretend otherwise. Since the fee-sizing
+      // mirror is gone, nothing on the mandatory path ever asks — the solver's
+      // own balancing leg spends tokenOut or nothing at all.
+      if (refuseTokenInSelection && shielded[A] !== undefined) {
+        calls.push("REFUSED-tokenIn-selection");
+        throw new Error("wallet holds no tokenIn: coin selection refused");
+      }
       const rows: Imbalance[] = [
         ...Object.entries(shielded).map(([token, amount]) => ({
           seg: 0, tag: "shielded" as const, raw: token, amount,
@@ -199,9 +245,8 @@ function harness(options: {
             seg: 0, tag: "shielded" as const, raw: output.type, amount: -output.amount,
           }))),
       ];
-      // Only the fee-sizing mirror ever spends tokenIn; the solver's own
-      // balancing leg spends tokenOut or nothing at all.
-      const label = shielded[A] === undefined ? "residual" : "mirror";
+      // `initSwap` now has exactly one caller: the solver's own balancing leg.
+      const label = "residual";
       legs.push({ label, inputs: { ...shielded }, outputs: rows.filter((row) => row.amount < 0n) });
       calls.push(label);
       return { transaction: fakeTx(label, rows) };
@@ -213,11 +258,15 @@ function harness(options: {
         : fakeTx("dust-final", [{ seg: 0, tag: "dust", raw: "dust", amount: 1n }]) as any;
     },
     revertTransaction: async (transaction: any) => {
-      const mirror = transaction?.label === "mirror";
-      calls.push(mirror ? "mirror-revert" : `revert-unproven:${transaction?.label ?? "unknown"}`);
-      if (mirror && mirrorRevertFailures > 0) {
-        mirrorRevertFailures -= 1;
-        throw new Error("mirror revert failed");
+      calls.push(`revert-unproven:${transaction?.label ?? "unknown"}`);
+      // FR-001: the stand-in is fabricated, so it must never be offered to the
+      // wallet for reverting. Fail loudly if it ever is.
+      if (transaction?.label === "fee-standin") {
+        throw new Error("the fee-sizing stand-in must never be reverted");
+      }
+      if (unprovenRevertFailures > 0) {
+        unprovenRevertFailures -= 1;
+        throw new Error("unproven revert failed");
       }
     },
     revert: async (transaction) => {
@@ -251,6 +300,10 @@ function harness(options: {
     wallet,
     journal,
     keys: { dustSecretKey: "dust-key" },
+    networkId: "networkId" in options ? (options.networkId as string) : "undeployed",
+    ...(options.modelledTakerInputs === undefined
+      ? {}
+      : { modelledTakerInputs: options.modelledTakerInputs }),
     relayHttpUrl: "http://relay.test/api/v1",
     maxParallelSwaps: options.maxParallelSwaps ?? 2,
     expiryMarginSeconds: 120,
@@ -262,6 +315,16 @@ function harness(options: {
     sweepIntervalMs: 60_000,
     nowMs: () => now,
     dependencies: {
+      // FR-001. The real builder is a pure ledger call (covered directly in
+      // `packages/solver-core/fee-sizing.test.ts`); here it is a spy, so every
+      // test in this file also asserts that fee sizing goes through it and never
+      // through the wallet.
+      buildFeeSizingStandIn: ((spec: FeeSizingStandInSpec) => {
+        standInSpecs.push(spec);
+        calls.push("fee-standin");
+        if (options.standInFailure !== undefined) throw new Error(options.standInFailure);
+        return fakeTx("fee-standin") as any;
+      }) as any,
       readExactOfferFiles: async (offerIds) => {
         calls.push("exact-files");
         if (exactBarrier) await exactBarrier;
@@ -327,10 +390,13 @@ function harness(options: {
     executor,
     book,
     stock,
+    wallet,
     calls,
     reverts,
     legs,
     imbalanceReads,
+    standInSpecs,
+    dustBalanceInputs,
     journal,
     setCurrent: (value: boolean) => { current = value; },
     advance: (ms: number) => { now += ms; },
@@ -353,19 +419,34 @@ test("exact-boundary job fetches exact files after arrival, funds DUST, and retu
   expect(result.type).toBe("swap-tx");
   expect(h.calls).toEqual([
     "exact-files",
-    "mirror",
-    "mirror-revert",
+    // 00006 FR-001: where "mirror" + "mirror-revert" used to be. One pure
+    // ledger call, no wallet mutation, nothing to revert.
+    "fee-standin",
     "dust-balance",
     "finalize:dust-unproven",
   ]);
   expect(h.executor.stats()).toMatchObject({ building: 0, awaitingRelay: 1, refused: 0 });
+  // FR-004: the two MIRROR_* rows are GONE from new jobs. The kinds remain
+  // readable for journals written before the upgrade — pinned separately by
+  // "FR-004 a legacy MIRROR_* journal still recovers…" below.
   expect(h.journal.list().map((row) => [row.operationKind, row.lifecycleState])).toEqual([
     ["JOB_SETTLEMENT", "AWAITING_RELAY"],
-    ["MIRROR_RESERVATION", "REVERTED"],
-    ["MIRROR_REVERT", "REVERTED"],
     ["DUST_BALANCE", "AWAITING_RELAY"],
     ["FINALIZED_CONTRIBUTION", "AWAITING_RELAY"],
   ]);
+  // The stand-in is what the DUST balancer prices alongside the merged base,
+  // and it has the taker half's shape: n tokenIn inputs, one tokenIn change
+  // output, one tokenOut receive output, all at the fixed placeholder value.
+  expect(h.dustBalanceInputs).toEqual([[`maker:${H1}`, "fee-standin"]]);
+  expect(h.standInSpecs).toEqual([{
+    networkId: "undeployed",
+    inputs: [{ token: A, amount: FEE_SIZING_PLACEHOLDER_AMOUNT }],
+    outputs: [
+      { token: A, amount: FEE_SIZING_PLACEHOLDER_AMOUNT },
+      { token: B, amount: FEE_SIZING_PLACEHOLDER_AMOUNT },
+    ],
+  }]);
+  expect(DEFAULT_MODELLED_TAKER_INPUTS).toBe(1);
   await h.executor.stop();
 });
 
@@ -521,11 +602,11 @@ test("FR-001 above-advertised, out-of-ladder, and non-positive demands stay refu
 });
 
 // R2/FR-004 amendment: this test used to run with `{A: 0n, B: 0n}`. A is the
-// job's tokenIn, and the mandatory fee-sizing mirror spends the taker's full
-// input out of the solver wallet, so a zero-A solver is now refused for a reason
-// that has nothing to do with surplus (asserted separately below). The property
-// this test exists for — retained surplus needs no tokenOUT inventory — is
-// unchanged and still asserted with `B: 0n`.
+// job's tokenIn, and the retained tokenIn depth bound (00006-R2 removes it)
+// refuses a zero-A solver for a reason that has nothing to do with surplus
+// (asserted separately below). The property this test exists for — retained
+// surplus needs no tokenOUT inventory — is unchanged and still asserted with
+// `B: 0n`.
 test("FR-001 retained surplus needs no tokenOut inventory while a residual payout still gates on Stock", () => {
   // Surplus is inflow-only: a solver with zero tokenOut inventory can still
   // serve every at/below-prefix demand.
@@ -562,12 +643,13 @@ test("FR-001 a lowered demand settles end to end with the surplus retained by th
   const result = await h.executor.onSwap(job("surplus-interior", "15", "25"));
   expect(result.type).toBe("swap-tx");
   expect(h.calls).toEqual([
-    "exact-files", "mirror", "mirror-revert", "residual", "finalize:residual",
+    "exact-files", "fee-standin", "residual", "finalize:residual",
     "dust-balance", "finalize:dust-unproven",
   ]);
-  // The solver's own leg: spends nothing, keeps 5 A (overpaid input) + 5 B.
-  expect(h.legs.map((leg) => leg.label)).toEqual(["mirror", "residual"]);
-  expect(h.legs[1]).toEqual({
+  // The solver's own leg: spends nothing, keeps 5 A (overpaid input) + 5 B. It
+  // is now the ONLY `initSwap` the job makes (FR-001).
+  expect(h.legs.map((leg) => leg.label)).toEqual(["residual"]);
+  expect(h.legs[0]).toEqual({
     label: "residual",
     inputs: {},
     outputs: [
@@ -588,8 +670,6 @@ test("FR-001 a lowered demand settles end to end with the surplus retained by th
   expect(h.executor.stats()).toMatchObject({ completed: 1, quarantined: 0, reverted: 0 });
   expect(h.journal.list().map((row) => [row.operationKind, row.lifecycleState])).toEqual([
     ["JOB_SETTLEMENT", "SETTLED"],
-    ["MIRROR_RESERVATION", "REVERTED"],
-    ["MIRROR_REVERT", "REVERTED"],
     ["RESIDUAL_BUILD", "SETTLED"],
     ["FINALIZED_CONTRIBUTION", "SETTLED"],
     ["DUST_BALANCE", "SETTLED"],
@@ -607,7 +687,7 @@ test("FR-001 a lowered exact rung and the minimum positive demand both settle", 
   // Case 3 — no residual input at all: the leg's only output is the surplus.
   const rung = harness({ offers: LADDER(), status: "consumed" });
   expect((await rung.executor.onSwap(job("surplus-rung", "20", "45"))).type).toBe("swap-tx");
-  expect(rung.legs[1]).toEqual({
+  expect(rung.legs[0]).toEqual({
     label: "residual",
     inputs: {},
     outputs: [{ seg: 0, tag: "shielded", raw: B, amount: -5n }],
@@ -624,7 +704,7 @@ test("FR-001 a lowered exact rung and the minimum positive demand both settle", 
   // Case 4 — one unit of output against the first rung.
   const minimum = harness({ offers: LADDER(), status: "consumed" });
   expect((await minimum.executor.onSwap(job("surplus-minimum", "10", "1"))).type).toBe("swap-tx");
-  expect(minimum.legs[1]).toEqual({
+  expect(minimum.legs[0]).toEqual({
     label: "residual",
     inputs: {},
     outputs: [{ seg: 0, tag: "shielded", raw: B, amount: -29n }],
@@ -642,7 +722,7 @@ test("FR-001 the residual payout path is unchanged end to end for a lowered inte
   // difference out of Stock exactly as before.
   const h = harness({ offers: LADDER(), status: "consumed" });
   expect((await h.executor.onSwap(job("residual-lowered", "15", "35"))).type).toBe("swap-tx");
-  expect(h.legs[1]).toEqual({
+  expect(h.legs[0]).toEqual({
     label: "residual",
     inputs: { [B]: 5n },
     outputs: [{ seg: 0, tag: "shielded", raw: A, amount: -5n }],
@@ -1072,6 +1152,21 @@ test("wallet timeout retains the slot until the late generation is durably termi
   await h.executor.stop();
 });
 
+// 00006 FR-001 BEHAVIOUR CHANGE, recorded here rather than deleted.
+//
+// Before this test ended with the generation durably TERMINAL and `quarantined:
+// 0`, and it got there for a reason that no longer exists: the blocked call was
+// the fee-sizing mirror's `initSwap`, so after release the late work failed on
+// its own quarantined `MIRROR_RESERVATION` row, reverted the mirror it was
+// holding, left nothing non-terminal behind, and the claim could be released.
+//
+// With the mirror gone the late work RUNS TO COMPLETION (it has no fee-sizing
+// mutation left to trip over), so what is exercised now is the harder case: a
+// late build that produced a real finalized contribution whose rollback then
+// FAILS. The invariant this test exists for is unchanged and still asserted —
+// the late completion cannot advance beyond its quarantined generation: exactly
+// one generation ever exists, no relay half is ever handed out, and the outcome
+// is fail-closed (claim and offer retained) rather than silently released.
 test("a timed-out wallet call cannot advance beyond its quarantined generation", async () => {
   const h = harness({
     blockWallet: true,
@@ -1079,13 +1174,24 @@ test("a timed-out wallet call cannot advance beyond its quarantined generation",
     failImbalance: true,
     revertFailures: 1,
   });
-  expect((await h.executor.onSwap(job("late-cleanup"))).type).toBe("job-error");
+  expect(await h.executor.onSwap(job("late-cleanup"))).toEqual({
+    type: "job-error", jobId: "late-cleanup", reason: JOB_WALLET_TIMEOUT,
+  });
   h.releaseWallet();
   await h.executor.idle();
-  expect(h.executor.stats()).toMatchObject({ building: 0, awaitingRelay: 0, quarantined: 0 });
-  const generations = new Set(h.journal.list().map((row) => row.generation));
-  expect([...generations]).toEqual([1]);
-  expect(h.journal.list().every((row) => ["REVERTED", "FAILED"].includes(row.lifecycleState))).toBe(true);
+  // One generation, never a second: the late work stayed inside generation 1.
+  expect([...new Set(h.journal.list().map((row) => row.generation))]).toEqual([1]);
+  expect(h.executor.stats()).toMatchObject({
+    building: 0, awaitingRelay: 0, completed: 0, quarantined: 1, timedOutBuilds: 1,
+  });
+  // Fail-closed: the uncertain finalized contribution keeps the claim and the
+  // offer, and no sweep retries the wallet call.
+  expect(h.stock.isClaimed({ offerHashes: [H1], nullifiers: [N1] })).toBe(true);
+  expect(h.executor.unavailableOfferHashes()).toEqual([H1]);
+  h.advance(60_001);
+  await h.executor.sweep();
+  expect(h.executor.stats()).toMatchObject({ quarantined: 1, completed: 0 });
+  expect([...new Set(h.journal.list().map((row) => row.generation))]).toEqual([1]);
   await h.executor.stop();
 });
 
@@ -1108,13 +1214,33 @@ test("failed immediate rollback is outcome-ambiguous and is never retried", asyn
   await h.executor.stop();
 });
 
-test("unfinalized mirror revert ambiguity remains fail-closed across sweeps", async () => {
-  const h = harness({ mirrorRevertFailures: 2, maxParallelSwaps: 1 });
-  expect(await h.executor.onSwap(job("mirror-uncertain"))).toEqual({
+// 00006 FR-001 RE-ENCODED, not deleted.
+//
+// This test used to drive the fee-sizing MIRROR's revert (`mirrorRevertFailures`)
+// because that mirror was the first unproven wallet artifact on every job's
+// mandatory path. The mirror is gone, but the property it pinned is about the
+// UNPROVEN-artifact class, not about fee sizing: when the wallet cannot
+// acknowledge release of an unproven mutation it already applied, the job stays
+// quarantined, the claim and the slot stay held, and no sweep ever retries the
+// wallet call. The DUST balancing transaction is now the artifact in that class
+// (it is applied, then rolled back if admission refuses the estimate), so the
+// same property is pinned through it.
+test("unfinalized unproven revert ambiguity remains fail-closed across sweeps", async () => {
+  const h = harness({
+    // A DUST estimate above the per-job limit refuses AFTER the balancer's
+    // unproven transaction has been applied and journalled — exactly the window
+    // the mirror used to occupy.
+    dustAmount: 3n,
+    dustAdmission: { maxPerJob: 2n, maxPerWindow: 10n, windowMs: 60_000 },
+    unprovenRevertFailures: 2,
+    maxParallelSwaps: 1,
+  });
+  expect(await h.executor.onSwap(job("unproven-uncertain"))).toEqual({
     type: "job-error",
-    jobId: "mirror-uncertain",
+    jobId: "unproven-uncertain",
     reason: JOB_WALLET_FAILED,
   });
+  expect(h.calls).toContain("revert-unproven:dust-unproven");
   expect(h.executor.stats().quarantined).toBe(1);
   expect(await h.executor.onSwap(job("blocked-by-quarantine"))).toEqual({
     type: "job-error",
@@ -1127,19 +1253,175 @@ test("unfinalized mirror revert ambiguity remains fail-closed across sweeps", as
   await h.executor.stop();
 });
 
-// ── FR-003 / FR-004: solvency is decided before any wallet mutation ─────────
-//
-// P4-F04: `buildHalf` opens with a MANDATORY fee-sizing mirror that calls
-// `initSwap({shielded: {[tokenIn]: amountIn}}, …)` — it selects real coins for
-// the taker's FULL input out of the solver's own wallet and reverts them
-// immediately. Nothing at publication or admission proved the wallet could
-// spend that much, so an unfundable job failed HALF-WAY THROUGH a wallet
-// mutation; if the revert of that mutation was itself uncertain the job went to
-// `WalletMutationUncertain` quarantine, stranding the claim and a capacity slot.
-// R1 made this strictly more load-bearing: every lowered-demand job builds the
-// mirror too.
+// 00006 FR-001. The old mirror made fee sizing a WALLET MUTATION: an `initSwap`
+// that had to be reverted, with its own journal rows and its own cleanup arm in
+// `buildHalf`'s catch. A fabricated stand-in cannot fail that way, and this
+// pins the difference: when the stand-in builder itself throws, the job is a
+// clean refusal with zero wallet calls, zero journal rows and nothing
+// quarantined.
+test("FR-001 a failing fee-sizing stand-in refuses cleanly with no wallet mutation to undo", async () => {
+  const h = harness({ standInFailure: "ledger refused the stand-in shape" });
+  expect(await h.executor.onSwap(job("standin-broken"))).toEqual({
+    type: "job-error",
+    jobId: "standin-broken",
+    reason: JOB_WALLET_FAILED,
+  });
+  expect(h.calls).toEqual(["exact-files", "fee-standin"]);
+  expect(h.legs).toEqual([]);
+  expect(h.reverts).toEqual([]);
+  expect(h.executor.stats()).toMatchObject({
+    quarantined: 0, revertFailures: 0, awaitingRelay: 0, refused: 1,
+  });
+  // Nothing durable survives: no wallet-artifact row at all, and the claim and
+  // the offer are both released.
+  expect(h.journal.list().filter((row) => row.operationKind !== "JOB_SETTLEMENT")).toEqual([]);
+  expect(h.stock.isClaimed({ offerHashes: [H1], nullifiers: [N1] })).toBe(false);
+  expect(h.executor.unavailableOfferHashes()).toEqual([]);
+  await h.executor.stop();
+});
 
-test("FR-004 an unfundable fee-sizing mirror is refused before any wallet call", async () => {
+// 00006 SC-001. The headline requirement, stated as one test: a wallet that
+// cannot select tokenIn coins AT ALL still settles a whole job end to end.
+// `refuseTokenInSelection` is on by default for every harness in this file, so
+// this test's job is to make the claim explicit and to prove the refusal is
+// real — the same wallet, asked to spend tokenIn, throws.
+test("SC-001 a wallet that refuses all tokenIn coin selection still settles a whole job", async () => {
+  const h = harness({ status: "consumed" });
+  expect((await h.executor.onSwap(job("capital-free", "10", "20"))).type).toBe("swap-tx");
+  // Fee sizing went through the pure ledger builder and never through the wallet.
+  expect(h.standInSpecs).toHaveLength(1);
+  expect(h.legs).toEqual([]);
+  expect(h.calls).not.toContain("REFUSED-tokenIn-selection");
+  expect(h.calls).toEqual([
+    "exact-files", "fee-standin", "dust-balance", "finalize:dust-unproven",
+  ]);
+  // …and it settles: the relay half is the exact inverse job, the maker offer is
+  // consumed, and no tokenIn was ever reserved.
+  expect(netImbalance(h.imbalanceReads.at(-1)!.rows)).toEqual([[A, -10n], [B, 20n]]);
+  await h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "capital-free", txId: RELAY_TX });
+  expect(h.executor.stats()).toMatchObject({ completed: 1, quarantined: 0, reverted: 0 });
+  expect(h.stock.reserved(A)).toBe(0n);
+  await h.executor.stop();
+
+  // The control: the refusal is not inert. No reachable job asks this wallet to
+  // spend tokenIn any more, so the double is driven directly — if it silently
+  // accepted a tokenIn spend, the assertion above would prove nothing.
+  const control = harness();
+  await expect(control.wallet.initSwap(
+    { shielded: { [A]: 10n } },
+    [{ type: "shielded", outputs: [] }],
+    { dustSecretKey: "dust-key" },
+    { ttl: new Date(Date.now() + 60_000), payFees: false },
+  )).rejects.toThrow(/wallet holds no tokenIn/);
+  await control.executor.stop();
+});
+
+// 00006 FR-004. New jobs no longer write `MIRROR_RESERVATION`/`MIRROR_REVERT`
+// rows, but a journal written BEFORE this change can still hold non-terminal
+// ones — and those rows describe REAL reserved coins, so recovery must still
+// revert them. This drives startup reconciliation over a journal that only has
+// a legacy mirror row, and asserts the wallet is asked to revert exactly it.
+test("FR-004 a legacy MIRROR_* journal row still recovers after the mirror is gone", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cow-00006-legacy-mirror-"));
+  const path = join(directory, "operations.sqlite");
+  try {
+    // Write the legacy shape by hand: a settlement whose only wallet artifact is
+    // an APPLIED MIRROR_RESERVATION, exactly as a pre-00006 crash between
+    // `initSwap` and `revertTransaction` would have left it. The operation-key
+    // grammar is the executor's own (`job:<id>:g<n>:<KIND>:<label>`).
+    const seed = SolverOperationJournal.open({ path });
+    const legacyRow = (kind: "JOB_SETTLEMENT" | "MIRROR_RESERVATION", label: string) => {
+      const key = kind === "JOB_SETTLEMENT"
+        ? "job:legacy-mirror:g1:settlement"
+        : `job:legacy-mirror:g1:${kind}:${label}`;
+      seed.createPrepared({
+        operationKey: key,
+        jobId: "legacy-mirror",
+        generation: 1,
+        offerHashes: [H1],
+        claim: { inputs: [N1], payouts: {} },
+        operationKind: kind,
+        ttlExpiresAtMs: Date.now() + 3_600_000,
+        deadlineAtMs: Date.now() + 1_800_000,
+        ...(kind === "MIRROR_RESERVATION"
+          ? {
+            walletArtifactKind: "UNPROVEN_TRANSACTION" as const,
+            walletArtifactBytes: new TextEncoder().encode("legacy-mirror-bytes"),
+          }
+          : {}),
+      });
+      seed.transition(key, "PREPARED", "APPLIED");
+      return key;
+    };
+    legacyRow("JOB_SETTLEMENT", "settlement");
+    const mirrorKey = legacyRow("MIRROR_RESERVATION", "fee-sizing");
+    seed.close();
+
+    const reopened = harness({ journalPath: path, relayStatus: "error", status: "live" });
+    await reopened.executor.ready;
+    // The legacy mirror bytes — and only those — were handed back to the wallet.
+    expect(reopened.calls.filter((entry) => entry.startsWith("revert-unproven:")))
+      .toEqual(["revert-unproven:legacy-mirror-bytes"]);
+    expect(reopened.journal.require(mirrorKey).lifecycleState).toBe("REVERTED");
+    expect(reopened.stock.isClaimed({ offerHashes: [H1], nullifiers: [N1] })).toBe(false);
+    expect(reopened.executor.stats()).toMatchObject({ quarantined: 0, revertFailures: 0 });
+    await reopened.executor.stop();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// 00006 FR-001 / Q-R0-1 (option A). The modelled taker-input count is the one
+// genuinely unknowable number in the fee model, so it is an explicit, bounded,
+// operator-visible parameter rather than a buried constant.
+test("FR-001 modelledTakerInputs shapes the stand-in and is bounded at startup", async () => {
+  const h = harness({ modelledTakerInputs: 3 });
+  expect((await h.executor.onSwap(job("modelled-3"))).type).toBe("swap-tx");
+  expect(h.standInSpecs[0]!.inputs).toEqual([
+    { token: A, amount: FEE_SIZING_PLACEHOLDER_AMOUNT },
+    { token: A, amount: FEE_SIZING_PLACEHOLDER_AMOUNT },
+    { token: A, amount: FEE_SIZING_PLACEHOLDER_AMOUNT },
+  ]);
+  // The shape's outputs never scale with `n`: one change, one receive.
+  expect(h.standInSpecs[0]!.outputs).toHaveLength(2);
+  await h.executor.stop();
+
+  for (const invalid of [0, -1, 1.5, Number.NaN, MAX_MODELLED_TAKER_INPUTS + 1]) {
+    expect(() => harness({ modelledTakerInputs: invalid })).toThrow(/modelledTakerInputs/);
+  }
+});
+
+// 00006 FR-001. The stand-in is a real ledger transaction and therefore carries
+// a network id, which the ledger only validates when the DUST balancer merges it
+// with the solver's own half. A mis-threaded id must be a boot error, not a
+// per-job `wallet_build_failed`.
+test("FR-001 a missing or malformed networkId is refused at startup", () => {
+  for (const invalid of ["", " undeployed", "undeployed ", "under\0deployed", undefined]) {
+    expect(() => harness({ networkId: invalid as any })).toThrow(/networkId/);
+  }
+  expect(() => harness({ networkId: "undeployed" }).executor.stop()).not.toThrow();
+});
+
+// ── FR-003 / FR-004: the tokenIn depth bound (00006-R2 removes it) ──────────
+//
+// P4-F04's ORIGINAL reason: `buildHalf` opened with a MANDATORY fee-sizing
+// mirror that called `initSwap({shielded: {[tokenIn]: amountIn}}, …)`, selecting
+// real coins for the taker's FULL input out of the solver's own wallet and
+// reverting them immediately. Nothing at publication or admission proved the
+// wallet could spend that much, so an unfundable job failed HALF-WAY THROUGH a
+// wallet mutation, and an uncertain revert sent it to `WalletMutationUncertain`
+// quarantine, stranding the claim and a capacity slot.
+//
+// 00006-R1 REMOVED THAT MIRROR (FR-001): fee sizing spends no tokenIn at all,
+// so this bound no longer protects a wallet mutation and the solver no longer
+// needs tokenIn inventory to quote. The mechanism is nevertheless retained
+// UNCHANGED at this head so R1 is a pure fee-sizing change, and these tests are
+// retained with it — removing bound and tests together is 00006-R2's scope
+// (FR-003 / SC-002). Until then they pin a conservative depth check, not a
+// solvency fact, and the test names below say "mirror" for continuity with the
+// rows they still assert.
+
+test("FR-004 an unfundable tokenIn bound is refused before any wallet call", async () => {
   // Route level first: the check is inside `resolveSwapJobRoute`, so it is
   // reached before a journal row or a reservation exists.
   expect(refusalReason(() => routeFor("15", "25", { balances: { [A]: 14n, [B]: 1_000n } })))
@@ -1170,13 +1452,14 @@ test("FR-004 an unfundable fee-sizing mirror is refused before any wallet call",
   const fundedRun = harness({ offers: LADDER(), balances: { [A]: 15n, [B]: 1_000n } });
   expect((await fundedRun.executor.onSwap(job("mirror-fundable", "15", "25"))).type)
     .toBe("swap-tx");
-  expect(fundedRun.legs.map((leg) => leg.label)).toEqual(["mirror", "residual"]);
+  expect(fundedRun.legs.map((leg) => leg.label)).toEqual(["residual"]);
   await fundedRun.executor.stop();
 });
 
-test("FR-004 the mirror budget is AVAILABLE tokenIn, so another job's payout reduces it", () => {
+test("FR-004 the tokenIn budget is AVAILABLE tokenIn, so another job's payout reduces it", () => {
   // A reservation is a promise to pay that has not settled yet, so the coins
-  // behind it cannot also fund a mirror. Balance alone would double-count them.
+  // behind it cannot also count toward this bound. Balance alone would
+  // double-count them.
   const book = new Book();
   for (const source of LADDER()) book.upsert(source);
   const stock = new Stock();

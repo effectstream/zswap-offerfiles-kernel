@@ -124,15 +124,25 @@ run_negative_gate solver-missing-journal-path \
   "SOLVER_JOURNAL_PATH is required" \
   "${SOLVER_RUN[@]}" -e SOLVER_JOURNAL_PATH= solver run start.solver.ts
 
-# G3c — nothing at all is configured. Proves the aggregation property: ONE run
-# reports all seven mandatory boundaries, so an operator does not fix and
+# G3c — nothing MANDATORY is configured. Proves the aggregation property: ONE
+# run reports all seven mandatory boundaries, so an operator does not fix and
 # restart seven times.
+#
+# `SOLVER_FEE_SIZING_TAKER_INPUTS=1` is pinned here deliberately. This gate
+# bypasses the entrypoint (that is its whole point), so it does NOT get the
+# empty-optional unset pass that `entrypoint-common.sh` performs — and since
+# 00006-V1 `compose.yml` forwards that knob, whose parser treats "" as
+# MALFORMED rather than as unset. Leaving it blank would add an eighth problem
+# and turn a gate about the seven mandatory boundaries into a gate about how
+# this machine's `.env` happens to be filled in. G3f below covers the blank case
+# properly, with the entrypoint in the loop where it belongs.
 run_negative_gate solver-missing-everything \
   "solver launch configuration is invalid \(7 problems\)" \
   "${SOLVER_RUN[@]}" \
     -e MIDNIGHT_NETWORK_ID= -e ZSWAP_API= -e SOLVER_RELAY_WS_URL= \
     -e SOLVER_RELAY_HTTP_URL= -e SOLVER_RELAY_AUTH_TOKEN= \
     -e SOLVER_JOURNAL_PATH= -e SOLVER_SEED= \
+    -e SOLVER_FEE_SIZING_TAKER_INPUTS=1 \
     solver run start.solver.ts
 
 # G3d — a short bearer is refused. Both sides of the wire enforce 32 chars; the
@@ -145,6 +155,35 @@ run_negative_gate solver-short-auth-token \
 run_negative_gate solver-relative-journal-path \
   "SOLVER_JOURNAL_PATH must be an absolute mounted-volume path" \
   "${SOLVER_RUN[@]}" -e SOLVER_JOURNAL_PATH=operations.sqlite solver run start.solver.ts
+
+# G3f — the empty-optional unset list actually covers the strict knobs (00006).
+#
+# Compose cannot express "leave this variable out": `FOO: ${FOO:-}` renders as
+# FOO="". Most of this codebase's optional knobs read "" as a value, which is
+# why `entrypoint-common.sh` unsets them — but four of them are STRICTER still,
+# because their parsers reject "" outright:
+# SOLVER_FEE_SIZING_TAKER_INPUTS (a bounded integer) and the
+# SOLVER_DUST_MAX_PER_JOB / _PER_WINDOW / SOLVER_DUST_WINDOW_MS group (positive
+# bigints, all-or-nothing). For those, a missing entry in the unset list is not
+# a soft mis-default: it is a hard startup failure on a stack whose `.env` left
+# them blank.
+#
+# So this gate keeps the entrypoint IN the loop (the only gate that does) and
+# asserts the count: with all four blank AND the seven mandatory boundaries
+# blank, the launch report must still be exactly the seven mandatory problems.
+# An eighth means the unset list and `compose.yml` have drifted apart.
+run_negative_gate solver-blank-strict-optionals \
+  "solver launch configuration is invalid \(7 problems\)" \
+  docker compose run --rm --no-deps --entrypoint bash \
+    -e MIDNIGHT_NETWORK_ID= -e ZSWAP_API= -e SOLVER_RELAY_WS_URL= \
+    -e SOLVER_RELAY_HTTP_URL= -e SOLVER_RELAY_AUTH_TOKEN= \
+    -e SOLVER_JOURNAL_PATH= -e SOLVER_SEED= \
+    -e SOLVER_FEE_SIZING_TAKER_INPUTS= \
+    -e SOLVER_DUST_MAX_PER_JOB= -e SOLVER_DUST_MAX_PER_WINDOW= \
+    -e SOLVER_DUST_WINDOW_MS= \
+    -e SOLVER_SUPPORTED_PAIRS= -e SOLVER_MIN_JOB_OUTPUT= \
+    -e SOLVER_LADDER_CONFIG= \
+    solver -c '. /usr/local/bin/entrypoint-common.sh; cd "${REPO_ROOT}"; exec bun run start.solver.ts'
 
 # ── G4: the disabled solver is a clean exit 0, not a crash ──────────────────
 run_gate solver-disabled-exits-zero \

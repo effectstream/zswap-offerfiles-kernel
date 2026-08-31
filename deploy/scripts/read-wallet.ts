@@ -16,6 +16,15 @@
 //   READ_SEED         the seed to open (REQUIRED)
 //   EXPECT_SHIELDED   optional JSON {color: amount}; every listed color must
 //                     match EXACTLY or the script exits 1
+//   EXPECT_SHIELDED_ONLY
+//                     optional "true": in addition, NO unlisted color may hold
+//                     a non-zero balance. This is what turns the gate from
+//                     "the expected deltas landed" into "and the wallet holds
+//                     nothing else" — the decisive on-chain evidence for
+//                     00006 SC-004 that the solver was never provisioned any
+//                     token. A solver minted the usual 1e9 of each would fail
+//                     it by nine orders of magnitude, whatever any receipt or
+//                     configuration file claimed.
 //   OUT_FILE          optional path to write the JSON report to
 //
 // Exit 0 = read (and every expectation held).
@@ -66,6 +75,24 @@ try {
       const ok = actual === String(want);
       checks.push({ color, expected: String(want), actual, ok });
       log(`${ok ? "PASS" : "FAIL"} shielded[${color.slice(0, 12)}…] expected ${want}, got ${actual}`);
+      if (!ok) exitCode = 1;
+    }
+    if (process.env["EXPECT_SHIELDED_ONLY"] === "true") {
+      const listed = new Set(Object.keys(expected));
+      const unexpected = Object.entries(shielded).filter(
+        ([color, amount]) => !listed.has(color) && amount !== 0n,
+      );
+      const ok = unexpected.length === 0;
+      checks.push({
+        color: "(no unlisted color)",
+        expected: "none",
+        actual: unexpected.map(([c, v]) => `${c.slice(0, 12)}…=${v}`).join(",") || "none",
+        ok,
+      });
+      log(
+        `${ok ? "PASS" : "FAIL"} the wallet holds NOTHING beyond the listed colors` +
+          (ok ? "" : `: ${unexpected.map(([c, v]) => `${c}=${v}`).join(", ")}`),
+      );
       if (!ok) exitCode = 1;
     }
   }

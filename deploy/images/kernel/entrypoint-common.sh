@@ -31,13 +31,29 @@ set -euo pipefail
 # contract: the solver's seven mandatory variables are deliberately absent, so
 # an empty one still reaches `start.solver.ts` and is reported as missing —
 # which is the deployment's fail-fast negative control and must not be softened.
+# The four names added by 00006-V1 are the STRICTER kind of optional: their
+# parsers reject "" outright rather than treating it as unset, so leaving one
+# blank in .env would be a startup failure rather than a silent default.
+#   * SOLVER_FEE_SIZING_TAKER_INPUTS  — `parseBoundedIntegerEnv` reads "" as a
+#     parse failure (measured, not assumed), so it is a LISTED start:solver
+#     launch problem. It must be unset here for the blank-means-default rule
+#     above to hold for it too.
+#   * SOLVER_DUST_MAX_PER_JOB / _PER_WINDOW / SOLVER_DUST_WINDOW_MS — read as a
+#     GROUP: `packages/solver/env.ts` requires all three set or all three unset,
+#     and `parsePositiveBigint` rejects "". Three empty strings therefore count
+#     as "all set" and fail. Unsetting them here is what makes DUST admission
+#     genuinely optional in the deployment.
 for _optional_env in \
   CELESTIA_NAMESPACE \
   CELESTIA_AUTH_TOKEN \
   API_RATE_LIMIT_ALLOWLIST \
   SOLVER_LADDER_CONFIG \
   SOLVER_SUPPORTED_PAIRS \
-  SOLVER_MIN_JOB_OUTPUT
+  SOLVER_MIN_JOB_OUTPUT \
+  SOLVER_FEE_SIZING_TAKER_INPUTS \
+  SOLVER_DUST_MAX_PER_JOB \
+  SOLVER_DUST_MAX_PER_WINDOW \
+  SOLVER_DUST_WINDOW_MS
 do
   if [ -z "${!_optional_env:-}" ]; then unset "${_optional_env}"; fi
 done

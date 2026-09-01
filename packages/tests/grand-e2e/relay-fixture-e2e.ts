@@ -39,7 +39,8 @@
  * writes anything in the repository it was pointed at.
  */
 
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -116,7 +117,10 @@ export interface CleanupEvidence {
   images: string[];
 }
 
-const children = new Set<ChildProcessWithoutNullStreams>();
+// `spawn` with stdio `["ignore", "pipe", "pipe"]` returns a child whose
+// stdin is null, which is precisely what these commands want — track the
+// shape actually produced instead of the without-null-streams one.
+const children = new Set<ChildProcessByStdio<null, Readable, Readable>>();
 const emergencyCleanups = new Map<string, () => Promise<CleanupEvidence>>();
 let handlingSignal = false;
 

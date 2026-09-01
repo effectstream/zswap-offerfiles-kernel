@@ -194,3 +194,49 @@ test("reserved never exceeds balance and available+reserved is conserved, over r
     expect(stock.available(A) + stock.reserved(A)).toBe(BALANCE);
   }
 });
+
+// FR-003/FR-004: the snapshot publication is allowed to advertise as executable.
+// Derivation must stay reproducible from its inputs, so the push loop takes one
+// of these per push rather than reading Stock live.
+
+test("spendable() snapshots available per token, and omits what cannot be moved", () => {
+  const stock = new Stock();
+  stock.setBalances({ [A]: 1000n, [B]: 50n });
+  expect([...stock.spendable()].sort()).toEqual([[A, 1000n], [B, 50n]]);
+
+  // A reservation is a promise to pay that has not settled: those coins are not
+  // spendable, for a residual payout or for a fee-sizing mirror.
+  stock.reserve(claim(["h1"], ["n1"], [[B, 50n]]));
+  expect([...stock.spendable()]).toEqual([[A, 1000n]]);
+  // Zero is omitted rather than published as 0n — the derivation treats an
+  // absent token as zero, so the two are equivalent and one shape is enough.
+  expect(stock.spendable().get(B)).toBeUndefined();
+  expect(stock.available(B)).toBe(0n);
+});
+
+test("spendable() is a detached copy, so a push cannot observe a later mutation", () => {
+  const stock = new Stock();
+  stock.setBalances({ [A]: 1000n });
+  const snapshot = stock.spendable();
+  stock.reserve(claim(["h1"], ["n1"], [[A, 900n]]));
+  expect(snapshot.get(A)).toBe(1000n);
+  expect(stock.spendable().get(A)).toBe(100n);
+  // Mutating the snapshot cannot corrupt Stock's own accounting either.
+  snapshot.set(A, 0n);
+  expect(stock.available(A)).toBe(100n);
+});
+
+test("an emptied balance view withdraws every budget, which is what a failed refresh does", () => {
+  // `createInventoryRefreshController` empties Stock for the whole read/failure
+  // window. After FR-003/FR-004 that also withdraws budget-bounded rungs from
+  // the next push, and this is the number it withdraws them with.
+  const stock = new Stock();
+  stock.setBalances({ [A]: 1000n, [B]: 1000n });
+  stock.reserve(claim(["h1"], ["n1"], [[A, 10n]]));
+  stock.setBalances({});
+  expect([...stock.spendable()]).toEqual([]);
+  // The reservation survives the refresh, as it must — it covers an unsettled
+  // payout — and simply has no balance behind it.
+  expect(stock.reserved(A)).toBe(10n);
+  expect(stock.available(A)).toBe(0n);
+});

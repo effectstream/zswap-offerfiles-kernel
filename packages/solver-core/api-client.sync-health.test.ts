@@ -75,7 +75,7 @@ test("sync health uses the versioned backend route and projects the exact truste
     requestedUrl = String(input);
     requestedAccept = new Headers(init?.headers).get("accept") ?? "";
     return new Response(JSON.stringify(healthyResponse()));
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const result = await getBackendSyncHealth({ api: "http://backend", timeoutMs: 100 });
 
@@ -135,7 +135,7 @@ test("syncing and error remain explicit fail-closed domain states", async () => 
     },
   ];
   let index = 0;
-  installFetch(mock(async () => new Response(JSON.stringify(responses[index++]))) as typeof fetch);
+  installFetch(mock(async () => new Response(JSON.stringify(responses[index++]))) as unknown as typeof fetch);
 
   expect(reportsBackendProjectionCurrent(await getBackendSyncHealth("http://backend"))).toBe(false);
   expect(reportsBackendProjectionCurrent(await getBackendSyncHealth("http://backend"))).toBe(false);
@@ -144,7 +144,7 @@ test("syncing and error remain explicit fail-closed domain states", async () => 
 test("sync health accepts the maximum canonical u64 L2 generation", async () => {
   const body = healthyResponse();
   body.blockL2.height = "18446744073709551615";
-  installFetch(mock(async () => new Response(JSON.stringify(body))) as typeof fetch);
+  installFetch(mock(async () => new Response(JSON.stringify(body))) as unknown as typeof fetch);
 
   const health = await getBackendSyncHealth({ api: "http://backend", timeoutMs: 100 });
   expect(health.blockL2?.height).toBe("18446744073709551615");
@@ -183,7 +183,7 @@ for (const [name, mutate, expectedField] of [
   test(`sync health rejects ${name}`, async () => {
     const body = healthyResponse();
     mutate(body);
-    installFetch(mock(async () => new Response(JSON.stringify(body))) as typeof fetch);
+    installFetch(mock(async () => new Response(JSON.stringify(body))) as unknown as typeof fetch);
 
     const error = await failure(getBackendSyncHealth({ api: "http://backend", timeoutMs: 100 }));
     expect(error.kind).toBe("malformed");
@@ -192,7 +192,7 @@ for (const [name, mutate, expectedField] of [
 }
 
 test("sync health rejects malformed JSON within the body bound", async () => {
-  installFetch(mock(async () => new Response("{not-json")) as typeof fetch);
+  installFetch(mock(async () => new Response("{not-json")) as unknown as typeof fetch);
 
   const error = await failure(getBackendSyncHealth({ api: "http://backend", timeoutMs: 100 }));
   expect(error.kind).toBe("malformed");
@@ -211,7 +211,9 @@ test("sync health rejects an oversized declared body before reading it", async (
       bodyRead = true;
       throw new Error("oversized body must not be consumed");
     },
-  }) as Response) as typeof fetch);
+    // A deliberately partial Response: the point of the case is that the
+    // reader must refuse on content-length before touching `body`.
+  }) as unknown as Response) as unknown as typeof fetch);
 
   const error = await failure(getBackendSyncHealth({ api: "http://backend", timeoutMs: 100 }));
   expect(error.kind).toBe("malformed");
@@ -232,7 +234,7 @@ test("sync health cancels a streamed body once its decoded bytes exceed the boun
       cancelled = true;
     },
   });
-  installFetch(mock(async () => new Response(stream)) as typeof fetch);
+  installFetch(mock(async () => new Response(stream)) as unknown as typeof fetch);
 
   const error = await failure(getBackendSyncHealth({ api: "http://backend", timeoutMs: 100 }));
   expect(error.kind).toBe("malformed");
@@ -242,7 +244,7 @@ test("sync health cancels a streamed body once its decoded bytes exceed the boun
 
 for (const status of [429, 500]) {
   test(`sync health HTTP ${status} is unavailable, never current`, async () => {
-    installFetch(mock(async () => new Response("{}", { status })) as typeof fetch);
+    installFetch(mock(async () => new Response("{}", { status })) as unknown as typeof fetch);
 
     const error = await failure(getBackendSyncHealth({ api: "http://backend", timeoutMs: 100 }));
     expect(error.kind).toBe("http");
@@ -255,7 +257,7 @@ test("sync health's absolute deadline includes a stalled response body", async (
   installFetch(mock(async (_input: RequestInfo | URL, init?: RequestInit) => {
     requestSignal = init?.signal ?? undefined;
     return new Response(new ReadableStream<Uint8Array>({}));
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const started = Date.now();
   const error = await failure(getBackendSyncHealth({ api: "http://backend", timeoutMs: 20 }));
@@ -269,7 +271,7 @@ test("sync health's absolute deadline settles a fetch that ignores cancellation"
   installFetch(mock(async (_input: RequestInfo | URL, init?: RequestInit) => {
     requestSignal = init?.signal ?? undefined;
     return await new Promise<Response>(() => {});
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const started = Date.now();
   const error = await failure(getBackendSyncHealth({ api: "http://backend", timeoutMs: 20 }));
@@ -283,7 +285,7 @@ test("sync health composes owner cancellation with its deadline", async () => {
   installFetch(mock(async (_input: RequestInfo | URL, init?: RequestInit) => {
     requestSignal = init?.signal ?? undefined;
     return await new Promise<Response>(() => {});
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
   const owner = new AbortController();
   const pending = getBackendSyncHealth({
     api: "http://backend",
@@ -313,7 +315,7 @@ test("a complete offer page and backend currentness are independent boundaries",
       return new Response(JSON.stringify(behind));
     }
     return new Response("not found", { status: 404 });
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const page = await getZswapsPage({ api: "http://backend", timeoutMs: 100 });
   const health = await getBackendSyncHealth({ api: "http://backend", timeoutMs: 100 });

@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
+import { admissionPairKey } from "./admission-policy.ts";
 import {
   buildPriceLevelsFrame,
   buildSolverCapabilitiesFrame,
   deriveLadder,
   withdrawalPriceLevelsFrame,
+  worstCaseIntervalResidual,
+  type LadderExclusionReason,
   type LadderSourceOffer,
 } from "./ladder-derivation.ts";
 import { rejectLevels } from "./ladder-schema.ts";
@@ -352,7 +355,9 @@ describe("ladder derivation — fail closed", () => {
 
   test("unsupported offer shapes are excluded, never guessed at", () => {
     const base = offer(hash("55"), A, 10n, B, 10n);
-    const cases: Array<[string, LadderSourceOffer]> = [
+    // Typed by the reason union, not `string`: a renamed or mistyped reason
+    // must fail the gate here rather than silently assert nothing.
+    const cases: Array<[LadderExclusionReason, LadderSourceOffer]> = [
       ["multi-leg", { ...base, wants: [...base.wants, { token: C, amount: 1n, kind: "SHIELDED" }] }],
       ["non-shielded-leg", { ...base, gives: [{ token: A, amount: 10n, kind: "UNSHIELDED" }] }],
       ["non-shielded-leg", { ...base, wants: [{ token: B, amount: 10n, kind: "UNSHIELDED" }] }],
@@ -705,5 +710,248 @@ describe("ladder frames — malformed output is unrepresentable", () => {
       type: "solver-capabilities",
       tokenIds: [],
     });
+  });
+});
+
+// ── FR-003 / FR-004: only executable liquidity is published ─────────────────
+//
+// Findings P4-F03 and P4-F04. Before this, derivation had no inventory input at
+// all: it published every interior rung regardless of whether the solver could
+// pay the residual tokenOut those rungs promise, and regardless of whether the
+// wallet could fund the fee-sizing mirror a job at that size forces the executor
+// to build. Both were discovered only AFTER a taker's job had been routed, and
+// the relay kept quoting the same unexecutable rung afterwards.
+
+/**
+ * Strictly descending marginal rates 2 → 1 → 0.5, so the ladder is concave and
+ * each offer's own worst-case interval residual is distinct:
+ *
+ *   O1  gives 20 A wants 10 B — rate 2,   cumulative (10, 20), worst 18
+ *   O2  gives 10 A wants 10 B — rate 1,   cumulative (20, 30), worst 9
+ *   O3  gives 20 A wants 40 B — rate 0.5, cumulative (60, 50), worst 19
+ *
+ * The pair is B→A: tokenIn = B (what the fee-sizing mirror spends), tokenOut =
+ * A (what a residual pays out). O1's 18 is never required — the first rung opens
+ * no interpolation interval.
+ */
+const BUDGET_BOOK = (): LadderSourceOffer[] => [
+  offer(O1, A, 20n, B, 10n),
+  offer(O2, A, 10n, B, 10n),
+  offer(O3, A, 20n, B, 40n),
+];
+
+const publishedRungs = (
+  book: LadderSourceOffer[],
+  extra: Record<string, unknown> = {},
+): Array<[string, string]> => {
+  const derived = deriveLadder(book, { ...OPTIONS, ...extra });
+  return (derived.levels[0]?.levels ?? []).map((rung) => [rung.input, rung.output]);
+};
+
+const exclusionsBy = (
+  book: LadderSourceOffer[],
+  extra: Record<string, unknown> = {},
+): Array<[string, string]> =>
+  deriveLadder(book, { ...OPTIONS, ...extra }).excluded.map(
+    (entry) => [entry.offerHash, entry.reason],
+  );
+
+const inventory = (entries: Array<[string, bigint]>): ReadonlyMap<string, bigint> =>
+  new Map(entries);
+
+describe("ladder derivation — the residual tokenOut budget (FR-003)", () => {
+  test("the worst-case interval residual IS the relay's own arithmetic, not an estimate", () => {
+    const rungs = deriveLadder(BUDGET_BOOK(), OPTIONS).levels[0]!.levels;
+    const offers = [
+      { amountIn: 10n, amountOut: 20n },
+      { amountIn: 10n, amountOut: 10n },
+      { amountIn: 40n, amountOut: 20n },
+    ];
+
+    for (let index = 1; index < rungs.length; index += 1) {
+      const low = rungs[index - 1]!;
+      const high = rungs[index]!;
+      // Scan every size the relay will quote while the maker prefix is still
+      // `low`. `high.input` itself is EXCLUDED on purpose: at that size the
+      // prefix becomes `high`, so the residual there is zero, not the whole
+      // offer's payout. That off-by-one is exactly why the closed form carries
+      // `amountIn - 1`.
+      let worst = 0n;
+      for (let size = BigInt(low.input); size < BigInt(high.input); size += 1n) {
+        const quoted = interpolateQuote(rungs, size)!;
+        const residual = quoted - BigInt(low.output);
+        if (residual > worst) worst = residual;
+      }
+      expect(worst, `${low.input}..${high.input}`)
+        .toBe(worstCaseIntervalResidual(offers[index]!));
+    }
+    // The two numbers the truncation matrix below is built on.
+    expect(worstCaseIntervalResidual(offers[1]!)).toBe(9n);
+    expect(worstCaseIntervalResidual(offers[2]!)).toBe(19n);
+    // An offer that admits no interior size needs no inventory at all.
+    expect(worstCaseIntervalResidual({ amountIn: 1n, amountOut: 1_000n })).toBe(0n);
+  });
+
+  test("a rung whose interval the solver cannot pay for is withheld, and truncates the ladder", () => {
+    const mirrorOpen = inventory([[B, 1_000n]]);
+    // Zero tokenOut: the FIRST rung still publishes. It opens no interpolation
+    // interval (below it the relay quotes nothing, at it the quote is exactly
+    // its own output), so FR-001's retained-surplus path stays advertised by a
+    // solver holding no tokenOut whatsoever.
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([...mirrorOpen, [A, 0n]]),
+    })).toEqual([["10", "20"]]);
+    // 8 < 9: same verdict at the boundary below.
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([...mirrorOpen, [A, 8n]]),
+    })).toEqual([["10", "20"]]);
+    // 9 affords O2's interval but not O3's 19.
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([...mirrorOpen, [A, 9n]]),
+    })).toEqual([["10", "20"], ["20", "30"]]);
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([...mirrorOpen, [A, 18n]]),
+    })).toEqual([["10", "20"], ["20", "30"]]);
+    // 19 affords the whole book — identical to the unbounded ladder.
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([...mirrorOpen, [A, 19n]]),
+    })).toEqual(publishedRungs(BUDGET_BOOK()));
+  });
+
+  test("truncation is total: no rung above a withheld one is published either", () => {
+    // A rung's cumulative totals assume every earlier offer is consumed, so the
+    // ladder can be cut but never punctured. Both later offers are reported.
+    expect(exclusionsBy(BUDGET_BOOK(), {
+      spendableInventory: inventory([[A, 0n], [B, 1_000n]]),
+    })).toEqual([[O2, "residual-budget"], [O3, "residual-budget"]]);
+    expect(exclusionsBy(BUDGET_BOOK(), {
+      spendableInventory: inventory([[A, 9n], [B, 1_000n]]),
+    })).toEqual([[O3, "residual-budget"]]);
+    expect(exclusionsBy(BUDGET_BOOK(), {
+      spendableInventory: inventory([[A, 19n], [B, 1_000n]]),
+    })).toEqual([]);
+  });
+
+  test("provenance and residualBound shrink with the ladder, so the executor's depth check follows", () => {
+    const { provenance } = deriveLadder(BUDGET_BOOK(), {
+      ...OPTIONS,
+      spendableInventory: inventory([[A, 9n], [B, 1_000n]]),
+    });
+    expect(provenance[0]!.rungs.map((rung) => rung.offerHash)).toEqual([O1, O2]);
+    // 20 (O1's gives), not 20-then-O3's: a withheld rung cannot widen the bound
+    // the executor re-checks a resolved route against.
+    expect(provenance[0]!.residualBound).toBe("20");
+  });
+});
+
+describe("ladder derivation — the fee-sizing tokenIn budget (FR-004)", () => {
+  test("published rung inputs are capped by the tokenIn the mirror can actually spend", () => {
+    const residualOpen = inventory([[A, 1_000n]]);
+    // `interpolateQuote` refuses any size above the LAST rung's input, so the
+    // published list's tail is the ceiling on a job's amountIn — and the mirror
+    // spends a job's FULL amountIn of tokenIn out of the solver's own wallet.
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([...residualOpen, [B, 59n]]),
+    })).toEqual([["10", "20"], ["20", "30"]]);
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([...residualOpen, [B, 60n]]),
+    })).toEqual(publishedRungs(BUDGET_BOOK()));
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([...residualOpen, [B, 19n]]),
+    })).toEqual([["10", "20"]]);
+    expect(exclusionsBy(BUDGET_BOOK(), {
+      spendableInventory: inventory([...residualOpen, [B, 19n]]),
+    })).toEqual([[O2, "mirror-budget"], [O3, "mirror-budget"]]);
+  });
+
+  test("a solver that cannot fund the smallest rung publishes NOTHING for that pair", () => {
+    // The availability consequence, stated as a test: this is not a degraded
+    // ladder, it is no ladder. An unfunded solver is unquotable rather than
+    // quotable-and-refusing, which is the whole point of FR-004.
+    for (const tokenIn of [0n, 9n]) {
+      const derived = deriveLadder(BUDGET_BOOK(), {
+        ...OPTIONS,
+        spendableInventory: inventory([[A, 1_000n], [B, tokenIn]]),
+      });
+      expect(derived.levels, String(tokenIn)).toEqual([]);
+      expect(derived.tokenIds, String(tokenIn)).toEqual([]);
+      expect(derived.excluded.map((entry) => entry.reason), String(tokenIn))
+        .toEqual(["mirror-budget", "mirror-budget", "mirror-budget"]);
+    }
+  });
+
+  test("a token missing from the snapshot is zero, never open", () => {
+    // The snapshot is the complete view of what the solver can move, so an
+    // absent token must not read as "unconstrained" — that would restore
+    // exactly the fail-open publication F03/F04 are about.
+    expect(publishedRungs(BUDGET_BOOK(), { spendableInventory: inventory([]) })).toEqual([]);
+    expect(publishedRungs(BUDGET_BOOK(), { spendableInventory: inventory([[A, 1_000n]]) }))
+      .toEqual([]);
+  });
+});
+
+describe("ladder derivation — budgets alongside the rest of the policy", () => {
+  test("no inventory at all is OPEN, which is what keeps dry-run publication unchanged", () => {
+    // The one fail-open default here, and it is deliberate: the live push always
+    // supplies a snapshot, and the executor re-checks both numbers against the
+    // same Stock before any wallet mutation.
+    expect(publishedRungs(BUDGET_BOOK(), { spendableInventory: null }))
+      .toEqual(publishedRungs(BUDGET_BOOK()));
+    expect(publishedRungs(BUDGET_BOOK(), { spendableInventory: undefined }))
+      .toEqual(publishedRungs(BUDGET_BOOK()));
+  });
+
+  test("the tighter of the two budgets wins, and the mirror is reported first", () => {
+    // Both stop the same rung: the mirror check runs first so an unfundable
+    // wallet reads as unfundable rather than as short of tokenOut.
+    expect(exclusionsBy(BUDGET_BOOK(), {
+      spendableInventory: inventory([[A, 0n], [B, 0n]]),
+    })).toEqual([
+      [O1, "mirror-budget"], [O2, "mirror-budget"], [O3, "mirror-budget"],
+    ]);
+    // Mirror allows two rungs, residual allows all three ⇒ two.
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([[A, 19n], [B, 59n]]),
+    })).toEqual([["10", "20"], ["20", "30"]]);
+    // Residual allows one, mirror allows all three ⇒ one.
+    expect(publishedRungs(BUDGET_BOOK(), {
+      spendableInventory: inventory([[A, 0n], [B, 1_000n]]),
+    })).toEqual([["10", "20"]]);
+  });
+
+  test("a budget-bounded ladder is still a frame the relay admits, and still reproducible", () => {
+    const options = { ...OPTIONS, spendableInventory: inventory([[A, 9n], [B, 59n]]) };
+    const derived = deriveLadder(BUDGET_BOOK(), options);
+    // Concavity and strict ascent survive truncation — a prefix of a concave
+    // whole-offer ladder is one.
+    expect(rejectLevels(derived.levels[0]!.levels)).toBeNull();
+    expect(isPriceLevelsPair(derived.levels[0]!)).toBe(true);
+    const frame = buildPriceLevelsFrame(derived.levels);
+    expect(parsePriceLevels(frame)).toEqual(frame);
+    // Same inputs in any order ⇒ byte-identical output; the budget is a plain
+    // snapshot, so nothing about it can leak iteration order.
+    const reversed = deriveLadder([...BUDGET_BOOK()].reverse(), options);
+    expect(JSON.stringify(reversed)).toBe(JSON.stringify(derived));
+  });
+
+  test("budgets compose with the pair allowlist and the output minimum", () => {
+    const options = {
+      ...OPTIONS,
+      spendableInventory: inventory([[A, 9n], [B, 1_000n]]),
+      supportedPairs: new Set([admissionPairKey(B, A)]),
+      minJobOutput: new Map([[A, 25n]]),
+    };
+    // Budget truncates to rungs {10,20} {20,30}; the minimum then hides the
+    // sub-25 rung, leaving one publishable quote. The budget runs FIRST
+    // (deliberately conservative — the surviving first rung no longer needs its
+    // residual, but re-deriving executability after an unrelated policy filter
+    // would couple the two).
+    expect(publishedRungs(BUDGET_BOOK(), options)).toEqual([["20", "30"]]);
+    // The allowlist is directed: the unbacked direction publishes nothing even
+    // with inventory on both sides.
+    expect(publishedRungs(BUDGET_BOOK(), {
+      ...options,
+      supportedPairs: new Set([admissionPairKey(A, B)]),
+    })).toEqual([]);
   });
 });

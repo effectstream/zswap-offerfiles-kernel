@@ -233,7 +233,7 @@ test("terminal pruning cannot erase active DUST accounting before its own safe p
 test("canonical JSON sorts object keys and rejects lossy values or noncanonical rows", () => {
   expect(canonicalJson({ z: [2, 1], a: { y: "2", x: "1" } }))
     .toBe('{"a":{"x":"1","y":"2"},"z":[2,1]}');
-  expect(parseCanonicalJson('{"a":1,"b":2}')).toEqual({ a: 1, b: 2 });
+  expect(parseCanonicalJson<{ a: number; b: number }>('{"a":1,"b":2}')).toEqual({ a: 1, b: 2 });
   expect(() => parseCanonicalJson('{"b":2,"a":1}')).toThrow(/non-canonical/);
   expect(() => canonicalJson({ missing: undefined })).toThrow(/undefined/);
   expect(() => canonicalJson({ unsafe: Number.MAX_SAFE_INTEGER + 1 })).toThrow(/safe integers/);

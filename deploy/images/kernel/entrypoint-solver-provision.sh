@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# entrypoint-solver-provision.sh — give the solver something to trade with.
+#
+# WHY THIS IS A SERVICE AND NOT A README STEP
+# -------------------------------------------
+# Since R2 (`c4ac2bb`), ladder publication is bounded by what the solver can
+# actually move: a rung whose cumulative INPUT exceeds spendable tokenIn is
+# withheld along with every rung above it, and a rung whose worst-case residual
+# exceeds available tokenOut is withheld too. So a solver with an empty wallet
+# publishes NOTHING, however deep the maker book behind it is.
+#
+# The failure that produces is silent and expensive. D2 reproduced it exactly:
+# every service healthy, the solver connected and authenticated to the relay,
+# `pushed 0 pair(s)` forever, and the relay reporting connectedCount:1 with an
+# empty token list. Nothing is logged as an error anywhere. Leaving that to a
+# documented manual step would mean the default `docker compose up` produces a
+# stack that looks perfect and quotes nothing.
+#
+# WHAT IT RUNS
+# ------------
+# `packages/solver/scripts/bootstrap-dev.ts` — the repository's OWN solver
+# provisioner, not something invented here. It funds the solver's NIGHT from
+# genesis, registers NIGHT for dust, mints the solver TESTA *and* TESTB using
+# the SAME fixed domain separators as `mint-test-tokens.ts` (so the colors are
+# identical to the ones the genesis wallet holds and the maker offer names), and
+# writes those colors into the ladder config.
+#
+# ORDERING IS LOAD-BEARING: it drives a wallet on SOLVER_SEED, so the solver
+# must not be running. Compose enforces that — `solver` waits on this service's
+# `service_completed_successfully`.
+#
+# DEVNET ONLY. This mints inventory to a public dev seed on a throwaway chain.
+# A real deployment funds its solver out of band; set SOLVER_PROVISION_ENABLED=
+# false and the ladder config falls back to the in-repo default.
+set -euo pipefail
+
+. /usr/local/bin/entrypoint-common.sh
+
+require_env MIDNIGHT_NETWORK_ID MIDNIGHT_NODE_HTTP MIDNIGHT_INDEXER_HTTP \
+            MIDNIGHT_INDEXER_WS MIDNIGHT_PROOF_SERVER_URL SOLVER_SEED \
+            SOLVER_LADDER_CONFIG
+
+LADDER_DIR="$(dirname "${SOLVER_LADDER_CONFIG}")"
+MARKER="${LADDER_DIR}/.provisioned"
+IN_REPO_LADDER="${REPO_ROOT}/packages/solver/config/ladders.dev.json"
+
+mkdir -p "${LADDER_DIR}"
+
+# The solver reads SOLVER_LADDER_CONFIG unconditionally, so this script must
+# leave a readable file behind on EVERY path it can exit through — including
+# the disabled and already-provisioned ones. A missing file here would surface
+# as a solver crash loop whose cause is three services away.
+fallback_ladder() {
+  if [ ! -f "${SOLVER_LADDER_CONFIG}" ]; then
+    install -m 0644 "${IN_REPO_LADDER}" "${SOLVER_LADDER_CONFIG}"
+    log "installed the in-repo dev ladder at ${SOLVER_LADDER_CONFIG}"
+    log "NOTE: its token colors are from an older deployment and will not match"
+    log "NOTE: this stack's freshly deployed contract."
+  fi
+}
+
+if [ "${SOLVER_PROVISION_ENABLED:-true}" != "true" ]; then
+  log "SOLVER_PROVISION_ENABLED=${SOLVER_PROVISION_ENABLED:-} — skipping solver provisioning"
+  fallback_ladder
+  exit 0
+fi
+
+# Idempotent, for the same reason the contract deploy is: re-running would mint
+# a second tranche of inventory and re-fund NIGHT on every restart, turning a
+# `docker compose restart` into several minutes of proving.
+if [ -f "${MARKER}" ] && [ -f "${SOLVER_LADDER_CONFIG}" ]; then
+  log "JOIN: ${MARKER} exists — solver already provisioned, not minting again"
+  log "$(cat "${MARKER}")"
+  exit 0
+fi
+
+wait_node_block "${MIDNIGHT_NODE_HTTP}" 1 "${NODE_BLOCK_TIMEOUT_S:-600}"
+wait_http "${MIDNIGHT_INDEXER_HTTP}" "indexer" "${INDEXER_WAIT_TIMEOUT_S:-300}"
+wait_http "${MIDNIGHT_PROOF_SERVER_URL}" "proof-server" "${PROOF_WAIT_TIMEOUT_S:-300}"
+
+adopt_contract_address
+
+cd "${REPO_ROOT}"
+log "provisioning the solver wallet (bootstrap-dev.ts) — mints BOTH sides of the pair"
+if bun run packages/solver/scripts/bootstrap-dev.ts; then
+  date -u +%FT%TZ > "${MARKER}"
+  log "solver provisioned; marker written to ${MARKER}"
+  exit 0
+fi
+
+# Fail loudly. This is NOT the deploy one-shot's non-fatal mint: without solver
+# inventory the stack comes up healthy and quotes nothing, which is the one
+# outcome this service exists to prevent.
+log "ERROR: bootstrap-dev.ts failed — the solver would publish an EMPTY ladder."
+log "ERROR: refusing to report success; see the log above for the cause."
+exit 1

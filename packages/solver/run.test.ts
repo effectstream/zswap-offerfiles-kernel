@@ -13,7 +13,7 @@ import type { SyncDependencies } from "./src/book-sync.ts";
 import { RELAY_WS_OPEN, type RelayWebSocketLike } from "./src/relay-client.ts";
 import { Stock } from "./src/stock.ts";
 import { SolverOperationJournal } from "./src/operation-journal.ts";
-import { JOB_RECONCILING } from "./src/swap-job-executor.ts";
+import { JOB_RECONCILING, JOB_ROUTE_UNAVAILABLE } from "./src/swap-job-executor.ts";
 
 const TOKEN = "a".repeat(64);
 
@@ -161,7 +161,7 @@ function syncHarness(lifecycle: string[]): SyncDependencies {
       midnight: { current: 7, fetched: 7, tip: 7, pct: 100, lagBlocks: 0 },
       celestia: { current: 7, fetched: 7, tip: 7, pct: 100, lagBlocks: 0 },
     }),
-    openUpdatesStream: (_handler, options) => {
+    openUpdatesStream: (_handler, options = {}) => {
       queueMicrotask(() => options.onOpen?.({ streamId: "00".repeat(16), blockL2Height: null }));
       return { close: async () => { lifecycle.push("mirror-stop"); } };
     },
@@ -370,7 +370,10 @@ test("relay publishes empty and rejects jobs until journal reconciliation finish
     walletDependencies: {
       buildWallet: async () => ({ wallet }),
       waitForSync: async () => {},
-      shieldedBalances: async () => ({ [B]: 1_000n }),
+      // A is the pair's tokenIn: FR-004 caps published rungs by the tokenIn the
+      // fee-sizing mirror can actually spend, so a solver holding only B would
+      // (correctly) publish nothing at all here.
+      shieldedBalances: async () => ({ [A]: 1_000n, [B]: 1_000n }),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
     } as any,
     jobDependencies: {
@@ -448,7 +451,9 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
     walletDependencies: {
       buildWallet: async () => walletOwner,
       waitForSync: async () => {},
-      shieldedBalances: async () => ({ [B]: 1_000n }),
+      // Both sides funded: B pays a residual, A funds the FR-004 fee-sizing
+      // mirror for a job of this size.
+      shieldedBalances: async () => ({ [A]: 1_000n, [B]: 1_000n }),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
     } as any,
     jobDependencies: {
@@ -533,4 +538,96 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
     (frame) => frame.type === "price-levels" && Array.isArray(frame.levels) && frame.levels.length === 0,
   );
   expect(withdrawal).toBeGreaterThanOrEqual(0);
+});
+
+// FR-002/FR-003/FR-004 through the real wiring. This is the layer P4-F02 lived
+// at: `runSolver` handed the admission policy to the relay client, the relay
+// client's options did not declare it, and it evaporated. The budgets (F03/F04)
+// are wired the same way, so they are asserted here too — end to end from the
+// wallet's balance read to the bytes on the socket and back through admission.
+test("an underfunded solver publishes nothing and refuses the job its ladder would have implied", async () => {
+  const lifecycle: string[] = [];
+  const socket = new RunSocket(lifecycle);
+  let mutations = 0;
+  const wallet = {
+    shielded: { getAddress: async () => "solver-address" },
+    dust: { balanceTransactions: async () => { mutations += 1; throw new Error("must not size fees"); } },
+    // The fee-sizing mirror is the FIRST wallet call `buildHalf` makes, and the
+    // guard exists precisely so it is never reached unfunded.
+    initSwap: async () => { mutations += 1; throw new Error("must not mutate"); },
+    finalizeTransaction: async () => { mutations += 1; throw new Error("must not mutate"); },
+    revertTransaction: async () => { mutations += 1; },
+    revert: async () => { mutations += 1; },
+    stop: async () => { lifecycle.push("wallet-stop"); },
+  };
+
+  const handle = await runSolver({
+    dryRun: false,
+    api: "http://backend.test",
+    relayUrl: "ws://relay.test/solver",
+    relayHttpUrl: "http://relay.test/api/v1",
+    relayAuthToken: "r".repeat(64),
+    relayPushIntervalMs: 60_000,
+    relayReconnectDelayMs: 60_000,
+    relayConnectTimeoutMs: 1_000,
+    relayWithdrawTimeoutMs: 100,
+    jobSweepIntervalMs: 60_000,
+    resyncIntervalMs: 60_000,
+    backendHealthCheckIntervalMs: 30_000,
+    backendHealthMaxAgeMs: 60_000,
+    startupTimeoutMs: 1_000,
+    stopTimeoutMs: 1_000,
+    journalOptions: { path: ":memory:", allowMemory: true },
+    syncDependencies: syncHarness(lifecycle),
+    relayCreateWebSocket: () => {
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+    walletDependencies: {
+      buildWallet: async () => ({ wallet, dustSecretKey: "dust-key", zswapSecretKeys: {} }),
+      waitForSync: async () => {},
+      // Only tokenOut. The book's single offer wants 10 A, so the pair's
+      // fee-sizing mirror needs 10 A the wallet does not have.
+      shieldedBalances: async () => ({ [B]: 1_000n }),
+      shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
+    } as any,
+    log: () => {},
+  });
+
+  try {
+    await handle.ready;
+    await waitFor(
+      () => socket.sent.some((frame) => frame.type === "price-levels"),
+      "the first ladder push",
+    );
+    // The offer IS in the mirror — the book is current and complete — and the
+    // ladder is still empty, because publishing it would advertise a size this
+    // solver must refuse.
+    expect(handle.book.get(OFFER_HASH)).toBeDefined();
+    const levels = socket.sent.filter((frame) => frame.type === "price-levels");
+    expect(levels.at(-1)).toEqual({ type: "price-levels", levels: [] });
+    const capabilities = socket.sent.filter((frame) => frame.type === "solver-capabilities");
+    expect(capabilities.at(-1)).toMatchObject({ tokenIds: [] });
+
+    // And if the relay dispatches that job anyway (a stale quote, or an operator
+    // running with the publication budget open), admission refuses it fail-closed
+    // with zero wallet mutation.
+    socket.receive({
+      type: "swap", jobId: "underfunded", tokenIn: A, tokenOut: B,
+      amountIn: "10", amountOut: "20",
+    });
+    await waitFor(
+      () => socket.sent.some((frame) => frame.type === "job-error" && frame.jobId === "underfunded"),
+      "the fail-closed job refusal",
+    );
+    expect(socket.sent.findLast((frame) => frame.type === "job-error")).toEqual({
+      type: "job-error",
+      jobId: "underfunded",
+      reason: JOB_ROUTE_UNAVAILABLE,
+    });
+    expect(mutations).toBe(0);
+    expect(handle.stock.reserved(B)).toBe(0n);
+  } finally {
+    await handle.stop();
+  }
 });

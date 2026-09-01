@@ -38,7 +38,7 @@ test("REST/stream book readiness remains blocked while the backend reports synci
       pct: 95.2,
       lag_blocks: 5,
     },
-  }))) as typeof fetch;
+  }))) as unknown as typeof fetch;
 
   const dependencies = {
     getZswapsPage: async () => ({ offers: [], nextCursor: null }),

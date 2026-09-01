@@ -37,6 +37,9 @@ process.env["API_RATE_LIMIT_ALLOWLIST"] = "127.0.0.1";
 const { migrationTable } = await import("@zswap-da/database");
 const { closeTestPglite } = await import("../database/test-pglite.ts");
 const { startPglite } = await import("@effectstream/db/start-pglite");
+// `pg` ships no type declarations and this workspace has no `@types/pg`
+// dependency; the mirror harness only needs its Client to seed rows.
+// @ts-expect-error — untyped module by dependency policy, not by accident.
 const pg = (await import("pg")).default;
 const fastify = (await import("fastify")).default;
 const { apiRouter } = await import("./api.ts");
@@ -158,7 +161,9 @@ class FramingProxy {
       });
 
       let head: "pending" | "frames" | "passthrough" = "pending";
-      let buffer = Buffer.alloc(0);
+      // Annotated: `Buffer.alloc` narrows to `Buffer<ArrayBuffer>`, while the
+      // framing helper returns the general `Buffer<ArrayBufferLike>`.
+      let buffer: Buffer = Buffer.alloc(0);
       upstream.on("data", (chunk: Buffer) => {
         buffer = buffer.length === 0 ? Buffer.from(chunk) : Buffer.concat([buffer, chunk]);
         if (head === "passthrough") {

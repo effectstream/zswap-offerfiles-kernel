@@ -69,7 +69,7 @@ test("job-time exact-files client sends the closed unauthenticated v1 request an
     url = String(input);
     init = request;
     return new Response(JSON.stringify(response()));
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
 
   expect(await readExactOfferFiles([ID], { api: "http://backend", timeoutMs: 100 }))
     .toEqual(response());
@@ -91,7 +91,7 @@ test("exact-files client refuses missing, extra, reordered, and byte-mismatched 
     { ...response(), files: [{ offerId: ID, verdict: verdict(), offer: OfferFiles.encode(new Uint8Array([1, 2, 3])) }] },
   ];
   let index = 0;
-  globalThis.fetch = mock(async () => new Response(JSON.stringify(malformed[index++]))) as typeof fetch;
+  globalThis.fetch = mock(async () => new Response(JSON.stringify(malformed[index++]))) as unknown as typeof fetch;
   for (let attempt = 0; attempt < malformed.length; attempt += 1) {
     expect((await failure(readExactOfferFiles([ID], "http://backend"))).kind).toBe("malformed");
   }
@@ -113,7 +113,7 @@ test("exact-files client preserves a bound negative verdict for the job executor
       },
     }],
   };
-  globalThis.fetch = mock(async () => new Response(JSON.stringify(negative))) as typeof fetch;
+  globalThis.fetch = mock(async () => new Response(JSON.stringify(negative))) as unknown as typeof fetch;
   expect(await readExactOfferFiles([ID], "http://backend")).toEqual(negative);
 });
 
@@ -123,10 +123,10 @@ test("exact-files decoded body cap and absolute timeout fail closed", async () =
     status: 200,
     headers: new Headers({ "content-length": String(MAX_EXACT_FILES_RESPONSE_BYTES + 1) }),
     body: { cancel: () => Promise.resolve() },
-  }) as Response) as typeof fetch;
+  }) as Response) as unknown as typeof fetch;
   expect((await failure(readExactOfferFiles([ID], "http://backend"))).kind).toBe("malformed");
 
-  globalThis.fetch = mock(async () => await new Promise<Response>(() => {})) as typeof fetch;
+  globalThis.fetch = mock(async () => await new Promise<Response>(() => {})) as unknown as typeof fetch;
   const timed = await failure(readExactOfferFiles([ID], { api: "http://backend", timeoutMs: 10 }));
   expect(timed.kind).toBe("timeout");
 });

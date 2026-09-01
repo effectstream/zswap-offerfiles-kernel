@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
+import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 
 import {
   declaredLedgerSegments,
@@ -116,8 +117,21 @@ test("a serialized ledger-v8 offer round-trip exposes every declared segment to 
     new URL("../validator/fixtures/valid-offer.bech32", import.meta.url),
     "utf8",
   ).trim();
-  const parsed = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(blob));
-  const restored = Transaction.deserialize("signature", "proof", "binding", parsed.serialize());
+  // Without a contextual type the marker generics widen to their constraints
+  // (`Transaction<Signaturish, Proofish, Bindingish>`); these markers ARE the
+  // finalized shape, which is what the guard under test consumes.
+  const parsed = Transaction.deserialize(
+    "signature",
+    "proof",
+    "binding",
+    OfferFiles.decode(blob),
+  ) as unknown as FinalizedTransaction;
+  const restored = Transaction.deserialize(
+    "signature",
+    "proof",
+    "binding",
+    parsed.serialize(),
+  ) as unknown as FinalizedTransaction;
   const expected = [
     0,
     ...(restored.intents?.keys() ?? []),
@@ -185,7 +199,7 @@ test("batcher deadline settles and aborts when fetch ignores its signal", async 
   installFetch(mock(async (_input: RequestInfo | URL, init?: RequestInit) => {
     requestSignal = init?.signal ?? undefined;
     return await new Promise<Response>(() => {});
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const started = Date.now();
   let caught: unknown;
@@ -216,7 +230,7 @@ test("batcher deadline covers body consumption and safely observes cancellation"
         },
       },
     } as unknown as Response;
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   let caught: unknown;
   try {

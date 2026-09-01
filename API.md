@@ -13,14 +13,27 @@ settle via the batcher's `midnight-balancer` target, and connect a wallet to
 inspect balances / mint test tokens (`VITE_PROOF_SERVER_URL`, default
 `http://localhost:6300`).
 
-**Repository validation scope.** `bun run typecheck:backend` is the strict,
-no-emit TypeScript gate for the 27 production `packages/node` roots only; it
-excludes node tests and the grand-E2E entrypoint, builds the real dependency
-graph without modifying it, and fails all node-owned or fileless compiler
-diagnostics. It is deliberately not advertised as a workspace-wide typecheck.
-CI also bundles API examples 01, 03, 05, 07, and 11 before running the docs
-playground typecheck. Example 11's Midnight network-id and ledger-v8 imports
-are direct root dependencies, not transitive assumptions.
+**Repository validation scope.** There are two strict, no-emit TypeScript gates,
+and `bun run typecheck` runs both.
+
+- `bun run typecheck:backend` covers the 27 production `packages/node` roots
+  only; it excludes node tests and the grand-E2E entrypoint, builds the real
+  dependency graph without modifying it, and fails all node-owned or fileless
+  compiler diagnostics.
+- `bun run typecheck:solver` covers the solver: `packages/solver`,
+  `packages/solver-core` and `packages/validator` — **production and test
+  sources alike** — plus every other first-party file that imports the solver's
+  source, discovered by scanning rather than by a maintained list. Zero
+  diagnostics are required. Test sources are inside this gate deliberately: the
+  drift it exists to catch (an E2E harness still passing callbacks the solver no
+  longer accepts) lived in a test file.
+
+Neither gate is a workspace-wide typecheck: each reports, but does not fail on,
+diagnostics in dependencies outside its own roots — including the gitignored
+Compact output, which CI stubs as declarations for both gates. CI also bundles
+API examples 01, 03, 05, 07, and 11 before running the docs playground
+typecheck. Example 11's Midnight network-id and ledger-v8 imports are direct
+root dependencies, not transitive assumptions.
 
 ---
 
@@ -93,15 +106,31 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults
                                         # phantom unfillable offers on the book; too narrow
                                         # ⇒ valid offers rejected ROOT_UNKNOWN.
 
-# ── Solver process (packages/solver) ───────────────────────────────────────────
-SOLVER_DRY_RUN=true                      # mainnet default; mirrors only, never settles
-                                        # current dry-run does NOT load inventory, so it is not Path-A decision parity
-SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
+# ── Solver process (packages/solver, started by `bun run start:solver`) ────────
+# The seven values below are MANDATORY for that entrypoint, in dry-run as well
+# as live mode; it validates all of them before opening a wallet, socket or
+# journal and exits non-zero listing every problem at once.
+MIDNIGHT_NETWORK_ID=undeployed           # declared explicitly: the SDK otherwise assumes undeployed
+ZSWAP_API=http://127.0.0.1:9999          # kernel Offer Files REST/SSE base
+SOLVER_SEED=...                          # the repository dev seed is accepted only on undeployed
 SOLVER_RELAY_WS_URL=wss://relay/solver   # outbound Midnight Intents solver socket
-SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer; backend exact-files is unauthenticated
+SOLVER_RELAY_HTTP_URL=https://relay/api/v1  # public relay HTTP base for durable GET /jobs/:jobId
+                                        # never derived from the websocket URL
+SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer, >= 32 chars; backend exact-files is unauthenticated
+SOLVER_JOURNAL_PATH=/var/lib/cow-solver/operations.sqlite  # absolute, per-instance volume; :memory: refused
+
+SOLVER_DRY_RUN=true                      # mainnet default; mirrors and loads read-only inventory,
+                                        # syncs the REAL wallet, starts no relay jobs, mutates nothing
+SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
+SOLVER_ENABLED=true                      # "false" exits 0 without requiring the values above
 SOLVER_RELAY_MAX_PARALLEL_SWAPS=8        # advertised and enforced proof-build capacity
 SOLVER_STATUS_POLL_MS=5000               # missed-signal backend-consumption backstop
 SOLVER_SETTLE_TTL_MINUTES=30             # wallet rollback window when no terminal signal arrives
+SOLVER_SUPPORTED_PAIRS=                  # JSON ["<64hex>-><64hex>"]; bounds publication AND admission
+SOLVER_MIN_JOB_OUTPUT=                   # JSON {"<64hex out-token>":"<min>"}; same two boundaries
+SOLVER_DUST_MAX_PER_JOB=                 # DUST admission budget; all three DUST values set together
+SOLVER_DUST_MAX_PER_WINDOW=
+SOLVER_DUST_WINDOW_MS=
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -786,7 +815,9 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 
 This backend holds no solver state, so nothing else can win the quote. Solver
 ladders are pushed to the Midnight Intents relay, which does its own
-interpolation; the backend's job is the indexed book and its reads.
+interpolation; the backend's job is the indexed book and its reads. What the
+solver publishes, and what it will settle, is described in
+[The COW solver](#the-cow-solver-midnight-intents-side) below.
 
 ---
 
@@ -946,6 +977,77 @@ curl http://host:9999/v1/midnight/config
 ```
 
 Returns `500` if `MIDNIGHT_CONTRACT_ADDRESS` is not set.
+
+---
+
+## The COW solver (Midnight Intents side)
+
+The solver is **not** part of this HTTP API and listens on no port. It is a
+separate process (`bun run start:solver`; see README → "Running the COW solver")
+that consumes this backend as a client — `GET /v1/offers`, `GET /v1/offers/updates`,
+`POST /v1/offers/files`, `GET /v1/health/sync` — and connects **outbound** to a
+Midnight Intents relay, where it publishes price ladders and settles the swap
+jobs the relay dispatches to it. Neither `bun run dev` nor `bun run start:mainnet`
+launches it.
+
+**Topology.** Kernel (node), batcher and solver are three independent processes.
+The kernel indexes and serves offers; the batcher publishes blobs to Celestia;
+the solver mirrors the kernel's book and owns its own wallet, journal and relay
+connection. A container deployment gives each of them its own service, with the
+solver depending on the kernel and relay rather than starting them.
+
+**Supported domain.** Midnight 1.x / ledger-v8 only. The solver settles offers
+that normalize to **one shielded give leg and one shielded want leg** with
+distinct token colors and positive amounts, at most **8 makers per job**, plus an
+optional shielded residual paid from its own inventory. Unshielded legs, mixed
+value layers, multi-leg baskets, and Midnight 2.x are refused before admission —
+they are out of scope, not partially supported.
+
+**Fees.** Maker offers are constructed with `payFees:false` (see
+[Encoding offers](#encoding-offers-swapoffer1)), so a maker's offer pays no fee
+itself. The settling side pays: for a relay job, the solver sizes and funds the
+DUST for the transaction it submits, bounded by the `SOLVER_DUST_*` admission
+budget. Sizing that fee currently requires the solver wallet to be able to spend
+the job's full `amountIn` of the input token (see the publication bounds below).
+
+**Quotes are indicative.** A published ladder is authenticated market data for
+the relay's interpolation, not a reservation: nothing is held, and admission is
+re-decided at job time against the current book, inventory and policy. The
+kernel's `GET /v1/quote` is a separate, `token_prices`-backed contract and is not
+replaced by solver data.
+
+**A job's `amountOut` is the taker's exact demand, and may be below the quote.**
+The solver accepts any dispatched job with `0 < amountOut <= interpolate(amountIn)`
+for a published pair:
+
+| Case | Disposition |
+|---|---|
+| Maker prefix pays exactly the demand | Settles; no residual, no surplus. |
+| Prefix pays **less** than the demand | The difference is a **residual** paid from solver inventory, reserved before any wallet call. |
+| Prefix pays **more** than the demand | The difference is **surplus retained by the solver**, along with any unspent input — the same disposition the reference solver makes. |
+| `amountOut > interpolate(amountIn)` | Refused (unchanged). |
+
+Out-of-ladder sizes, non-positive demands, stale routes, disallowed pairs,
+below-minimum outputs, unaffordable residuals and DUST-budget violations remain
+refusals. Lower demands used to be refused as `route_not_current`; they now
+settle.
+
+**Published liquidity is bounded by executability.** The solver withholds what it
+could not execute at the moment of publication:
+
+- a rung whose interpolation interval could demand more residual tokenOut than
+  its inventory can pay is withheld, and so is every rung above it;
+- published rung inputs are capped by the input-token amount the wallet can prove
+  spendable, because of the fee-sizing spend above — **a solver holding none of a
+  pair's input token publishes nothing for that pair**;
+- `SOLVER_SUPPORTED_PAIRS` and `SOLVER_MIN_JOB_OUTPUT` bound publication as well
+  as admission, and are re-applied after every reconnect;
+- withheld liquidity is surfaced once per change as `ladder-budget-limited` /
+  `ladder-budget-cleared` operator events.
+
+Operators upgrading from an earlier build will therefore see advertised depth
+shrink, and must fund the solver wallet with **both** tokens of every pair it
+quotes.
 
 ---
 

@@ -40,7 +40,7 @@ async function failure(promise: Promise<unknown>): Promise<ApiRequestError> {
 
 for (const status of [429, 500]) {
   test(`status HTTP ${status} is a typed failure, never a business status`, async () => {
-    installFetch(mock(async () => new Response(JSON.stringify({ error: "no" }), { status })) as typeof fetch);
+    installFetch(mock(async () => new Response(JSON.stringify({ error: "no" }), { status })) as unknown as typeof fetch);
 
     const err = await failure(getOfferStatus(HASH, { api: "http://node", timeoutMs: 100 }));
     expect(err.kind).toBe("http");
@@ -51,7 +51,7 @@ for (const status of [429, 500]) {
 test("a network failure remains a typed unknown boundary", async () => {
   installFetch(mock(async () => {
     throw new TypeError("socket offline");
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const err = await failure(getOfferStatus(HASH, { api: "http://node", timeoutMs: 100 }));
   expect(err.kind).toBe("network");
@@ -63,7 +63,7 @@ test("a fetch that ignores AbortSignal still settles at the absolute deadline", 
   installFetch(mock(async (_input: RequestInfo | URL, init?: RequestInit) => {
     requestSignal = init?.signal ?? undefined;
     return await new Promise<Response>(() => {});
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const started = Date.now();
   const err = await failure(getOfferStatus(HASH, { api: "http://node", timeoutMs: 20 }));
@@ -81,7 +81,7 @@ test("the deadline covers a response body that never finishes", async () => {
       status: 200,
       json: async () => await new Promise<unknown>(() => {}),
     } as Response;
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const err = await failure(getOfferStatus(HASH, { api: "http://node", timeoutMs: 20 }));
   expect(err.kind).toBe("timeout");
@@ -93,7 +93,7 @@ test("caller cancellation is composed with the request deadline", async () => {
   installFetch(mock(async (_input: RequestInfo | URL, init?: RequestInit) => {
     requestSignal = init?.signal ?? undefined;
     return await new Promise<Response>(() => {});
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
   const owner = new AbortController();
   const pending = getOfferStatus(HASH, {
     api: "http://node",
@@ -108,7 +108,7 @@ test("caller cancellation is composed with the request deadline", async () => {
 });
 
 test("unknown status text is rejected instead of entering the status union", async () => {
-  installFetch(mock(async () => new Response(JSON.stringify({ offerId: HASH, status: "LIVE" }))) as typeof fetch);
+  installFetch(mock(async () => new Response(JSON.stringify({ offerId: HASH, status: "LIVE" }))) as unknown as typeof fetch);
 
   const err = await failure(getOfferStatus(HASH, { api: "http://node", timeoutMs: 100 }));
   expect(err.kind).toBe("malformed");
@@ -119,7 +119,7 @@ test("a status response must be bound to the requested offer", async () => {
   installFetch(mock(async () => new Response(JSON.stringify({
     offerId: "b".repeat(64),
     status: "live",
-  }))) as typeof fetch);
+  }))) as unknown as typeof fetch);
 
   const err = await failure(getOfferStatus(HASH, { api: "http://node", timeoutMs: 100 }));
   expect(err.kind).toBe("malformed");
@@ -131,7 +131,7 @@ test("offer detail rejects a non-canonical requested hash before fetch", async (
   installFetch(mock(async () => {
     fetchCalls++;
     throw new Error("must not fetch");
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const err = await failure(getZswapByHash("A".repeat(64), { api: "http://node" }));
   expect(err.kind).toBe("malformed");
@@ -143,7 +143,7 @@ test("offer detail must carry the requested offerId", async () => {
   installFetch(mock(async () => new Response(JSON.stringify({
     offerId: "b".repeat(64),
     offerBech32: VALID_BLOB,
-  }))) as typeof fetch);
+  }))) as unknown as typeof fetch);
 
   const err = await failure(getZswapByHash(VALID_HASH, { api: "http://node" }));
   expect(err.kind).toBe("malformed");
@@ -154,7 +154,7 @@ test("offer detail rejects a malformed MIP-0005 blob", async () => {
   installFetch(mock(async () => new Response(JSON.stringify({
     offerId: VALID_HASH,
     offerBech32: "not-a-bech32m-offer",
-  }))) as typeof fetch);
+  }))) as unknown as typeof fetch);
 
   const err = await failure(getZswapByHash(VALID_HASH, { api: "http://node" }));
   expect(err.kind).toBe("malformed");
@@ -169,7 +169,7 @@ test("offer detail rejects a valid blob whose content hash does not match", asyn
   installFetch(mock(async () => new Response(JSON.stringify({
     offerId: VALID_HASH,
     offerBech32: wrongBlob,
-  }))) as typeof fetch);
+  }))) as unknown as typeof fetch);
 
   const err = await failure(getZswapByHash(VALID_HASH, { api: "http://node" }));
   expect(err.kind).toBe("malformed");
@@ -177,7 +177,7 @@ test("offer detail rejects a valid blob whose content hash does not match", asyn
 });
 
 test("list requests check HTTP status instead of parsing an error as a book", async () => {
-  installFetch(mock(async () => new Response(JSON.stringify({ error: "down" }), { status: 500 })) as typeof fetch);
+  installFetch(mock(async () => new Response(JSON.stringify({ error: "down" }), { status: 500 })) as unknown as typeof fetch);
 
   const err = await failure(getZswapsPage({ api: "http://node", timeoutMs: 100 }));
   expect(err.kind).toBe("http");
@@ -190,7 +190,7 @@ test("SSE close cancels a long reconnect backoff and awaits lifecycle exit", asy
   installFetch(mock(async () => {
     fetchCalls++;
     return { ok: false, status: 503, body: null } as Response;
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const stream = openSseStream(() => {}, {
     api: "http://node",
@@ -226,7 +226,7 @@ test("a clean SSE EOF is reported as a disconnect before reconnect backoff", asy
     ok: true,
     status: 200,
     body: { getReader: () => reader },
-  }) as unknown as Response) as typeof fetch);
+  }) as unknown as Response) as unknown as typeof fetch);
 
   const stream = openSseStream(() => {}, {
     api: "http://node",
@@ -270,7 +270,7 @@ test("SSE close cancels and drains an active read pump with no late event", asyn
       status: 200,
       body: { getReader: () => reader },
     } as unknown as Response;
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const events: unknown[] = [];
   const stream = openSseStream((event) => events.push(event), {
@@ -317,7 +317,7 @@ test("an oversized unterminated SSE frame is discarded and cannot hold close", a
       status: 200,
       body: { getReader: () => reader },
     } as unknown as Response;
-  }) as typeof fetch);
+  }) as unknown as typeof fetch);
 
   const stream = openSseStream(() => {
     throw new Error("unterminated input must never dispatch");

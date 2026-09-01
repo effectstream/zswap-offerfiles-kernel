@@ -3,6 +3,8 @@ import { isAbsolute } from "node:path";
 
 import { getEnv } from "@effectstream/utils/runtime";
 
+import type { JobAdmissionPolicy } from "@zswap-da/solver-core/admission-policy";
+
 // Dev seed. Must avoid every other wallet on the dev stack — genesis, the
 // batcher's (…0003/…0004), and the ring-maker range (…0005+) — because two
 // facades on one seed against one node force each other's connection down.
@@ -25,11 +27,15 @@ export const SOLVER_RELAY_WS_URL = getEnv("SOLVER_RELAY_WS_URL") ?? "";
 export const SOLVER_RELAY_HTTP_URL = getEnv("SOLVER_RELAY_HTTP_URL") ?? "";
 export const SOLVER_RELAY_AUTH_TOKEN = getEnv("SOLVER_RELAY_AUTH_TOKEN") ?? "";
 
-export const SOLVER_LADDER_CONFIG =
-  getEnv("SOLVER_LADDER_CONFIG") ??
+/** Ladder file used when `SOLVER_LADDER_CONFIG` is unset. Exported so an
+ * entrypoint can report the effective path from an injected environment reader
+ * without going through this module's process-wide constant. */
+export const DEFAULT_SOLVER_LADDER_CONFIG =
   // fileURLToPath, not URL.pathname: pathname percent-encodes, so a checkout
   // under a directory with a space yields a path readFile cannot open.
   fileURLToPath(new URL("./config/ladders.dev.json", import.meta.url));
+
+export const SOLVER_LADDER_CONFIG = getEnv("SOLVER_LADDER_CONFIG") ?? DEFAULT_SOLVER_LADDER_CONFIG;
 
 type EnvReader = (name: string) => string | undefined;
 
@@ -42,7 +48,17 @@ export interface SolverDustAdmissionEnv {
   windowMs: number;
 }
 
-export interface SolverAdmissionEnv {
+/**
+ * The parsed admission configuration.
+ *
+ * EXTENDS the shared `JobAdmissionPolicy` (FR-002) so config, publication and
+ * executor admission all declare the same fields under the same names — the
+ * policy is carried between layers by `forwardAdmissionPolicy`, never
+ * re-listed. The two policy fields are redeclared here only to make them
+ * REQUIRED: a loader must decide open-versus-configured explicitly, whereas a
+ * consumer may legitimately leave them out.
+ */
+export interface SolverAdmissionEnv extends JobAdmissionPolicy {
   /** null means intentionally OPEN under Q-RF-2, with a recurring warning. */
   supportedPairs: ReadonlySet<string> | null;
   /** null means intentionally OPEN under Q-RF-2, with a recurring warning. */
@@ -159,8 +175,13 @@ export interface SolverRelayHttpEnvOptions {
   relayExecutionEnabled: boolean;
 }
 
-export function parseSolverRelayHttpUrl(raw: string): string {
-  const name = "SOLVER_RELAY_HTTP_URL";
+/**
+ * One canonical HTTP(S) base URL. Shared by every mandatory HTTP boundary of
+ * the solver process (the relay's public status base and the kernel API) so a
+ * deployment cannot pass a credential-bearing, query-bearing, or
+ * trailing-slash-inconsistent URL to one of them and a strict one to the other.
+ */
+export function parseHttpBaseUrl(name: string, raw: string): string {
   if (raw.length === 0 || raw.trim() !== raw || raw.includes("\0")) {
     throw new Error(`${name} must be a non-empty canonical HTTP(S) URL without whitespace or NUL`);
   }
@@ -182,6 +203,9 @@ export function parseSolverRelayHttpUrl(raw: string): string {
   parsed.pathname = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/$/, "");
   return parsed.toString().replace(/\/$/, "");
 }
+
+export const parseSolverRelayHttpUrl = (raw: string): string =>
+  parseHttpBaseUrl("SOLVER_RELAY_HTTP_URL", raw);
 
 /** The public relay status authority is configured explicitly. It is never
  * guessed by rewriting the websocket URL because the deployed HTTP prefix may

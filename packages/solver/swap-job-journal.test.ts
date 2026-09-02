@@ -169,6 +169,7 @@ const start = (
     wallet,
     journal,
     keys: { dustSecretKey: "dust" },
+    networkId: "undeployed",
     relayHttpUrl: "http://relay.test/api/v1",
     maxParallelSwaps: 2,
     expiryMarginSeconds: 120,

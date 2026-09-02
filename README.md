@@ -141,7 +141,10 @@ services rather than launching them.
   are refused before admission, not partially supported.
 - Maker offers are built `payFees:false`, so the maker's offer carries no fee
   payment: **the settling side pays**. The solver sizes and pays DUST for the
-  settlement it submits, under the `SOLVER_DUST_*` admission budget.
+  settlement it submits, under the `SOLVER_DUST_*` admission budget. Sizing that
+  fee requires **no swap-token inventory at all** — see
+  [`SOLVER_FEE_SIZING_TAKER_INPUTS`](#fee-sizing-solver_fee_sizing_taker_inputs).
+  The solver still needs NIGHT/DUST to pay the fee itself.
 - Published ladders are indicative data for the relay's own interpolation, not
   reservations. Job admission is re-decided at job time against the current
   book, inventory and policy.
@@ -167,28 +170,64 @@ below-minimum outputs and unaffordable residuals. Previously these lower demands
 were refused as `route_not_current`; deployments that relied on that refusal will
 now see them settle.
 
-### Published liquidity is bounded by what the solver can actually execute
+### The solver needs NO token inventory to quote whole-maker rungs
 
-**Availability change.** The solver only advertises rungs it can execute right
-now, so operators will see liquidity withdrawn that earlier versions advertised:
+**Availability change.** Sizing the settlement's DUST fee no longer touches the
+solver's coins: the taker's half is modelled by a *synthetic* transaction built
+from ledger primitives with the taker half's shape, because the DUST fee is a
+function of transaction structure only. So:
 
-- a rung whose interpolation interval could demand a tokenOut residual larger
-  than available `Stock` is withheld, **and so is every rung above it**;
-- published rung inputs are capped by the tokenIn the solver can prove
-  spendable, because the mandatory fee-sizing mirror spends the job's full
-  `amountIn` of tokenIn from the solver wallet. **A solver holding no tokenIn
-  publishes nothing for that pair**, however deep the maker book behind it is —
-  fund the solver wallet with *both* sides of every pair it quotes;
-- `SOLVER_SUPPORTED_PAIRS` and `SOLVER_MIN_JOB_OUTPUT` now bound publication as
-  well as admission (they previously bounded admission only), and are re-applied
-  on every reconnect;
+- **every whole-maker rung is publishable and settleable by a solver holding
+  zero of both tokens.** The maker offer being consumed pays the rung; the
+  solver contributes nothing but the fee;
+- **tokenOut is needed only for *interior* sizes.** Publishing a second rung
+  opens the interpolated interval below it, and any size inside that interval is
+  served as "consume the whole prefix, then top up the difference from solver
+  inventory". A rung whose interval could demand a tokenOut residual larger than
+  available `Stock` is withheld, **and so is every rung above it**. With zero
+  tokenOut the solver therefore publishes each pair's first rung and no more;
+- `SOLVER_SUPPORTED_PAIRS` and `SOLVER_MIN_JOB_OUTPUT` bound publication as well
+  as admission (they previously bounded admission only), and are re-applied on
+  every reconnect;
 - inventory readiness republishes immediately on both edges, so a failed or
-  in-flight balance refresh withdraws budget-bounded rungs instead of
+  in-flight balance refresh withdraws residual-bounded rungs instead of
   advertising them for up to one push interval.
 
 Withheld liquidity is reported once per change through the
 `ladder-budget-limited` / `ladder-budget-cleared` operator events, so a shrunk
 ladder is visible rather than silent.
+
+> Earlier builds also capped published rung inputs by the tokenIn the solver
+> could prove spendable — a solver holding no tokenIn published nothing for that
+> pair — because fee sizing spent the job's full `amountIn` out of the solver's
+> own wallet and reverted it. That cap is **gone**. Operators no longer need to
+> fund both sides of a pair; deployments that provisioned the solver with tokenIn
+> purely to make it quote can stop.
+
+### Fee sizing: `SOLVER_FEE_SIZING_TAKER_INPUTS`
+
+The solver never sees the taker's half — the relay merges it — so it cannot know
+how many zswap inputs the taker's own coin selection produced. It therefore
+models a fixed number, and that number is the one knob:
+
+| | |
+|---|---|
+| `SOLVER_FEE_SIZING_TAKER_INPUTS` | Optional. Integer in `[1, 64]`, default **1**. Malformed values are a listed `start:solver` launch problem, never a silent default. |
+
+**Coverage rule (measured).** A stand-in modelling `n` taker inputs funds a real
+taker half of up to **`n + 2`** zswap inputs. The default of 1 therefore covers
+takers paying from up to three coins, which is what the deployed E2E exercises,
+and it reserves exactly the DUST the previous mirror-based design did.
+
+**Raising it costs real DUST.** Each extra modelled input adds **12–14 %** to the
+reserved fee, and the DUST intent *spends* the estimate rather than merely
+holding it — so a higher value also consumes `SOLVER_DUST_MAX_PER_JOB` /
+`SOLVER_DUST_MAX_PER_WINDOW` budget faster. Raise it only if settlements start
+failing at submit time because a taker's balance is fragmented across many small
+coins; that failure is an availability failure (the chain rejects the merged
+transaction, the relay reports `submit-failed`, and the solver's contribution is
+reverted), not a loss of funds. The startup banner prints the effective model and
+its coverage.
 
 ## Mainnet environment
 

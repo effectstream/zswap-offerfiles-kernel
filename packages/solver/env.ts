@@ -4,6 +4,11 @@ import { isAbsolute } from "node:path";
 import { getEnv } from "@effectstream/utils/runtime";
 
 import type { JobAdmissionPolicy } from "@zswap-da/solver-core/admission-policy";
+import {
+  DEFAULT_MODELLED_TAKER_INPUTS,
+  MAX_MODELLED_TAKER_INPUTS,
+  MIN_MODELLED_TAKER_INPUTS,
+} from "@zswap-da/solver-core/fee-sizing";
 
 // Dev seed. Must avoid every other wallet on the dev stack — genesis, the
 // batcher's (…0003/…0004), and the ring-maker range (…0005+) — because two
@@ -169,6 +174,41 @@ export function loadSolverAdmissionEnv(read: EnvReader = getEnv): SolverAdmissio
     ...(dust === null ? [dustNames.join("+")] : []),
   ];
   return { supportedPairs, minJobOutput, dust, warningIntervalMs, openGroups };
+}
+
+/**
+ * How many taker zswap inputs capital-free fee sizing models
+ * (`SOLVER_FEE_SIZING_TAKER_INPUTS`, 00006 FR-001).
+ *
+ * THE `n + 2` RULE. The solver pays the DUST fee for the transaction the RELAY
+ * submits, which includes the taker's half — a half this process never sees.
+ * Fee sizing therefore models it, and the only unknown is how many zswap inputs
+ * the taker's own coin selection produced. Measured coverage: a stand-in
+ * modelling `n` inputs funds a real taker half of up to **`n + 2`** inputs (the
+ * headroom is the `feeBlocksMargin = 5` multiplier plus the flat
+ * `additionalFeeOverhead`).
+ *
+ * Raising it is not free: each extra modelled input costs ~12–14% more DUST,
+ * and that DUST is actually SPENT, not merely reserved, so it also consumes
+ * `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` budget faster.
+ * Lowering it below coverage is an AVAILABILITY failure, not a loss: the chain
+ * rejects the merged transaction, the relay reports `submit-failed`, and the
+ * existing revert path reclaims the solver's contribution.
+ *
+ * Default 1 — the shape 00005's deployed E2E actually observed (1 input + 1
+ * change + 1 receive, byte-identical 15 480-byte taker halves), which keeps the
+ * reserved DUST identical to the pre-00006 mirror's. Raise it if
+ * `submit-failed` from a fee shortfall ever shows up against takers with
+ * fragmented balances.
+ */
+export function loadSolverFeeSizingTakerInputs(read: EnvReader = getEnv): number {
+  return parseBoundedIntegerEnv(
+    "SOLVER_FEE_SIZING_TAKER_INPUTS",
+    read("SOLVER_FEE_SIZING_TAKER_INPUTS"),
+    DEFAULT_MODELLED_TAKER_INPUTS,
+    MIN_MODELLED_TAKER_INPUTS,
+    MAX_MODELLED_TAKER_INPUTS,
+  );
 }
 
 export interface SolverRelayHttpEnvOptions {

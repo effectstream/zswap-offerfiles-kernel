@@ -102,12 +102,17 @@ problem at once, before any wallet, socket or journal is touched — so one
 restart shows the whole list. `gates.sh` drives exactly that as a negative
 control.
 
-> **The solver must be funded on BOTH sides of every pair it quotes.** Since
-> `c4ac2bb`, publication is bounded by what the solver can actually move —
-> tokenOut for residuals, and tokenIn because the fee-sizing mirror spends the
-> job's full `amountIn` from the solver's own wallet. A solver holding no
-> tokenIn publishes nothing, however deep the maker book is, while every service
-> still reports healthy. See the boxed note in `.env.example`.
+> **The solver needs NO swap-token inventory to quote whole-maker rungs.** Since
+> 00006 the DUST fee is sized from a synthetic taker-half stand-in rather than by
+> spending and reverting the job's full `amountIn` out of the solver's own
+> wallet, and the tokenIn publication cap that mechanism forced (added in
+> `c4ac2bb`, which made a solver holding no tokenIn publish nothing at all) is
+> gone. What tokenOut inventory still buys is *interior* sizes: a rung whose
+> interpolated interval could demand more residual tokenOut than the solver can
+> move is withheld, so a solver holding no tokenOut publishes each pair's first
+> rung and no more. See the boxed note in `.env.example`, and
+> `SOLVER_FEE_SIZING_TAKER_INPUTS` beside it — the one fee knob, where raising
+> the number spends more real DUST.
 
 ## Observing the relay
 

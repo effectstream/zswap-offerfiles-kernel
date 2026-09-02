@@ -14,15 +14,30 @@
 // prefix pays over it (the pinned reference solver keeps `dy - requiredOutput`
 // the same way). Demanding MORE than the published curve stays refused.
 //
-// SOLVENCY (P4-F03/P4-F04, FR-003/FR-004). Two inventory facts decide a job
-// before any wallet call happens, both against live `Stock`: the residual
-// tokenOut the solver would PAY, and the full `amountIn` of tokenIn the
-// mandatory fee-sizing mirror SPENDS. Publication now caps the advertised
-// ladder by the same two numbers (`deriveLadder`'s `spendableInventory`), so
-// these are the fail-closed depth checks for the gap between a push and a
-// dispatch rather than the only guard — but they remain the only guard when the
-// publication budget is left open, and they are what keeps an unfundable job
-// from failing part-way through a wallet mutation.
+// SOLVENCY (P4-F03, FR-003). ONE inventory fact decides a job before any wallet
+// call happens, against live `Stock`: the residual tokenOut the solver would
+// PAY. Publication caps the advertised ladder by the same number
+// (`deriveLadder`'s `spendableInventory`), so this is the fail-closed depth check
+// for the gap between a push and a dispatch rather than the only guard — but it
+// remains the only guard when the publication budget is left open.
+//
+// The solver needs NO tokenIn inventory. 00005-R2 also bounded a job (and
+// publication) by the solver's spendable tokenIn, because fee sizing spent it;
+// 00006-R2 removed both (FR-003) once 00006-R1 made fee sizing capital-free. See
+// the note in `resolveSwapJobRoute` where that guard used to stand.
+//
+// CAPITAL-FREE FEE SIZING (00006 FR-001/FR-002). Fee sizing used to open with a
+// MIRROR: `initSwap` selecting the taker's full `amountIn` of tokenIn out of the
+// solver's own wallet, immediately reverted, handed to the DUST balancer as the
+// taker-half stand-in. It is now a SYNTHETIC stand-in built from ledger
+// primitives (`@zswap-da/solver-core/fee-sizing`), because the DUST fee is a
+// function of transaction STRUCTURE only. Consequences:
+//   * fee sizing spends, reserves and mutates NOTHING — one fewer
+//     mutate-then-revert wallet class per job;
+//   * an empty token wallet can quote and settle every whole-maker rung;
+//   * new jobs write no `MIRROR_RESERVATION`/`MIRROR_REVERT` journal rows. The
+//     recovery filters still READ those kinds so pre-existing rows recover
+//     (FR-004).
 
 import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 import { createHash } from "node:crypto";
@@ -64,6 +79,13 @@ import {
   tokenImbalances,
   type Imbalance,
 } from "@zswap-da/solver-core/batcher";
+import {
+  buildTakerHalfStandIn,
+  DEFAULT_MODELLED_TAKER_INPUTS,
+  MAX_MODELLED_TAKER_INPUTS,
+  MIN_MODELLED_TAKER_INPUTS,
+  takerHalfStandInSpec,
+} from "@zswap-da/solver-core/fee-sizing";
 import {
   collectNullifiers,
   deriveLegs,
@@ -141,9 +163,14 @@ class WalletCleanupFailure extends JobRefusal {
   }
 }
 
-/** The wallet could not acknowledge release of the unfinalized fee-sizing
- * mirror. It must remain an occupied slot/claim and be retried by the sweeper;
- * releasing it would let uncertain wallet state fund another job. */
+/** The wallet could not acknowledge release of an unfinalized mutation it had
+ * already applied (the DUST balancing transaction, or a residual leg before it
+ * was finalized). It must remain an occupied slot/claim and be retried by the
+ * sweeper; releasing it would let uncertain wallet state fund another job.
+ *
+ * Since 00006 FR-001 fee sizing is NOT one of these: its taker-half stand-in is
+ * fabricated from ledger primitives, so it never becomes wallet state and can
+ * never be the source of this ambiguity. */
 class WalletMutationUncertain extends JobRefusal {
   readonly rawTransactions: unknown[];
   readonly walletTransaction: FinalizedTransaction | undefined;
@@ -195,6 +222,10 @@ export interface ExactOfferSemantics {
 }
 
 export interface SwapJobDependencies {
+  /** FR-001's taker-half stand-in. A pure ledger call — no wallet, no coin
+   * selection, nothing to revert. Injected so the wallet doubles can assert
+   * that fee sizing reaches it and never reaches `initSwap`. */
+  buildFeeSizingStandIn: typeof buildTakerHalfStandIn;
   readExactOfferFiles: typeof readExactOfferFiles;
   getOfferConsumptionEvidence: typeof getOfferConsumptionEvidence;
   getRelayJobStatus: typeof getRelayJobStatus;
@@ -209,6 +240,7 @@ export interface SwapJobDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: SwapJobDependencies = {
+  buildFeeSizingStandIn: buildTakerHalfStandIn,
   readExactOfferFiles,
   getOfferConsumptionEvidence,
   getRelayJobStatus,
@@ -252,6 +284,27 @@ export interface SwapJobExecutorOptions extends JobAdmissionPolicy {
   wallet: SwapJobWallet;
   journal: SolverOperationJournal;
   keys: { dustSecretKey: unknown } & Record<string, unknown>;
+  /**
+   * The network id the WALLET was built with (FR-001).
+   *
+   * The fee-sizing stand-in is a real ledger transaction, so it carries a
+   * network id, and the DUST balancer merges it with the solver's own half. The
+   * ledger accepts any string at construction time (measured) and only refuses
+   * at the merge — `invalid network ID - expect 'undeployed' found 'testnet'` —
+   * so a mis-threaded value would surface as a per-job `wallet_build_failed`
+   * rather than a configuration error. It is validated here at startup instead,
+   * and threaded from the SAME source the wallet facade reads
+   * (`midnightNetworkConfig.id`) rather than imported, so tests stay hermetic.
+   */
+  networkId: string;
+  /**
+   * How many taker zswap inputs fee sizing models (FR-001). Defaults to
+   * `DEFAULT_MODELLED_TAKER_INPUTS` (1) — the shape 00005's deployed E2E
+   * actually observed, which makes the reserved DUST identical to the mirror's.
+   * The reservation funds a real taker half of up to `n + 2` inputs; see
+   * `@zswap-da/solver-core/fee-sizing`.
+   */
+  modelledTakerInputs?: number;
   api?: string;
   /** Explicit relay HTTP authority. Never derived from the websocket URL. */
   relayHttpUrl: string;
@@ -460,9 +513,9 @@ export function resolveSwapJobRoute(
     throw new JobRefusal(JOB_MIN_OUTPUT);
   }
 
-  // Deliberately derived WITHOUT `spendableInventory`: the publication budgets
-  // (FR-003/FR-004) shape what the solver advertises, but a job already in hand
-  // must be judged against the whole current book and then against live `Stock`
+  // Deliberately derived WITHOUT `spendableInventory`: the publication budget
+  // (FR-003) shapes what the solver advertises, but a job already in hand must
+  // be judged against the whole current book and then against live `Stock`
   // below. Deriving with a budget here would turn an inventory dip into
   // `route_not_current` ("the ladder moved"), hiding a solvency refusal behind
   // a staleness one.
@@ -538,28 +591,26 @@ export function resolveSwapJobRoute(
   if (residualOut > stock.available(tokenOut)) {
     throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "residual solver inventory is insufficient");
   }
-  // FR-004 (P4-F04), fail-closed and BEFORE any wallet mutation, journal row,
-  // or reservation exists.
+  // NO tokenIn CHECK HERE, deliberately (00006 FR-003).
   //
-  // `buildHalf` opens with a mandatory fee-sizing mirror that calls
-  // `initSwap({shielded: {[tokenIn]: amountIn}}, …)` — it selects real coins for
-  // the taker's FULL input out of the solver's own wallet and reverts them
-  // immediately. So a job the wallet cannot fund does not merely fail; it fails
-  // half-way through a wallet mutation, and a revert that is itself uncertain
-  // sends the job to `WalletMutationUncertain` quarantine, stranding the claim
-  // and a capacity slot. Publication now caps rung inputs by the same number
-  // (FR-004 in `deriveLadder`), which makes this the depth check for the window
-  // between a push and a dispatch — and the only check at all when the operator
-  // runs with the publication budget open.
+  // 00005-R2 added one for P4-F04: `buildHalf` opened with a mandatory
+  // fee-sizing MIRROR that called `initSwap({shielded: {[tokenIn]: amountIn}}, …)`,
+  // selecting real coins for the taker's FULL input out of the solver's own
+  // wallet and reverting them immediately, so an unfundable job failed half-way
+  // through a wallet mutation and an uncertain revert sent it to
+  // `WalletMutationUncertain` quarantine, stranding the claim and a slot. The
+  // guard refused such a job with `JOB_ROUTE_UNAVAILABLE` before any wallet call.
   //
-  // `tokenIn !== tokenOut` is guaranteed by `requireCanonicalJob`, so the
-  // residual reservation taken below can never consume this budget.
-  if (amountIn > stock.available(tokenIn)) {
-    throw new JobRefusal(
-      JOB_ROUTE_UNAVAILABLE,
-      "fee-sizing mirror cannot be funded from spendable tokenIn",
-    );
-  }
+  // 00006-R1 removed the mirror (FR-001): fee sizing models the taker half with
+  // a fabricated transaction and spends no tokenIn at all, so there is no
+  // tokenIn mutation left to protect and no tokenIn inventory the solver needs
+  // in order to quote. 00006-R2 removed the guard and its publication
+  // counterpart in `deriveLadder` together (FR-003) — keeping either would keep
+  // an uncapitalized solver unquotable for a mechanism that no longer exists.
+  //
+  // The residual check above is what remains, and it is the one that was ever a
+  // solvency fact: `residualOut` is tokenOut the solver actually PAYS. It stays
+  // as F03's defense in depth for the window between a push and a dispatch.
   if (!stock.reserve(claim)) {
     throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "route is already claimed or inventory changed");
   }
@@ -662,6 +713,30 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
   requirePositiveInteger("expiryMarginSeconds", options.expiryMarginSeconds);
   requirePositiveInteger("settleTtlMinutes", options.settleTtlMinutes);
   if (options.relayHttpUrl.length === 0) throw new Error("relayHttpUrl is required");
+  // FR-001. Both fee-sizing inputs are decided at startup, so a malformed one
+  // is a boot error and never a per-job `wallet_build_failed` refusal.
+  const networkId = options.networkId;
+  if (
+    typeof networkId !== "string" || networkId.length === 0 ||
+    networkId.trim() !== networkId || networkId.includes("\0")
+  ) {
+    throw new Error(
+      "networkId is required: the fee-sizing stand-in must carry the same " +
+        "network id the wallet was built with, and the ledger only refuses a " +
+        "mismatch at merge time",
+    );
+  }
+  const modelledTakerInputs = options.modelledTakerInputs ?? DEFAULT_MODELLED_TAKER_INPUTS;
+  requirePositiveInteger("modelledTakerInputs", modelledTakerInputs);
+  if (
+    modelledTakerInputs < MIN_MODELLED_TAKER_INPUTS ||
+    modelledTakerInputs > MAX_MODELLED_TAKER_INPUTS
+  ) {
+    throw new RangeError(
+      `modelledTakerInputs must be in [${MIN_MODELLED_TAKER_INPUTS}, ` +
+        `${MAX_MODELLED_TAKER_INPUTS}], got ${modelledTakerInputs}`,
+    );
+  }
   const requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
   const walletOperationTimeoutMs = options.walletOperationTimeoutMs ?? 240_000;
   const sweepIntervalMs = options.sweepIntervalMs ?? 10_000;
@@ -1044,6 +1119,11 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       : dependencies.mergeFinalized(finalizedTransactions);
     const hasResidualFinal = finalizedRows.some((row) => row.operationKey.endsWith(":residual"));
     const hasDustFinal = finalizedRows.some((row) => row.operationKey.endsWith(":dust"));
+    // FR-004: the `MIRROR_RESERVATION` arm is LEGACY-ONLY. Jobs built at this
+    // head never write that kind (00006-R1 replaced the mirror with a fabricated
+    // stand-in that is not wallet state), but a journal written before the
+    // upgrade can still hold one, and it is a real reserved coin set that must
+    // still be reverted. Do not remove this arm.
     const rawRows = primaryRevert === undefined ? rows.filter((row) =>
       row.walletArtifactKind === "UNPROVEN_TRANSACTION" && !terminal(row.lifecycleState) &&
       (row.operationKind === "MIRROR_RESERVATION" ||
@@ -1259,43 +1339,34 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     const ttl = new Date(ttlExpiresAt);
     const receiverAddress = await options.wallet.shielded.getAddress();
     const walletTransactions: FinalizedTransaction[] = [];
-    let mirrorReverted = false;
-    let mirrorKey: string | undefined;
     const finalized: Array<{ key: string; sourceKey: string; transaction: FinalizedTransaction }> = [];
     const pendingUnproven: Array<{ key: string; transaction: unknown }> = [];
 
-    // Fee sizing needs the taker's half too. Build an equivalent local mirror,
-    // immediately revert its token reservation, and pass its bytes only to the
-    // DUST estimator — the pinned reference solver uses the same strategy.
-    let mirrorTransaction: unknown;
     try {
-      mirrorKey = prepareMutation(record, "MIRROR_RESERVATION", "fee-sizing");
-      const mirror = await options.wallet.initSwap(
-        { shielded: { [job.tokenIn.toLowerCase()]: BigInt(job.amountIn) } },
-        [{
-          type: "shielded",
-          outputs: [{
-            type: job.tokenOut.toLowerCase(),
-            amount: BigInt(job.amountOut),
-            receiverAddress,
-          }],
-        }],
-        options.keys,
-        { ttl, payFees: false },
+      // FR-001. Fee sizing needs the taker's half too, and the DUST fee depends
+      // on the merged transaction's STRUCTURE only — not on any coin's value,
+      // token type or owner. So the taker half is modelled by a FABRICATED
+      // transaction of the same shape (`modelledTakerInputs` tokenIn inputs, one
+      // tokenIn change output, one tokenOut receive output, guaranteed segment
+      // only) built over a throwaway keypair inside the call.
+      //
+      // Nothing here is a wallet mutation: no coin selection, no reservation, no
+      // `watchCoins`, and therefore NO JOURNAL ROW and no revert. That is
+      // deliberate and load-bearing — the `MIRROR_RESERVATION` arms of the
+      // recovery filters (`restoreRecoveryTargets` and startup reconciliation)
+      // hand their bytes to `wallet.revertTransaction`, and reverting a
+      // transaction full of coins this wallet never owned is exactly the surface
+      // 00005 FR-010 wants shrunk. Those arms stay in place unmodified so
+      // PRE-EXISTING `MIRROR_*` rows still recover (FR-004); new jobs simply
+      // never write them.
+      const standInTransaction = dependencies.buildFeeSizingStandIn(
+        takerHalfStandInSpec({
+          networkId,
+          tokenIn: job.tokenIn,
+          tokenOut: job.tokenOut,
+          modelledTakerInputs,
+        }),
       );
-      mirrorTransaction = mirror.transaction;
-      const mirrorBytes = dependencies.serializeUnproven(mirrorTransaction);
-      applyArtifact(mirrorKey, "UNPROVEN_TRANSACTION", mirrorBytes);
-      const mirrorRevertKey = prepareMutation(record, "MIRROR_REVERT", "fee-sizing", {
-        kind: "UNPROVEN_TRANSACTION",
-        bytes: mirrorBytes,
-      });
-      journal.transition(mirrorRevertKey, "PREPARED", "REVERTING");
-      journal.transition(mirrorKey, "APPLIED", "REVERTING");
-      await options.wallet.revertTransaction(mirrorTransaction);
-      journal.transition(mirrorRevertKey, "REVERTING", "REVERTED");
-      journal.transition(mirrorKey, "REVERTING", "REVERTED");
-      mirrorReverted = true;
 
       // The solver's own balancing leg: everything the whole-offer maker prefix
       // does not already move. What the solver KEEPS is expressed as an output
@@ -1349,7 +1420,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       const dustKey = prepareMutation(record, "DUST_BALANCE", "fees");
       const dustTransaction = await options.wallet.dust.balanceTransactions(
         options.keys.dustSecretKey,
-        [base, mirrorTransaction],
+        [base, standInTransaction],
         ttl,
       );
       applyArtifact(dustKey, "UNPROVEN_TRANSACTION", dependencies.serializeUnproven(dustTransaction));
@@ -1413,20 +1484,9 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
           try { quarantineRow(journal.require(pending.key), "LOCAL_REVERT_FAILED", candidate); } catch { /* retained */ }
         }
       }
-      let mirrorCleanupError: unknown = null;
-      if (mirrorTransaction !== undefined && !mirrorReverted) {
-        try {
-          if (mirrorKey) {
-            const current = journal.require(mirrorKey);
-            if (current.lifecycleState === "APPLIED") journal.transition(mirrorKey, "APPLIED", "REVERTING");
-          }
-          await options.wallet.revertTransaction(mirrorTransaction);
-          if (mirrorKey) markOperationReverted(mirrorKey);
-          mirrorReverted = true;
-        } catch (cleanupError) {
-          mirrorCleanupError = cleanupError;
-        }
-      }
+      // FR-001: there is deliberately no fee-sizing cleanup arm any more. The
+      // taker-half stand-in is fabricated, so a failure anywhere in this block
+      // leaves nothing of it behind to revert, journal or quarantine.
       const failedWalletTransaction = failedTransactions.length === 0
         ? undefined
         : dependencies.mergeFinalized(failedTransactions);
@@ -1442,16 +1502,12 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         if (error instanceof JobRefusal) throw error;
         throw new JobRefusal(JOB_WALLET_FAILED, errorMessage(error));
       }
-      const combined = [errorMessage(error), cleanupError && `cleanup failed: ${errorMessage(cleanupError)}`,
-        mirrorCleanupError && `mirror cleanup failed: ${errorMessage(mirrorCleanupError)}`]
+      const combined = [errorMessage(error), cleanupError && `cleanup failed: ${errorMessage(cleanupError)}`]
         .filter(Boolean).join("; ");
       quarantineGroup(job.jobId, record.generation, "LOCAL_MUTATION_UNCERTAIN", combined);
       throw new WalletMutationUncertain(
         combined,
-        [
-          ...failedUnproven,
-          ...(mirrorReverted || mirrorTransaction === undefined ? [] : [mirrorTransaction]),
-        ],
+        failedUnproven,
         failedWalletTransaction,
         ttlExpiresAt,
       );
@@ -2074,6 +2130,9 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
           dependencies.deserializeFinalized(row.walletArtifactBytes!));
         const hasResidualFinal = finalizedRows.some((row) => row.operationKey.endsWith(":residual"));
         const hasDustFinal = finalizedRows.some((row) => row.operationKey.endsWith(":dust"));
+        // FR-004: `MIRROR_RESERVATION` is legacy-only here too — see
+        // `restoreRecoveryTargets`. A journal carried across the 00006-R1
+        // upgrade may still hold one, and it must still be reverted.
         const rawRows = revertArtifact ? [] : jobRows.filter((row) =>
           row.walletArtifactKind === "UNPROVEN_TRANSACTION" && !terminal(row.lifecycleState) &&
           (row.operationKind === "MIRROR_RESERVATION" ||

@@ -368,6 +368,23 @@ services:
       <<: [*midnight-endpoints, *celestia-endpoints]
       CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
       SOLVER_PROVISION_ENABLED: ${SOLVER_PROVISION_ENABLED:-true}
+      # ── 00006-V1: which HALF of provisioning runs ──────────────────────────
+      # "true"  → packages/solver/scripts/bootstrap-dev.ts: NIGHT + dust
+      #           registration + MINT both swap tokens. The pre-00006 funded
+      #           path, kept as SC-004's control.
+      # "false" → deploy/scripts/provision-solver-fees.ts: NIGHT + dust
+      #           registration and NOTHING ELSE. The solver's wallet is left
+      #           holding zero of every swap token, which since 00006 is enough
+      #           to publish and settle whole-maker rungs.
+      # Distinct from SOLVER_PROVISION_ENABLED=false, which skips fee currency
+      # too and leaves a solver that cannot pay for anything.
+      SOLVER_PROVISION_MINT_TOKENS: ${SOLVER_PROVISION_MINT_TOKENS:-true}
+      # Where the fee-only path writes its machine-readable receipt: the solver
+      # wallet's balances as MEASURED by the only process entitled to open that
+      # facade, at the moment provisioning finished and before the solver boots.
+      # The E2E driver asserts on it — "no tokens were provisioned" has to be an
+      # observation, not a configuration claim.
+      SOLVER_PROVISION_RECEIPT: ${SOLVER_PROVISION_RECEIPT:-/srv/solver-config/provision-receipt.json}
       # Drives a wallet on this seed, which is why `solver` must wait for this
       # service to COMPLETE: two facades on one seed against one node force
       # each other's connection down.
@@ -520,6 +537,32 @@ services:
       SOLVER_DRY_RUN: ${SOLVER_DRY_RUN:-false}
       SOLVER_SUPPORTED_PAIRS: ${SOLVER_SUPPORTED_PAIRS:-}
       SOLVER_MIN_JOB_OUTPUT: ${SOLVER_MIN_JOB_OUTPUT:-}
+      # ── capital-free fee sizing (00006) ────────────────────────────────────
+      # How many taker zswap inputs the DUST estimate models. Unset = 1, which
+      # is the value the E1/V1 single-coin taker exercises and which reserves
+      # byte-for-byte what the pre-00006 mirror did. Coverage is n + 2.
+      #
+      # Forwarded even though it is normally blank BECAUSE blank is malformed
+      # for this knob, not "unset": `entrypoint-common.sh` unsets an empty one
+      # before `start.solver.ts` ever sees it. Both halves are required — see
+      # the note in .env.example.
+      SOLVER_FEE_SIZING_TAKER_INPUTS: ${SOLVER_FEE_SIZING_TAKER_INPUTS:-}
+      # ── DUST admission accounting (RF3) ────────────────────────────────────
+      # All three or none (packages/solver/env.ts refuses a partial group), and
+      # an empty one is malformed, so `entrypoint-common.sh` unsets the whole
+      # group when blank.
+      #
+      # 00006-V1 turns this ON in the deployment for the first time. It is not a
+      # new mechanism: it is the accounting FR-002 requires be left untouched,
+      # and switching it on is the only way the amount `estimateDustAmount`
+      # computed for each settled job becomes OBSERVABLE — `reserveDust` writes
+      # it to `journal_dust_reservations.amount_text`, which the E2E driver
+      # reads to record design-note §6's live-chain DUST figures. The defaults
+      # are deliberately far above the measured per-job estimate (~2.8e15
+      # SPECKs) so admission records rather than gates.
+      SOLVER_DUST_MAX_PER_JOB: ${SOLVER_DUST_MAX_PER_JOB:-}
+      SOLVER_DUST_MAX_PER_WINDOW: ${SOLVER_DUST_MAX_PER_WINDOW:-}
+      SOLVER_DUST_WINDOW_MS: ${SOLVER_DUST_WINDOW_MS:-}
       # The GENERATED ladder, not the in-repo one. Token colors derive from the
       # deployed contract address, so the checked-in `ladders.dev.json` names
       # colors from an older deployment; `solver-provision` rewrites it with
@@ -579,10 +622,26 @@ services:
       E2E_CASE_C_DEMAND_DEN: ${E2E_CASE_C_DEMAND_DEN:-5}
       E2E_CASES: ${E2E_CASES:-A,B,C,D}
       E2E_SKIP_PROVISION: ${E2E_SKIP_PROVISION:-false}
+      # ── 00006-V1 / SC-004 ──────────────────────────────────────────────────
+      # When true the driver REFUSES to run unless the solver-provision receipt
+      # proves the solver was given fee currency only — zero of every swap
+      # token, nothing minted. The receipt is a measurement taken with the
+      # solver's own facade while the solver was stopped; this driver cannot
+      # take it itself (two facades on one seed against one node force each
+      # other's connection down).
+      E2E_REQUIRE_UNFUNDED_SOLVER: ${E2E_REQUIRE_UNFUNDED_SOLVER:-false}
+      SOLVER_PROVISION_RECEIPT: ${SOLVER_PROVISION_RECEIPT:-/srv/solver-config/provision-receipt.json}
+      # Recorded into the driver's evidence next to the reserved-DUST amounts it
+      # reads out of the journal — design-note §6 asks for the model that was in
+      # force alongside the number it produced. Blank = the solver's default, 1.
+      SOLVER_FEE_SIZING_TAKER_INPUTS: ${SOLVER_FEE_SIZING_TAKER_INPUTS:-}
     volumes:
       - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - e2e-evidence:/var/lib/e2e
       - solver-journal:/var/lib/cow-solver
+      # Read-only: the driver asserts on the provisioning receipt, never writes
+      # it, and must not be able to touch the ladder config the solver reads.
+      - solver-config:/srv/solver-config:ro
 
 volumes:
   # Chain-keyed. These MUST be wiped together: a kernel ledger mirror, a solver

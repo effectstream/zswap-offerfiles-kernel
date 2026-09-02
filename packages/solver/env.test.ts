@@ -1,7 +1,15 @@
 import { expect, test } from "bun:test";
 
 import {
+  DEFAULT_MODELLED_TAKER_INPUTS,
+  MAX_MODELLED_TAKER_INPUTS,
+  MIN_MODELLED_TAKER_INPUTS,
+  takerInputCoverage,
+} from "@zswap-da/solver-core/fee-sizing";
+
+import {
   loadRelayClientEnv,
+  loadSolverFeeSizingTakerInputs,
   loadSolverRelayHttpEnv,
   loadSolverJournalEnv,
   loadSolverAdmissionEnv,
@@ -229,6 +237,43 @@ test("relay client config accepts the bounded defaults", () => {
   expect(
     loadRelayClientEnv(reader({ SOLVER_RELAY_PUSH_INTERVAL_MS: "250" })).pushIntervalMs,
   ).toBe(250);
+});
+
+// ── 00006 FR-001: capital-free fee sizing ───────────────────────────────────
+//
+// `SOLVER_FEE_SIZING_TAKER_INPUTS` is the one genuinely unknowable number in the
+// fee model — how many zswap inputs the TAKER's own coin selection produced —
+// so Q-R0-1 (option A) made it an explicit operator knob with a documented
+// coverage rule instead of a constant buried in the estimator.
+
+test("fee-sizing taker inputs default to the behaviour-preserving 1 and stay bounded", () => {
+  expect(loadSolverFeeSizingTakerInputs(reader({}))).toBe(DEFAULT_MODELLED_TAKER_INPUTS);
+  expect(DEFAULT_MODELLED_TAKER_INPUTS).toBe(1);
+  // The default reproduces the shape 00005's deployed E2E actually observed
+  // (1 input + change + receive), and its measured coverage is n + 2.
+  expect(takerInputCoverage(DEFAULT_MODELLED_TAKER_INPUTS)).toBe(3);
+  expect(loadSolverFeeSizingTakerInputs(reader({ SOLVER_FEE_SIZING_TAKER_INPUTS: "4" }))).toBe(4);
+  expect(takerInputCoverage(4)).toBe(6);
+  expect(loadSolverFeeSizingTakerInputs(reader({
+    SOLVER_FEE_SIZING_TAKER_INPUTS: String(MIN_MODELLED_TAKER_INPUTS),
+  }))).toBe(MIN_MODELLED_TAKER_INPUTS);
+  expect(loadSolverFeeSizingTakerInputs(reader({
+    SOLVER_FEE_SIZING_TAKER_INPUTS: String(MAX_MODELLED_TAKER_INPUTS),
+  }))).toBe(MAX_MODELLED_TAKER_INPUTS);
+});
+
+test("fee-sizing taker inputs reject malformed, zero, negative, and out-of-range values", () => {
+  // A malformed knob must stop startup by NAME. Zero is specifically excluded:
+  // modelling no taker inputs under-approximates the real charge by 16–49%
+  // (measured), i.e. it would silently underfund every settlement.
+  for (const raw of [
+    "not-an-integer", "0", "-1", "1.5", " 1", "1 ", "+1", "01", "0x2", "",
+    String(MAX_MODELLED_TAKER_INPUTS + 1),
+  ]) {
+    expect(() => loadSolverFeeSizingTakerInputs(reader({
+      SOLVER_FEE_SIZING_TAKER_INPUTS: raw,
+    }))).toThrow("SOLVER_FEE_SIZING_TAKER_INPUTS");
+  }
 });
 
 test("every bounded relay variable rejects malformed startup input by name", () => {

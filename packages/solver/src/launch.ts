@@ -43,6 +43,7 @@ import { getEnv } from "@effectstream/utils/runtime";
 import {
   DEFAULT_SOLVER_LADDER_CONFIG,
   DEV_SEED,
+  loadSolverFeeSizingTakerInputs,
   loadSolverJournalEnv,
   parseBooleanEnv,
   parseHttpBaseUrl,
@@ -77,6 +78,9 @@ export interface SolverLaunchConfig {
   seed: string;
   dryRun: boolean;
   ladderConfigPath: string;
+  /** 00006 FR-001. How many taker zswap inputs fee sizing models; the
+   * reservation funds a real taker half of up to this many `+ 2` inputs. */
+  feeSizingTakerInputs: number;
   /** Non-fatal observations the entrypoint prints. Never a reason to refuse. */
   warnings: readonly string[];
 }
@@ -327,9 +331,20 @@ export function resolveSolverLaunchConfig(
     );
   }
 
-  if (problems.length > 0 || networkId === null || journal === null) {
-    // networkId/journal being null always coincides with a recorded problem;
-    // the check keeps that invariant explicit rather than assumed.
+  // ── capital-free fee sizing (00006 FR-001) ─────────────────────────────────
+  // A malformed value must be one of the listed problems, not a crash inside
+  // `runSolver` after the wallet is already up.
+  let feeSizingTakerInputs: number | null = null;
+  try {
+    feeSizingTakerInputs = loadSolverFeeSizingTakerInputs(read);
+  } catch (error) {
+    problems.push(asMessage(error));
+  }
+
+  if (problems.length > 0 || networkId === null || journal === null ||
+      feeSizingTakerInputs === null) {
+    // networkId/journal/feeSizingTakerInputs being null always coincides with a
+    // recorded problem; the check keeps that invariant explicit, not assumed.
     throw new SolverLaunchConfigError(
       problems.length > 0 ? problems : ["solver launch configuration could not be resolved"],
     );
@@ -345,6 +360,7 @@ export function resolveSolverLaunchConfig(
     seed,
     dryRun,
     ladderConfigPath,
+    feeSizingTakerInputs,
     warnings,
   };
 }
@@ -364,6 +380,9 @@ export function describeSolverLaunchConfig(config: SolverLaunchConfig): string {
     `  relay token    : set (${config.relayAuthToken.length} chars)`,
     `  journal        : ${config.journal.path}`,
     `  ladder config  : ${config.ladderConfigPath}`,
+    `  fee sizing     : models ${config.feeSizingTakerInputs} taker input(s) ` +
+      `(funds a taker half of up to ${config.feeSizingTakerInputs + 2}) ` +
+      `— SOLVER_FEE_SIZING_TAKER_INPUTS`,
     `  seed           : set (never logged)`,
   ];
   for (const warning of config.warnings) lines.push(`  ! ${warning}`);

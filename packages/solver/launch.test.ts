@@ -88,8 +88,37 @@ describe("FR-005 solver launch configuration", () => {
       seed: REAL_SEED,
       dryRun: false,
       ladderConfigPath: "/etc/cow-solver/ladders.json",
+      // 00006 FR-001: optional, but resolved and reported like everything else.
+      feeSizingTakerInputs: 1,
       warnings: [],
     });
+  });
+
+  // 00006 FR-001 / Q-R0-1 (option A). The knob is optional, so its DEFAULT must
+  // not be a launch problem — but a malformed value must be a listed problem
+  // alongside the others, not a crash inside `runSolver` after the wallet is up.
+  test("the fee-sizing taker-input knob is optional, bounded, and listed when malformed", () => {
+    expect(resolveWith(complete()).feeSizingTakerInputs).toBe(1);
+    expect(resolveWith({ ...complete(), SOLVER_FEE_SIZING_TAKER_INPUTS: "3" })
+      .feeSizingTakerInputs).toBe(3);
+
+    for (const raw of ["0", "-1", "1.5", "many", "65"]) {
+      const problems = problemsOf({ ...complete(), SOLVER_FEE_SIZING_TAKER_INPUTS: raw });
+      namesOne(problems, "SOLVER_FEE_SIZING_TAKER_INPUTS");
+      // Still ONE pass over everything: a bad knob does not mask a bad seed.
+      expect(problemsOf({
+        ...complete(), SOLVER_FEE_SIZING_TAKER_INPUTS: raw, SOLVER_SEED: "",
+      }).length).toBe(2);
+    }
+  });
+
+  test("the banner states the fee-sizing model and its coverage", () => {
+    const banner = describeSolverLaunchConfig(
+      resolveWith({ ...complete(), SOLVER_FEE_SIZING_TAKER_INPUTS: "2" }),
+    );
+    expect(banner).toContain("models 2 taker input(s)");
+    expect(banner).toContain("up to 4");
+    expect(banner).toContain("SOLVER_FEE_SIZING_TAKER_INPUTS");
   });
 
   test("HTTP bases are canonicalized identically for the kernel and the relay", () => {

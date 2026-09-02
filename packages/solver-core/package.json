@@ -9,6 +9,7 @@
     "./api-client": "./api-client.ts",
     "./batcher": "./batcher.ts",
     "./exact-files-contract": "./exact-files-contract.ts",
+    "./fee-sizing": "./fee-sizing.ts",
     "./wallet": "./wallet.ts",
     "./offer-files": "./offer-files.ts",
     "./ladder-derivation": "./ladder-derivation.ts",

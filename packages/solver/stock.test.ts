@@ -195,9 +195,12 @@ test("reserved never exceeds balance and available+reserved is conserved, over r
   }
 });
 
-// FR-003/FR-004: the snapshot publication is allowed to advertise as executable.
+// FR-003: the snapshot publication is allowed to advertise as executable.
 // Derivation must stay reproducible from its inputs, so the push loop takes one
-// of these per push rather than reading Stock live.
+// of these per push rather than reading Stock live. `deriveLadder` reads only a
+// pair's tokenOut entry from it — 00006-R2 removed the tokenIn bound (spec 00006
+// FR-003) — so an EMPTY snapshot now means "whole-maker rungs only", not
+// "publish nothing".
 
 test("spendable() snapshots available per token, and omits what cannot be moved", () => {
   const stock = new Stock();
@@ -205,7 +208,7 @@ test("spendable() snapshots available per token, and omits what cannot be moved"
   expect([...stock.spendable()].sort()).toEqual([[A, 1000n], [B, 50n]]);
 
   // A reservation is a promise to pay that has not settled: those coins are not
-  // spendable, for a residual payout or for a fee-sizing mirror.
+  // spendable for a residual payout.
   stock.reserve(claim(["h1"], ["n1"], [[B, 50n]]));
   expect([...stock.spendable()]).toEqual([[A, 1000n]]);
   // Zero is omitted rather than published as 0n — the derivation treats an
@@ -226,10 +229,11 @@ test("spendable() is a detached copy, so a push cannot observe a later mutation"
   expect(stock.available(A)).toBe(100n);
 });
 
-test("an emptied balance view withdraws every budget, which is what a failed refresh does", () => {
+test("an emptied balance view withdraws the residual budget, which is what a failed refresh does", () => {
   // `createInventoryRefreshController` empties Stock for the whole read/failure
-  // window. After FR-003/FR-004 that also withdraws budget-bounded rungs from
-  // the next push, and this is the number it withdraws them with.
+  // window. After FR-003 that also withdraws residual-budget-bounded rungs from
+  // the next push, and this is the number it withdraws them with. Whole-maker
+  // rungs survive it since 00006-R2.
   const stock = new Stock();
   stock.setBalances({ [A]: 1000n, [B]: 1000n });
   stock.reserve(claim(["h1"], ["n1"], [[A, 10n]]));

@@ -10,6 +10,12 @@ const HEX_32 = /^[0-9a-f]{64}$/;
 const CANONICAL_UINT = /^(0|[1-9][0-9]*)$/;
 const TERMINAL_STATES = new Set<JournalLifecycleState>(["SETTLED", "REVERTED", "FAILED"]);
 const OPERATION_KINDS = [
+  // LEGACY, READ-ONLY as of 00006-R1 (FR-004). Fee sizing used to reserve real
+  // tokenIn coins with `initSwap` and revert them; it now models the taker half
+  // with a fabricated transaction that is not wallet state, so no new row of
+  // either kind is ever written. Both kinds MUST stay in the grammar: a journal
+  // carried across the upgrade can hold non-terminal rows whose coins are real
+  // and still need reverting, and dropping them would be a silent schema break.
   "MIRROR_RESERVATION",
   "MIRROR_REVERT",
   "RESIDUAL_BUILD",

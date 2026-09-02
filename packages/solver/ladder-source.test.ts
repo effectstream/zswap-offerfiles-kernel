@@ -86,25 +86,31 @@ describe("ladder source — the cache is the only input", () => {
     ]);
   });
 
-  test("FR-003/FR-004 executability budgets reach the derivation through the push", () => {
-    // The canonical book backs B→A, so tokenIn = B (what the fee-sizing mirror
-    // spends) and tokenOut = A (what a residual pays). Worst-case interval
-    // residuals are 9 (rung 2) and 4 (rung 3); cumulative inputs are 10/20/25.
+  // RE-ENCODED at 00006-R2 (FR-003 / SC-002). Was "FR-003/FR-004 executability
+  // budgets reach the derivation through the push", with a tokenIn matrix
+  // (`[B, 24n]` → two rungs, `[B, 9n]` → nothing, one `mirror-budget` reason).
+  // The tokenIn bound is gone — fee sizing spends no tokenIn — so the same
+  // snapshots now publish the full ladder, and the tokenOut half is asserted
+  // unchanged from a wallet that holds NO tokenIn at all.
+  test("FR-003 the tokenOut budget reaches the derivation through the push, and tokenIn does not", () => {
+    // The canonical book backs B→A, so tokenIn = B and tokenOut = A (what a
+    // residual pays). Worst-case interval residuals are 9 (rung 2) and 4
+    // (rung 3); cumulative inputs are 10/20/25.
     const rungs = (spendableInventory: ReadonlyMap<string, bigint>) =>
       deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, spendableInventory })
         .priceLevels.levels[0]?.levels ?? [];
 
     // No tokenOut inventory still publishes the first rung: it opens no
     // interpolation interval, so FR-001's retained-surplus path stays quotable.
-    expect(rungs(new Map([[A, 0n], [B, 1_000n]]))).toEqual([{ input: "10", output: "20" }]);
-    expect(rungs(new Map([[A, 9n], [B, 1_000n]]))).toHaveLength(3);
-    // tokenIn caps the LAST rung's cumulative input, because that is the
-    // largest size the relay can quote at all.
-    expect(rungs(new Map([[A, 1_000n], [B, 24n]]))).toEqual([
-      { input: "10", output: "20" },
-      { input: "20", output: "30" },
-    ]);
-    expect(rungs(new Map([[A, 1_000n], [B, 9n]]))).toEqual([]);
+    // Asserted with tokenIn EXHAUSTED, which is 00006's operating mode.
+    expect(rungs(new Map([[A, 0n], [B, 0n]]))).toEqual([{ input: "10", output: "20" }]);
+    expect(rungs(new Map([[A, 9n], [B, 0n]]))).toHaveLength(3);
+    // The old tokenIn matrix, inverted: 24 used to cap the ladder at the second
+    // rung and 9 used to suppress the pair entirely. Neither bounds anything now.
+    expect(rungs(new Map([[A, 1_000n], [B, 24n]]))).toHaveLength(3);
+    expect(rungs(new Map([[A, 1_000n], [B, 9n]]))).toHaveLength(3);
+    // SC-002: a wallet with NO tokenIn key at all publishes the full ladder.
+    expect(rungs(new Map([[A, 1_000n]]))).toHaveLength(3);
     // Absent is OPEN — the pre-budget contract, which dry-run still relies on.
     expect(deriveLadderPush(cache(seed(CANONICAL_ROWS)), OPTIONS)
       .priceLevels.levels[0]!.levels).toHaveLength(3);
@@ -116,9 +122,21 @@ describe("ladder source — the cache is the only input", () => {
     const reasonsFor = (spendableInventory: ReadonlyMap<string, bigint>) =>
       deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, spendableInventory })
         .derived.excluded.map(({ reason }) => reason);
-    expect(reasonsFor(new Map([[A, 0n], [B, 1_000n]])))
+    expect(reasonsFor(new Map([[A, 0n], [B, 0n]])))
       .toEqual(["residual-budget", "residual-budget"]);
-    expect(reasonsFor(new Map([[A, 1_000n], [B, 24n]]))).toEqual(["mirror-budget"]);
+    // Was `["mirror-budget"]`: nothing is withheld for a tokenIn reason.
+    expect(reasonsFor(new Map([[A, 1_000n], [B, 24n]]))).toEqual([]);
+    // SC-002, the uncapitalized solver end to end through the push: the
+    // whole-maker rung publishes, the interior rungs are withheld by F03 alone.
+    const empty = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
+      ...OPTIONS,
+      spendableInventory: new Map(),
+    });
+    expect(empty.withheld).toBeNull();
+    expect(empty.priceLevels.levels[0]!.levels).toEqual([{ input: "10", output: "20" }]);
+    expect(empty.capabilities.tokenIds).toEqual([A, B]);
+    expect(empty.derived.excluded.map(({ reason }) => reason))
+      .toEqual(["residual-budget", "residual-budget"]);
   });
 
   test("a seeded book pushes exactly the canonical ladder and its capabilities", () => {

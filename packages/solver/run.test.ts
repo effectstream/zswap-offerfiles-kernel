@@ -149,10 +149,29 @@ const row = {
   },
 };
 
-function syncHarness(lifecycle: string[]): SyncDependencies {
+const OFFER_HASH_2 = "12".repeat(32);
+const NULLIFIER_2 = "32".repeat(32);
+
+/** A second, WORSE-rate offer on the same pair, so the seeded book has an
+ *  INTERIOR interval — the only thing the F03 residual budget is ever about.
+ *  Rate 1 against `row`'s rate 2, so the unbounded ladder is (10, 20) then
+ *  (20, 30) and the interval (10, 20) can demand up to floor(10 · 9 / 10) = 9
+ *  of tokenOut out of the solver's own inventory. */
+const row2 = {
+  ...row,
+  offerId: OFFER_HASH_2,
+  computed: {
+    ...row.computed,
+    gives: [{ token: B, amount: "10", type: "SHIELDED" as const }],
+    inputNullifiers: [NULLIFIER_2],
+  },
+};
+
+function syncHarness(lifecycle: string[], rows: Array<typeof row> = [row]): SyncDependencies {
   return {
-    getZswapsPage: async () => ({ offers: [row], nextCursor: null }),
-    getZswapByHash: async () => row as any,
+    getZswapsPage: async () => ({ offers: rows, nextCursor: null }),
+    getZswapByHash: async (hash: string) =>
+      (rows.find((entry) => entry.offerId === hash) ?? rows[0]) as any,
     getBackendSyncHealth: async () => ({
       ts: Date.now(),
       status: "ok",
@@ -370,10 +389,13 @@ test("relay publishes empty and rejects jobs until journal reconciliation finish
     walletDependencies: {
       buildWallet: async () => ({ wallet }),
       waitForSync: async () => {},
-      // A is the pair's tokenIn: FR-004 caps published rungs by the tokenIn the
-      // fee-sizing mirror can actually spend, so a solver holding only B would
-      // (correctly) publish nothing at all here.
-      shieldedBalances: async () => ({ [A]: 1_000n, [B]: 1_000n }),
+      // tokenOUT only, which is all this solver ever needs (00006-R2). `B: 1000`
+      // is load-bearing here for a different reason: the durable journal claim
+      // rebuilt during reconciliation pays out 5 B, and `Stock.reserve` must be
+      // able to hold it. Was `{[A]: 1_000n, [B]: 1_000n}`, because the 00005-R2
+      // tokenIn cap would otherwise have published nothing and the
+      // "post-reconciliation ladder" wait below would have hung.
+      shieldedBalances: async () => ({ [B]: 1_000n }),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
     } as any,
     jobDependencies: {
@@ -416,7 +438,10 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
     dust: { balanceTransactions: async () => tx("dust-unproved", [
       { seg: 0, tag: "dust", raw: "dust", amount: 1n },
     ]) },
-    initSwap: async () => ({ transaction: tx("mirror") }),
+    // The solver's own balancing leg — the ONLY `initSwap` caller since 00006-R1
+    // (it was labelled "mirror" while fee sizing had one). Never reached by the
+    // exact-rung job below, which pays no residual and keeps no surplus.
+    initSwap: async () => ({ transaction: tx("solver-leg") }),
     finalizeTransaction: async () => tx("dust-final", [
       { seg: 0, tag: "dust", raw: "dust", amount: 1n },
     ]),
@@ -451,9 +476,10 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
     walletDependencies: {
       buildWallet: async () => walletOwner,
       waitForSync: async () => {},
-      // Both sides funded: B pays a residual, A funds the FR-004 fee-sizing
-      // mirror for a job of this size.
-      shieldedBalances: async () => ({ [A]: 1_000n, [B]: 1_000n }),
+      // SC-002 at the wiring layer: NO inventory of either token. The job below
+      // is an exact whole-maker rung, so it pays no residual, and 00006-R2
+      // removed the tokenIn bound that used to require `A` here.
+      shieldedBalances: async () => ({}),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
     } as any,
     jobDependencies: {
@@ -540,20 +566,34 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
   expect(withdrawal).toBeGreaterThanOrEqual(0);
 });
 
-// FR-002/FR-003/FR-004 through the real wiring. This is the layer P4-F02 lived
-// at: `runSolver` handed the admission policy to the relay client, the relay
-// client's options did not declare it, and it evaporated. The budgets (F03/F04)
-// are wired the same way, so they are asserted here too — end to end from the
+// FR-002/FR-003 through the real wiring. This is the layer P4-F02 lived at:
+// `runSolver` handed the admission policy to the relay client, the relay
+// client's options did not declare it, and it evaporated. The residual budget
+// (F03) is wired the same way, so it is asserted here too — end to end from the
 // wallet's balance read to the bytes on the socket and back through admission.
-test("an underfunded solver publishes nothing and refuses the job its ladder would have implied", async () => {
+//
+// RE-ENCODED at 00006-R2 (FR-003 / SC-002). This test was
+// "an underfunded solver publishes nothing and refuses the job its ladder would
+// have implied": the wallet held only tokenOut, the tokenIn publication cap
+// therefore withheld EVERY rung, and the assertion was an empty `price-levels`
+// frame plus a `route_unavailable` refusal of the exact-rung job. Both halves
+// have changed meaning now that fee sizing spends no tokenIn:
+//
+//   * publication is NOT empty — the whole-maker rung publishes from a wallet
+//     holding NOTHING, which is the availability this project exists to restore;
+//   * the refusal that remains is the one that was always a solvency fact: an
+//     INTERIOR job whose residual tokenOut the solver cannot pay, refused
+//     fail-closed with zero wallet mutation (spec 00006 edge case
+//     "zero-tokenOut + interior-demand job racing publication").
+test("a solver with NO inventory publishes its whole-maker rung and still refuses an unaffordable residual", async () => {
   const lifecycle: string[] = [];
   const socket = new RunSocket(lifecycle);
   let mutations = 0;
   const wallet = {
     shielded: { getAddress: async () => "solver-address" },
     dust: { balanceTransactions: async () => { mutations += 1; throw new Error("must not size fees"); } },
-    // The fee-sizing mirror is the FIRST wallet call `buildHalf` makes, and the
-    // guard exists precisely so it is never reached unfunded.
+    // Every wallet entry point counts a mutation: the residual refusal happens
+    // inside `resolveSwapJobRoute`, before `buildHalf` touches the wallet at all.
     initSwap: async () => { mutations += 1; throw new Error("must not mutate"); },
     finalizeTransaction: async () => { mutations += 1; throw new Error("must not mutate"); },
     revertTransaction: async () => { mutations += 1; },
@@ -578,7 +618,7 @@ test("an underfunded solver publishes nothing and refuses the job its ladder wou
     startupTimeoutMs: 1_000,
     stopTimeoutMs: 1_000,
     journalOptions: { path: ":memory:", allowMemory: true },
-    syncDependencies: syncHarness(lifecycle),
+    syncDependencies: syncHarness(lifecycle, [row, row2]),
     relayCreateWebSocket: () => {
       queueMicrotask(() => socket.open());
       return socket;
@@ -586,9 +626,10 @@ test("an underfunded solver publishes nothing and refuses the job its ladder wou
     walletDependencies: {
       buildWallet: async () => ({ wallet, dustSecretKey: "dust-key", zswapSecretKeys: {} }),
       waitForSync: async () => {},
-      // Only tokenOut. The book's single offer wants 10 A, so the pair's
-      // fee-sizing mirror needs 10 A the wallet does not have.
-      shieldedBalances: async () => ({ [B]: 1_000n }),
+      // NOTHING. Not the pair's tokenIn (which nothing reads any more), and not
+      // its tokenOut either. Was `{[B]: 1_000n}` — tokenOut had to be funded so
+      // that the empty ladder could be attributed to the tokenIn cap alone.
+      shieldedBalances: async () => ({}),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
     } as any,
     log: () => {},
@@ -597,32 +638,42 @@ test("an underfunded solver publishes nothing and refuses the job its ladder wou
   try {
     await handle.ready;
     await waitFor(
-      () => socket.sent.some((frame) => frame.type === "price-levels"),
-      "the first ladder push",
+      () => socket.sent.some((frame) => frame.type === "price-levels" &&
+        Array.isArray(frame.levels) && frame.levels.length > 0),
+      "the first non-empty ladder push",
     );
-    // The offer IS in the mirror — the book is current and complete — and the
-    // ladder is still empty, because publishing it would advertise a size this
-    // solver must refuse.
+    // AVAILABILITY RESTORED, on the wire, from a wallet with no tokens at all:
+    // the whole-maker first rung publishes because the maker offer it consumes
+    // pays it, and it opens no interpolation interval. The SECOND rung is
+    // withheld by the unchanged F03 residual bound, since the interval it opens
+    // could demand 9 of tokenOut this solver does not have.
     expect(handle.book.get(OFFER_HASH)).toBeDefined();
+    expect(handle.book.get(OFFER_HASH_2)).toBeDefined();
     const levels = socket.sent.filter((frame) => frame.type === "price-levels");
-    expect(levels.at(-1)).toEqual({ type: "price-levels", levels: [] });
+    expect(levels.at(-1)).toEqual({
+      type: "price-levels",
+      levels: [{ tokenIn: A, tokenOut: B, levels: [{ input: "10", output: "20" }] }],
+    });
     const capabilities = socket.sent.filter((frame) => frame.type === "solver-capabilities");
-    expect(capabilities.at(-1)).toMatchObject({ tokenIds: [] });
+    expect(capabilities.at(-1)).toMatchObject({ tokenIds: [A, B] });
 
-    // And if the relay dispatches that job anyway (a stale quote, or an operator
-    // running with the publication budget open), admission refuses it fail-closed
-    // with zero wallet mutation.
+    // And if the relay dispatches an INTERIOR job anyway (a stale quote, or an
+    // operator running with the publication budget open), admission refuses it
+    // fail-closed with zero wallet mutation. Size 15 quotes 25 against the full
+    // book; the maker prefix pays 20, so 5 of tokenOut would come out of a Stock
+    // holding none.
     socket.receive({
-      type: "swap", jobId: "underfunded", tokenIn: A, tokenOut: B,
-      amountIn: "10", amountOut: "20",
+      type: "swap", jobId: "unaffordable-residual", tokenIn: A, tokenOut: B,
+      amountIn: "15", amountOut: "25",
     });
     await waitFor(
-      () => socket.sent.some((frame) => frame.type === "job-error" && frame.jobId === "underfunded"),
+      () => socket.sent.some((frame) =>
+        frame.type === "job-error" && frame.jobId === "unaffordable-residual"),
       "the fail-closed job refusal",
     );
     expect(socket.sent.findLast((frame) => frame.type === "job-error")).toEqual({
       type: "job-error",
-      jobId: "underfunded",
+      jobId: "unaffordable-residual",
       reason: JOB_ROUTE_UNAVAILABLE,
     });
     expect(mutations).toBe(0);

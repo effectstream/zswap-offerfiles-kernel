@@ -45,7 +45,7 @@
 // single `503 no_solver` therefore means nothing. Every ladder observation here
 // retries across multiple push cycles before concluding absence.
 
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
 
 import { registerNightForDust } from "@effectstream/midnight-contracts";
@@ -65,6 +65,10 @@ import {
   waitForShielded,
   waitForSync,
 } from "../../packages/solver-core/wallet.ts";
+import {
+  buildTakerHalfStandIn,
+  takerHalfStandInSpec,
+} from "../../packages/solver-core/fee-sizing.ts";
 import { KernelApi, type LiveOffer } from "./lib/kernel-api.ts";
 import { postMakerOffer, resolveMintedTokens, type PostedOffer } from "./lib/maker-offer.ts";
 
@@ -90,6 +94,18 @@ const CASES = (process.env["E2E_CASES"] ?? "A,B,C,D")
   .map((s) => s.trim())
   .filter(Boolean);
 const SKIP_PROVISION = process.env["E2E_SKIP_PROVISION"] === "true";
+
+// ── 00006 SC-004: the capital-free solver ────────────────────────────────────
+// When set, this run is the unfunded-solver proof and the driver refuses to
+// treat a funded stack as one. See `assertUnfundedSolver` below.
+const REQUIRE_UNFUNDED_SOLVER = process.env["E2E_REQUIRE_UNFUNDED_SOLVER"] === "true";
+const PROVISION_RECEIPT =
+  process.env["SOLVER_PROVISION_RECEIPT"] ?? "/srv/solver-config/provision-receipt.json";
+/** The fee-sizing model the solver is running with. Unset means the solver's
+ *  own default of 1 (`entrypoint-common.sh` unsets an empty value before
+ *  `start.solver.ts` sees it, so "" here really is "default"). Recorded, not
+ *  used: it is one of the four numbers design-note §6 asks this run to pin. */
+const FEE_SIZING_TAKER_INPUTS = process.env["SOLVER_FEE_SIZING_TAKER_INPUTS"] || "1 (default)";
 
 /** The maker offer every case posts: GIVES this much A, WANTS this much B. The
  *  defaults match the deployment's own seeding offer so a case can also consume
@@ -124,6 +140,10 @@ const JOB_POLL_TIMEOUT_MS = Number(process.env["E2E_JOB_TIMEOUT_MS"] ?? "600000"
 const BALANCE_POLL_TIMEOUT_MS = Number(process.env["E2E_BALANCE_TIMEOUT_MS"] ?? "300000");
 const OFFER_STATUS_TIMEOUT_MS = Number(process.env["E2E_OFFER_STATUS_TIMEOUT_MS"] ?? "300000");
 const INTENT_RETRY_TIMEOUT_MS = Number(process.env["E2E_INTENT_RETRY_TIMEOUT_MS"] ?? "300000");
+/** How long a settled job's journal rows may take to reach a terminal state
+ *  after the relay says `done`. The gap is the kernel's Celestia-lagged
+ *  consumption evidence, not the settlement — see step 8 in `runCase`. */
+const JOURNAL_TERMINAL_TIMEOUT_MS = Number(process.env["E2E_JOURNAL_TERMINAL_TIMEOUT_MS"] ?? "300000");
 /** After the book changes, give the solver's mirror a full projection cycle
  *  before quoting against it. Without this a case can be dispatched against a
  *  rung the solver derived from the offer the PREVIOUS case just consumed; the
@@ -297,11 +317,16 @@ interface JobState {
   status: string;
   txId?: string;
   reason?: string;
+  /** Every distinct status the relay reported, in order. Design-note §6 asks
+   *  whether the settlement was accepted FIRST TRY; a `submit-failed` from a
+   *  DUST shortfall would appear here (and only here) before any terminal. */
+  trail?: string[];
 }
 
 async function pollJob(jobId: string, timeoutMs = JOB_POLL_TIMEOUT_MS): Promise<JobState> {
   const deadline = Date.now() + timeoutMs;
   let seen = "";
+  const trail: string[] = [];
   while (Date.now() < deadline) {
     await sleep(2_000);
     const res = await fetch(`${RELAY}/jobs/${jobId}`).catch(() => null);
@@ -309,16 +334,17 @@ async function pollJob(jobId: string, timeoutMs = JOB_POLL_TIMEOUT_MS): Promise<
     if (res.status === 404) {
       // The relay drops a terminal job after TERMINAL_JOB_TTL_MS; inside this
       // loop a 404 can only mean the job was never created.
-      return { status: "not_found" };
+      return { status: "not_found", trail };
     }
     const job = (await res.json()) as JobState;
     if (job.status !== seen) {
       seen = job.status;
+      trail.push(job.status);
       log(`  job ${jobId} → ${job.status}${job.txId ? ` txId=${job.txId}` : ""}${job.reason ? ` reason=${job.reason}` : ""}`);
     }
-    if (job.status === "done" || job.status === "error") return job;
+    if (job.status === "done" || job.status === "error") return { ...job, trail };
   }
-  return { status: "timeout" };
+  return { status: "timeout", trail };
 }
 
 // ── kernel book helpers ──────────────────────────────────────────────────────
@@ -386,9 +412,9 @@ interface JournalRow {
  * accident (a reader that took the write lock would be a fault injected into
  * the very component under test).
  */
-function readJournal(): JournalRow[] {
+function snapshotJournal(): string {
   if (!existsSync(JOURNAL_PATH)) throw new Error(`solver journal not found at ${JOURNAL_PATH}`);
-  const dir = `/tmp/journal-snapshot-${Date.now()}`;
+  const dir = `/tmp/journal-snapshot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   mkdirSync(dir, { recursive: true });
   const copy = `${dir}/operations.sqlite`;
   copyFileSync(JOURNAL_PATH, copy);
@@ -397,7 +423,11 @@ function readJournal(): JournalRow[] {
       copyFileSync(`${JOURNAL_PATH}${suffix}`, `${copy}${suffix}`);
     }
   }
-  const db = new Database(copy);
+  return copy;
+}
+
+function readJournal(): JournalRow[] {
+  const db = new Database(snapshotJournal());
   try {
     return db
       .query(
@@ -409,6 +439,189 @@ function readJournal(): JournalRow[] {
   } finally {
     db.close();
   }
+}
+
+/** One row of `journal_dust_reservations` — the durable record of what
+ *  `estimateDustAmount` computed for a job and `reserveDust` admitted.
+ *
+ *  This is design-note §6 number 1, and the ONLY place the live-chain DUST
+ *  figure is observable from outside the solver process: the amount is read off
+ *  the transaction `wallet.dust.balanceTransactions` returned, priced by the
+ *  ledger with the LIVE `ledgerParameters` that only exist on a running chain.
+ *  Rows appear only when SOLVER_DUST_MAX_PER_* are configured. */
+interface DustReservationRow {
+  operation_key: string;
+  job_id: string;
+  generation: number;
+  amount_text: string;
+  state: string;
+  reserved_at_ms: number;
+  spent_at_ms: number | null;
+}
+
+function readDustReservations(): DustReservationRow[] {
+  const db = new Database(snapshotJournal());
+  try {
+    const present = db
+      .query(`SELECT name FROM sqlite_master WHERE type='table' AND name='journal_dust_reservations'`)
+      .get();
+    if (!present) return [];
+    return db
+      .query(
+        `SELECT operation_key, job_id, generation, amount_text, state,
+                reserved_at_ms, spent_at_ms
+           FROM journal_dust_reservations ORDER BY rowid`,
+      )
+      .all() as DustReservationRow[];
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Price the SAME stand-in shape the solver used, but with the ledger's
+ * `initialParameters()` instead of the chain's live ones.
+ *
+ * This is R1's offline prediction recomputed HERE, in the deployed image,
+ * against the same ledger WASM the solver is running — so design-note §6's
+ * offline-vs-live comparison is two numbers from one process rather than one
+ * number and a quotation from a document. It touches no wallet and no chain:
+ * `buildTakerHalfStandIn` fabricates its coins from a throwaway keypair, which
+ * is the whole point of the capital-free design.
+ *
+ * `+ DUST_FEE_OVERHEAD` reproduces `calculateFee`'s flat term
+ * (`@effectstream/midnight-contracts` `constants.ts` `DUST_FEE_OVERHEAD`,
+ * 3e14 SPECKs) and `DUST_FEE_BLOCKS_MARGIN` its 5-block price margin, so the
+ * result is comparable with what `reserveDust` journalled.
+ */
+const DUST_FEE_OVERHEAD = 300_000_000_000_000n;
+const DUST_FEE_BLOCKS_MARGIN = 5;
+
+async function offlineStandInFee(
+  tokenIn: string,
+  tokenOut: string,
+  modelledTakerInputs: number,
+): Promise<{ standInFeeWithMargin: string; plusFlatOverhead: string } | { error: string }> {
+  try {
+    const { LedgerParameters } = (await import("@midnight-ntwrk/ledger-v8")) as {
+      LedgerParameters: { initialParameters: () => unknown };
+    };
+    const standIn = buildTakerHalfStandIn(
+      takerHalfStandInSpec({ networkId: net.id, tokenIn, tokenOut, modelledTakerInputs }),
+    ) as unknown as { feesWithMargin: (p: unknown, m: number) => bigint };
+    const fee = standIn.feesWithMargin(
+      LedgerParameters.initialParameters(),
+      DUST_FEE_BLOCKS_MARGIN,
+    );
+    return {
+      standInFeeWithMargin: fee.toString(),
+      plusFlatOverhead: (fee + DUST_FEE_OVERHEAD).toString(),
+    };
+  } catch (err) {
+    return { error: String(err).slice(0, 300) };
+  }
+}
+
+// ── 00006 SC-004: prove the solver was given NO token provisioning ───────────
+
+interface ProvisionReceipt {
+  mode?: string;
+  script?: string;
+  measuredAt?: string;
+  mintedTokens?: string[];
+  tokensTransferredToSolver?: string[];
+  dustRegistered?: boolean;
+  nightBeforeDustRegistrationSpecks?: string;
+  nightAfterDustRegistrationSpecks?: string;
+  solverShielded?: Record<string, string>;
+  solverUnshielded?: Record<string, string>;
+  solverShieldedNonZeroCount?: number;
+}
+
+/**
+ * Assert, from a MEASUREMENT rather than from configuration, that the solver
+ * wallet held zero of every swap token when it started.
+ *
+ * This driver cannot look for itself: the solver service holds a live facade on
+ * SOLVER_SEED throughout, and two facades on one seed against one Midnight node
+ * force each other's connection down (the same reason the solver-surplus gate
+ * is a separate script run after the solver is stopped). The measurement is
+ * therefore taken by `deploy/scripts/provision-solver-fees.ts` — the process
+ * that legitimately owns that facade, at the moment provisioning ends and
+ * before the solver boots — and published as a receipt on the shared
+ * `solver-config` volume, which this service mounts read-only.
+ *
+ * The receipt is not the only evidence and is not meant to be: the run's other
+ * half is `deploy/scripts/read-wallet.ts` afterwards, which reads the solver's
+ * REAL post-run balance off the chain and must find the case-B surplus and
+ * nothing else. A solver that had been minted the usual 1e9 of each token would
+ * fail that gate by nine orders of magnitude.
+ */
+function assertUnfundedSolver(tokenIn: string, tokenOut: string): ProvisionReceipt | null {
+  if (!REQUIRE_UNFUNDED_SOLVER) {
+    log("E2E_REQUIRE_UNFUNDED_SOLVER is not set — not asserting the capital-free premise");
+    return null;
+  }
+  log("");
+  log("══ SC-004 PREMISE — the solver received NO token provisioning ══════════");
+  let receipt: ProvisionReceipt;
+  try {
+    receipt = JSON.parse(readFileSync(PROVISION_RECEIPT, "utf-8")) as ProvisionReceipt;
+  } catch (err) {
+    assert(false, `solver-provision receipt is readable at ${PROVISION_RECEIPT}`, String(err));
+    return null;
+  }
+  log(`receipt: ${JSON.stringify(receipt)}`);
+  record("05-solver-provision-receipt", receipt);
+
+  assert(
+    receipt.mode === "fee-currency-only",
+    "solver provisioning ran in the FEE-CURRENCY-ONLY mode",
+    { mode: receipt.mode, script: receipt.script },
+  );
+  assert(
+    (receipt.mintedTokens?.length ?? -1) === 0 &&
+      (receipt.tokensTransferredToSolver?.length ?? -1) === 0,
+    "provisioning minted NO token and transferred NO token to the solver",
+    { minted: receipt.mintedTokens, transferred: receipt.tokensTransferredToSolver },
+  );
+  const shielded = receipt.solverShielded ?? {};
+  const nonZero = Object.entries(shielded).filter(([, v]) => BigInt(v) !== 0n);
+  assert(
+    nonZero.length === 0 && (receipt.solverShieldedNonZeroCount ?? -1) === 0,
+    "the solver wallet held ZERO of EVERY shielded token when provisioning finished",
+    { nonZero, count: receipt.solverShieldedNonZeroCount },
+  );
+  assert(
+    BigInt(shielded[tokenIn] ?? "0") === 0n,
+    "…including zero tokenIn (the token fee sizing used to have to spend)",
+    { tokenIn, held: shielded[tokenIn] ?? "0" },
+  );
+  assert(
+    BigInt(shielded[tokenOut] ?? "0") === 0n,
+    "…including zero tokenOut (so no interior rung is fundable either)",
+    { tokenOut, held: shielded[tokenOut] ?? "0" },
+  );
+  // The funding fact is the CONFIRMED balance measured before dust
+  // registration, not the reading after it. Registration spends the
+  // unregistered NIGHT UTXOs and re-creates them registered, so the
+  // post-registration unshielded view legitimately reads 0 for a few seconds
+  // (measured: 2e13 on one run of the provisioner and 0 on the next, with the
+  // dust wallet above 1.7e18 on both). Falls back to the post reading for
+  // receipts written before that field existed.
+  const nightFunding = BigInt(
+    receipt.nightBeforeDustRegistrationSpecks ?? receipt.solverUnshielded?.[NIGHT] ?? "0",
+  );
+  assert(
+    receipt.dustRegistered === true && nightFunding > 0n,
+    "the solver DOES hold fee currency (NIGHT, registered for dust) — the one thing it needs",
+    {
+      nightBeforeDustRegistration: nightFunding.toString(),
+      nightAfterDustRegistration: receipt.nightAfterDustRegistrationSpecks ?? "n/a",
+      dustRegistered: receipt.dustRegistered,
+    },
+  );
+  return receipt;
 }
 
 // ── wallets ──────────────────────────────────────────────────────────────────
@@ -546,6 +759,26 @@ interface CaseResult {
   journalRows: JournalRow[];
   expectedSolverSurplusTokenOut: string;
   passed: boolean;
+  /** ── design-note §6: the four numbers only a live chain can supply ────────
+   *  1. `reservedDustSpecks` — what `estimateDustAmount` read off the
+   *     transaction `dust.balanceTransactions` returned, i.e. the fee priced
+   *     with the LIVE `ledgerParameters`, as journalled by `reserveDust`.
+   *  2. `modelledTakerInputs` — the stand-in shape in force while it was priced.
+   *  3. `takerHalfBytes` — the REAL taker half's serialized length, so the
+   *     modelled shape can be compared with the one the relay actually merged.
+   *  4. `acceptedFirstTry` — no `submit-failed` from a fee shortfall. */
+  feeSizing: {
+    reservedDustSpecks: string | null;
+    dustReservationState: string | null;
+    modelledTakerInputs: string;
+    takerHalfBytes: number;
+    acceptedFirstTry: boolean;
+    jobStatusTrail: string[];
+    journalErrorCodes: Array<string | null>;
+    /** The subset of `journalErrorCodes` that actually denotes a failed
+     *  submission. `BACKEND_EVIDENCE_UNKNOWN` is deliberately NOT in it. */
+    submitFailureCodes: Array<string | null>;
+  };
 }
 
 async function runCase(
@@ -653,7 +886,12 @@ async function runCase(
   );
   const finalized = await taker.wallet.finalizeTransaction(recipe.transaction);
   const txBytes: Uint8Array = finalized.serialize();
-  log(`taker half proven — ${txBytes.length} bytes`);
+  // Design-note §6 number 3. The solver never sees this transaction — the relay
+  // merges it — so its length is the only handle anyone has on the REAL taker
+  // half's element count, and therefore on whether `modelledTakerInputs` was a
+  // sound model. 00005-E1's baseline for 1 input + change + receive is 15 480.
+  const takerHalfBytes = txBytes.length;
+  log(`taker half proven — ${takerHalfBytes} bytes`);
 
   // 5. POST /intent.
   let intent: IntentResult;
@@ -808,8 +1046,35 @@ async function runCase(
   }
 
   // 8. The solver's own durable record.
-  const journalAfter = readJournal();
-  const jobRows = intent.jobId ? journalAfter.filter((r) => r.job_id === intent.jobId) : [];
+  //
+  // POLLED, not sampled once. The relay answers `done` as soon as the node
+  // accepts the merged transaction, but the solver will not call the job
+  // settled until the KERNEL's Celestia-lagged projection proves the maker
+  // consumption (`reconcileRelayDone` → `readUniformEvidence`). Between those
+  // two moments the group sits QUARANTINED with `BACKEND_EVIDENCE_UNKNOWN` and
+  // the next sweep resolves it. A single sample therefore races the sweep and
+  // wins or loses by luck — measured: it won 3/3 in V1 run 1 and lost on case B
+  // in run 2, on the same code and the same stack.
+  //
+  // This is not softening the assertion. The terminal state still has to
+  // arrive, within a bounded wait, and the end-of-run global assertions still
+  // require that NOTHING anywhere is left non-terminal or quarantined.
+  let journalAfter = readJournal();
+  let jobRows = intent.jobId ? journalAfter.filter((r) => r.job_id === intent.jobId) : [];
+  if (spec.expect === "settle" && intent.jobId) {
+    const terminalDeadline = Date.now() + JOURNAL_TERMINAL_TIMEOUT_MS;
+    while (
+      Date.now() < terminalDeadline &&
+      (jobRows.length === 0 || jobRows.some((r) => !TERMINAL_LIFECYCLE.has(r.lifecycle_state)))
+    ) {
+      await sleep(5_000);
+      journalAfter = readJournal();
+      jobRows = journalAfter.filter((r) => r.job_id === intent.jobId);
+    }
+    log(
+      `journal for ${intent.jobId}: ${jobRows.map((r) => `${r.operation_kind}=${r.lifecycle_state}`).join(", ")}`,
+    );
+  }
   if (spec.expect === "settle") {
     const settlement = jobRows.filter((r) => r.operation_kind === "JOB_SETTLEMENT");
     assert(
@@ -832,6 +1097,55 @@ async function runCase(
       journalAfter.length === journalBefore.length,
       `case ${spec.label}: journal row count unchanged`,
       { before: journalBefore.length, after: journalAfter.length },
+    );
+  }
+
+  // ── design-note §6, per job ────────────────────────────────────────────────
+  const dustRows = intent.jobId
+    ? readDustReservations().filter((r) => r.job_id === intent.jobId)
+    : [];
+  const jobStatusTrail = job.trail ?? [];
+  const journalErrorCodes = jobRows.map((r) => r.error_code);
+  // "Accepted first try" = the chain took the merged transaction on the first
+  // submission. A DUST shortfall shows up as the relay reporting `submit-failed`
+  // (`relay-client.ts:772` → `onSubmitFailed`), which drives
+  // `reconcileRelayFailure` and leaves a `RELAY_FAILURE_*` code with a
+  // non-SETTLED settlement row.
+  //
+  // NOT a failure signal, and measured to occur on a healthy settlement:
+  // `BACKEND_EVIDENCE_UNKNOWN`. The relay answers `done` as soon as the node
+  // accepts the transaction, while the solver will only call a job settled once
+  // the KERNEL's Celestia-lagged projection proves the maker consumption
+  // (`reconcileRelayDone` → `readUniformEvidence`). In the gap the row is
+  // quarantined with that code, and the next sweep binds the evidence and marks
+  // it SETTLED — the code stays on the row as history. Treating it as a
+  // settlement failure would report every normal settlement on this devnet as a
+  // fee shortfall (observed in V1 run 1, and the reason this predicate is
+  // narrowed to the RELAY_FAILURE_* family).
+  const submitFailureCodes = journalErrorCodes.filter(
+    (c) => c !== null && /^RELAY_FAILURE|SUBMIT/i.test(c),
+  );
+  const acceptedFirstTry =
+    spec.expect !== "settle"
+      ? true
+      : job.status === "done" &&
+        !jobStatusTrail.some((s) => /fail|reject|error/i.test(s)) &&
+        submitFailureCodes.length === 0;
+  if (spec.expect === "settle") {
+    assert(
+      dustRows.length === 1 && BigInt(dustRows[0]!.amount_text) > 0n,
+      `case ${spec.label}: exactly one DUST reservation was journalled, with a positive live-chain amount`,
+      dustRows.map((r) => `${r.amount_text}/${r.state}`),
+    );
+    assert(
+      acceptedFirstTry,
+      `case ${spec.label}: the merged transaction was accepted FIRST TRY — no submit-failed from a fee shortfall`,
+      { trail: jobStatusTrail, submitFailureCodes, allErrorCodes: journalErrorCodes },
+    );
+    log(
+      `  §6  reservedDust=${dustRows[0]?.amount_text ?? "n/a"} SPECKs  ` +
+        `modelledTakerInputs=${FEE_SIZING_TAKER_INPUTS}  takerHalf=${takerHalfBytes} bytes  ` +
+        `acceptedFirstTry=${acceptedFirstTry}`,
     );
   }
 
@@ -862,6 +1176,16 @@ async function runCase(
     journalRows: jobRows,
     expectedSolverSurplusTokenOut: surplus.toString(),
     passed: failures.length === failuresBefore,
+    feeSizing: {
+      reservedDustSpecks: dustRows[0]?.amount_text ?? null,
+      dustReservationState: dustRows[0]?.state ?? null,
+      modelledTakerInputs: FEE_SIZING_TAKER_INPUTS,
+      takerHalfBytes,
+      acceptedFirstTry,
+      jobStatusTrail,
+      journalErrorCodes,
+      submitFailureCodes,
+    },
   };
   record(`case-${spec.label}`, result);
   log(`case ${spec.label}: ${result.passed ? "PASS" : "FAIL"}`);
@@ -897,6 +1221,10 @@ try {
     minted: minted.raw,
     journalPath: JOURNAL_PATH,
   });
+
+  // SC-004's premise, asserted before anything else spends time: if the solver
+  // was funded after all, this run cannot prove what it claims to prove.
+  const provisionReceipt = assertUnfundedSolver(tokenIn, tokenOut);
 
   genesis = await buildWallet(GENESIS_SEED);
   await waitForSync(genesis, { requireUnshieldedFunds: true });
@@ -935,6 +1263,38 @@ try {
   record("03-kernel-book-before", (await KERNEL.liveOffers()).map(describeOffer));
   const journalAtStart = readJournal();
   record("04-journal-before", journalAtStart);
+
+  // ── SC-004: a token-less solver publishes a real, non-empty ladder ─────────
+  // At the UNMODIFIED reference relay, from the deployment's own seeding offer,
+  // while the solver holds zero of both sides of the pair. Retried, because the
+  // ladder is withdrawn fail-closed in ~10-20 s windows and one sample proves
+  // nothing either way.
+  if (REQUIRE_UNFUNDED_SOLVER) {
+    log("");
+    log("══ SC-004 — the token-less solver's published ladder ═══════════════════");
+    const openingQuote = await quoteWithRetry(tokenIn, tokenOut, OFFER_WANT);
+    const openingTokens = await relayTokens();
+    const lower = openingTokens.map((t) => t.toLowerCase());
+    assert(
+      openingTokens.length > 0 &&
+        lower.includes(tokenIn.toLowerCase()) &&
+        lower.includes(tokenOut.toLowerCase()),
+      "the relay lists BOTH sides of the pair as tradable, published by a solver holding neither",
+      openingTokens,
+    );
+    assert(
+      BigInt(openingQuote.amountOut) === OFFER_GIVE,
+      "the relay's quote traces to the maker offer's whole-rung terms (non-empty price levels)",
+      { amountIn: OFFER_WANT.toString(), amountOut: openingQuote.amountOut, rung: OFFER_GIVE.toString() },
+    );
+    record("06-unfunded-ladder", {
+      relayTokens: openingTokens,
+      quote: openingQuote,
+      amountIn: OFFER_WANT.toString(),
+      expectedRungOutput: OFFER_GIVE.toString(),
+      solverShieldedAtProvisioning: provisionReceipt?.solverShielded ?? null,
+    });
+  }
 
   const specs: CaseSpec[] = [
     { label: "A", title: "exact-advertised", demand: { num: 1n, den: 1n }, expect: "settle" },
@@ -1016,6 +1376,84 @@ try {
   record("91-kernel-book-after", finalBook.map(describeOffer));
   record("92-relay-tokens-after", await relayTokens());
 
+  // ── design-note §6 — the live-chain half of the fee model ──────────────────
+  // Everything else about capital-free fee sizing was measured offline against
+  // the ledger WASM. These are the numbers that need a running chain, because
+  // `dust.balanceTransactions` prices with `syncService.blockData()`'s LIVE
+  // `ledgerParameters`, which do not exist off-chain.
+  const allDust = readDustReservations();
+  record("93-dust-reservations", allDust);
+  const settled = results.filter((r) => r.expect === "settle");
+  const offlineHere = await offlineStandInFee(tokenIn, tokenOut, 1);
+  const feeFacts = {
+    modelledTakerInputs: FEE_SIZING_TAKER_INPUTS,
+    /** R1's offline prediction for n = 1 over the merged transaction, taken
+     *  with `LedgerParameters.initialParameters()`. The live chain's parameters
+     *  may differ; the delta is the point of recording both. */
+    offlinePredictionSpecksAtN1: "2779466641196585",
+    /** The same shape priced right here, in this image, with
+     *  `initialParameters()` — see `offlineStandInFee`. The stand-in ALONE, not
+     *  merged with the maker offers, so it is smaller than the reservation by
+     *  the rest of the merged transaction; its value is that it isolates the
+     *  parameter difference from the shape difference. */
+    offlineStandInHereAtN1: offlineHere,
+    ledgerCostParams: {
+      dustFeeOverheadSpecks: DUST_FEE_OVERHEAD.toString(),
+      dustFeeBlocksMargin: DUST_FEE_BLOCKS_MARGIN,
+    },
+    dustAdmissionConfigured: allDust.length > 0,
+    perJob: settled.map((r) => ({
+      case: r.label,
+      jobId: r.jobId,
+      txId: r.txId,
+      reservedDustSpecks: r.feeSizing.reservedDustSpecks,
+      dustReservationState: r.feeSizing.dustReservationState,
+      modelledTakerInputs: r.feeSizing.modelledTakerInputs,
+      takerHalfBytes: r.feeSizing.takerHalfBytes,
+      acceptedFirstTry: r.feeSizing.acceptedFirstTry,
+      jobStatusTrail: r.feeSizing.jobStatusTrail,
+      journalErrorCodes: r.feeSizing.journalErrorCodes,
+      submitFailureCodes: r.feeSizing.submitFailureCodes,
+    })),
+    distinctReservedAmounts: [
+      ...new Set(settled.map((r) => r.feeSizing.reservedDustSpecks).filter(Boolean)),
+    ],
+    distinctTakerHalfBytes: [...new Set(settled.map((r) => r.feeSizing.takerHalfBytes))],
+    everySettlementAcceptedFirstTry: settled.every((r) => r.feeSizing.acceptedFirstTry),
+  };
+  record("94-fee-sizing-chain-facts", feeFacts);
+  log("");
+  log("══ DESIGN-NOTE §6 — live-chain fee-sizing facts ════════════════════════");
+  log(`modelledTakerInputs in force : ${feeFacts.modelledTakerInputs}`);
+  for (const j of feeFacts.perJob) {
+    log(
+      `case ${j.case}: reservedDust=${j.reservedDustSpecks ?? "n/a"} SPECKs (${j.dustReservationState ?? "-"}) ` +
+        `takerHalf=${j.takerHalfBytes} bytes acceptedFirstTry=${j.acceptedFirstTry}`,
+    );
+  }
+  log(`offline prediction at n=1 (initialParameters): ${feeFacts.offlinePredictionSpecksAtN1} SPECKs`);
+  log(`offline stand-in priced HERE at n=1: ${JSON.stringify(offlineHere)}`);
+  for (const amount of feeFacts.distinctReservedAmounts) {
+    const live = BigInt(amount as string);
+    const delta = live - BigInt(feeFacts.offlinePredictionSpecksAtN1);
+    log(
+      `  live ${amount} → delta vs offline = ${delta >= 0n ? "+" : ""}${delta} SPECKs ` +
+        `(structural part after the ${DUST_FEE_OVERHEAD} flat overhead: ${live - DUST_FEE_OVERHEAD})`,
+    );
+  }
+  assert(
+    settled.length === 0 || feeFacts.everySettlementAcceptedFirstTry,
+    "every settlement was accepted FIRST TRY — the offline-sized DUST estimate never underfunded the chain",
+    feeFacts.perJob.map((j) => `${j.case}:${j.acceptedFirstTry}`),
+  );
+  if (REQUIRE_UNFUNDED_SOLVER) {
+    assert(
+      settled.length > 0 && settled.every((r) => r.feeSizing.reservedDustSpecks !== null),
+      "every settled job journalled a live-chain DUST reservation (design-note §6 number 1)",
+      feeFacts.perJob.map((j) => `${j.case}:${j.reservedDustSpecks ?? "MISSING"}`),
+    );
+  }
+
   const summary = {
     startedAt: new Date(started).toISOString(),
     finishedAt: new Date().toISOString(),
@@ -1039,7 +1477,15 @@ try {
       txId: r.txId,
       reason: r.reason,
       intentStatus: r.intentStatus,
+      feeSizing: r.feeSizing,
     })),
+    unfundedSolver: REQUIRE_UNFUNDED_SOLVER
+      ? {
+          required: true,
+          receipt: provisionReceipt,
+          feeSizingChainFacts: feeFacts,
+        }
+      : { required: false },
     // The solver holds SOLVER_SEED and this driver must not open a second
     // facade on it (two facades on one seed against one node force each
     // other's connection down). The expected delta is recorded here and

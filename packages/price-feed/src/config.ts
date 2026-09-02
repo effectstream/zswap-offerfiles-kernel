@@ -1,5 +1,5 @@
 import { ENV } from "@effectstream/utils/node-env";
-import { FEED_ASSET_IDS } from "@zswap-da/database";
+import { SEEDED_ASSET_IDS } from "@zswap-da/database";
 
 import { COINGECKO_BASE_URL } from "./coingecko.ts";
 
@@ -47,7 +47,7 @@ export function loadPriceFeedConfig(): PriceFeedConfig {
     intervalMs: ENV.getNumber("PRICE_FEED_INTERVAL_MS", DEFAULT_INTERVAL_MS),
     spacingMs: ENV.getNumber("PRICE_FEED_REQUEST_SPACING_MS", DEFAULT_SPACING_MS),
     requestTimeoutMs: ENV.getNumber("PRICE_FEED_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT_MS),
-    assetIds: assets.length > 0 ? assets : [...FEED_ASSET_IDS],
+    assetIds: assets.length > 0 ? assets : [...SEEDED_ASSET_IDS],
     db: {
       host: ENV.getString("DB_HOST", "127.0.0.1"),
       port: ENV.getNumber("DB_PORT", 5432),

@@ -164,8 +164,8 @@ export async function runOnce(deps: RunDeps, config: PriceFeedConfig): Promise<n
     deps.logError(`[price-feed] cycle aborted: ${String((error as Error)?.message ?? error)}`);
     return EXIT_CONFIG;
   }
-  const requested = config.assetIds.filter((id) => !result.skipped.includes(id));
-  const complete = result.failed.length === 0 && result.updated.length === requested.length;
+  const complete =
+    result.failed.length === 0 && result.updated.length === config.assetIds.length;
   return complete ? EXIT_OK : EXIT_CYCLE_INCOMPLETE;
 }
 

@@ -729,10 +729,10 @@ export interface IUpsertAssetPriceFeedParams {
 }
 export interface IUpsertAssetPriceFeedResult { asset_id: string }
 /**
- * Write one fetched price. The WHERE on the conflict clause is the guard that
- * makes `fixed` mean what it says: a peg (usdm) is never overwritten even if a
- * misconfigured PRICE_FEED_ASSETS asks for it, and the query reports what it
- * did by returning zero rows instead of silently succeeding.
+ * Write one fetched price. Every asset is fetchable — USD is the numeraire and
+ * no asset is pinned to it — so there is no row this refuses to overwrite. It
+ * still RETURNS the asset id it wrote, and the feed reports a zero-row result
+ * as a failure: that can now only mean the schema has drifted from this code.
  */
 export const upsertAssetPriceFeed = prepared<IUpsertAssetPriceFeedParams, IUpsertAssetPriceFeedResult>(
       `INSERT INTO asset_prices (asset_id, price_usd, source, provider_updated_at, updated_at)
@@ -742,7 +742,6 @@ export const upsertAssetPriceFeed = prepared<IUpsertAssetPriceFeedParams, IUpser
              source = 'feed',
              provider_updated_at = EXCLUDED.provider_updated_at,
              updated_at = NOW()
-         WHERE asset_prices.source <> 'fixed'
        RETURNING asset_id`,
 );
 

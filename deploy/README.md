@@ -139,11 +139,11 @@ mode logs one line and **idles**; it deliberately does not exit, because a
 non-zero exit under `restart: unless-stopped` is a crash loop and the stack is
 usable on the seeds meanwhile.
 
-One cycle is four requests — `bitcoin`, `ethereum`, `usd-coin`, `midnight-3` —
-issued one at a time at least a second apart. `usdm` is a fixed $1 peg with no
-listing and is never requested; the database refuses to overwrite it even if it
-is named in `PRICE_FEED_ASSETS`. A `429` stops the cycle where it stands, keeping
-what was already written, and the failure is visible in
+One cycle is five requests — `bitcoin`, `ethereum`, `usd-coin`, `midnight-3`,
+`usdm-2` — issued one at a time at least a second apart. Every asset is fetched:
+USD is the numeraire and nothing is pinned to it, so the stablecoins are observed
+like the rest and a depeg shows up in the quotes. A `429` stops the cycle where it
+stands, keeping what was already written, and the failure is visible in
 `GET /v1/prices.feed.last_error`. Roughly 5 calls a day against the demo plan's
 10 000 credits a month.
 

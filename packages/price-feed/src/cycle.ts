@@ -1,13 +1,11 @@
-// One refresh cycle: fetch each non-fixed asset, write it, record what
-// happened. Everything the cycle needs from the world — the network, the
-// clock, the sleep — is injected, so the tests exercise the real control flow
-// (spacing, the 429 stop, partial failure) without a network or a wall clock.
+// One refresh cycle: fetch each asset, write it, record what happened. Every
+// asset is fetched — USD is the numeraire and nothing is pinned to it, so
+// there is no "skip this one, it is a peg" case. Everything the cycle needs
+// from the world — the network, the clock, the sleep — is injected, so the
+// tests exercise the real control flow (spacing, the 429 stop, partial
+// failure) without a network or a wall clock.
 
-import {
-  FIXED_ASSET_IDS,
-  upsertAssetPriceFeed,
-  upsertPriceFeedStatus,
-} from "@zswap-da/database";
+import { upsertAssetPriceFeed, upsertPriceFeedStatus } from "@zswap-da/database";
 
 import {
   CoinGeckoError,
@@ -55,11 +53,6 @@ export interface CycleResult {
   updated: string[];
   /** Assets that were requested and did not land. */
   failed: CycleFailure[];
-  /**
-   * Assets that were never requested at all: a `fixed` peg someone put in
-   * PRICE_FEED_ASSETS. Not a failure — the cycle is still "ok".
-   */
-  skipped: string[];
   /** True when a 429 ended the cycle early; the remaining assets were not requested. */
   stoppedOnRateLimit: boolean;
   /** Assets the cycle never reached because of the 429. */
@@ -80,9 +73,7 @@ export interface CycleResult {
  *            the budget is a month long — a tight retry loop is how you lose
  *            the whole month in an afternoon.
  *   other    record and CONTINUE to the next asset. One delisted id or one
- *            502 must not cost the other three their daily refresh.
- *   fixed    never requested (see FIXED_ASSET_IDS). The DB guard on
- *            upsertAssetPriceFeed is the backstop if this list is ever wrong.
+ *            502 must not cost the other four their daily refresh.
  *
  * The last good prices always survive a failure: nothing is deleted, and a
  * row is only ever overwritten by a successful fetch.
@@ -92,11 +83,7 @@ export async function runCycle(deps: CycleDeps, options: CycleOptions): Promise<
   const log = deps.log ?? ((line: string) => console.log(line));
   const provider = options.provider ?? COINGECKO_PROVIDER;
 
-  const requestable = options.assetIds.filter((id) => !FIXED_ASSET_IDS.includes(id));
-  const skipped = options.assetIds.filter((id) => FIXED_ASSET_IDS.includes(id));
-  for (const id of skipped) {
-    log(`[price-feed] ${id}: fixed peg — not requested`);
-  }
+  const requestable = options.assetIds;
 
   const updated: string[] = [];
   const failed: CycleFailure[] = [];
@@ -137,11 +124,13 @@ export async function runCycle(deps: CycleDeps, options: CycleOptions): Promise<
       deps.db,
     );
     if (written.length === 0) {
-      // The row exists and is `fixed`. Not in FIXED_ASSET_IDS, so this file's
-      // list has drifted from the database's — say so rather than reporting a
-      // silent success.
-      skipped.push(assetId);
-      log(`[price-feed] ${assetId}: refused by the database (fixed row) — price NOT written`);
+      // The upsert RETURNs the row it wrote, so no row means the database
+      // refused the write. There is no rule left that can refuse one, so this
+      // is a real anomaly (a schema that has drifted from this code) and must
+      // be reported, not counted as a silent success.
+      const message = "the database wrote no row for this asset";
+      failed.push({ assetId, kind: "not_written", message });
+      log(`[price-feed] ${assetId}: FAILED (not_written) ${message}`);
       continue;
     }
     updated.push(assetId);
@@ -176,9 +165,8 @@ export async function runCycle(deps: CycleDeps, options: CycleOptions): Promise<
 
   log(
     `[price-feed] cycle done: ${updated.length} updated, ${failed.length} failed` +
-      (skipped.length > 0 ? `, ${skipped.length} skipped` : "") +
       (stoppedOnRateLimit ? " — STOPPED on 429" : ""),
   );
 
-  return { updated, failed, skipped, stoppedOnRateLimit, notRequested, rateLimit, error };
+  return { updated, failed, stoppedOnRateLimit, notRequested, rateLimit, error };
 }

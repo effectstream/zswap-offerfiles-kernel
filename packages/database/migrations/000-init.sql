@@ -26,9 +26,12 @@
 -- "Market data" section further down, and this table's comment block is the
 -- one place the whole pricing model is written out:
 --
---   asset_prices   USD per COIN of a tradable asset, keyed by the CoinGecko id
---                  (or `usdm`, which has no listing). Refreshed by the
---                  standalone `packages/price-feed` process.
+--   asset_prices   USD per COIN of a tradable asset, keyed by the CoinGecko
+--                  id. USD is the numeraire: every price in this schema is a
+--                  USD price and NO asset is assumed to be worth one dollar —
+--                  the stablecoins are quoted like everything else, so a
+--                  depeg is visible in quotes and in the sponsorship gate.
+--                  Refreshed by the standalone `packages/price-feed` process.
 --   known_tokens   maps a Midnight token colour to an asset_id (or, when NULL,
 --                  is mapped by NAME through packages/database/price-map.ts)
 --                  and carries the `decimals` needed to turn a per-coin price
@@ -41,9 +44,9 @@
 --           2026-09-02 so a stack that never runs the price-feed service still
 --           quotes real ratios. Overwritten by the service.
 --   'feed'  written by packages/price-feed from CoinGecko.
---   'fixed' a peg the service must NEVER fetch or overwrite. `usdm` is one:
---           Midnight's USDM is a bridged $1 stablecoin with no CoinGecko
---           listing, so its price is a constant, not an observation.
+--
+-- There is no third source. Every asset in this table is fetched from the
+-- provider; nothing is pinned to a constant.
 --
 -- Seed values, all captured 2026-09-02 from
 --   GET /api/v3/simple/price?ids=<id>&vs_currencies=usd&include_last_updated_at=true
@@ -54,10 +57,15 @@
 --   ethereum   2393.28     1788380750
 --   usd-coin   0.999818    1788380750
 --   midnight-3 0.01918181  1788380780   (NIGHT — coingecko.com/en/coins/midnight-3)
+--   usdm-2     1.001       1788388850   (Moneta's Cardano USDM, the asset the
+--                                        VIA Labs bridge carries to Midnight —
+--                                        coingecko.com/en/coins/usdm-2. Close
+--                                        to a dollar, but NOT a $1 peg: it is
+--                                        observed like every other asset.)
 CREATE TABLE asset_prices (
     asset_id            TEXT PRIMARY KEY,
     price_usd           NUMERIC NOT NULL,
-    source              TEXT NOT NULL CHECK (source IN ('seed', 'feed', 'fixed')),
+    source              TEXT NOT NULL CHECK (source IN ('seed', 'feed')),
     provider_updated_at TIMESTAMPTZ,
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -67,8 +75,7 @@ INSERT INTO asset_prices (asset_id, price_usd, source, provider_updated_at) VALU
 ('ethereum',   2393.28,    'seed',  to_timestamp(1788380750)),
 ('usd-coin',   0.999818,   'seed',  to_timestamp(1788380750)),
 ('midnight-3', 0.01918181, 'seed',  to_timestamp(1788380780)),
--- No listing, no provider timestamp: a peg, not an observation.
-('usdm',       1,          'fixed', NULL);
+('usdm-2',     1.001,      'seed',  to_timestamp(1788388850));
 
 -- One row (id = 1), upserted by packages/price-feed after every cycle. Not
 -- seeded: "the feed has never run here" and "the feed ran and told us nothing"
@@ -125,11 +132,13 @@ CREATE TABLE known_tokens (
 --           (contract 65023744190a4fc7c8ac9a3dfbc8cfc28f63d2aaa431ceda1d88fdb9a096a6a1).
 --           Also a placeholder on preprod (no USDM there, Q-5), but kept
 --           unshielded with 6 decimals — the bridge's real shape — so the row
---           needs no change if the bridge ever reaches this network.
+--           needs no change if the bridge ever reaches this network. The
+--           asset behind it is Moneta's Cardano USDM (`usdm-2`), the token
+--           the bridge carries — priced from the provider, not pegged (Q-10).
 INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES
 ('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 0, 'midnight-3'),
 ('1111111111111111111111111111111111111111111111111111111111111111', 'USDC',  'shielded',   0, 'usd-coin'),
-('003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73', 'USDM',  'unshielded', 6, 'usdm');
+('003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73', 'USDM',  'unshielded', 6, 'usdm-2');
 -- ('0000000000000000000000000000000000000000000000000000000000000001', 'SILK', 'shielded'),
 -- ('0000000000000000000000000000000000000000000000000000000000000002', 'DUSK', 'shielded')
 

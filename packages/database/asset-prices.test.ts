@@ -2,8 +2,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { closeTestPglite } from "./test-pglite.ts";
 
 // The schema half of the price model: the seeds shipped in 000-init.sql, the
-// rules that protect a `fixed` peg and a `manual` override from the feed, and
-// the per-base-unit conversion applied to the real seeded numbers.
+// rule that protects a `manual` override from the feed, and the per-base-unit
+// conversion applied to the real seeded numbers.
 //
 // These seeds are not decoration. They are what makes a fresh stack quote real
 // ratios with the price-feed service switched off (D2), so "the seed values are
@@ -69,21 +69,22 @@ test("a fresh database ships the 2026-09-02 reference prices", async () => {
     "ethereum",
     "midnight-3",
     "usd-coin",
-    "usdm",
+    "usdm-2",
   ]);
   // Exact NUMERIC spellings — the API serves these as strings.
   expect(assets.get("bitcoin")!.price_usd).toBe("77387");
   expect(assets.get("ethereum")!.price_usd).toBe("2393.28");
   expect(assets.get("usd-coin")!.price_usd).toBe("0.999818");
   expect(assets.get("midnight-3")!.price_usd).toBe("0.01918181");
-  expect(assets.get("usdm")!.price_usd).toBe("1");
+  // USDM is Moneta's Cardano USDM, observed like everything else — NOT pinned
+  // to 1. It was 1.001 when the seed was captured, and that drift is the point.
+  expect(assets.get("usdm-2")!.price_usd).toBe("1.001");
 
-  for (const id of ["bitcoin", "ethereum", "usd-coin", "midnight-3"]) {
+  // Every asset is a fetched, provider-sourced price. There is no other kind.
+  for (const id of ["bitcoin", "ethereum", "usd-coin", "midnight-3", "usdm-2"]) {
     expect(assets.get(id)!.source).toBe("seed");
+    expect(assets.get(id)!.provider_updated_at).not.toBeNull();
   }
-  // The peg is `fixed`, and a peg has no provider timestamp.
-  expect(assets.get("usdm")!.source).toBe("fixed");
-  expect(assets.get("usdm")!.provider_updated_at).toBeNull();
 
   // CoinGecko's own last_updated_at, as unix seconds in the plan.
   expect(new Date(assets.get("bitcoin")!.provider_updated_at as any).getTime()).toBe(
@@ -91,6 +92,9 @@ test("a fresh database ships the 2026-09-02 reference prices", async () => {
   );
   expect(new Date(assets.get("midnight-3")!.provider_updated_at as any).getTime()).toBe(
     1788380780 * 1000,
+  );
+  expect(new Date(assets.get("usdm-2")!.provider_updated_at as any).getTime()).toBe(
+    1788388850 * 1000,
   );
 });
 
@@ -126,18 +130,19 @@ test("the three redeploy-stable tokens are seeded, and only those", async () => 
     token_color: COLOR_USDM,
     kind: "unshielded",
     decimals: 6,
-    asset_id: "usdm",
+    asset_id: "usdm-2",
   });
 });
 
-test("USDM's per-base-unit price is 0.000001, not 1", async () => {
+test("USDM's per-base-unit price is the seeded usdm-2 price / 1e6", async () => {
   const assets = await assetsByIdRaw();
   const tokens = await getKnownTokensWithAssets.run(undefined, client);
   const usdm = tokens.find((t) => t.name === "USDM")!;
   const mapped = resolveAssetId(usdm)!;
-  expect(mapped).toEqual({ assetId: "usdm", decimals: 6 });
+  expect(mapped).toEqual({ assetId: "usdm-2", decimals: 6 });
+  // 1.001 / 10^6 — exactly, with no float noise and no assumed peg.
   expect(tokenPriceFromAsset(assets.get(mapped.assetId)!.price_usd, mapped.decimals)).toBe(
-    "0.000001",
+    "0.000001001",
   );
 });
 
@@ -227,15 +232,24 @@ test("the feed overwrites its own row too", async () => {
   expect(assets.get("bitcoin")!.provider_updated_at).toBeNull();
 });
 
-test("the feed cannot touch a `fixed` peg, and says so by writing no row", async () => {
+test("the stablecoin is a fetched row like any other — a depeg is written through", async () => {
   const written = await upsertAssetPriceFeed.run(
-    { asset_id: "usdm", price_usd: "0.5", provider_updated_at: null },
+    { asset_id: "usdm-2", price_usd: "0.94", provider_updated_at: null },
     client,
   );
-  expect(written).toEqual([]);
+  expect(written.map((r) => r.asset_id)).toEqual(["usdm-2"]);
   const assets = await assetsByIdRaw();
-  expect(assets.get("usdm")!.price_usd).toBe("1");
-  expect(assets.get("usdm")!.source).toBe("fixed");
+  expect(assets.get("usdm-2")!.price_usd).toBe("0.94");
+  expect(assets.get("usdm-2")!.source).toBe("feed");
+});
+
+test("the source CHECK admits only seed and feed", async () => {
+  await expect(
+    client.query(
+      "INSERT INTO asset_prices (asset_id, price_usd, source) VALUES ($1, $2, $3)",
+      ["some-peg", "1", "fixed"],
+    ),
+  ).rejects.toThrow();
 });
 
 test("a manual token price survives a fallback write; source defaults to fallback", async () => {

@@ -26,27 +26,22 @@ export interface PriceMapEntry {
   decimals?: number;
 }
 
-/** The asset ids seeded in 000-init.sql. */
+/**
+ * The asset ids seeded in 000-init.sql, which are also the assets one
+ * price-feed cycle requests, in order.
+ *
+ * Every one of them is a CoinGecko id and every one is fetched. USD is the
+ * numeraire and nothing is pinned to it: `usdm-2` is Moneta's Cardano USDM
+ * (the token the VIA Labs bridge carries to Midnight), which trades AROUND a
+ * dollar but is not a dollar, so it is observed like bitcoin (Q-10).
+ */
 export const SEEDED_ASSET_IDS: readonly string[] = [
   "bitcoin",
   "ethereum",
   "usd-coin",
   "midnight-3",
-  "usdm",
+  "usdm-2",
 ];
-
-/**
- * Assets the price feed must never fetch or overwrite: `usdm` is a bridged $1
- * peg with no CoinGecko listing (the USDM search hits are unrelated tokens),
- * so its price is a constant. Kept in sync with the `fixed` rows seeded in
- * 000-init.sql.
- */
-export const FIXED_ASSET_IDS: readonly string[] = ["usdm"];
-
-/** Assets one price-feed cycle requests, in order. */
-export const FEED_ASSET_IDS: readonly string[] = SEEDED_ASSET_IDS.filter(
-  (id) => !FIXED_ASSET_IDS.includes(id),
-);
 
 /**
  * Default token NAME → asset. Names are compared upper-cased.
@@ -54,7 +49,9 @@ export const FEED_ASSET_IDS: readonly string[] = SEEDED_ASSET_IDS.filter(
  * The wrapped/synthetic spellings are here because the faucet and the bridge
  * both mint under them: on Midnight there is no native BTC or ETH, so every
  * BTC-priced token is a wrapper of some kind and they all track the same
- * reference. NIGHT is coingecko.com/en/coins/midnight-3 (confirmed 2026-09-02).
+ * reference. NIGHT is coingecko.com/en/coins/midnight-3 and USDM is
+ * coingecko.com/en/coins/usdm-2 — Moneta's Cardano USDM, the asset the VIA
+ * Labs bridge carries to Midnight (both confirmed 2026-09-02).
  */
 export const DEFAULT_NAME_ASSET_MAP: ReadonlyMap<string, PriceMapEntry> = new Map<
   string,
@@ -67,7 +64,7 @@ export const DEFAULT_NAME_ASSET_MAP: ReadonlyMap<string, PriceMapEntry> = new Ma
   ["WSETH", { assetId: "ethereum" }],
   ["ETH", { assetId: "ethereum" }],
   ["USDC", { assetId: "usd-coin" }],
-  ["USDM", { assetId: "usdm" }],
+  ["USDM", { assetId: "usdm-2" }],
   ["NIGHT", { assetId: "midnight-3" }],
 ]);
 

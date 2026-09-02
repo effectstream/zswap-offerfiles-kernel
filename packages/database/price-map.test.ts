@@ -4,8 +4,6 @@ import { expect, test } from "bun:test";
 // the DB half (that the seeds match this map) is asset-prices.test.ts.
 import {
   DEFAULT_NAME_ASSET_MAP,
-  FEED_ASSET_IDS,
-  FIXED_ASSET_IDS,
   SEEDED_ASSET_IDS,
   parsePriceMapEnv,
   priceMapKey,
@@ -30,7 +28,7 @@ test("default map matches names case-insensitively", () => {
     ["wsETH", "ethereum"],
     ["ETH", "ethereum"],
     ["USDC", "usd-coin"],
-    ["usdm", "usdm"],
+    ["usdm", "usdm-2"],
     ["night", "midnight-3"],
   ] as const) {
     expect(resolveAssetId({ name })?.assetId).toBe(assetId);
@@ -67,9 +65,9 @@ test("an env entry keyed by colour wins over one keyed by name", () => {
 });
 
 test("env decimals override the registered decimals even when the DB set the asset", () => {
-  const env = parsePriceMapEnv("USDM=usdm:8");
-  const resolved = resolveAssetId({ name: "USDM", asset_id: "usdm", decimals: 6 }, env);
-  expect(resolved).toEqual({ assetId: "usdm", decimals: 8 });
+  const env = parsePriceMapEnv("USDM=usdm-2:8");
+  const resolved = resolveAssetId({ name: "USDM", asset_id: "usdm-2", decimals: 6 }, env);
+  expect(resolved).toEqual({ assetId: "usdm-2", decimals: 8 });
 });
 
 test("the env map can price a token the default map never heard of", () => {
@@ -109,8 +107,9 @@ test("tokenPriceFromAsset divides exactly, with no float noise and no toFixed", 
   // 0 decimals: base unit == coin, the faucet's shape.
   expect(tokenPriceFromAsset("77387", 0)).toBe("77387");
   expect(tokenPriceFromAsset("2393.28", 0)).toBe("2393.28");
-  // 6 decimals: USDM's shape — one base unit of a $1 peg.
-  expect(tokenPriceFromAsset("1", 6)).toBe("0.000001");
+  // 6 decimals: USDM's shape. The asset is near a dollar but not on it, and
+  // the division must carry that through instead of rounding it away.
+  expect(tokenPriceFromAsset("1.001", 6)).toBe("0.000001001");
   expect(tokenPriceFromAsset("0.999818", 6)).toBe("0.000000999818");
   // 8 decimals: what a wrapped-BTC bridge would use. 77387/1e8 in doubles is
   // 0.0007738700000000001 — the string result must not carry that tail.
@@ -145,12 +144,14 @@ test("tokenPriceFromAsset rejects nonsense rather than returning NaN", () => {
 
 // ── asset id lists ─────────────────────────────────────────────────────────
 
-test("the feed asset list is the seeded list minus the pegs", () => {
-  expect(FIXED_ASSET_IDS).toEqual(["usdm"]);
-  expect(FEED_ASSET_IDS).toEqual(["bitcoin", "ethereum", "usd-coin", "midnight-3"]);
-  expect(new Set(SEEDED_ASSET_IDS)).toEqual(
-    new Set([...FEED_ASSET_IDS, ...FIXED_ASSET_IDS]),
-  );
+test("every seeded asset is fetched — the list is one list, in request order", () => {
+  expect(SEEDED_ASSET_IDS).toEqual([
+    "bitcoin",
+    "ethereum",
+    "usd-coin",
+    "midnight-3",
+    "usdm-2",
+  ]);
 });
 
 test("every asset the default map points at is seeded", () => {

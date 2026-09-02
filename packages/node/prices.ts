@@ -6,7 +6,7 @@
 //      over everything and is never rewritten by anything.
 //   2. the token's ASSET price ÷ 10^decimals   asset_prices, reached through
 //      known_tokens.asset_id or the NAME map in @zswap-da/database. Source is
-//      the asset's own: feed | seed | fixed.
+//      the asset's own: feed | seed.
 //   3. token_prices row with source='fallback' the deterministic demo price,
 //      already written by an earlier quote.
 //   4. write the deterministic demo price once and use it.
@@ -39,7 +39,7 @@ import { priceOf } from "./market-mock.ts";
 /** The provider the price feed writes. One provider today; the field is not a guess. */
 const DEFAULT_PROVIDER = "coingecko";
 
-export type TokenPriceSource = "feed" | "seed" | "fixed" | "manual" | "fallback";
+export type TokenPriceSource = "feed" | "seed" | "manual" | "fallback";
 
 export interface ResolvedTokenPrice {
   /** USD per BASE UNIT, as an exact decimal string. */
@@ -108,7 +108,7 @@ function resolveWithoutWriting(
     if (mapped !== null && asset !== undefined) {
       return {
         price_usd: tokenPriceFromAsset(asset.price_usd, mapped.decimals),
-        // 'seed' | 'feed' | 'fixed', constrained by the CHECK on asset_prices.
+        // 'seed' | 'feed', constrained by the CHECK on asset_prices.
         source: asset.source as TokenPriceSource,
         updated_at: iso(asset.updated_at),
       };

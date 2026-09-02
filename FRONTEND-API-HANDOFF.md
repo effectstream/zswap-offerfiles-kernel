@@ -245,11 +245,13 @@ their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
   (`decimals` and `asset_id` are new: base units per coin, and the reference asset
   a price comes from. `POST /v1/known-tokens` accepts both, optionally.)
 - `GET /v1/prices` → `{ "sponsor_discount", "feed": { "provider", "last_run_at", "last_ok_at", "last_error" }, "assets": [...], "tokens": [...] }`.
-  The reference prices behind every quote. `price_usd` is a decimal **string** and is
-  **per base unit** (a $1 stablecoin with 6 decimals reads `0.000001`). Each entry
-  carries a `source`: `feed` (CoinGecko), `seed` (shipped in the schema), `fixed`
-  (a peg), `manual` (an operator override) or `fallback` (**a demo price derived
-  from the token colour — not market data; label it**). `feed` is all-nulls when the
+  The reference prices behind every quote. Every price is in **USD** and nothing is
+  pinned to a dollar — the stablecoins are quoted from the provider too, so a depeg
+  shows. `price_usd` is a decimal **string** and is **per base unit** (a dollar-ish
+  stablecoin with 6 decimals reads about `0.000001`). Each entry carries a `source`:
+  `feed` (CoinGecko), `seed` (shipped in the schema), `manual` (an operator
+  override) or `fallback` (**a demo price derived from the token colour — not
+  market data; label it**). `feed` is all-nulls when the
   refresh service has never run. `tokens` omits tokens with no price at all.
 - `GET /v1/pairs` → `[{ "pair_key": "…", "base_color": "…", "quote_color": "…", "trade_count": 3, "last_price": "2.0", "last_traded_at": "…", "open_count": 1 }]`
 - `GET /v1/quote?from_token=…&to_token=…&from_amount=…[&to_amount=…]` →
@@ -263,7 +265,7 @@ their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
   The four new fields are what a UI needs to explain a rate rather than just show it:
   `sponsor_discount` is the threshold `sponsored` was decided against (a fraction,
   `0.025` = 2.5%); `from_source`/`to_source` are the per-leg provenance
-  (`feed|seed|fixed|manual|fallback|demo-fallback`) so one leg can be labelled a demo
+  (`feed|seed|manual|fallback|demo-fallback`) so one leg can be labelled a demo
   rate while the other is real; `prices_updated_at` is the **older** of the two legs'
   timestamps — a quote is only as fresh as its stalest side — and is `null` when
   either leg is `demo-fallback`. `market_rate` now comes from real reference prices

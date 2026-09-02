@@ -20,7 +20,7 @@
 import type { OfferLeg } from "@zswap-da/validator";
 
 /** Where a price came from. Only `fallback` is not a market price. */
-export type PriceSource = "feed" | "seed" | "fixed" | "manual" | "fallback";
+export type PriceSource = "feed" | "seed" | "manual" | "fallback";
 
 /** One token's USD price PER BASE UNIT, as served by GET /v1/prices. */
 export interface PriceRow {

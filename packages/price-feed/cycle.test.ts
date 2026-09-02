@@ -19,7 +19,7 @@ const PORT = 54355;
 let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
-const FEED = ["bitcoin", "ethereum", "usd-coin", "midnight-3"];
+const FEED = ["bitcoin", "ethereum", "usd-coin", "midnight-3", "usdm-2"];
 
 beforeAll(async () => {
   handle = await startPglite(PORT);
@@ -39,7 +39,7 @@ beforeEach(async () => {
     `UPDATE asset_prices SET price_usd = v.price, source = v.source, updated_at = NOW()
      FROM (VALUES ('bitcoin', 77387::numeric, 'seed'), ('ethereum', 2393.28, 'seed'),
                   ('usd-coin', 0.999818, 'seed'), ('midnight-3', 0.01918181, 'seed'),
-                  ('usdm', 1, 'fixed')) AS v(id, price, source)
+                  ('usdm-2', 1.001, 'seed')) AS v(id, price, source)
      WHERE asset_prices.asset_id = v.id`,
   );
 });
@@ -97,7 +97,7 @@ test("one request per asset, spaced, all rows written and marked `feed`", async 
 
   expect(h.requested).toEqual(FEED);
   // n assets = n-1 waits: nothing is paid before the first request.
-  expect(h.sleeps).toEqual([1000, 1000, 1000]);
+  expect(h.sleeps).toEqual([1000, 1000, 1000, 1000]);
   expect(result.updated).toEqual(FEED);
   expect(result.failed).toEqual([]);
   expect(result.error).toBeNull();
@@ -107,9 +107,9 @@ test("one request per asset, spaced, all rows written and marked `feed`", async 
   expect(rows.get("bitcoin")!.price_usd).toBe("80000");
   expect(rows.get("bitcoin")!.source).toBe("feed");
   expect(rows.get("ethereum")!.source).toBe("feed");
-  // The peg is untouched: it was never in the list.
-  expect(rows.get("usdm")!.price_usd).toBe("1");
-  expect(rows.get("usdm")!.source).toBe("fixed");
+  // The stablecoin is fetched like everything else — no asset is exempt.
+  expect(rows.get("usdm-2")!.price_usd).toBe("1.5");
+  expect(rows.get("usdm-2")!.source).toBe("feed");
 
   const status = (await getPriceFeedStatus.run(undefined, client))[0]!;
   expect(status.provider).toBe("coingecko");
@@ -144,10 +144,10 @@ test("the first 429 stops the cycle and keeps what was already written", async (
   );
   const result = await runCycle(h.deps, { assetIds: FEED, spacingMs: 1000 });
 
-  // midnight-3 was never asked for.
+  // Everything after the 429 was never asked for.
   expect(h.requested).toEqual(["bitcoin", "ethereum", "usd-coin"]);
   expect(result.stoppedOnRateLimit).toBe(true);
-  expect(result.notRequested).toEqual(["midnight-3"]);
+  expect(result.notRequested).toEqual(["midnight-3", "usdm-2"]);
   expect(result.updated).toEqual(["bitcoin", "ethereum"]);
 
   const rows = await assets();
@@ -160,7 +160,7 @@ test("the first 429 stops the cycle and keeps what was already written", async (
 
   const status = (await getPriceFeedStatus.run(undefined, client))[0]!;
   expect(status.last_error).toContain("429");
-  expect(status.last_error).toContain("not requested: midnight-3");
+  expect(status.last_error).toContain("not requested: midnight-3, usdm-2");
   expect(status.last_ok_at).toBeNull();
 });
 
@@ -175,7 +175,7 @@ test("a 500 on one asset does not stop the next one", async () => {
   const result = await runCycle(h.deps, { assetIds: FEED, spacingMs: 1000 });
 
   expect(h.requested).toEqual(FEED);
-  expect(result.updated).toEqual(["bitcoin", "usd-coin", "midnight-3"]);
+  expect(result.updated).toEqual(["bitcoin", "usd-coin", "midnight-3", "usdm-2"]);
   expect(result.failed).toEqual([
     { assetId: "ethereum", kind: "http", message: "ethereum: HTTP 500" },
   ]);
@@ -199,27 +199,28 @@ test("a non-CoinGecko throw is recorded, not propagated", async () => {
   expect(result.updated).toEqual(["ethereum"]);
 });
 
-// ── fixed assets ───────────────────────────────────────────────────────────
+// ── no asset is exempt ─────────────────────────────────────────────────────
 
-test("a fixed asset in the list is skipped WITHOUT a request", async () => {
-  const h = harness((id) => ok(id, "0.5"));
+test("the stablecoin is requested and written like any other asset", async () => {
+  const h = harness((id) => ok(id, id === "usdm-2" ? "0.94" : "80000"));
   const result = await runCycle(h.deps, {
-    assetIds: ["bitcoin", "usdm"],
+    assetIds: ["bitcoin", "usdm-2"],
     spacingMs: 1000,
   });
 
-  expect(h.requested).toEqual(["bitcoin"]);
-  expect(result.skipped).toEqual(["usdm"]);
-  expect(result.error).toBeNull(); // not a failure
-  expect(h.logs.join("\n")).toContain("usdm: fixed peg — not requested");
+  expect(h.requested).toEqual(["bitcoin", "usdm-2"]);
+  expect(result.updated).toEqual(["bitcoin", "usdm-2"]);
+  expect(result.error).toBeNull();
 
   const rows = await assets();
-  expect(rows.get("usdm")!.price_usd).toBe("1");
+  // A depeg reaches the database instead of being clamped to 1.
+  expect(rows.get("usdm-2")!.price_usd).toBe("0.94");
+  expect(rows.get("usdm-2")!.source).toBe("feed");
 });
 
 test("a status row is written even when nothing was requested at all", async () => {
   const h = harness((id) => ok(id, "1"));
-  const result = await runCycle(h.deps, { assetIds: ["usdm"], spacingMs: 1000 });
+  const result = await runCycle(h.deps, { assetIds: [], spacingMs: 1000 });
   expect(h.requested).toEqual([]);
   expect(result.updated).toEqual([]);
   const status = (await getPriceFeedStatus.run(undefined, client))[0]!;
@@ -235,7 +236,7 @@ test("running twice leaves the same rows and one status row", async () => {
   await runCycle(h2.deps, { assetIds: FEED, spacingMs: 0 });
 
   const rows = await assets();
-  expect([...rows.values()].filter((r) => r.source === "feed")).toHaveLength(4);
+  expect([...rows.values()].filter((r) => r.source === "feed")).toHaveLength(5);
   const statuses = await client.query("SELECT COUNT(*)::int AS n FROM price_feed_status");
   expect(statuses.rows[0].n).toBe(1);
 });

@@ -96,16 +96,18 @@ rather than a colour-hash rate. See [Reference prices](#reference-prices).
 ## Reference prices
 
 `GET /v1/prices` serves the USD prices behind `GET /v1/quote` and behind the
-batcher's fee sponsorship. Three tables back it:
+batcher's fee sponsorship. USD is the numeraire: every price is a USD price and
+no asset — stablecoins included — is assumed to be worth one dollar. Three
+tables back it:
 
 | Table | Holds |
 |---|---|
-| `asset_prices` | USD **per coin** for a tradable asset, keyed by its CoinGecko id (or `usdm`, a $1 peg with no listing). Seeded in `000-init.sql` with values captured 2026-09-02 |
+| `asset_prices` | USD **per coin** for a tradable asset, keyed by its CoinGecko id. Seeded in `000-init.sql` with values captured 2026-09-02 |
 | `known_tokens` | a colour's `decimals` (base units per coin) and optional `asset_id`. Prices are served **per base unit**, i.e. the asset price ÷ `10^decimals` |
 | `token_prices` | only operator overrides (`manual`) and the deterministic demo rows (`fallback`) for tokens with no asset behind them |
 
 Tokens map to assets **by name** — `WBTC`/`WSBTC`/`BTC` → `bitcoin`, `WETH`/`WSETH`/
-`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm`, `NIGHT` → `midnight-3` —
+`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3` —
 because faucet-minted colours derive from the contract address and change on every
 clean redeploy. `known_tokens.asset_id` overrides the map; `PRICE_FEED_MAP`
 (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
@@ -119,9 +121,9 @@ bun run --filter @zswap-da/price-feed start   # loop, one cycle a day
 docker compose run --rm price-feed --once     # the same, in deploy/
 ```
 
-One cycle is four requests (`bitcoin`, `ethereum`, `usd-coin`, `midnight-3`) issued
-one at a time, at least a second apart, stopping at the first `429`; `usdm` is never
-requested. About 5 calls a day.
+One cycle is five requests (`bitcoin`, `ethereum`, `usd-coin`, `midnight-3`,
+`usdm-2`) issued one at a time, at least a second apart, stopping at the first
+`429`. About 5 calls a day.
 
 | Variable | Default | Meaning |
 |---|---|---|

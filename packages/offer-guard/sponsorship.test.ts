@@ -187,8 +187,8 @@ test("a `fallback` row is NOT a market price", () => {
   expect(v.unpriced).toEqual([TEST]);
 });
 
-test("seed, fixed and manual rows ARE market prices", () => {
-  for (const source of ["seed", "fixed", "manual"] as const) {
+test("seed and manual rows ARE market prices", () => {
+  for (const source of ["seed", "manual"] as const) {
     const prices = priced([[BTC, "100", source], [ETH, "1", source]]);
     const v = evaluateSponsorship(
       { gives: [leg(BTC, 1)], wants: [leg(ETH, 90)] },

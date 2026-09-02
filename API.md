@@ -778,10 +778,14 @@ is the source of truth behind `GET /v1/quote` and behind the batcher's fee
 sponsorship — the batcher polls it rather than keeping its own prices, so the
 threshold the UI shows and the one the batcher enforces cannot drift apart.
 
+Every price is in **USD** — USD is the numeraire and no asset is assumed to be
+worth one dollar, stablecoins included: they are quoted from the provider like
+everything else, so a depeg is visible here.
+
 Prices are **per base unit**. Amounts everywhere in this API are integer base units
 and carry no decimals metadata, so a token's price is its asset's per-coin price
-divided by `10^known_tokens.decimals`. A $1 stablecoin with 6 decimals is
-`0.000001` here, and that is the number to multiply an amount by.
+divided by `10^known_tokens.decimals`. A dollar-ish stablecoin with 6 decimals is
+about `0.000001` here, and that is the number to multiply an amount by.
 
 ```bash
 curl http://host:9999/v1/prices
@@ -799,8 +803,8 @@ curl http://host:9999/v1/prices
   "assets": [
     { "asset_id": "bitcoin", "price_usd": "77387", "source": "feed",
       "provider_updated_at": "2026-09-02T20:25:50.000Z", "updated_at": "2026-09-03T00:00:00.000Z" },
-    { "asset_id": "usdm", "price_usd": "1", "source": "fixed",
-      "provider_updated_at": null, "updated_at": "2026-09-02T00:00:00.000Z" }
+    { "asset_id": "usdm-2", "price_usd": "1.001", "source": "seed",
+      "provider_updated_at": "2026-09-02T22:40:50.000Z", "updated_at": "2026-09-02T22:40:50.000Z" }
   ],
   "tokens": [
     { "token_color": "e758...a912", "name": "WBTC", "kind": "shielded", "decimals": 0,
@@ -820,7 +824,6 @@ exact; parsing them as doubles is the caller's decision, not ours.
 |---|---|
 | `feed` | fetched from CoinGecko by the `price-feed` service |
 | `seed` | the value shipped in `000-init.sql` (captured 2026-09-02). A stack that never runs the feed still quotes real ratios |
-| `fixed` | a peg with no listing (`usdm` = $1). The feed never requests or overwrites it |
 | `manual` | an operator's row in `token_prices`. Wins over everything; nothing rewrites it |
 | `fallback` | the deterministic demo price derived from the token's colour. **Not a market price** — label it as such in a UI, and the sponsorship gate treats it as *unpriced* |
 
@@ -832,7 +835,8 @@ this endpoint never writes.
 
 **Mapping.** Faucet-minted colours change on every clean redeploy (they derive from
 the contract address), so tokens map to assets by **name**: `WBTC`/`WSBTC`/`BTC` →
-`bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm`,
+`bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`
+(Moneta's Cardano USDM, the asset the VIA Labs bridge carries to Midnight),
 `NIGHT` → `midnight-3`. `known_tokens.asset_id` overrides the map, and
 `PRICE_FEED_MAP` (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 

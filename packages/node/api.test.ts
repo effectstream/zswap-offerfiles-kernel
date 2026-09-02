@@ -288,14 +288,16 @@ describe("GET /v1/prices", () => {
       "ethereum",
       "midnight-3",
       "usd-coin",
-      "usdm",
+      "usdm-2",
     ]);
     expect(assets.get("bitcoin")).toMatchObject({ price_usd: "77387", source: "seed" });
     expect(assets.get("ethereum")).toMatchObject({ price_usd: "2393.28", source: "seed" });
-    expect(assets.get("usdm")).toMatchObject({
-      price_usd: "1",
-      source: "fixed",
-      provider_updated_at: null,
+    // The stablecoin is an observed price like the rest — not 1, and with a
+    // provider timestamp of its own.
+    expect(assets.get("usdm-2")).toMatchObject({
+      price_usd: "1.001",
+      source: "seed",
+      provider_updated_at: "2026-09-02T22:40:50.000Z",
     });
     expect(assets.get("bitcoin").provider_updated_at).toBe("2026-09-02T20:25:50.000Z");
 
@@ -308,13 +310,13 @@ describe("GET /v1/prices", () => {
       price_usd: "0.01918181",
       source: "seed",
     });
-    // 6 decimals: a $1 peg is $0.000001 per base unit, and this is the number
-    // the sponsorship gate multiplies amounts by.
+    // 6 decimals: the seeded usdm-2 price divided by 1e6, and this is the
+    // number the sponsorship gate multiplies amounts by.
     expect(tokens.get("USDM")).toMatchObject({
       kind: "unshielded",
       decimals: 6,
-      price_usd: "0.000001",
-      source: "fixed",
+      price_usd: "0.000001001",
+      source: "seed",
     });
   });
 

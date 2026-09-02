@@ -136,10 +136,20 @@ test("--once exits 2 when a 429 cut the cycle short", async () => {
   expect(await runOnce(h.deps, CONFIG)).toBe(EXIT_CYCLE_INCOMPLETE);
 });
 
-test("--once still exits 0 when the only untouched asset is a fixed peg", async () => {
-  const h = harness((id) => ok(id));
-  const code = await runOnce(h.deps, { ...CONFIG, assetIds: ["bitcoin", "usdm"] });
-  expect(code).toBe(EXIT_OK);
+test("--once counts the stablecoin like every other asset", async () => {
+  // No asset is exempt from a cycle any more, so a stablecoin that did not
+  // land makes the cycle incomplete exactly as a failed bitcoin would.
+  const all = harness((id) => ok(id));
+  expect(await runOnce(all.deps, { ...CONFIG, assetIds: ["bitcoin", "usdm-2"] })).toBe(
+    EXIT_OK,
+  );
+
+  const partial = harness((id) =>
+    id === "usdm-2" ? new CoinGeckoError("boom", "http", "usdm-2", 500) : ok(id),
+  );
+  expect(await runOnce(partial.deps, { ...CONFIG, assetIds: ["bitcoin", "usdm-2"] })).toBe(
+    EXIT_CYCLE_INCOMPLETE,
+  );
 });
 
 test("--once without a key exits 64 and says why, without running a cycle", async () => {

@@ -24,6 +24,7 @@ export type OfferRejectCode =
   | "NULLIFIER_SPENT"
   | "UTXO_SPENT"
   | "UTXO_UNKNOWN"
+  | "UTXO_NOT_LIVE"
   | "ROOT_UNKNOWN"
   | "ROOT_UNREADABLE"
   | "DUPLICATE";
@@ -110,14 +111,14 @@ export interface ValidateOpts {
   // Optional SYNCHRONOUS liveness checks. Provide these only when a sync check
   // is available (unit tests with in-memory sets; callers that pre-fetched).
   // Async callers (the STM via World.resolve, submit via pg, the batcher via
-  // the indexer) should instead leave these unset and run liveness themselves
-  // on the returned `nullifiers` / `unshieldedSpends`, reusing the
-  // NULLIFIER_SPENT / UTXO_SPENT codes.
+  // the indexer) leave these unset and consume the ordered descriptors through
+  // evaluateOfferLiveness. Indexed live-set absence normalizes to
+  // UTXO_NOT_LIVE; these split predicates retain UTXO_SPENT / UTXO_UNKNOWN for
+  // callers that genuinely hold both facts separately.
   isNullifierSpent?: (nullifierHex: string) => boolean;
   isUnshieldedSpent?: (ref: UnshieldedSpendRef) => boolean;
   // Existence checks (same sync-vs-async note as above): UTXO ever created;
-  // input's merkle root is a known recent chain root. Reuse UTXO_UNKNOWN /
-  // ROOT_UNKNOWN in the async caller path.
+  // input's merkle root is a known recent chain root.
   isUnshieldedCreated?: (ref: UnshieldedSpendRef) => boolean;
   isKnownRoot?: (rootHex: string) => boolean;
   // Optional dedup hook (e.g. already-indexed nullifiers/identifiers).

@@ -89,6 +89,9 @@ export function ReadPanel() {
         <div className="actions">
           <button className="btn primary" type="button" onClick={() => dbg.call(api.quote(from, to, amt))}>Quote</button>
         </div>
+        <p className="lead" style={{ marginBottom: 0 }}>
+          Quotes come from the indexer's token-price table (or its demo fallback). They are market data, not a fill reservation.
+        </p>
         <div className="row" style={{ marginTop: 10 }}>
           <div className="field"><label>base</label><input value={base} onChange={(e) => setBase(e.target.value)} /></div>
           <div className="field"><label>quote</label><input value={quote} onChange={(e) => setQuote(e.target.value)} /></div>

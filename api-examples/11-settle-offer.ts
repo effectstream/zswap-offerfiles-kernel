@@ -37,7 +37,6 @@ const networkUrls = {
 
 // ── 2. Pick an offer ──────────────────────────────────────────────────────────
 let blob = process.env.OFFER_BLOB ?? "";
-let offerId: number | undefined;
 
 if (!blob) {
   const { offers } = await get<any>("/v1/offers?limit=1");
@@ -48,8 +47,7 @@ if (!blob) {
   // The list is blob-free — fetch the blob by content hash.
   const detail = await get<any>(`/v1/offers/${offers[0].offerId}`);
   blob    = detail.offerBech32;
-  offerId = offers[0].id;
-  console.log(`Using offer ${offers[0].offerId}  celestia=#${offers[0].celestiaHeight}`);
+  console.log(`Using offer ${offers[0].offerId}  effectstream-l2=#${offers[0].blockHeight}`);
   console.log(`  gives: ${JSON.stringify(offers[0].computed.gives)}`);
   console.log(`  wants: ${JSON.stringify(offers[0].computed.wants)}\n`);
 } else {
@@ -85,10 +83,10 @@ for (let i = 0; i < 36; i++) {
   const { status } = await post<any>("/v1/offers/status", { offer: blob });
   console.log(`  status: ${status}`);
   if (status === "consumed") {
-    console.log("✅  Offer consumed (all inputs spent in one tx) — settlement confirmed.");
+    console.log("✅  Offer consumed with transaction-bound fill markers — settlement confirmed.");
     break;
   }
-  if (status === "cancelled" || status === "expired" || status === "not_found") {
+  if (status === "cancelled" || status === "expired" || status === "unknown" || status === "not_found") {
     console.log(`Offer ended with status: ${status}`);
     break;
   }

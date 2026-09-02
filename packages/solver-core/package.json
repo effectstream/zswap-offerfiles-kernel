@@ -1,0 +1,35 @@
+{
+  "name": "@zswap-da/solver-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./mod.ts",
+    "./admission-policy": "./admission-policy.ts",
+    "./api-client": "./api-client.ts",
+    "./batcher": "./batcher.ts",
+    "./exact-files-contract": "./exact-files-contract.ts",
+    "./fee-sizing": "./fee-sizing.ts",
+    "./wallet": "./wallet.ts",
+    "./offer-files": "./offer-files.ts",
+    "./ladder-derivation": "./ladder-derivation.ts",
+    "./ladder-schema": "./ladder-schema.ts",
+    "./offer-updates-contract": "./offer-updates-contract.ts",
+    "./receipt-client": "./receipt-client.ts",
+    "./relay-ws-contract": "./relay-ws-contract.ts",
+    "./validation-contract": "./validation-contract.ts"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@effectstream/midnight-contracts": "0.103.1",
+    "@effectstream/mip-zswap-offer": "0.3.0",
+    "@midnight-ntwrk/compact-js": "2.5.1",
+    "@midnight-ntwrk/ledger-v8": "8.1.0",
+    "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
+    "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
+    "@zswap-da/contract-offer-files": "workspace:*",
+    "rxjs": "^7.8.2"
+  }
+}

@@ -36,10 +36,8 @@ import {
   insertNullifierWithTx,
   markNullifierMatched,
   findUnmatchedNullifier,
-  isNullifierSpent,
   insertCreatedUnshielded,
   deleteCreatedUnshielded,
-  isUnshieldedCreated,
   upsertKnownRootWithFirstSeen,
   getOfferRootTiming,
   isKnownRootLive,
@@ -82,6 +80,8 @@ import { canonicalRootHex } from "@zswap-da/validator";
 import { grammar } from "./grammar.ts";
 import { extractMidnightLedgerSnapshot } from "./zswap-logic.ts";
 import { emitAppEvent } from "./event-bus.ts";
+import { failStopAppInput } from "./app-input-savepoint.ts";
+import { evaluateOfferLivenessInStateMachine } from "./offer-liveness.ts";
 import {
   CELESTIA_PRIMITIVE_NAME,
   MIDNIGHT_NETWORK_ID,
@@ -129,6 +129,87 @@ function unshieldedOwnerToCanonicalHex(value: unknown): string {
   return bytesOrStringToHex(value);
 }
 
+export type OfferExpiryCandidate = Date | string | number | null | undefined;
+
+function expiryTimestamp(label: string, value: OfferExpiryCandidate): number | null {
+  if (value == null) return null;
+  const timestamp = value instanceof Date
+    ? value.getTime()
+    : typeof value === "number"
+      ? value
+      : Date.parse(value);
+  const date = new Date(timestamp);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(date.getTime())) {
+    throw new Error(`invalid ${label} offer expiry: ${String(value)}`);
+  }
+  return timestamp;
+}
+
+/** Distinguish a constraint that does not apply from one that applies but
+ * failed to produce a timestamp. The latter is an ingestion invariant failure
+ * and must never fall through to a later expiry. */
+export function requireApplicableOfferExpiry(
+  label: "root" | "intent",
+  applies: boolean,
+  value: OfferExpiryCandidate,
+): Date | null {
+  if (!applies) return null;
+  if (value == null) throw new Error(`${label} offer expiry was not derived`);
+  const timestamp = expiryTimestamp(label, value);
+  if (timestamp === null) throw new Error(`${label} offer expiry was not derived`);
+  return new Date(timestamp);
+}
+
+/** Ledger-v8 exposes intents through a keyed-map `values()` API (the same API
+ * used by P2pAtomicSwaps.earliestIntentTtl). Iterating it avoids assuming a
+ * native Map `.size` implementation while still detecting malformed shapes. */
+export function hasTransactionIntents(tx: unknown): boolean {
+  if (typeof tx !== "object" || tx === null) return false;
+  const intents = (tx as { intents?: unknown }).intents;
+  if (intents == null) return false;
+  const values = (intents as { values?: unknown }).values;
+  if (typeof values !== "function") {
+    throw new Error("transaction intents are not iterable");
+  }
+  for (const _intent of values.call(intents) as Iterable<unknown>) return true;
+  return false;
+}
+
+/**
+ * Choose the earliest ledger constraint that applies to an offer.
+ *
+ * Shielded roots and Intent TTLs are independent and can coexist in mixed
+ * transactions, so neither is a fallback for the other. The publication TTL
+ * is used only when the transaction carries neither constraint. Invalid
+ * applicable constraints fail closed instead of silently extending an offer.
+ */
+export function deriveOfferExpiry(
+  rootExpiry: OfferExpiryCandidate,
+  earliestIntentTtl: OfferExpiryCandidate,
+  fallbackExpiry: OfferExpiryCandidate,
+): Date {
+  const rootTimestamp = expiryTimestamp("root", rootExpiry);
+  const intentTimestamp = expiryTimestamp("intent", earliestIntentTtl);
+  if (rootTimestamp !== null || intentTimestamp !== null) {
+    return new Date(Math.min(
+      rootTimestamp ?? Number.POSITIVE_INFINITY,
+      intentTimestamp ?? Number.POSITIVE_INFINITY,
+    ));
+  }
+  const fallbackTimestamp = expiryTimestamp("fallback", fallbackExpiry);
+  if (fallbackTimestamp === null) throw new Error("offer expiry was not derived");
+  return new Date(fallbackTimestamp);
+}
+
+function cleanupBlockTimestamp(blockTimestamp: unknown): Date {
+  if (typeof blockTimestamp !== "number") {
+    throw new Error(`invalid cleanup block timestamp: ${String(blockTimestamp)}`);
+  }
+  const timestamp = expiryTimestamp("cleanup block", blockTimestamp);
+  if (timestamp === null) throw new Error("cleanup block timestamp is missing");
+  return new Date(timestamp);
+}
+
 const stm = new Stm<typeof grammar, {}>(grammar);
 
 /**
@@ -136,16 +217,15 @@ const stm = new Stm<typeof grammar, {}>(grammar);
  *
  * The runtime catches state-transition errors and reports them to telemetry
  * only (`log.remote` in process-blocks.ts), so on a dev box a failing
- * transition produces no console output at all — the block transaction just
- * aborts and the next statement dies with a Postgres 25P02, surfacing as an
- * unexplained process exit. That is precisely how the 0x00 scrub crash
- * presented: hours of bisecting a silent death whose cause was a one-line SQL
- * error the engine had already caught and hidden.
+ * transition produces no console output at all. SQL errors poison the
+ * transaction and the next statement dies with Postgres 25P02, surfacing as
+ * an unexplained process exit. JavaScript errors are swallowed by the runtime
+ * and the block otherwise continues; withAppInputSavepoint below is what
+ * prevents successful writes before that error from partially committing.
  *
- * This wrapper logs and RETHROWS, so the runtime's rollback semantics are
- * unchanged — the only difference is that the operator can see what broke.
- * Kept in our code rather than as a node_modules patch so it survives
- * `bun install`.
+ * This wrapper logs and RETHROWS into the application SAVEPOINT boundary so it
+ * can roll back the input before the runtime records it failed. Kept in our
+ * code rather than as a node_modules patch so it survives `bun install`.
  */
 function addTransition(
   name: string,
@@ -157,7 +237,7 @@ function addTransition(
     } catch (err) {
       console.error(
         `[STF] transition "${name}" FAILED (block ${data?.blockHeight ?? "?"}) — ` +
-          `this aborts the block transaction:`,
+          `this rolls back the application input:`,
         err,
       );
       throw err;
@@ -190,6 +270,7 @@ addTransition("midnight-zswap-event", function* (data) {
       });
     } catch (e) {
       console.error("[MIDNIGHT] Failed to record commitment", payload?.commitment, e);
+      throw e;
     }
     return;
   }
@@ -246,6 +327,7 @@ addTransition("midnight-zswap-event", function* (data) {
     // root's validity really does expire, so that set IS TTL-limited.
   } catch (e) {
     console.error("[MIDNIGHT] Failed to archive offer for nullifier", nullifier, e);
+    throw e;
   }
 });
 
@@ -332,6 +414,7 @@ addTransition("midnight-unshielded-spend", function* (data) {
       { owner, intentHash, outputNo },
       e,
     );
+    throw e;
   }
 });
 
@@ -385,6 +468,7 @@ addTransition("midnight-unshielded-create", function* (data) {
       { owner, intentHash, outputNo },
       e,
     );
+    throw e;
   }
 });
 
@@ -410,6 +494,7 @@ addTransition("midnight-zswap-root", function* (data) {
     });
   } catch (e) {
     console.error("[MIDNIGHT] Failed to record zswap root", root, e);
+    throw e;
   }
 });
 
@@ -520,58 +605,22 @@ addTransition("celestia-zswap", function* (data) {
     return;
   }
 
-  // ── Liveness: drop offers whose coins are already spent on chain ──
-  // The midnight-* handlers ingest every consumed nullifier / unshielded UTXO
-  // into the permanent spent_* sets, so these are a plain existence check. We
-  // do NOT compare heights across chains (Midnight height ≠ Celestia height);
-  // determinism comes from the rollup's fixed input ordering. An already-spent
-  // coin means the offer can never settle, so it must not be indexed.
-  for (const nullifier of nullifierStrs) {
-    const spent = yield* World.resolve(isNullifierSpent, { nullifier });
-    if (spent.length > 0) {
-      yield* rejectOffer(
-        "NULLIFIER_SPENT",
-        `nullifier already spent: ${nullifier}`,
-        { offerHash },
-      );
-      return;
-    }
-  }
-  // ── Existence + liveness for unshielded UTXOs ──
-  // created_unshielded is a live-set: midnight-unshielded-create inserts,
-  // midnight-unshielded-spend deletes. A missing row means either the UTXO
-  // was never created OR it has already been spent — both mean reject.
-  for (const s of unshieldedSpends) {
-    const created = yield* World.resolve(isUnshieldedCreated, s);
-    if (created.length === 0) {
-      yield* rejectOffer(
-        "UTXO_NOT_LIVE",
-        `unshielded UTXO not live (spent or never created): ${s.owner}/${s.intent_hash}/${s.output_no}`,
-        { offerHash },
-      );
-      return;
-    }
-  }
-
-  // ── Root-known: drop offers whose shielded input proves against a root the
-  // chain never held / that has aged out (midnight-zswap-root populates
-  // known_roots). inputRoots are canonical hex == the indexer's root form.
-  // The window is enforced HERE, at read time, with this block's own
-  // timestamp as the cutoff — pruning is event-driven and stops on a quiet
-  // chain, so presence in known_roots alone is not recency. ──
-  for (const root of result.inputRoots ?? []) {
-    const known = yield* World.resolve(isKnownRootLive, {
-      root,
-      cutoff_ms: data.blockTimestamp - ROOT_WINDOW_SECONDS * 1000,
-    });
-    if (known.length === 0) {
-      yield* rejectOffer(
-        "ROOT_UNKNOWN",
-        `input merkle root not a known recent chain root: ${root}`,
-        { offerHash },
-      );
-      return;
-    }
+  // ── Indexed liveness ──
+  // Consume the shared nullifier → unshielded live-set → recent-root
+  // descriptors through the generator DB adapter. The STM retains its own
+  // deterministic clock: this L2 block timestamp, not wall time and not the
+  // API's latest-processed-block query. No heights are compared across chains.
+  const liveness = yield* evaluateOfferLivenessInStateMachine(
+    result,
+    data.blockTimestamp - ROOT_WINDOW_SECONDS * 1000,
+  );
+  if (!liveness.ok) {
+    yield* rejectOffer(
+      liveness.code,
+      liveness.reason,
+      { offerHash },
+    );
+    return;
   }
 
   // ── Cryptographic verification — LAST, and mandatory ──
@@ -624,8 +673,9 @@ addTransition("celestia-zswap", function* (data) {
   }
 
   // ── Derive expires_at (MIP-0006) ──
-  // Computed once at ingestion. The two paths have genuinely different
-  // ledger semantics:
+  // Computed once at ingestion. The constraints have genuinely different
+  // ledger semantics and a mixed transaction can carry BOTH, so expiry is the
+  // earliest applicable constraint rather than a root-vs-intent branch:
   //
   // SHIELDED (offer has input roots) → earliest root last_seen + ROOT_WINDOW.
   //   A Zswap offer carries NO ttl field: `ttl_check_weak` only iterates
@@ -642,7 +692,7 @@ addTransition("celestia-zswap", function* (data) {
   //   roots and recomputing at read time; the floor never over-promises
   //   fillability, and our own TTL cleanup archives at OFFER_TTL anyway.
   //
-  // UNSHIELDED → the earliest intent TTL. Not a fallback: `UnshieldedOffer`
+  // INTENT → the earliest intent TTL. Not a fallback: `UnshieldedOffer`
   //   exists only inside `Intent`, and `Intent.ttl` is non-optional, so an
   //   unshielded offer structurally ALWAYS has a TTL (bounded by the
   //   on-chain `global_ttl`, 1 h by default, so the inclusion window is
@@ -659,6 +709,12 @@ addTransition("celestia-zswap", function* (data) {
   // the offer's own past while cleanup sat an hour out (§2.6), and a short
   // policy TTL would delete an offer while the API still advertised a later
   // expiry. Two calculations that happen to agree is not the same fact.
+  //
+  // PORT NOTE (merge of 8244283): upstream's derivation replaces ours here. It
+  // consumes `getOfferRootTiming`'s anchor semantics, which S-1 obliges us to
+  // adopt, so our `requireApplicableOfferExpiry` / `deriveOfferExpiry` pair is
+  // superseded ON THIS PATH by 774b363. Both helpers remain exported and are
+  // still covered by offer-expiry.test.ts.
   let layerDeadlineMs: number | null = null;
   // firstSeenAt (MIP-0006): shielded → the moment the offer became provable
   // on this chain (earliest proof-root first-seen); otherwise the Celestia
@@ -674,7 +730,9 @@ addTransition("celestia-zswap", function* (data) {
     const anchorMs = fs[0]?.window_anchor_ms;
     // firstSeenAt: the offer cannot predate its own proof root.
     if (firstSeenMs != null) {
-      firstSeenAt = new Date(Number(firstSeenMs)).toISOString();
+      const firstSeenTimestamp = expiryTimestamp("root first-seen", Number(firstSeenMs));
+      if (firstSeenTimestamp === null) throw new Error("root first-seen timestamp was not derived");
+      firstSeenAt = new Date(firstSeenTimestamp).toISOString();
     }
     // The anchor is already the MIN over per-root anchors, with the
     // current-root escape applied per row — see getOfferRootTiming.
@@ -689,6 +747,9 @@ addTransition("celestia-zswap", function* (data) {
     layerDeadlineMs = intentTtl
       ? Number(new Date(intentTtl))
       : data.blockTimestamp + OFFER_TTL_SECONDS * 1000;
+  }
+  if (layerDeadlineMs == null) {
+    throw new Error("offer expiry deadline was not derived");
   }
   // The indexer's retention policy is a CEILING, never an extension: an offer
   // whose layer deadline falls sooner dies sooner, and one that would outlive
@@ -838,6 +899,7 @@ addTransition("celestia-zswap", function* (data) {
     emitAppEvent({ type: "offer_indexed", offerId: offerFileId, offerHash, blockHeight: data.blockHeight, gives, wants }, data.blockHeight);
   } catch (e) {
     console.error("[ZSWAP] Failed to save offer file", e);
+    throw e;
   }
 });
 
@@ -851,22 +913,28 @@ addTransition("midnight-zswap", function* (data) {
   );
 });
 
-// Scheduled TTL cleanup: if the offer is still active in the main table,
-// move it to history and mark it as archived due to TTL.
-addTransition("zswap-ttl-cleanup", function* (data) {
+// Scheduled TTL cleanup: if the offer is still active AND its persisted expiry
+// is at or before this L2 block's deterministic timestamp, move it to history.
+// Exported so a focused test can inspect the exact query and cutoff yielded by
+// the real transition instead of testing a disconnected timestamp helper.
+export function* archiveOfferAtExpiry(data: any): Generator<any, void, any> {
   const { offerId } = data.parsedInput;
 
   try {
+    const cutoff = cleanupBlockTimestamp(data.blockTimestamp);
     const archived = yield* World.resolve(archiveOfferByIdTtlWithHash, {
       offer_file_id: offerId,
-      // The scheduled input executes inside an L2 block like any other
-      // transition, so this is the deterministic expiry time, not wall-clock.
-      archived_at: new Date(data.blockTimestamp),
+      // A duplicate or unexpectedly early schedule must not archive a row
+      // before the exact metadata_expires_at value persisted at ingestion.
+      expires_at_cutoff: cutoff,
+      // Archive time is when the scheduled input actually executes, which can
+      // be later than expiry by up to one L2 block. Never use wall-clock time.
+      archived_at: cutoff,
     });
 
     if (archived.length === 0) {
       console.log(
-        "[ZSWAP] TTL cleanup: offer already consumed or missing",
+        "[ZSWAP] TTL cleanup: offer not yet expired, already consumed, or missing",
         offerId,
       );
       return;
@@ -888,12 +956,15 @@ addTransition("zswap-ttl-cleanup", function* (data) {
       offerId,
       e,
     );
+    throw e;
   }
-});
+}
+
+addTransition("zswap-ttl-cleanup", archiveOfferAtExpiry);
 
 export const gameStateTransitions: StartConfigGameStateTransitions = function* (
   _blockHeight: number,
   input: BaseStfInput,
 ): SyncStateUpdateStream<void> {
-  yield* stm.processInput(input);
+  yield* failStopAppInput(() => stm.processInput(input));
 };

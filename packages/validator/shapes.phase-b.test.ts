@@ -62,10 +62,12 @@ describe("phase (b) — the ladder makes an explicit decision for every shape", 
 });
 
 describe("phase (b) — deriveTokenLegs is correct for every shape", () => {
-  const oneIntent = {
+  // Typed as what `deriveLegs` returns, not `as const`: a deeply readonly
+  // literal is not comparable to the mutable leg arrays the deriver produces.
+  const oneIntent: ReturnType<typeof deriveLegs> = {
     gives: [{ token: GIVE_TOKEN, amount: "100", kind: "UNSHIELDED" }],
     wants: [{ token: WANT_TOKEN, amount: "125", kind: "UNSHIELDED" }],
-  } as const;
+  };
 
   for (const id of [
     "guaranteed-single",

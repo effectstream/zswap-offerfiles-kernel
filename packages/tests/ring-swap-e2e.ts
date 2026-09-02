@@ -89,7 +89,7 @@ async function submitOffer(blob: string): Promise<{ status: number; body: any }>
 }
 
 const before = {
-  spent_nullifiers: await count("spent_nullifiers"),
+  nullifiers: await count("nullifiers"),
   offers: await count("offer_file"),
 };
 console.log(`${TAG} before:`, JSON.stringify(before));
@@ -171,8 +171,8 @@ try {
   check("batcher accepted + settled merged ring tx (batcher pays dust)", settle.ok, `status=${settle.status} ${JSON.stringify(settle.body)?.slice(0, 160)}`);
 
   // ── 7. Settlement effects ──
-  const spentOk = await waitFor(`spent_nullifiers += ${N}`, async () => (await count("spent_nullifiers")) >= before.spent_nullifiers + N, 36);
-  check(`spent_nullifiers grew by ${N} (all offer inputs consumed)`, spentOk, `before=${before.spent_nullifiers} now=${await count("spent_nullifiers")}`);
+  const spentOk = await waitFor(`nullifiers += ${N}`, async () => (await count("nullifiers")) >= before.nullifiers + N, 36);
+  check(`nullifiers grew by ${N} (all offer inputs consumed)`, spentOk, `before=${before.nullifiers} now=${await count("nullifiers")}`);
 
   const archivedOk = await waitFor("all offers archived", async () => {
     const active = await db<{ id: number }>(`SELECT id FROM offer_file WHERE id IN (${offerIds.join(",")})`);

@@ -4,9 +4,6 @@ import rateLimit from "@fastify/rate-limit";
 import {
   getKnownTokens,
   insertKnownToken,
-  isNullifierSpent,
-  isUnshieldedCreated,
-  isKnownRootLive,
   getLatestEffectstreamBlock,
   getTokenPrice,
   upsertTokenPrice,
@@ -26,14 +23,34 @@ import {
   findActiveOfferByUnshieldedOutput,
 } from "@zswap-da/database";
 
-import { isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WINDOW_SECONDS, midnightContract } from "./env.ts";
+import {
+  apiRateLimitAllowList,
+  apiRateLimitMax,
+  apiSseMaxConnections,
+  apiUpdatesMaxConnections,
+  isEventGatePollEnabled,
+  isTokenRegistryEnabled,
+  MIDNIGHT_NETWORK_ID,
+  OFFER_MAX_BYTES,
+  ROOT_WINDOW_SECONDS,
+  midnightContract,
+} from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
-import { eventBus, emitAppEvent, markBlockCommitted, type AppEvent } from "./event-bus.ts";
+import {
+  eventBus,
+  emitAppEvent,
+  markBlockCommitted,
+  type AppEvent,
+} from "./event-bus.ts";
 import { quoteWithPrices, priceOf } from "./market-mock.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
+import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
+import { registerExactFilesRoute } from "./offer-files-read.ts";
+import { registerOfferConsumptionRoute } from "./offer-consumption-read.ts";
+import { registerOfferUpdatesStream } from "./offer-updates-stream.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
@@ -45,11 +62,36 @@ import { declaredMarkers, duplicateMarkerReason, DUPLICATE_MARKERS } from "./mar
 // value layer. Our DB column is `kind`; the wire name is the MIP's.
 type TokenLegDto = { token: string; amount: string; type: string };
 
+/** Write one SSE frame without retaining an unbounded slow-client buffer. */
+export function writeSseChunk(
+  raw: any,
+  chunk: string,
+  cleanup: () => void,
+): boolean {
+  if (raw.destroyed || raw.writableEnded) {
+    cleanup();
+    return false;
+  }
+  try {
+    if (raw.write(chunk) === true) return true;
+  } catch {
+    // Treat write failures exactly like response close.
+  }
+  // ServerResponse.write() returning false means the per-client buffer crossed
+  // its high-water mark. SSE has no replay cursor here, so retaining arbitrary
+  // event data is both misleading and a public memory-DoS primitive. Clients
+  // reconnect after the socket closes and refresh state from GET /v1/offers.
+  try { raw.destroy(); } catch { /* already closed */ }
+  cleanup();
+  return false;
+}
+
 export const apiRouter: StartConfigApiRouter = async function (
   server: any,
   dbConn: any,
 ): Promise<void> {
-  // 60 requests/min per IP — applied to every route in this router.
+  // Per-IP request budget (default 60/min) — applied to every route in this
+  // router.
   //
   // `statusCode` is load-bearing, not decoration: @fastify/rate-limit THROWS
   // whatever this builder returns (`throw params.errorResponseBuilder(...)`),
@@ -59,7 +101,8 @@ export const apiRouter: StartConfigApiRouter = async function (
   // clients "server fault" instead of "back off", so no caller could throttle
   // itself. Verified: 90 requests gave {200:56, 500:34}.
   await server.register(rateLimit, {
-    max: 60,
+    max: apiRateLimitMax(),
+    allowList: apiRateLimitAllowList(),
     timeWindow: "1 minute",
     errorResponseBuilder: () => ({
       statusCode: 429,
@@ -80,6 +123,20 @@ export const apiRouter: StartConfigApiRouter = async function (
     }
     const status = Number(error?.statusCode);
     if (Number.isFinite(status) && status >= 400 && status < 500) {
+      const isExactFilesRead = String(request?.url ?? "").split("?", 1)[0] ===
+        "/v1/offers/files";
+      if (status === 413 && isExactFilesRead) {
+        return reply.code(413).send({
+          error: "TOO_LARGE",
+          reason: "request body exceeds the configured transport limit",
+        });
+      }
+      if (status === 415 && isExactFilesRead) {
+        return reply.code(400).send({
+          error: "VALIDATION",
+          reason: "exact-files reads require application/json",
+        });
+      }
       return reply
         .code(status)
         .send({ error: error?.error ?? "BAD_REQUEST", reason: error?.message });
@@ -98,6 +155,21 @@ export const apiRouter: StartConfigApiRouter = async function (
   // GET /docs — interactive API playground (upload + accept/settle debugger).
   registerDocsRoutes(server);
 
+  // Side-effect-free exact-files read. Registration happens after the
+  // router-wide limiter and before the submission route; it shares the
+  // canonical validation/liveness primitives but never calls the batcher.
+  registerExactFilesRoute(server, dbConn);
+
+  // Strict RF2 settlement authority. This is a SELECT-only read and returns
+  // inner-ledger evidence only when every shielded marker agrees.
+  registerOfferConsumptionRoute(server, dbConn);
+
+  // GET /v1/offers/updates — the client-initiated websocket update stream.
+  // Same lifecycle events as the SSE route below, plus a per-subscription
+  // sequence number so a consumer mirroring the book can prove it missed
+  // nothing. It lives on the HTTP server's `upgrade` event, not on a route.
+  registerOfferUpdatesStream(server, dbConn);
+
   // Drive the event gate from THIS pool — the whole point is that it is not
   // the connection running the block transaction. The runtime writes the block
   // record inside that transaction, so a height visible here proves its COMMIT
@@ -105,17 +177,21 @@ export const apiRouter: StartConfigApiRouter = async function (
   // Without this poll nothing is ever published; with it, nothing is published
   // early. 1 s against a ~1 s block time — a tick of latency, never a lost
   // event, since the buffer holds until the height is seen.
-  const gatePoll = setInterval(() => {
-    void getLatestEffectstreamBlock
-      .run(undefined, dbConn)
-      .then((rows) => {
-        const h = rows[0]?.block_height;
-        if (h != null) markBlockCommitted(h as any);
-      })
-      .catch(() => { /* transient; the next tick retries and the buffer waits */ });
-  }, 1000);
-  (gatePoll as any).unref?.();
-  server.addHook("onClose", async () => clearInterval(gatePoll));
+  const gatePoll = isEventGatePollEnabled()
+    ? setInterval(() => {
+      void getLatestEffectstreamBlock
+        .run(undefined, dbConn)
+        .then((rows) => {
+          const h = rows[0]?.block_height;
+          if (h != null) markBlockCommitted(h as any);
+        })
+        .catch(() => { /* transient; the next tick retries and the buffer waits */ });
+    }, 1000)
+    : null;
+  if (gatePoll !== null) (gatePoll as any).unref?.();
+  server.addHook("onClose", async () => {
+    if (gatePoll !== null) clearInterval(gatePoll);
+  });
 
   // Adjudicate the fill verdict after each CONSUMED archive. The event is
   // released only after its block commits (see the gate above), so this
@@ -138,6 +214,29 @@ export const apiRouter: StartConfigApiRouter = async function (
     }
   };
   eventBus.on("app_event", onAppEvent);
+  const sseMaxConnections = apiSseMaxConnections();
+  // The emitter warning threshold should reflect the explicit connection caps
+  // of BOTH event transports (SSE responses and websocket subscriptions), plus
+  // non-stream projection listeners. The caps, not EventEmitter warnings, are
+  // the resource boundary. One owner raises and restores this so the two
+  // transports cannot fight over the threshold at shutdown.
+  const priorEventBusMaxListeners = eventBus.getMaxListeners();
+  eventBus.setMaxListeners(
+    Math.max(priorEventBusMaxListeners, sseMaxConnections + apiUpdatesMaxConnections() + 10),
+  );
+  let activeSseConnections = 0;
+  const activeSseResponses = new Set<any>();
+  // Fastify's preClose hook runs before it waits for active requests. Without
+  // this, persistent streams can prevent server.close() from settling.
+  server.addHook("preClose", async () => {
+    for (const raw of activeSseResponses) {
+      try { raw.destroy(); } catch { /* already closed */ }
+    }
+  });
+  server.addHook("onClose", async () => {
+    eventBus.off("app_event", onAppEvent);
+    eventBus.setMaxListeners(priorEventBusMaxListeners);
+  });
 
   // The repair sweep. Every archived CONSUMED offer owes exactly one verdict;
   // this finds the ones that never got it — a crash between COMMIT and the
@@ -380,6 +479,14 @@ export const apiRouter: StartConfigApiRouter = async function (
   }
 
   const TOKEN_COLOR_RE = /^[0-9a-f]{64}$/;
+  const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,77})$/; // bounded above by u256
+  const MAX_AMOUNT = (1n << 256n) - 1n;
+
+  const parseQuoteAmount = (value: unknown): bigint | null => {
+    if (typeof value !== "string" || !AMOUNT_RE.test(value)) return null;
+    const amount = BigInt(value);
+    return amount <= MAX_AMOUNT ? amount : null;
+  };
 
   server.get("/v1/quote", async (request: any, reply: any) => {
     const q = request?.query ?? {};
@@ -391,6 +498,29 @@ export const apiRouter: StartConfigApiRouter = async function (
         reason: "from_token and to_token must be 64-hex token colors",
       });
     }
+    if (fromToken === toToken) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "from_token and to_token must be distinct",
+      });
+    }
+    const fromAmount = parseQuoteAmount((q as any).from_amount);
+    if (fromAmount === null || fromAmount <= 0n) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "from_amount must be a positive canonical decimal integer no larger than u256",
+      });
+    }
+    const hasToAmount = (q as any).to_amount !== undefined;
+    const parsedToAmount = hasToAmount ? parseQuoteAmount((q as any).to_amount) : undefined;
+    if (hasToAmount && parsedToAmount === null) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "to_amount must be a canonical decimal integer no larger than u256",
+      });
+    }
+    const toAmount: bigint | undefined = parsedToAmount ?? undefined;
+
     // DEMO FALLBACK — unknown tokens quote at $1 (so two unknowns are 1:1).
     // This endpoint used to 404 UNKNOWN_TOKEN for unregistered colors, on the
     // principle that quoting arbitrary colors fabricates a market rate. That
@@ -412,14 +542,21 @@ export const apiRouter: StartConfigApiRouter = async function (
           `No token-tracking solution yet; fix before any real pricing. Tokens: ${unknownTokens.join(", ")}`,
       );
     }
-    const digits = (v: unknown) => String(v ?? "").replace(/[^0-9]/g, "");
-    const fromAmount = BigInt(digits((q as any).from_amount) || "0");
-    const toRaw = digits((q as any).to_amount);
-    const toAmount = toRaw.length ? BigInt(toRaw) : undefined;
     const priceFor = (color: string) =>
       unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
     const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
-    return quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount);
+
+    // Quotes come from the token-price table (or the demo fallback) only. The
+    // backend deliberately holds NO solver state: solver-posted ladders used to
+    // take precedence here through a registry this node maintained, which made
+    // the indexer a quote venue for one class of client. Under the confirmed
+    // architecture the COW solver pushes its ladders to the Midnight Intents
+    // relay and the relay does the interpolation, so this backend keeps a
+    // single, client-agnostic price source.
+    return {
+      ...quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount),
+      source: unknownTokens.length > 0 ? "demo-fallback" : "token-prices",
+    };
   });
 
   // GET /v1/chart/{stats,history} — REAL per-pair market data derived from the
@@ -545,7 +682,7 @@ export const apiRouter: StartConfigApiRouter = async function (
   });
 
   // Status lookup for My Trades startup reconciliation. Returns
-  // { offer, status } with status 'live' | 'consumed' | 'cancelled' | 'expired' | 'not_found'.
+  // { offer, status } with status live/consumed/cancelled/expired/unknown/not_found.
   //
   // Always via the content hash — an indexed probe. Undecodable blobs are
   // answered WITHOUT touching the DB: they can never have been indexed
@@ -674,52 +811,33 @@ export const apiRouter: StartConfigApiRouter = async function (
         });
       }
 
-      // Liveness: never pay a Celestia fee for an offer whose coins are already
-      // spent on chain (it can never settle). The spent_* sets are populated by
-      // the node's midnight-* sync handlers.
-      for (const nullifier of validation.nullifiers ?? []) {
-        const spent = await isNullifierSpent.run({ nullifier }, dbConn);
-        if (spent.length > 0) {
-          return reply.code(400).send({
-            error: "NULLIFIER_SPENT",
-            reason: `nullifier already spent: ${nullifier}`,
-          });
-        }
-      }
-      // Liveness: unshielded UTXO must exist in created_unshielded (absent = spent or never created).
-      for (const s of validation.unshieldedSpends ?? []) {
-        const live = await isUnshieldedCreated.run(
-          { owner: s.owner, intent_hash: s.intentHash, output_no: s.outputNo },
-          dbConn,
-        );
-        if (live.length === 0) {
-          return reply.code(400).send({
-            error: "UTXO_NOT_LIVE",
-            reason:
-              `unshielded UTXO not live (spent or never created): ${s.owner}/${s.intentHash}/${s.outputNo}`,
-          });
-        }
-      }
-      // Root-known: each shielded input must prove against a known recent
-      // root, with the window enforced at read time. The cutoff is derived
-      // from the latest PROCESSED block's timestamp — the same L2 clock that
-      // stamps known_roots.last_seen_ms — never from the wall clock, and never
-      // from MAX(last_seen_ms) (which stops advancing exactly when the window
-      // needs to close). isKnownRootLive keeps the newest root valid
-      // regardless of age, mirroring the ledger's past_roots re-insertion.
-      const latestBlock = (await getLatestEffectstreamBlock.run(undefined, dbConn))[0];
-      const chainNowMs = latestBlock ? Number(latestBlock.ms_timestamp) : 0;
-      for (const root of validation.inputRoots ?? []) {
-        const known = await isKnownRootLive.run(
-          { root, cutoff_ms: chainNowMs - ROOT_WINDOW_SECONDS * 1000 },
-          dbConn,
-        );
-        if (known.length === 0) {
+      // Indexed liveness uses the same ordered descriptors and normalized
+      // reasons as STM ingestion and the future validate-for-use route. The
+      // root clock remains API-specific: latest PROCESSED Effectstream block,
+      // never wall time or MAX(last_seen_ms). It is resolved lazily only after
+      // nullifier and UTXO probes pass.
+      const liveness = await evaluateOfferLivenessFromDatabase(
+        validation,
+        dbConn,
+        {
+          getRootCutoffMs: async () => {
+            const latestBlock = (await getLatestEffectstreamBlock.run(
+              undefined,
+              dbConn,
+            ))[0];
+            const chainNowMs = latestBlock ? Number(latestBlock.ms_timestamp) : 0;
+            return chainNowMs - ROOT_WINDOW_SECONDS * 1000;
+          },
+        },
+      );
+      if (!liveness.ok) {
+        if (liveness.descriptor.kind === "root") {
+          const root = liveness.descriptor.root;
           const tip = await getSyncStatus(dbConn).catch(() => null as any);
           const rootsMeta = tip?.sets?.known_roots;
           return reply.code(400).send({
-            error: "ROOT_UNKNOWN",
-            reason: `input merkle root not a known recent chain root: ${root}`,
+            error: liveness.code,
+            reason: liveness.reason,
             hint:
               "Lace proved against a Merkle root this node has never synced. " +
               "Usually Lace's indexer URI differs from this node even when networkId matches " +
@@ -737,6 +855,10 @@ export const apiRouter: StartConfigApiRouter = async function (
             },
           });
         }
+        return reply.code(400).send({
+          error: liveness.code,
+          reason: liveness.reason,
+        });
       }
 
       // Cryptographic verification — last and mandatory. Everything above read
@@ -784,34 +906,69 @@ export const apiRouter: StartConfigApiRouter = async function (
 
   // GET /v1/offers/stream — Server-Sent Events stream for real-time offer lifecycle updates
   server.get("/v1/offers/stream", async (request: any, reply: any) => {
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-    });
+    if (activeSseConnections >= sseMaxConnections) {
+      return reply
+        .header("Retry-After", "5")
+        .code(503)
+        .send({
+          error: "SSE_CAPACITY",
+          reason: "Too many active event streams; retry with backoff.",
+        });
+    }
 
-    const send = (data: object) => {
-      try {
-        reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-      } catch { /* client disconnected */ }
+    const raw = reply.raw;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let listenerRegistered = false;
+    let cleaned = false;
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+    const listener = (event: object) => {
+      writeSseChunk(raw, `data: ${JSON.stringify({ ...event, timestamp: Date.now() })}\n\n`, cleanup);
+    };
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      raw.off("close", cleanup);
+      request.raw.off("aborted", cleanup);
+      if (listenerRegistered) eventBus.off("app_event", listener);
+      if (heartbeat !== undefined) clearInterval(heartbeat);
+      activeSseResponses.delete(raw);
+      activeSseConnections -= 1;
+      resolveClosed();
     };
 
-    send({ type: "connected", timestamp: Date.now() });
+    activeSseConnections += 1;
+    activeSseResponses.add(raw);
+    // A long response ends on ServerResponse.close. IncomingMessage.close can
+    // describe completion of the request side and is therefore not the stream
+    // lifecycle signal; request.aborted remains a useful secondary signal.
+    raw.once("close", cleanup);
+    request.raw.once("aborted", cleanup);
 
-    const listener = (event: object) => send({ ...event, timestamp: Date.now() });
-    eventBus.on("app_event", listener);
+    try {
+      reply.hijack();
+      raw.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+      });
+      if (!writeSseChunk(
+        raw,
+        `data: ${JSON.stringify({ type: "connected", timestamp: Date.now() })}\n\n`,
+        cleanup,
+      )) return;
 
-    const heartbeat = setInterval(() => {
-      try { reply.raw.write(": heartbeat\n\n"); } catch { /* noop */ }
-    }, 30_000);
+      eventBus.on("app_event", listener);
+      listenerRegistered = true;
+      heartbeat = setInterval(() => {
+        writeSseChunk(raw, ": heartbeat\n\n", cleanup);
+      }, 30_000);
 
-    request.raw.on("close", () => {
-      eventBus.off("app_event", listener);
-      clearInterval(heartbeat);
-    });
-
-    // Keep connection open — never resolve
-    await new Promise(() => {});
+      if (raw.destroyed || raw.writableEnded || request.raw.aborted) cleanup();
+      await closed;
+    } finally {
+      cleanup();
+    }
   });
 };

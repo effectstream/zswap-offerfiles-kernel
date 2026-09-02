@@ -15,6 +15,7 @@
 //
 // Pattern ported from night-bitcoin-v2's mint-m20-to-fillers.ts.
 
+import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import * as Rx from "rxjs";
@@ -46,7 +47,7 @@ const SHIELDED_SEP_B = new Uint8Array(32).fill(0xb2);
 const UNSHIELDED_SEP = new Uint8Array(32).fill(0xc3);
 const MINT_AMOUNT = 1_000_000_000n;
 
-const currentDir = resolve(dirname(new URL(import.meta.url).pathname));
+const currentDir = resolve(dirname(fileURLToPath(import.meta.url)));
 
 const contractConfig = {
   privateStateStoreName: "offerFilesPrivateState",

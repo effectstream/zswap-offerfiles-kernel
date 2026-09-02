@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // Verifies the content-addressed offer identity added by 005-offer-hash.sql:
 // hash-aware insert, hash lookups (open + archived), the blob-free list page,
@@ -17,6 +18,7 @@ const {
   insertOfferFileTokenWithKind,
   insertOfferFileNullifier,
   archiveOfferByNullifierWithHash,
+  archiveOfferByIdTtlWithHash,
   getOfferByHash,
   getOfferStatusByHash,
   getOfferTokensAny,
@@ -26,7 +28,7 @@ const {
 } = await import("@zswap-da/database");
 
 const PORT = 54333;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 const HASH_A = "a".repeat(64);
@@ -59,6 +61,27 @@ async function insertOffer(hash: string, blob: string): Promise<number> {
   return id;
 }
 
+async function insertExpiringOffer(
+  hash: string,
+  blob: string,
+  expiresAt: Date,
+): Promise<number> {
+  const rows = await insertOfferFileWithHash.run(
+    {
+      celestia_height: 100,
+      transaction_hex: blob,
+      offer_hash: hash,
+      metadata_created_at: new Date("2026-01-01T00:00:00Z"),
+      metadata_expires_at: expiresAt,
+      // NOT NULL as of upstream's 000-init.sql (000-init collapse, 8244283).
+      first_seen_at: new Date("2026-01-01T00:00:00Z"),
+      ttl_seconds: 3600,
+    },
+    client,
+  );
+  return rows[0].id;
+}
+
 beforeAll(async () => {
   handle = await startPglite(PORT);
   client = new pg.Client({
@@ -74,9 +97,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 test("insert + getOfferByHash returns the open offer with blob and legs", async () => {
@@ -132,7 +153,7 @@ test("archiveOfferByNullifierWithHash carries offer_hash into history", async ()
   );
   // Mirror the real transition order: the spend (with its tx hash) is
   // recorded BEFORE the archive fires. Without it the classifier correctly
-  // reports `cancelled` (a partial/unrecorded spend can never be a fill).
+  // remains markerless: one spending tx alone is not enough to prove a fill.
   await insertNullifierWithTx.run(
     { nullifier: "null-b", height: 1, tx_hash: "settletx" },
     client,
@@ -142,6 +163,10 @@ test("archiveOfferByNullifierWithHash carries offer_hash into history", async ()
     client,
   );
   expect(archived.length).toBe(1);
+  // The archive result is what the state machine turns into an `offer_consumed`
+  // event; without offer_hash a consumer has only the local row id and cannot
+  // correlate the event with anything the REST API exposes.
+  expect(archived[0].offer_hash).toBe(HASH_B);
 
   const hist = await client.query(
     "SELECT offer_hash, archive_reason, archived_at FROM offer_file_history WHERE id = $1",
@@ -161,6 +186,42 @@ test("archiveOfferByNullifierWithHash carries offer_hash into history", async ()
   expect(detail[0].status).toBe("consumed");
   const legs = await getOfferTokensAny.run({ offer_file_id: id, live: false }, client);
   expect(legs.length).toBe(2);
+});
+
+test("TTL archive refuses an early/duplicate schedule and archives at the deterministic cutoff", async () => {
+  const hash = "c".repeat(64);
+  const expiry = new Date("2026-01-02T03:04:05.000Z");
+  const id = await insertExpiringOffer(hash, "swapoffer1ttl", expiry);
+
+  const early = await archiveOfferByIdTtlWithHash.run(
+    {
+      offer_file_id: id,
+      expires_at_cutoff: new Date(expiry.getTime() - 1),
+      archived_at: new Date(expiry.getTime() - 1),
+    },
+    client,
+  );
+  expect(early).toEqual([]);
+  expect((await getOfferStatusByHash.run({ offer_hash: hash }, client))[0].status).toBe("live");
+
+  const cutoff = new Date(expiry.getTime() + 5_000);
+  const archived = await archiveOfferByIdTtlWithHash.run(
+    { offer_file_id: id, expires_at_cutoff: cutoff, archived_at: cutoff },
+    client,
+  );
+  expect(archived).toEqual([{ id, offer_hash: hash }]);
+  const history = await client.query(
+    "SELECT metadata_expires_at, archived_at FROM offer_file_history WHERE id = $1",
+    [id],
+  );
+  expect(new Date(history.rows[0].metadata_expires_at).toISOString()).toBe(expiry.toISOString());
+  expect(new Date(history.rows[0].archived_at).toISOString()).toBe(cutoff.toISOString());
+
+  const duplicate = await archiveOfferByIdTtlWithHash.run(
+    { offer_file_id: id, expires_at_cutoff: cutoff, archived_at: cutoff },
+    client,
+  );
+  expect(duplicate).toEqual([]);
 });
 
 test("spec-removed columns are gone from the schema (auth block, maker note)", async () => {

@@ -57,6 +57,24 @@ function prepared<P, R>(statement: string): PreparedQuery<P, R> {
   return new PreparedQuery<P, R>(compileIR(statement) as any);
 }
 
+// Effectstream runtime 0.103.1 defines an input SAVEPOINT helper but does not
+// call it around scheduled application STFs. A JavaScript exception after one
+// or more successful World.resolve writes is caught by the runtime, which then
+// records the input as failed and COMMITs the block. Bracket the application
+// generator explicitly until the runtime invokes its own helper. The static,
+// application-specific identifier is intentional: transaction-control names
+// cannot be SQL parameters, and scheduled inputs execute serially on one
+// checked-out transaction connection.
+export const createAppInputSavepoint = prepared<void, never>(
+  "SAVEPOINT zswap_da_app_input_v1",
+);
+export const rollbackAppInputSavepoint = prepared<void, never>(
+  "ROLLBACK TO SAVEPOINT zswap_da_app_input_v1",
+);
+export const releaseAppInputSavepoint = prepared<void, never>(
+  "RELEASE SAVEPOINT zswap_da_app_input_v1",
+);
+
 // ── SQL fragment helpers (must precede all prepared() consts: statements
 // are compiled at module load, so these can no longer live mid-file) ──
 
@@ -952,10 +970,11 @@ export const insertOfferFileWithHash = prepared<IInsertOfferFileWithHashParams, 
 //   (a) some of its nullifiers were never spent at all (the maker moved one
 //       coin elsewhere; the rest can now never settle), or
 //   (b) its nullifiers were spent across MORE THAN ONE transaction.
-// Everything else stays `consumed`. All-in-one-tx is a heuristic (a maker
-// consolidating the same coins in one personal tx looks identical) until
-// phase 2 adds output-commitment tracking; offers with no shielded inputs
-// (unshielded-only) have no nullifiers to group and classify as `consumed`.
+// Everything else stays `consumed`. Classification is exact on BOTH layers
+// wherever fill markers exist: shielded markers are the offer's output
+// commitments, unshielded markers its declared outputs under #45's exact
+// (owner, intent_hash, output_no) identity. Only genuinely marker-less rows
+// keep the all-in-one-tx heuristic.
 //
 // Read-time on purpose: the archive fires on the FIRST nullifier event of a
 // block, before its same-tx siblings are processed — but the whole block
@@ -1012,6 +1031,85 @@ export const getOfferStatusByHash = prepared<IGetOfferStatusByHashParams, IGetOf
            archive_reason
        FROM offer_file_history
        WHERE offer_hash = :offer_hash!`,
+);
+
+// RF2 settlement evidence for the current shielded-offer release scope.
+//
+// A positive row is deliberately stricter than the general display status:
+// every declared shielded input must have one non-null spending ledger tx,
+// every declared output commitment must have been created by that SAME ledger
+// tx, and every marker must report one block height. Markerless, NULL, partial,
+// split, unshielded, expired, and cancellation rows retain their truthful
+// status but carry no evidence. This query is SELECT-only.
+export interface IGetOfferConsumptionEvidenceParams { offer_hash: string }
+export interface IGetOfferConsumptionEvidenceResult {
+  status: string;
+  ledger_tx_hash: string | null;
+  ledger_height: string | null;
+}
+export const getOfferConsumptionEvidence = prepared<
+  IGetOfferConsumptionEvidenceParams,
+  IGetOfferConsumptionEvidenceResult
+>(
+      `WITH target AS (
+         SELECT id, TRUE AS is_live, 'live'::text AS status
+           FROM offer_file
+          WHERE offer_hash = :offer_hash!
+         UNION ALL
+         SELECT h.id, FALSE AS is_live,
+                (${archivedStatusCase("h.id")})::text AS status
+           FROM offer_file_history h
+          WHERE h.offer_hash = :offer_hash!
+         LIMIT 1
+       ),
+       input_evidence AS (
+         SELECT COUNT(hn.nullifier)::int AS declared_count,
+                COUNT(n.nullifier) FILTER (WHERE n.tx_hash IS NOT NULL)::int AS bound_count,
+                COUNT(DISTINCT n.tx_hash) FILTER (WHERE n.tx_hash IS NOT NULL)::int AS tx_count,
+                MIN(n.tx_hash) FILTER (WHERE n.tx_hash IS NOT NULL) AS tx_hash,
+                MIN(n.height) FILTER (WHERE n.tx_hash IS NOT NULL) AS min_height,
+                MAX(n.height) FILTER (WHERE n.tx_hash IS NOT NULL) AS max_height
+           FROM target t
+           LEFT JOIN offer_file_nullifiers_history hn
+             ON NOT t.is_live AND hn.offer_file_id = t.id
+           LEFT JOIN nullifiers n ON n.nullifier = hn.nullifier
+       ),
+       output_evidence AS (
+         SELECT COUNT(hc.commitment)::int AS declared_count,
+                COUNT(c.commitment) FILTER (WHERE c.tx_hash IS NOT NULL)::int AS bound_count,
+                COUNT(DISTINCT c.tx_hash) FILTER (WHERE c.tx_hash IS NOT NULL)::int AS tx_count,
+                MIN(c.tx_hash) FILTER (WHERE c.tx_hash IS NOT NULL) AS tx_hash,
+                MIN(c.height) FILTER (WHERE c.tx_hash IS NOT NULL) AS min_height,
+                MAX(c.height) FILTER (WHERE c.tx_hash IS NOT NULL) AS max_height
+           FROM target t
+           LEFT JOIN offer_file_commitments_history hc
+             ON NOT t.is_live AND hc.offer_file_id = t.id
+           LEFT JOIN commitments c ON c.commitment = hc.commitment
+       ),
+       verdict AS (
+         SELECT t.status, i.tx_hash, i.min_height,
+                (t.status = 'consumed'
+                 AND NOT t.is_live
+                 AND i.declared_count > 0 AND i.bound_count = i.declared_count
+                 AND i.tx_count = 1 AND i.min_height = i.max_height
+                 AND o.declared_count > 0 AND o.bound_count = o.declared_count
+                 AND o.tx_count = 1 AND o.min_height = o.max_height
+                 AND i.tx_hash = o.tx_hash AND i.min_height = o.min_height
+                 AND NOT EXISTS (
+                   SELECT 1 FROM offer_file_unshielded_spends_history us
+                    WHERE us.offer_file_id = t.id)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM offer_file_unshielded_outputs_history uo
+                    WHERE uo.offer_file_id = t.id)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM offer_file_tokens_history tok
+                    WHERE tok.offer_file_id = t.id AND tok.kind <> 'SHIELDED')) AS positive
+           FROM target t CROSS JOIN input_evidence i CROSS JOIN output_evidence o
+       )
+       SELECT status,
+              CASE WHEN positive THEN tx_hash ELSE NULL END AS ledger_tx_hash,
+              CASE WHEN positive THEN min_height::text ELSE NULL END AS ledger_height
+         FROM verdict`,
 );
 
 export interface IGetOfferByHashParams { offer_hash: string }
@@ -1352,12 +1450,18 @@ export const archiveOfferByUnshieldedSpendWithHash = prepared<IArchiveOfferByUns
       ),
 );
 
-export interface IArchiveOfferByIdTtlWithHashParams { offer_file_id: number; archived_at: DateOrString }
+export interface IArchiveOfferByIdTtlWithHashParams {
+  offer_file_id: number;
+  expires_at_cutoff: DateOrString;
+  archived_at: DateOrString;
+}
 export const archiveOfferByIdTtlWithHash = prepared<IArchiveOfferByIdTtlWithHashParams, IArchiveOfferResult>(
       archiveOfferSql(
         `    SELECT id AS offer_file_id
     FROM offer_file
     WHERE id = :offer_file_id!
+      AND metadata_expires_at IS NOT NULL
+      AND metadata_expires_at <= :expires_at_cutoff!
     LIMIT 1`,
         "TTL",
       ),

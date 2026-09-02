@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { closeTestPglite } from "../database/test-pglite.ts";
 
 // HTTP-level tests: the REAL apiRouter registered on a real fastify instance
 // over in-memory PGlite with the real migrations — no route copies, no mocks.
@@ -16,7 +17,7 @@ const fastify = (await import("fastify")).default;
 const { apiRouter } = await import("./api.ts");
 
 const PORT = 54339;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 let server: any;
 
@@ -56,8 +57,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await server?.close();
-    await handle?.close();
-  } catch { /* noop */ }
+  } finally {
+    await closeTestPglite(handle, client);
+  }
 });
 
 const getJson = async (url: string) => {

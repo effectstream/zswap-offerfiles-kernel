@@ -12,6 +12,7 @@
     "dev": "NODE_ENV=development bunx orchestrator start",
     "pretest": "bun run scripts/patch-macos-celestia.ts",
     "start:mainnet": "bun run start.mainnet.ts",
+    "start:solver": "bun run start.solver.ts",
     "test": "bun run packages/tests/run-tests.ts",
     "test:grand": "bun run packages/tests/grand-e2e/run.ts",
     "seed:market": "bun run packages/tests/seed-market.ts",
@@ -21,6 +22,9 @@
     "docs:dev": "bun run --filter @zswap-da/docs-playground dev",
     "docs:build": "bun run --filter @zswap-da/docs-playground build",
     "docs:preview": "bun run --filter @zswap-da/docs-playground preview",
+    "typecheck:backend": "bun run scripts/backend-typecheck.ts",
+    "typecheck:solver": "bun run scripts/solver-typecheck.ts",
+    "typecheck": "bun run typecheck:backend && bun run typecheck:solver",
     "test:held-open": "bun test ./packages/database/held-open-transaction.pgtest.ts"
   },
   "dependencies": {
@@ -29,6 +33,8 @@
     "@effectstream/mip-zswap-offer": "0.3.0",
     "@effectstream/orchestrator": "0.103.1",
     "@electric-sql/pglite": "^0.3.14",
+    "@midnight-ntwrk/ledger-v8": "8.1.0",
+    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
     "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
     "@scure/bip39": "^2.2.0",
     "wait-on": "8.0.3"
@@ -37,7 +43,8 @@
     "default": "start.dev.ts"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.13"
+    "@types/bun": "^1.3.13",
+    "typescript": "~5.9.3"
   },
   "overrides": {
     "@midnight-ntwrk/ledger-v8": "8.1.0"

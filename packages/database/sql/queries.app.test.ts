@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { processSQLQueryIR } from "@pgtyped/runtime";
 
-import { compileIR, insertCommitment, upsertKnownRootWithFirstSeen, getOfferRootTiming } from "./queries.app.ts";
+import {
+  archiveOfferByIdTtlWithHash,
+  compileIR,
+  createAppInputSavepoint,
+  getOfferRootTiming,
+  insertCommitment,
+  releaseAppInputSavepoint,
+  rollbackAppInputSavepoint,
+  upsertKnownRootWithFirstSeen,
+} from "./queries.app.ts";
 
 // The STM path never calls .run(): World.resolve yields [query.queryIR, input]
 // and the framework executes the IR itself. So every query the STM touches
@@ -50,7 +59,15 @@ describe("the framework execution path (processSQLQueryIR on our IRs)", () => {
     // so every zswap-event / zswap-root transition died with
     // "undefined is not an object (evaluating 'queryIR.params')" — silently,
     // because the runtime routes STF errors to log.remote only.
-    for (const q of [insertCommitment, upsertKnownRootWithFirstSeen, getOfferRootTiming]) {
+    for (const q of [
+      insertCommitment,
+      upsertKnownRootWithFirstSeen,
+      getOfferRootTiming,
+      archiveOfferByIdTtlWithHash,
+      createAppInputSavepoint,
+      rollbackAppInputSavepoint,
+      releaseAppInputSavepoint,
+    ]) {
       expect((q as any).queryIR?.params).toBeDefined();
       expect((q as any).queryIR?.statement).toBeTypeOf("string");
     }
@@ -79,5 +96,30 @@ describe("the framework execution path (processSQLQueryIR on our IRs)", () => {
     expect(bindings).toEqual([900_000, ["r1", "r2"]]);
     expect(query).toMatch(/ANY\(\$\d\)/);
     expect(query).not.toContain(":roots");
+  });
+
+  test("TTL archive query binds the persisted-expiry cutoff used by the transition", () => {
+    const cutoff = new Date("2026-08-13T12:00:00.000Z");
+    const { query, bindings } = processSQLQueryIR(
+      (archiveOfferByIdTtlWithHash as any).queryIR,
+      { offer_file_id: 7, expires_at_cutoff: cutoff, archived_at: cutoff } as any,
+    );
+    expect(query).toContain("metadata_expires_at <= $2");
+    expect(bindings).toEqual([7, cutoff, cutoff]);
+  });
+
+  test("application-input transaction-control IR reaches PostgreSQL verbatim", () => {
+    for (const [preparedQuery, statement] of [
+      [createAppInputSavepoint, "SAVEPOINT zswap_da_app_input_v1"],
+      [rollbackAppInputSavepoint, "ROLLBACK TO SAVEPOINT zswap_da_app_input_v1"],
+      [releaseAppInputSavepoint, "RELEASE SAVEPOINT zswap_da_app_input_v1"],
+    ] as const) {
+      const { query, bindings } = processSQLQueryIR(
+        (preparedQuery as any).queryIR,
+        undefined,
+      );
+      expect(query).toBe(statement);
+      expect(bindings).toEqual([]);
+    }
   });
 });

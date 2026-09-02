@@ -26,10 +26,14 @@ import { ENV } from "@effectstream/utils/node-env";
 export type { SponsorPolicy, UnpricedPolicy };
 
 export interface SponsorshipConfig {
-  /** Node API base URL — the batcher polls `${nodeApiUrl}/v1/prices`. */
+  /** Node API base URL — the batcher asks `${nodeApiUrl}/v1/prices?tokens=`. */
   nodeApiUrl: string;
-  priceRefreshMs: number;
-  /** Past this age a snapshot stops counting as an answer at all. */
+  /** How long a per-colour answer counts as current before it is re-asked. */
+  priceTtlMs: number;
+  /**
+   * How old an answer may be and still be served when a re-ask FAILS. Past it
+   * the colour is unavailable and the policy decides.
+   */
   priceMaxAgeMs: number;
   policy: SponsorPolicy;
   unpriced: UnpricedPolicy;
@@ -139,6 +143,19 @@ export function loadSponsorshipConfig(): SponsorshipConfig {
     throw new Error(`BATCHER_NODE_API_URL must be an absolute http(s) URL, got "${nodeApiUrl}"`);
   }
 
+  const priceTtlMs = positiveMs("BATCHER_PRICE_TTL_MS", 600_000); // 10 min
+  const priceMaxAgeMs = positiveMs("BATCHER_PRICE_MAX_AGE_MS", 172_800_000); // 48 h
+  // A max age below the TTL would mean "re-ask after 10 minutes, but refuse to
+  // serve anything older than 5" — every failed re-ask would then make a colour
+  // unavailable even though a perfectly recent answer is in hand. Reject it at
+  // startup rather than discovering it during a node outage.
+  if (priceMaxAgeMs < priceTtlMs) {
+    throw new Error(
+      `BATCHER_PRICE_MAX_AGE_MS (${priceMaxAgeMs}) must be >= BATCHER_PRICE_TTL_MS (${priceTtlMs}): ` +
+        "max age is how long a stale answer may still be used when a refresh fails",
+    );
+  }
+
   const fallbackDiscountBps = ENV.getNumber("SPONSOR_DISCOUNT_BPS", 250);
   if (!Number.isInteger(fallbackDiscountBps) || fallbackDiscountBps < 0 || fallbackDiscountBps >= 10_000) {
     throw new Error(
@@ -148,8 +165,10 @@ export function loadSponsorshipConfig(): SponsorshipConfig {
 
   return {
     nodeApiUrl,
-    priceRefreshMs: positiveMs("BATCHER_PRICE_REFRESH_MS", 600_000), // 10 min
-    priceMaxAgeMs: positiveMs("BATCHER_PRICE_MAX_AGE_MS", 172_800_000), // 48 h
+    // Per-colour TTL, not a poll period: prices are looked up when an offer
+    // needs them (Q-11). BATCHER_PRICE_REFRESH_MS is gone with the poll.
+    priceTtlMs,
+    priceMaxAgeMs,
     policy: parseSponsorPolicy(ENV.getString("BATCHER_SPONSOR_POLICY", "")),
     unpriced: parseUnpricedPolicy(ENV.getString("BATCHER_SPONSOR_UNPRICED", "")),
     fallbackDiscountBps,

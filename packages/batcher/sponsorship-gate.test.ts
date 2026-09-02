@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import type { PriceRow } from "@zswap-da/offer-guard";
 
 import { ZswapCelestiaAdapter, type SponsorshipGate } from "./celestia.ts";
-import { PriceCache } from "./price-cache.ts";
+import { PriceLookup } from "./price-lookup.ts";
 
 // The fee gate, driven through the REAL adapter and the REAL proven offer
 // fixture — not a synthetic leg list. Everything here therefore also proves
@@ -33,35 +33,46 @@ const wantPriceFor = (fraction: number) => (GIVE_USD * fraction) / 5_000_000;
 const inputFor = (b: string) => ({ address: "tester", addressType: 0, input: b, timestamp: "1" });
 
 /**
- * A PriceCache holding a chosen snapshot, without any HTTP. `fetchedAt` is
- * `now`, so `isFresh` is true for any sane maxAge; the staleness cases below
- * move the clock instead.
+ * A PriceLookup backed by a stub node that answers with `tokens` — filtered by
+ * the `?tokens=` query, exactly as the real node does, so the URL the gate
+ * builds is under test too. `asked` records every colour list requested.
  */
-function cacheOf(
+function lookupOf(
   tokens: Record<string, PriceRow>,
-  { discount = 0.025, now = () => 1_000_000 } = {},
-): PriceCache {
-  const cache = new PriceCache({
+  { discount = 0.025, now = () => 1_000_000, maxAgeMs = 172_800_000 } = {},
+): PriceLookup & { asked: string[][] } {
+  const asked: string[][] = [];
+  const lookup = new PriceLookup({
     url: "http://node.test:9999",
-    refreshMs: 600_000,
+    ttlMs: 600_000,
+    maxAgeMs,
     fallbackDiscount: 0.025,
     now,
     log: () => {},
     logError: () => {},
-    fetchImpl: (async () =>
-      new Response(
+    fetchImpl: (async (input: any) => {
+      const wanted = (new URL(String(input)).searchParams.get("tokens") ?? "")
+        .split(",")
+        .filter((c) => c !== "");
+      asked.push(wanted);
+      return new Response(
         JSON.stringify({
           sponsor_discount: discount,
-          tokens: Object.entries(tokens).map(([token_color, row]) => ({
-            token_color,
-            price_usd: row.price_usd,
-            source: row.source,
-          })),
+          feed: { provider: "coingecko", last_run_at: null, last_ok_at: null, last_error: null },
+          // The node only ever returns colours that were asked for AND priced.
+          tokens: wanted
+            .filter((color) => tokens[color] !== undefined)
+            .map((color) => ({
+              token_color: color,
+              price_usd: tokens[color]!.price_usd,
+              source: tokens[color]!.source,
+            })),
         }),
         { status: 200 },
-      )) as unknown as typeof fetch,
+      );
+    }) as unknown as typeof fetch,
   });
-  return cache;
+  return Object.assign(lookup, { asked });
 }
 
 interface Harness {
@@ -70,7 +81,7 @@ interface Harness {
   logs: string[];
 }
 
-function harness(gate: Partial<SponsorshipGate> & { cache: PriceCache | null }): Harness {
+function harness(gate: Partial<SponsorshipGate> & { lookup: PriceLookup | null }): Harness {
   const warnings: string[] = [];
   const logs: string[] = [];
   const adapter = new ZswapCelestiaAdapter(
@@ -87,7 +98,6 @@ function harness(gate: Partial<SponsorshipGate> & { cache: PriceCache | null }):
     {
       policy: "enforce",
       unpriced: "allow",
-      maxAgeMs: 172_800_000,
       now: () => 1_000_000,
       warn: (line) => warnings.push(line),
       log: (line) => logs.push(line),
@@ -97,19 +107,21 @@ function harness(gate: Partial<SponsorshipGate> & { cache: PriceCache | null }):
   return { adapter, warnings, logs };
 }
 
-/** Build a warmed cache + adapter for a wanted-leg price. */
-async function gateAt(fraction: number, gate: Partial<SponsorshipGate> = {}) {
-  const cache = cacheOf({
+/**
+ * Adapter + lookup for a wanted-leg price. Nothing is warmed: the lookup is
+ * driven by the offer, which is the whole point of Q-11.
+ */
+function gateAt(fraction: number, gate: Partial<SponsorshipGate> = {}) {
+  const lookup = lookupOf({
     [GIVE_COLOR]: { price_usd: String(NIGHT_PRICE), source: "seed" },
     [WANT_COLOR]: { price_usd: String(wantPriceFor(fraction)), source: "manual" },
   });
-  await cache.refresh();
-  return harness({ cache, ...gate });
+  return { ...harness({ lookup, ...gate }), lookup };
 }
 
 describe("the fee gate — an offer at reference is no longer sponsored", () => {
   test("GREEN: priced EXACTLY at reference → NOT_SPONSORED (this is the RED probe's assertion, flipped)", async () => {
-    const { adapter } = await gateAt(1.0);
+    const { adapter } = gateAt(1.0);
     const verdict = await adapter.validateOffer(inputFor(blob) as any);
 
     expect(verdict.valid).toBe(false);
@@ -123,7 +135,7 @@ describe("the fee gate — an offer at reference is no longer sponsored", () => 
   });
 
   test("2.5% below reference → sponsored", async () => {
-    const { adapter } = await gateAt(0.975);
+    const { adapter } = gateAt(0.975);
     expect(await adapter.validateOffer(inputFor(blob) as any)).toEqual({ valid: true });
   });
 
@@ -132,19 +144,19 @@ describe("the fee gate — an offer at reference is no longer sponsored", () => 
     // the boundary were exclusive, the UI would promise sponsorship for an
     // offer the batcher then refuses — the one failure mode the shared rule
     // exists to prevent.
-    const { adapter } = await gateAt(1 - 0.025);
+    const { adapter } = gateAt(1 - 0.025);
     expect((await adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
   });
 
   test("a hair above the threshold is refused", async () => {
-    const { adapter } = await gateAt(0.9751);
+    const { adapter } = gateAt(0.9751);
     const verdict = await adapter.validateOffer(inputFor(blob) as any);
     expect(verdict.valid).toBe(false);
     expect(verdict.error).toContain("wants 2.5% below reference");
   });
 
   test("far above reference → refused, and the message says `above`", async () => {
-    const { adapter } = await gateAt(1.1);
+    const { adapter } = gateAt(1.1);
     const verdict = await adapter.validateOffer(inputFor(blob) as any);
     expect(verdict.valid).toBe(false);
     expect(verdict.error).toContain("wants 10.0% above reference");
@@ -153,24 +165,53 @@ describe("the fee gate — an offer at reference is no longer sponsored", () => 
   test("the node's discount is what applies, not the batcher's env fallback", async () => {
     // Node says 10%; an offer 5% below reference is therefore NOT enough, even
     // though the batcher's own bootstrap default (2.5%) would have allowed it.
-    const cache = cacheOf(
+    const lookup = lookupOf(
       {
         [GIVE_COLOR]: { price_usd: String(NIGHT_PRICE), source: "seed" },
         [WANT_COLOR]: { price_usd: String(wantPriceFor(0.95)), source: "manual" },
       },
       { discount: 0.1 },
     );
-    await cache.refresh();
-    const { adapter } = harness({ cache });
+    const { adapter } = harness({ lookup });
     const verdict = await adapter.validateOffer(inputFor(blob) as any);
     expect(verdict.valid).toBe(false);
     expect(verdict.error).toContain("needs ≥ 10.0%");
   });
 });
 
+describe("the request shape (Q-11) — one lookup per offer, for that offer's legs", () => {
+  test("validating an offer asks the node for EXACTLY the two leg colours, once", async () => {
+    const { adapter, lookup } = gateAt(1.0);
+    // Nothing is fetched before an offer arrives: no poll, no warm-up.
+    expect(lookup.asked).toEqual([]);
+    expect(lookup.requestCount).toBe(0);
+
+    await adapter.validateOffer(inputFor(blob) as any);
+
+    // ONE request, naming the offer's own legs and nothing else. The old
+    // design pulled the whole price table on a timer instead.
+    expect(lookup.asked).toEqual([[GIVE_COLOR, WANT_COLOR]]);
+    expect(lookup.requestCount).toBe(1);
+  });
+
+  test("a second offer on the same pair makes NO request while the TTL holds", async () => {
+    const { adapter, lookup } = gateAt(1.0);
+    await adapter.validateOffer(inputFor(blob) as any);
+    await adapter.validateOffer(inputFor(blob) as any);
+    // Cost is one request per TTL per colour, not one per offer.
+    expect(lookup.requestCount).toBe(1);
+  });
+
+  test("policy=off asks the node nothing at all", async () => {
+    const { adapter, lookup } = gateAt(1.0, { policy: "off" });
+    await adapter.validateOffer(inputFor(blob) as any);
+    expect(lookup.requestCount).toBe(0);
+  });
+});
+
 describe("policy — enforce | warn | off", () => {
   test("warn sponsors the same offer but logs the numbers, once per offer", async () => {
-    const { adapter, warnings } = await gateAt(1.0, { policy: "warn" });
+    const { adapter, warnings } = gateAt(1.0, { policy: "warn" });
     expect((await adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("would refuse (policy=warn)");
@@ -178,31 +219,28 @@ describe("policy — enforce | warn | off", () => {
   });
 
   test("off does not evaluate at all — no verdict, no log", async () => {
-    const { adapter, warnings, logs } = await gateAt(1.0, { policy: "off" });
+    const { adapter, warnings, logs } = gateAt(1.0, { policy: "off" });
     expect((await adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
     expect(warnings).toHaveLength(0);
     expect(logs).toHaveLength(0);
   });
 
   test("the same offer flips verdict on policy alone — nothing else changes", async () => {
-    const enforce = await gateAt(1.0, { policy: "enforce" });
-    const warn = await gateAt(1.0, { policy: "warn" });
+    const enforce = gateAt(1.0, { policy: "enforce" });
+    const warn = gateAt(1.0, { policy: "warn" });
     expect((await enforce.adapter.validateOffer(inputFor(blob) as any)).valid).toBe(false);
     expect((await warn.adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
   });
 });
 
 describe("unpriced tokens (SC-003 — the test site must keep working)", () => {
-  const unpricedCache = async () => {
-    // Only the give leg is priced. The wanted colour is absent entirely, which
-    // is what every faucet-minted test token looks like.
-    const cache = cacheOf({ [GIVE_COLOR]: { price_usd: String(NIGHT_PRICE), source: "seed" } });
-    await cache.refresh();
-    return cache;
-  };
+  // Only the give leg is priced. The wanted colour is answered for and has no
+  // price, which is what every faucet-minted test token looks like.
+  const unpricedLookup = () =>
+    lookupOf({ [GIVE_COLOR]: { price_usd: String(NIGHT_PRICE), source: "seed" } });
 
   test("allow (the default): sponsored, with an info log naming the colour", async () => {
-    const { adapter, logs } = harness({ cache: await unpricedCache(), unpriced: "allow" });
+    const { adapter, logs } = harness({ lookup: unpricedLookup(), unpriced: "allow" });
     expect((await adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
     expect(logs).toHaveLength(1);
     expect(logs[0]).toContain("sponsoring an unpriced offer");
@@ -210,7 +248,7 @@ describe("unpriced tokens (SC-003 — the test site must keep working)", () => {
   });
 
   test("reject: refused as UNPRICED_TOKEN, naming the colour", async () => {
-    const { adapter } = harness({ cache: await unpricedCache(), unpriced: "reject" });
+    const { adapter } = harness({ lookup: unpricedLookup(), unpriced: "reject" });
     const verdict = await adapter.validateOffer(inputFor(blob) as any);
     expect(verdict.valid).toBe(false);
     expect(verdict.error).toStartWith("UNPRICED_TOKEN:");
@@ -220,33 +258,32 @@ describe("unpriced tokens (SC-003 — the test site must keep working)", () => {
   test("a `fallback` (demo-hash) price counts as unpriced, not as a market price", async () => {
     // The whole point of carrying `source` through: a colour-hash demo price
     // is a number, but it is not a market, so it must not be used to refuse.
-    const cache = cacheOf({
+    const lookup = lookupOf({
       [GIVE_COLOR]: { price_usd: String(NIGHT_PRICE), source: "seed" },
       [WANT_COLOR]: { price_usd: "13.02", source: "fallback" },
     });
-    await cache.refresh();
-    const { adapter } = harness({ cache, unpriced: "reject" });
+    const { adapter } = harness({ lookup, unpriced: "reject" });
     const verdict = await adapter.validateOffer(inputFor(blob) as any);
     expect(verdict.valid).toBe(false);
     expect(verdict.error).toStartWith("UNPRICED_TOKEN:");
   });
 
   test("unpriced is decided BEFORE the threshold — a bad rate on unpriced tokens is not NOT_SPONSORED", async () => {
-    const cache = cacheOf({
+    const lookup = lookupOf({
       [GIVE_COLOR]: { price_usd: String(NIGHT_PRICE), source: "seed" },
       [WANT_COLOR]: { price_usd: "999999", source: "fallback" },
     });
-    await cache.refresh();
-    const { adapter } = harness({ cache, unpriced: "allow" });
+    const { adapter } = harness({ lookup, unpriced: "allow" });
     expect((await adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
   });
 });
 
-describe("no usable snapshot", () => {
-  const deadCache = (now: () => number) => {
-    const cache = new PriceCache({
+describe("no usable answer", () => {
+  const deadLookup = (now: () => number) =>
+    new PriceLookup({
       url: "http://node.test:9999",
-      refreshMs: 600_000,
+      ttlMs: 600_000,
+      maxAgeMs: 172_800_000,
       fallbackDiscount: 0.025,
       now,
       log: () => {},
@@ -255,39 +292,99 @@ describe("no usable snapshot", () => {
         throw new Error("ECONNREFUSED");
       }) as unknown as typeof fetch,
     });
-    return cache;
-  };
 
   test("enforce + node never answered → PRICE_UNAVAILABLE, no fee paid", async () => {
-    const cache = deadCache(() => 1_000_000);
-    await cache.refresh();
-    const { adapter } = harness({ cache, policy: "enforce" });
+    const { adapter } = harness({ lookup: deadLookup(() => 1_000_000), policy: "enforce" });
     const verdict = await adapter.validateOffer(inputFor(blob) as any);
     expect(verdict.valid).toBe(false);
     expect(verdict.error).toStartWith("PRICE_UNAVAILABLE:");
     expect(verdict.error).toContain("has never answered");
+    // Both legs are named, so an operator knows what could not be priced.
+    expect(verdict.error).toContain("2 of 2 color(s)");
   });
 
-  test("enforce + a snapshot older than maxAge → PRICE_UNAVAILABLE, with both ages", async () => {
+  test("enforce + an answer older than maxAge → PRICE_UNAVAILABLE", async () => {
     let t = 1_000_000;
-    const cache = cacheOf(
-      { [GIVE_COLOR]: { price_usd: "1", source: "seed" }, [WANT_COLOR]: { price_usd: "1", source: "seed" } },
-      { now: () => t },
-    );
-    await cache.refresh();
-    t += 100_000; // 100 s later, with a 60 s ceiling
-    const { adapter } = harness({ cache, policy: "enforce", maxAgeMs: 60_000, now: () => t });
+    let alive = true;
+    const lookup = new PriceLookup({
+      url: "http://node.test:9999",
+      ttlMs: 30_000,
+      maxAgeMs: 60_000,
+      fallbackDiscount: 0.025,
+      now: () => t,
+      log: () => {},
+      logError: () => {},
+      fetchImpl: (async (input: any) => {
+        if (!alive) throw new Error("ECONNREFUSED");
+        const wanted = (new URL(String(input)).searchParams.get("tokens") ?? "").split(",");
+        return new Response(
+          JSON.stringify({
+            sponsor_discount: 0.025,
+            tokens: wanted.map((color) => ({ token_color: color, price_usd: "1", source: "seed" })),
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    // Warm both legs while the node is up.
+    const warm = harness({ lookup, policy: "enforce", now: () => t });
+    await warm.adapter.validateOffer(inputFor(blob) as any);
+
+    // Node goes away; 100 s later the cached answers are past the 60 s ceiling.
+    alive = false;
+    t += 100_000;
+    const { adapter } = harness({ lookup, policy: "enforce", now: () => t });
     const verdict = await adapter.validateOffer(inputFor(blob) as any);
     expect(verdict.valid).toBe(false);
-    expect(verdict.error).toContain("is 100s old");
+    expect(verdict.error).toStartWith("PRICE_UNAVAILABLE:");
     expect(verdict.error).toContain("max 60s");
+    expect(verdict.error).toContain("ECONNREFUSED");
   });
 
-  test("warn + no snapshot → sponsored, and the warning is throttled to once a minute", async () => {
+  test("an answer INSIDE maxAge is still used when the node is unreachable", async () => {
+    // The distinction the ceiling exists for: stale-but-recent beats nothing.
     let t = 1_000_000;
-    const cache = deadCache(() => t);
-    await cache.refresh();
-    const { adapter, warnings } = harness({ cache, policy: "warn", now: () => t });
+    let alive = true;
+    const lookup = new PriceLookup({
+      url: "http://node.test:9999",
+      ttlMs: 30_000,
+      maxAgeMs: 3_600_000,
+      fallbackDiscount: 0.025,
+      now: () => t,
+      log: () => {},
+      logError: () => {},
+      fetchImpl: (async (input: any) => {
+        if (!alive) throw new Error("ECONNREFUSED");
+        const wanted = (new URL(String(input)).searchParams.get("tokens") ?? "").split(",");
+        return new Response(
+          JSON.stringify({
+            sponsor_discount: 0.025,
+            tokens: wanted.map((color) => ({
+              token_color: color,
+              price_usd:
+                color === GIVE_COLOR ? String(NIGHT_PRICE) : String(wantPriceFor(0.975)),
+              source: "seed",
+            })),
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch,
+    });
+
+    const warm = harness({ lookup, policy: "enforce", now: () => t });
+    expect((await warm.adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
+
+    alive = false;
+    t += 100_000; // past the 30 s TTL, well inside the 1 h ceiling
+    const { adapter } = harness({ lookup, policy: "enforce", now: () => t });
+    // Same verdict, from the stale answer — not PRICE_UNAVAILABLE.
+    expect((await adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
+  });
+
+  test("warn + no answer → sponsored, and the warning is throttled to once a minute", async () => {
+    let t = 1_000_000;
+    const { adapter, warnings } = harness({ lookup: deadLookup(() => t), policy: "warn", now: () => t });
 
     for (let i = 0; i < 3; i++) {
       expect((await adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
@@ -302,8 +399,8 @@ describe("no usable snapshot", () => {
     expect(warnings).toHaveLength(2);
   });
 
-  test("a null cache is the same as an unreachable node", async () => {
-    const { adapter } = harness({ cache: null, policy: "enforce" });
+  test("a null lookup is the same as an unreachable node", async () => {
+    const { adapter } = harness({ lookup: null, policy: "enforce" });
     const verdict = await adapter.validateOffer(inputFor(blob) as any);
     expect(verdict.valid).toBe(false);
     expect(verdict.error).toContain("no price source configured");
@@ -312,7 +409,7 @@ describe("no usable snapshot", () => {
 
 describe("ordering — the gate never sees an unverified offer", () => {
   test("a forged/undecodable blob is refused by the validator, and the gate never logs it", async () => {
-    const { adapter, warnings, logs } = await gateAt(1.0, { policy: "warn" });
+    const { adapter, warnings, logs } = gateAt(1.0, { policy: "warn" });
     const verdict = await adapter.validateOffer(inputFor("definitely-not-an-offer") as any);
     expect(verdict.valid).toBe(false);
     expect(verdict.error).toContain("BAD_ENCODING");
@@ -322,7 +419,7 @@ describe("ordering — the gate never sees an unverified offer", () => {
   });
 
   test("a duplicate is still caught before the gate", async () => {
-    const { adapter, warnings } = await gateAt(1.0, { policy: "warn" });
+    const { adapter, warnings } = gateAt(1.0, { policy: "warn" });
     (adapter as any).rpcCall = async () => ({ txhash: "stub-tx", height: 7 });
     await adapter.submitBatch({ blob: { namespace: "ns", data: "x", share_version: 0 }, rawData: blob, inputKey: "k" } as any, 2000n);
 
@@ -334,16 +431,25 @@ describe("ordering — the gate never sees an unverified offer", () => {
 });
 
 describe("describeSponsorship — what an operator reads at startup", () => {
-  test("names the policy, the node and the cache age", async () => {
-    const { adapter } = await gateAt(1.0);
+  test("before anything is asked, it says so rather than implying prices exist", () => {
+    const { adapter } = gateAt(1.0);
     expect(adapter.describeSponsorship()).toBe(
-      "sponsorship: policy=enforce unpriced=allow max_age=172800s " +
-        "prices=2 tokens age=0s discount=2.50% node=http://node.test:9999/v1/prices",
+      "sponsorship: policy=enforce unpriced=allow prices=NONE (not asked yet) " +
+        "node=http://node.test:9999/v1/prices",
+    );
+  });
+
+  test("after an offer has been priced it names the node, the cache and the ages", async () => {
+    const { adapter } = gateAt(1.0);
+    await adapter.validateOffer(inputFor(blob) as any);
+    expect(adapter.describeSponsorship()).toBe(
+      "sponsorship: policy=enforce unpriced=allow prices=2 color(s) cached, last answer 0s ago, " +
+        "ttl=600s max_age=172800s discount=2.50% node=http://node.test:9999/v1/prices",
     );
   });
 
   test("says so plainly when the gate is off", async () => {
-    const { adapter } = await gateAt(1.0, { policy: "off" });
+    const { adapter } = gateAt(1.0, { policy: "off" });
     expect(adapter.describeSponsorship()).toContain("policy=off");
   });
 });

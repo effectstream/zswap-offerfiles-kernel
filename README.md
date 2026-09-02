@@ -166,9 +166,9 @@ An invalid value throws at startup rather than defaulting.
 |---|---|---|---|
 | `BATCHER_SPONSOR_POLICY` | `warn` | node + batcher | `enforce` refuses; `warn` logs what `enforce` would have refused and lets it through; `off` skips the check |
 | `BATCHER_SPONSOR_UNPRICED` | `allow` | node + batcher | What to do when a leg's token has no market price (every test token). `allow` keeps them flowing |
-| `BATCHER_NODE_API_URL` | `http://127.0.0.1:9999` | batcher | Where it polls `/v1/prices` (compose: `http://kernel:9999`) — it has no database |
-| `BATCHER_PRICE_REFRESH_MS` | `600000` | batcher | Poll period |
-| `BATCHER_PRICE_MAX_AGE_MS` | `172800000` | batcher | Age past which a held snapshot stops counting as an answer |
+| `BATCHER_NODE_API_URL` | `http://127.0.0.1:9999` | batcher | Where it asks `/v1/prices?tokens=` for each offer's leg colours (compose: `http://kernel:9999`) — it has no database |
+| `BATCHER_PRICE_TTL_MS` | `600000` | batcher | How long a per-colour answer counts as current |
+| `BATCHER_PRICE_MAX_AGE_MS` | `172800000` | batcher | How old an answer may be and still be used when a re-ask fails. Must be ≥ the TTL |
 | `SPONSOR_DISCOUNT_BPS` | `250` | node + batcher | The threshold. On the batcher a bootstrap only: once the node answers, the node's `sponsor_discount` wins |
 
 Roll out with the defaults (`warn` + `allow`), read a day of

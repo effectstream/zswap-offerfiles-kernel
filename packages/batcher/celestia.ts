@@ -13,7 +13,7 @@ import {
 } from "@zswap-da/offer-guard";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import type { BatcherConfig, SponsorPolicy, UnpricedPolicy } from "./config.ts";
-import { PriceCache } from "./price-cache.ts";
+import { PriceLookup } from "./price-lookup.ts";
 
 // DoS guard on the decoded offer size; mirrors the node's OFFER_MAX_BYTES. The
 // base adapter separately caps the on-wire blob at 1.5 MB.
@@ -32,11 +32,9 @@ type ValidationResult = { valid: boolean; error?: string };
  */
 export interface SponsorshipGate {
   /** null = this adapter has no price source; only `off` makes sense then. */
-  cache: PriceCache | null;
+  lookup: PriceLookup | null;
   policy: SponsorPolicy;
   unpriced: UnpricedPolicy;
-  /** Beyond this, a held snapshot no longer counts as an answer. */
-  maxAgeMs: number;
   now?: () => number;
   log?: (line: string) => void;
   warn?: (line: string) => void;
@@ -52,10 +50,9 @@ const UNAVAILABLE_WARN_INTERVAL_MS = 60_000;
 
 /** A sponsorship gate that does nothing — the default when none is wired. */
 const NO_GATE: SponsorshipGate = {
-  cache: null,
+  lookup: null,
   policy: "off",
   unpriced: "allow",
-  maxAgeMs: 0,
 };
 
 const usd = (value: number): string => value.toFixed(2);
@@ -174,7 +171,10 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
     // earlier would mean logging trade values read out of an unverified (and
     // possibly forged) transaction, and refusing offers with numbers that were
     // never real.
-    const sponsorship = this.checkForCelestiaSponsorship(result.gives ?? [], result.wants ?? []);
+    const sponsorship = await this.checkForCelestiaSponsorship(
+      result.gives ?? [],
+      result.wants ?? [],
+    );
     if (!sponsorship.valid) return sponsorship;
 
     return { valid: true };
@@ -237,28 +237,32 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
    * themselves and it will still be indexed. What it protects is this
    * batcher's wallet.
    */
-  private checkForCelestiaSponsorship(
+  private async checkForCelestiaSponsorship(
     gives: readonly OfferLeg[],
     wants: readonly OfferLeg[],
-  ): ValidationResult {
-    const { policy, unpriced, cache, maxAgeMs } = this.gate;
+  ): Promise<ValidationResult> {
+    const { policy, unpriced, lookup } = this.gate;
     if (policy === "off") return { valid: true };
 
-    const fresh = cache !== null && cache.isFresh(maxAgeMs);
-    if (!fresh) {
-      // The batcher cannot tell a good trade from a bad one right now. Which
-      // way that should fail is a deployment decision, not a code decision:
-      // `enforce` protects the wallet, `warn` protects the site.
-      // `cache === null` first, so `age` narrows to `number | null` rather
-      // than carrying an `undefined` TypeScript cannot rule out later.
-      const age = cache === null ? null : cache.ageMs();
+    // ONE request for exactly this offer's leg colours (Q-11). Cached per
+    // colour, so a busy pair costs one request per TTL rather than one per
+    // offer, and a colour minted a minute ago is answered now instead of at
+    // the next poll.
+    const colors = [...new Set([...gives, ...wants].map((leg) => leg.token.toLowerCase()))];
+    const result =
+      lookup === null
+        ? null
+        : await lookup.lookup(colors);
+
+    if (result === null || result.unavailable.length > 0) {
+      // The batcher cannot tell a good trade from a bad one for at least one
+      // leg. Which way that should fail is a deployment decision, not a code
+      // decision: `enforce` protects the wallet, `warn` protects the site.
       const detail =
-        cache === null
+        result === null
           ? "no price source configured"
-          : age === null
-            ? `${cache.pricesUrl} has never answered`
-            : `last answer from ${cache.pricesUrl} is ${Math.round(age / 1000)}s old ` +
-              `(max ${Math.round(maxAgeMs / 1000)}s)`;
+          : `${result.detail ?? "no answer"} (${result.unavailable.length} of ` +
+            `${colors.length} color(s): ${result.unavailable.join(", ")})`;
       if (policy === "enforce") {
         return {
           valid: false,
@@ -279,20 +283,23 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
       return { valid: true };
     }
 
-    const snapshot = cache!.snapshot()!;
-    const discount = snapshot.sponsorDiscount;
-    const verdict = evaluateSponsorship({ gives, wants }, snapshot.prices, discount);
+    const discount = result.discount;
+    const verdict = evaluateSponsorship({ gives, wants }, result.prices, discount);
 
     if (verdict.verdict === "unpriced") {
       // Test tokens and anything the faucet minted live here. There is no
       // market to be above or below, so this is NOT a bad trade — it is an
       // unanswerable question, and D7's default is to keep such offers flowing.
-      const colors = verdict.unpriced.join(", ");
+      //
+      // Note the difference from `unavailable` above: the node ANSWERED about
+      // these colours and has no market price for them. "I do not know" and "I
+      // could not ask" get different policies on purpose.
+      const colorList = verdict.unpriced.join(", ");
       if (unpriced === "reject") {
-        return { valid: false, error: `UNPRICED_TOKEN: no market price for ${colors}` };
+        return { valid: false, error: `UNPRICED_TOKEN: no market price for ${colorList}` };
       }
       this.gateLog(
-        `[zswap-da-batcher] sponsoring an unpriced offer (no market price for ${colors}; ` +
+        `[zswap-da-batcher] sponsoring an unpriced offer (no market price for ${colorList}; ` +
           "BATCHER_SPONSOR_UNPRICED=allow)",
       );
       return { valid: true };
@@ -315,18 +322,22 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
 
   /** One line for the startup log: what will this batcher actually do? */
   describeSponsorship(): string {
-    const { policy, unpriced, cache, maxAgeMs } = this.gate;
+    const { policy, unpriced, lookup } = this.gate;
     if (policy === "off") return "sponsorship: policy=off (every valid offer is sponsored)";
     return (
       `sponsorship: policy=${policy} unpriced=${unpriced} ` +
-      `max_age=${Math.round(maxAgeMs / 1000)}s ` +
-      (cache === null ? "prices=NONE (no source configured)" : cache.describe())
+      (lookup === null ? "prices=NONE (no source configured)" : lookup.describe())
     );
   }
 
-  /** Stop the price poll. Called on shutdown; safe to call when there is none. */
+  /**
+   * Shutdown hook. There is nothing to stop any more — the lookup is driven by
+   * offers, not by a timer — but the entrypoints call this and a method that
+   * quietly does nothing is better than three call sites learning that the
+   * price path changed shape.
+   */
   stop(): void {
-    this.gate.cache?.stop();
+    /* per-offer lookups hold no timer */
   }
 }
 
@@ -343,12 +354,13 @@ export function createCelestiaAdapter(
   batcherConfig: BatcherConfig,
 ): ZswapCelestiaAdapter {
   const sponsorship = batcherConfig.sponsorship;
-  const cache =
+  const lookup =
     sponsorship.policy === "off"
       ? null
-      : new PriceCache({
+      : new PriceLookup({
           url: sponsorship.nodeApiUrl,
-          refreshMs: sponsorship.priceRefreshMs,
+          ttlMs: sponsorship.priceTtlMs,
+          maxAgeMs: sponsorship.priceMaxAgeMs,
           fallbackDiscount: sponsorDiscountFromBps(sponsorship.fallbackDiscountBps),
         });
   const adapter = new ZswapCelestiaAdapter(
@@ -367,13 +379,25 @@ export function createCelestiaAdapter(
     },
     batcherConfig.midnight.id,
     {
-      cache,
+      lookup,
       policy: sponsorship.policy,
       unpriced: sponsorship.unpriced,
-      maxAgeMs: sponsorship.priceMaxAgeMs,
     },
   );
-  cache?.start();
-  console.log(`[zswap-da-batcher] ${adapter.describeSponsorship()}`);
+  // ONE optional request at startup — the NIGHT colour, which every network
+  // seeds — so the startup log can say whether the node answers and what
+  // threshold it publishes, instead of an operator discovering it on the first
+  // offer. Fire-and-forget and non-fatal: a batcher that refused to start
+  // because the node was not up yet would make the node a hard dependency of
+  // the component whose entire job is to keep working when other things are
+  // down. Everything after this is driven by offers.
+  if (lookup === null) {
+    console.log(`[zswap-da-batcher] ${adapter.describeSponsorship()}`);
+  } else {
+    void lookup
+      .probe()
+      .catch(() => false)
+      .then(() => console.log(`[zswap-da-batcher] ${adapter.describeSponsorship()}`));
+  }
   return adapter;
 }

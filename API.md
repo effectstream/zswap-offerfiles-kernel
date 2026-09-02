@@ -1375,8 +1375,9 @@ implemented, as a **fee-sponsorship gate**, in two places:
 * **the batcher's `validateInput`**, which is authoritative because it holds the
   wallet: it refuses to pay a Celestia fee for an offer whose wanted value is not
   at least the sponsorship discount below the reference price. It has no database,
-  so it polls this node's `GET /v1/prices` (every `BATCHER_PRICE_REFRESH_MS`,
-  default 10 minutes) for the numbers;
+  so for each offer it asks this node's `GET /v1/prices?tokens=` for exactly that
+  offer's leg colours, caching each colour for `BATCHER_PRICE_TTL_MS` (default 10
+  minutes). It does **not** mirror the price table (Q-11);
 * **`POST /v1/offers`**, which asks the same question earlier and answers
   `422 NOT_SPONSORED` with the numbers, so a maker learns it from a readable
   response instead of an opaque failure.
@@ -1399,8 +1400,9 @@ Policy, read from the same variable names by both processes so they cannot drift
 | `BATCHER_SPONSOR_POLICY` | `enforce` \| `warn` \| `off` | `warn` | `enforce` refuses; `warn` logs what `enforce` would have refused and lets it through; `off` skips the check entirely |
 | `BATCHER_SPONSOR_UNPRICED` | `allow` \| `reject` | `allow` | what to do when a leg's token has no market price (every test token). `allow` keeps them flowing |
 | `SPONSOR_DISCOUNT_BPS` | `0`–`9999` | `250` | the threshold. On the batcher this is only a bootstrap — once the node answers, the node's `sponsor_discount` wins |
-| `BATCHER_NODE_API_URL` | URL | `http://127.0.0.1:9999` | where the batcher polls `/v1/prices` (compose: `http://kernel:9999`) |
-| `BATCHER_PRICE_REFRESH_MS` / `BATCHER_PRICE_MAX_AGE_MS` | ms | `600000` / `172800000` | poll period, and the age past which a held snapshot no longer counts as an answer |
+| `BATCHER_NODE_API_URL` | URL | `http://127.0.0.1:9999` | where the batcher asks `/v1/prices?tokens=` (compose: `http://kernel:9999`) |
+| `BATCHER_PRICE_TTL_MS` | ms | `600000` | how long a per-colour answer counts as current before it is asked for again |
+| `BATCHER_PRICE_MAX_AGE_MS` | ms | `172800000` | how old an answer may be and still be served when a re-ask FAILS. Past it the colour is unavailable. Must be ≥ the TTL |
 
 An invalid value for any of these **throws at startup** rather than falling back to
 a default: an operator who typed `enfroce` wants offers refused, and silently
@@ -1408,6 +1410,14 @@ sponsoring everything is precisely what they were preventing.
 
 A batcher that cannot reach the node behaves per `BATCHER_SPONSOR_POLICY`:
 `enforce` answers `PRICE_UNAVAILABLE`, `warn` sponsors and logs once a minute.
+Note the difference from an *unpriced* leg: "the node answered and has no market
+price for this colour" is `BATCHER_SPONSOR_UNPRICED`'s question, while "I could
+not ask" is the policy's. A colour with a cached answer younger than
+`BATCHER_PRICE_MAX_AGE_MS` is still served during an outage, so a brief node
+restart does not make every offer unavailable.
+
+(`BATCHER_PRICE_REFRESH_MS` configured the old ten-minute table poll and no longer
+does anything.)
 
 ### Manual submission (curl)
 

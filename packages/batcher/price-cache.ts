@@ -20,13 +20,17 @@
 
 import { sponsorDiscountFromBps, type PriceRow, type PriceSource } from "@zswap-da/offer-guard";
 
-/** Sources that carry a real market price. `fallback` is the demo hash price. */
-const MARKET_SOURCES: ReadonlySet<string> = new Set<PriceSource>([
-  "feed",
-  "seed",
-  "fixed",
-  "manual",
-]);
+/**
+ * Sources that carry a real market price. `fallback` is the demo hash price.
+ *
+ * Anything else the node sends is downgraded to `fallback` rather than
+ * trusted — including `fixed`, which older nodes served for the USDM peg
+ * before every asset became a fetched USD price. Downgrading is the safe
+ * direction: the offer becomes "unpriced" and BATCHER_SPONSOR_UNPRICED
+ * decides, instead of a fee being paid against a price this build cannot
+ * vouch for.
+ */
+const MARKET_SOURCES: ReadonlySet<string> = new Set<PriceSource>(["feed", "seed", "manual"]);
 
 /** One consistent read of the node's price table. */
 export interface PriceSnapshot {

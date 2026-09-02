@@ -247,8 +247,8 @@ describe("PriceCache — polling GET /v1/prices", () => {
 });
 
 describe("parsePricesBody — what counts as a market price", () => {
-  test("feed | seed | fixed | manual are priced; fallback is not", () => {
-    const sources = ["feed", "seed", "fixed", "manual", "fallback"];
+  test("feed | seed | manual are priced; fallback is not", () => {
+    const sources = ["feed", "seed", "manual", "fallback"];
     const parsed = parsePricesBody(
       body({
         tokens: sources.map((source, i) => ({

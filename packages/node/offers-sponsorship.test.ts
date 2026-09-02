@@ -272,11 +272,14 @@ describe("unpriced tokens", () => {
 });
 
 describe("a batcher refusal is 422, not 500", () => {
-  // Exactly what the batcher's HTTP server answers when validateInput refuses:
-  // a non-2xx with the adapter's message in `error`.
+  // Exactly what a REAL batcher answers when validateInput refuses — captured
+  // from one on 2026-09-02 (Brief B, B4): the SDK wraps the adapter's error, so
+  // the code is in `message` and `error` is the generic "Validation failed".
+  // Reading only `error` produced a 500; this shape is why the mapping checks
+  // both fields.
   const batcherSays = (message: string) => {
     batcherReply = () =>
-      new Response(JSON.stringify({ error: message }), {
+      new Response(JSON.stringify({ success: false, error: "Validation failed", message }), {
         status: 400,
         headers: { "content-type": "application/json" },
       });
@@ -305,6 +308,19 @@ describe("a batcher refusal is 422, not 500", () => {
       expect(body.error).toBe(message.split(":")[0]);
     },
   );
+
+  test("the code is also honoured when it arrives in `error` rather than `message`", async () => {
+    // Older/other batcher builds put the adapter message straight in `error`.
+    await priceWanted(wantPriceFor(0.975));
+    batcherReply = () =>
+      new Response(JSON.stringify({ error: "NOT_SPONSORED: wants 0.5% below reference" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    const { status, body } = await post();
+    expect(status).toBe(422);
+    expect(body.error).toBe("NOT_SPONSORED");
+  });
 
   test("any OTHER batcher failure stays a 500 — it is not the maker's fault", async () => {
     await priceWanted(wantPriceFor(0.975));

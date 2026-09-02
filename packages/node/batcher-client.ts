@@ -183,8 +183,18 @@ export async function submitBlobViaBatcher(
         : !resp.ok
           ? `HTTP ${resp.status}`
           : "malformed wait-receipt acknowledgement";
-    const refusal = sponsorshipRefusalError(reason);
-    if (refusal !== null) throw refusal;
+    // BOTH fields, and `message` is the one that usually carries it. Measured
+    // against a real batcher on 2026-09-02: the SDK wraps an adapter refusal as
+    //   {"success":false,"error":"Validation failed",
+    //    "message":"NOT_SPONSORED: wants 0.0% below reference, …"}
+    // so reading only `error` (the field `reason` above prefers) matched
+    // "Validation failed" and answered 500 — the exact defect this mapping
+    // exists to remove.
+    const refusal = [record?.error, record?.message]
+      .filter((value): value is string => typeof value === "string")
+      .map(sponsorshipRefusalError)
+      .find((value) => value !== null);
+    if (refusal !== undefined && refusal !== null) throw refusal;
     throw new Error(`Failed to submit blob to Celestia via batcher: ${reason}`);
   }
 

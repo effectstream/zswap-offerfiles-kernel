@@ -7,7 +7,9 @@ import {
   resolveOfferTtlSeconds,
   resolveRootWindowSeconds,
 } from "./network-windows.ts";
-import { MIP6_NAMESPACE_ID_SUFFIX_HEX } from "@zswap-da/offer-guard";
+import { MIP6_NAMESPACE_ID_SUFFIX_HEX, sponsorDiscountFromBps } from "@zswap-da/offer-guard";
+import { parsePriceMapEnv, type PriceMapEntry } from "@zswap-da/database";
+import { DEFAULT_SPONSOR_DISCOUNT_BPS } from "./market-mock.ts";
 
 // Instance name of the Celestia blob primitive. This is the value the
 // framework writes to effectstream.primitive_accounting.primitive_name, and
@@ -165,6 +167,42 @@ export const exactFilesReadTimeoutMs = (): number => {
 // state machine emits is ever published.
 export const isEventGatePollEnabled = (): boolean =>
   (getEnv("EVENT_GATE_POLL_ENABLED") ?? "true") === "true";
+
+// ── Sponsorship threshold ──────────────────────────────────────────────────
+//
+// How far below the reference price an offer must be priced before this
+// deployment will pay the Celestia fee for it. Basis points, not a fraction:
+// the quote's suggested amount is exact bigint arithmetic and 0.025 as a
+// double is not 25/1000, so the wire format has to be an integer.
+//
+// The batcher reads the SAME variable name (packages/batcher/config.ts) but
+// prefers the value the node publishes in GET /v1/prices, so a mismatch
+// between the two processes cannot make the UI promise what the batcher
+// refuses. Read per call, not at import, for the same reason as the knobs
+// above: a test (or a router built after the env was set) must see it.
+export const sponsorDiscountBps = (): number => {
+  const raw = getEnv("SPONSOR_DISCOUNT_BPS") ?? String(DEFAULT_SPONSOR_DISCOUNT_BPS);
+  if (!/^[0-9]{1,4}$/.test(raw)) return DEFAULT_SPONSOR_DISCOUNT_BPS;
+  const parsed = Number(raw);
+  return parsed < 10_000 ? parsed : DEFAULT_SPONSOR_DISCOUNT_BPS;
+};
+
+/** The same threshold as a fraction, for evaluateSponsorship(). */
+export const sponsorDiscount = (): number => sponsorDiscountFromBps(sponsorDiscountBps());
+
+// Default asset map overrides — `NAME_OR_COLOR=<asset_id>[:decimals],…`,
+// merged over the built-in map in @zswap-da/database. Parsed once per distinct
+// raw value: parsePriceMapEnv throws on a typo, and re-throwing that on every
+// quote would turn one bad character into an outage instead of a startup
+// failure.
+let priceMapCache: { raw: string; parsed: ReadonlyMap<string, PriceMapEntry> } | null = null;
+export const priceMapOverrides = (): ReadonlyMap<string, PriceMapEntry> => {
+  const raw = getEnv("PRICE_FEED_MAP") ?? "";
+  if (priceMapCache === null || priceMapCache.raw !== raw) {
+    priceMapCache = { raw, parsed: parsePriceMapEnv(raw) };
+  }
+  return priceMapCache.parsed;
+};
 
 // Demo token registry (POST /api/known-tokens). known_tokens is a manually
 // curated convenience table: the Midnight token-metadata standard is not live,

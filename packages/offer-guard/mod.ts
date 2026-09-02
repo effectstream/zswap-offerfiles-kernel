@@ -255,3 +255,17 @@ export class DedupStore {
     return this.seen.size;
   }
 }
+
+// The sponsorship rule, shared by the quote, the node's POST /v1/offers
+// pre-check and the batcher's validateInput. Re-exported here so callers have
+// one import from this package, exactly as for the guard ladder above.
+export {
+  evaluateSponsorship,
+  sponsorDiscountFromBps,
+  sponsorshipReason,
+  SPONSORSHIP_EPSILON_USD,
+  type PriceRow,
+  type PriceSource,
+  type SponsorshipLegs,
+  type SponsorshipVerdict,
+} from "./sponsorship.ts";

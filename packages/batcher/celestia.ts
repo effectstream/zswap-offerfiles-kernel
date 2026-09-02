@@ -249,7 +249,9 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
       // The batcher cannot tell a good trade from a bad one right now. Which
       // way that should fail is a deployment decision, not a code decision:
       // `enforce` protects the wallet, `warn` protects the site.
-      const age = cache?.ageMs();
+      // `cache === null` first, so `age` narrows to `number | null` rather
+      // than carrying an `undefined` TypeScript cannot rule out later.
+      const age = cache === null ? null : cache.ageMs();
       const detail =
         cache === null
           ? "no price source configured"

@@ -33,6 +33,8 @@ import {
   type PriceMapEntry,
 } from "@zswap-da/database";
 
+import type { PriceRow } from "@zswap-da/offer-guard";
+
 import { priceMapOverrides, sponsorDiscount } from "./env.ts";
 import { priceOf } from "./market-mock.ts";
 
@@ -132,6 +134,55 @@ function resolveWithoutWriting(
     };
   }
   return null;
+}
+
+/**
+ * Steps 1-3 for ONE colour, without writing anything. Returns null when the
+ * token has no price at all.
+ *
+ * This is what the fee-sponsorship pre-check uses. It must NOT take the quote's
+ * step 4 (write the demo price): a submission that is about to be refused would
+ * otherwise leave a permanent `fallback` row behind for a colour nobody ever
+ * traded, and — worse — the FIRST submission of an unmapped token would create
+ * the row that makes the SECOND one look priced.
+ */
+export async function resolveTokenPriceReadOnly(
+  dbConn: any,
+  color: string,
+  ctx: PricingContext,
+): Promise<ResolvedTokenPrice | null> {
+  const existing = (await getTokenPriceRow.run({ token_color: color }, dbConn))[0];
+  const token = (await getKnownTokenByColor.run({ token_color: color }, dbConn))[0] as
+    | TokenRow
+    | undefined;
+  return resolveWithoutWriting(token, existing, ctx);
+}
+
+/**
+ * Price rows for a set of colours, in the shape `evaluateSponsorship` wants —
+ * and by exactly the same resolution order the quote and `/v1/prices` use, so
+ * the node's pre-check, the maker's quote and the batcher's gate all price a
+ * token identically (D4/D6).
+ *
+ * A colour with no price at all is simply ABSENT from the map, which
+ * `evaluateSponsorship` reads as unpriced — the same verdict a `fallback` row
+ * produces. Reads are sequential and deduped: `dbConn` is one pg client, which
+ * queues concurrent queries rather than running them in parallel.
+ */
+export async function pricesForColors(
+  dbConn: any,
+  colors: readonly string[],
+): Promise<Map<string, PriceRow>> {
+  const wanted = [...new Set(colors.map((color) => color.toLowerCase()))];
+  const ctx = await loadPricingContext(dbConn);
+  const prices = new Map<string, PriceRow>();
+  for (const color of wanted) {
+    const resolved = await resolveTokenPriceReadOnly(dbConn, color, ctx);
+    if (resolved !== null) {
+      prices.set(color, { price_usd: resolved.price_usd, source: resolved.source });
+    }
+  }
+  return prices;
 }
 
 /**

@@ -242,11 +242,14 @@ export class PriceCache {
 
   /** One line an operator can read: is this batcher actually price-aware? */
   describe(): string {
-    const age = this.ageMs();
-    return this.current === null
-      ? `prices=NONE (${this.everAnswered ? "cleared" : "never answered"}) node=${this.pricesUrl}`
-      : `prices=${this.current.prices.size} tokens age=${Math.round(age! / 1000)}s ` +
-        `discount=${(this.current.sponsorDiscount * 100).toFixed(2)}% node=${this.pricesUrl}`;
+    const current = this.current;
+    if (current === null) {
+      return `prices=NONE (${this.everAnswered ? "cleared" : "never answered"}) node=${this.pricesUrl}`;
+    }
+    return (
+      `prices=${current.prices.size} tokens age=${Math.round((this.now() - current.fetchedAt) / 1000)}s ` +
+      `discount=${(current.sponsorDiscount * 100).toFixed(2)}% node=${this.pricesUrl}`
+    );
   }
 }
 

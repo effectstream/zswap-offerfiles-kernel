@@ -287,6 +287,15 @@ services:
       API_RATE_LIMIT_ALLOWLIST: ${API_RATE_LIMIT_ALLOWLIST:-}
       API_RATE_LIMIT_MAX: ${API_RATE_LIMIT_MAX:-6000}
       ENABLE_TOKEN_REGISTRY: ${ENABLE_TOKEN_REGISTRY:-true}
+      # The SAME two knobs the batcher reads: POST /v1/offers mirrors the
+      # batcher's fee gate so a maker gets a readable 422 instead of an opaque
+      # failure. They must be set to the same values in both services — a node
+      # in `enforce` with a batcher in `warn` refuses offers the batcher would
+      # have paid for.
+      BATCHER_SPONSOR_POLICY: ${BATCHER_SPONSOR_POLICY:-warn}
+      BATCHER_SPONSOR_UNPRICED: ${BATCHER_SPONSOR_UNPRICED:-allow}
+      SPONSOR_DISCOUNT_BPS: ${SPONSOR_DISCOUNT_BPS:-250}
+      PRICE_FEED_MAP: ${PRICE_FEED_MAP:-}
     volumes:
       - offerfiles-deploy:/srv/offerfiles-deploy:ro
     ports:
@@ -321,6 +330,16 @@ services:
       # other wallet on the stack: two facades on one seed against one node
       # force each other's connection down.
       BATCHER_WALLET_SEED: ${BATCHER_WALLET_SEED:-0000000000000000000000000000000000000000000000000000000000000003}
+      # Fee sponsorship. The batcher has no database, so it polls the kernel's
+      # GET /v1/prices for reference prices and for the threshold the UI already
+      # promised the maker. Defaults (warn/allow) change nothing about what gets
+      # published — they only log what `enforce` would have refused.
+      BATCHER_NODE_API_URL: ${BATCHER_NODE_API_URL:-http://kernel:9999}
+      BATCHER_SPONSOR_POLICY: ${BATCHER_SPONSOR_POLICY:-warn}
+      BATCHER_SPONSOR_UNPRICED: ${BATCHER_SPONSOR_UNPRICED:-allow}
+      BATCHER_PRICE_REFRESH_MS: ${BATCHER_PRICE_REFRESH_MS:-600000}
+      BATCHER_PRICE_MAX_AGE_MS: ${BATCHER_PRICE_MAX_AGE_MS:-172800000}
+      SPONSOR_DISCOUNT_BPS: ${SPONSOR_DISCOUNT_BPS:-250}
     volumes:
       - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - batcher-data:/var/lib/batcher

@@ -1,4 +1,4 @@
-# deploy/images/kernel/Dockerfile — ONE image, EIGHT single-process entrypoints.
+# deploy/images/kernel/Dockerfile — ONE image, NINE single-process entrypoints.
 #
 # Build context: the repository ROOT of this working clone (never a git clone of
 # it: the branch this deployment belongs to is deliberately unpushed, so a
@@ -18,6 +18,7 @@
 #   entrypoint-kernel.sh    exec bun run packages/node/main.dev.ts      (:9999)
 #   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.dev.ts (:3334)
 #   entrypoint-solver.sh    exec bun run start.solver.ts
+#   entrypoint-price-feed.sh  daily CoinGecko refresh of asset_prices
 #   entrypoint-scripts.sh   the E1 provisioning / assertion driver
 #   entrypoint-solver-provision.sh  one-shot: fund + mint the solver BOTH tokens
 #   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
@@ -116,6 +117,7 @@ COPY deploy/images/kernel/entrypoint-deploy.sh   /usr/local/bin/entrypoint-deplo
 COPY deploy/images/kernel/entrypoint-kernel.sh   /usr/local/bin/entrypoint-kernel.sh
 COPY deploy/images/kernel/entrypoint-batcher.sh  /usr/local/bin/entrypoint-batcher.sh
 COPY deploy/images/kernel/entrypoint-solver.sh   /usr/local/bin/entrypoint-solver.sh
+COPY deploy/images/kernel/entrypoint-price-feed.sh /usr/local/bin/entrypoint-price-feed.sh
 COPY deploy/images/kernel/entrypoint-scripts.sh  /usr/local/bin/entrypoint-scripts.sh
 # Devnet seeding one-shots. Without these the stack comes up entirely healthy
 # and quotes nothing — see each script's header.

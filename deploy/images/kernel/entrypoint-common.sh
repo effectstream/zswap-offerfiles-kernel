@@ -43,6 +43,12 @@ set -euo pipefail
 #     and `parsePositiveBigint` rejects "". Three empty strings therefore count
 #     as "all set" and fail. Unsetting them here is what makes DUST admission
 #     genuinely optional in the deployment.
+#   * COINGECKO_BASE_URL / PRICE_FEED_* — `ENV.getString(x, default)` would
+#     take "" as the value, and an empty base URL turns every request into a
+#     relative path against nothing. COINGECKO_API_KEY is in the list for a
+#     different reason: "" and unset must both mean "no key", so the service
+#     idles (loop) or exits 64 (--once) rather than sending an empty header
+#     and reading CoinGecko's 401 as an outage.
 for _optional_env in \
   CELESTIA_NAMESPACE \
   CELESTIA_AUTH_TOKEN \
@@ -53,7 +59,12 @@ for _optional_env in \
   SOLVER_FEE_SIZING_TAKER_INPUTS \
   SOLVER_DUST_MAX_PER_JOB \
   SOLVER_DUST_MAX_PER_WINDOW \
-  SOLVER_DUST_WINDOW_MS
+  SOLVER_DUST_WINDOW_MS \
+  COINGECKO_API_KEY \
+  COINGECKO_BASE_URL \
+  PRICE_FEED_INTERVAL_MS \
+  PRICE_FEED_REQUEST_SPACING_MS \
+  PRICE_FEED_ASSETS
 do
   if [ -z "${!_optional_env:-}" ]; then unset "${_optional_env}"; fi
 done

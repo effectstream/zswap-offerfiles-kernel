@@ -1,0 +1,25 @@
+{
+  "name": "@zswap-da/price-feed",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/run.ts"
+  },
+  "scripts": {
+    "start": "bun run price-feed.dev.ts",
+    "once": "bun run price-feed.dev.ts --once",
+    "start:preview": "bun run price-feed.preview.ts",
+    "start:mainnet": "bun run price-feed.mainnet.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@effectstream/utils": "0.103.1",
+    "@zswap-da/database": "workspace:*",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@effectstream/db": "0.103.1",
+    "@types/pg": "^8.11.10"
+  }
+}

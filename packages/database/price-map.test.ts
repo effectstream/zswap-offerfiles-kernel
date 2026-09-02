@@ -10,6 +10,7 @@ import {
   parsePriceMapEnv,
   priceMapKey,
   resolveAssetId,
+  toDecimalString,
   tokenPriceFromAsset,
 } from "./price-map.ts";
 
@@ -124,6 +125,15 @@ test("tokenPriceFromAsset accepts numbers, including exponent spellings", () => 
   expect(tokenPriceFromAsset(1e-7, 0)).toBe("0.0000001");
   expect(tokenPriceFromAsset(1e21, 0)).toBe("1000000000000000000000");
   expect(tokenPriceFromAsset(0, 6)).toBe("0");
+});
+
+test("toDecimalString keeps the provider's spelling, without exponents", () => {
+  expect(toDecimalString(77387)).toBe("77387");
+  expect(toDecimalString(0.01918181)).toBe("0.01918181");
+  expect(toDecimalString(0.999818)).toBe("0.999818");
+  expect(toDecimalString(1e-7)).toBe("0.0000001");
+  expect(toDecimalString("2393.2800")).toBe("2393.28");
+  expect(() => toDecimalString("")).toThrow(/not a decimal number/);
 });
 
 test("tokenPriceFromAsset rejects nonsense rather than returning NaN", () => {

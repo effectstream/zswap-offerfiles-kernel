@@ -24,7 +24,8 @@
     "docs:preview": "bun run --filter @zswap-da/docs-playground preview",
     "typecheck:backend": "bun run scripts/backend-typecheck.ts",
     "typecheck:solver": "bun run scripts/solver-typecheck.ts",
-    "typecheck": "bun run typecheck:backend && bun run typecheck:solver",
+    "typecheck:price-feed": "bun run scripts/price-feed-typecheck.ts",
+    "typecheck": "bun run typecheck:backend && bun run typecheck:solver && bun run typecheck:price-feed",
     "test:held-open": "bun test ./packages/database/held-open-transaction.pgtest.ts"
   },
   "dependencies": {

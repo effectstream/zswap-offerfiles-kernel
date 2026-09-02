@@ -36,6 +36,7 @@ Static gates only (no stack, safe on a shared host):
 | `batcher` | kernel image | `bun run packages/batcher/batcher.dev.ts` | 3334 | `13334` |
 | `relay` | `images/relay` (reference @ `061f4d3`, unmodified) | `node packages/relay/dist/relay-main.js` | 3000 / 9001 | `13000` / `19001` |
 | `solver` | kernel image | `bun run start.solver.ts` | — | — |
+| `price-feed` | kernel image | `bun run packages/price-feed/price-feed.dev.ts` (profile `prices`) | — | — |
 | `scripts` | kernel image | E2E driver (profile `e2e`) | — | — |
 
 ## Why there is no orchestrator here
@@ -113,6 +114,38 @@ control.
 > rung and no more. See the boxed note in `.env.example`, and
 > `SOLVER_FEE_SIZING_TAKER_INPUTS` beside it — the one fee knob, where raising
 > the number spends more real DUST.
+
+## The price feed
+
+`price-feed` refreshes `asset_prices` — the USD reference prices behind
+`GET /v1/prices`, `GET /v1/quote` and the sponsorship gate — from CoinGecko
+once a day. It is **opt-in** (`profiles: ["prices"]`) and the stack is complete
+without it: `000-init.sql` seeds real prices captured on 2026-09-02, so a fresh
+database already quotes 1 WBTC ≈ 32 WETH rather than the colour-hash demo rate.
+
+```bash
+# one refresh now, then exit (0 = every asset updated, 2 = something did not)
+docker compose run --rm price-feed --once
+
+# or leave it running, one cycle a day
+docker compose --profile prices up -d price-feed
+```
+
+`COINGECKO_API_KEY` is the only secret in this stack. It lives in `.env`, is
+passed as the `x-cg-demo-api-key` **header** (never a query parameter, which
+would put it in every access log), and is never printed — the service's startup
+line says `key=present` or `key=ABSENT`. With no key, `--once` exits 64 and loop
+mode logs one line and **idles**; it deliberately does not exit, because a
+non-zero exit under `restart: unless-stopped` is a crash loop and the stack is
+usable on the seeds meanwhile.
+
+One cycle is four requests — `bitcoin`, `ethereum`, `usd-coin`, `midnight-3` —
+issued one at a time at least a second apart. `usdm` is a fixed $1 peg with no
+listing and is never requested; the database refuses to overwrite it even if it
+is named in `PRICE_FEED_ASSETS`. A `429` stops the cycle where it stands, keeping
+what was already written, and the failure is visible in
+`GET /v1/prices.feed.last_error`. Roughly 5 calls a day against the demo plan's
+10 000 credits a month.
 
 ## Observing the relay
 

@@ -194,6 +194,16 @@ function renderDecimal({ sign, digits, exponent }: Decimal): string {
 }
 
 /**
+ * Normalise a decimal number or string to its exact plain decimal spelling —
+ * no exponent notation, no trailing zeros, no float noise. The price feed uses
+ * it on the number JSON.parse hands back so what reaches the NUMERIC column is
+ * the value CoinGecko printed, not `1e-7`.
+ */
+export function toDecimalString(value: string | number): string {
+  return renderDecimal(parseDecimal(value));
+}
+
+/**
  * Per-base-unit price of a token from its asset's per-coin price:
  * `assetPriceUsd / 10^decimals`, EXACTLY.
  *

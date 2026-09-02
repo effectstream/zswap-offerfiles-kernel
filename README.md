@@ -131,7 +131,7 @@ One cycle is five requests (`bitcoin`, `ethereum`, `usd-coin`, `midnight-3`,
 | `COINGECKO_BASE_URL` | `https://api.coingecko.com/api/v3` | Point at a stub in tests |
 | `PRICE_FEED_INTERVAL_MS` | `86400000` | Loop period |
 | `PRICE_FEED_REQUEST_SPACING_MS` | `1000` | Minimum gap between two requests |
-| `PRICE_FEED_ASSETS` | the four non-fixed seeded ids | Comma-separated CoinGecko ids |
+| `PRICE_FEED_ASSETS` | the five seeded ids | Comma-separated CoinGecko ids |
 | `PRICE_FEED_MAP` | — | Node + feed: `NAME_OR_COLOR=<asset_id>[:decimals],…`. A malformed entry is a startup error, never a silent skip |
 | `SPONSOR_DISCOUNT_BPS` | `250` | How far below reference an offer must be priced to earn fee sponsorship. Published in `/v1/prices.sponsor_discount` |
 | `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PW` / `DB_NAME` | `127.0.0.1` / `5432` / `postgres` / `postgres` / `postgres` | Where the feed writes |

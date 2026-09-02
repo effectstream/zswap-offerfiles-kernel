@@ -4,6 +4,7 @@ import rateLimit from "@fastify/rate-limit";
 import {
   getKnownTokens,
   insertKnownToken,
+  getAssetPrices,
   getLatestEffectstreamBlock,
   getTokenPrice,
   upsertTokenPrice,
@@ -599,6 +600,14 @@ export const apiRouter: StartConfigApiRouter = async function (
             color: { type: "string" },
             name: { type: "string" },
             kind: { type: "string", enum: ["shielded", "unshielded"] },
+            // Base units per coin. Omitted means 0 (base unit == coin), which
+            // is what the faucet mints; a bridged token that mints 10^6 units
+            // per coin states it, or its USD price would be off by 10^6.
+            decimals: { type: "integer", minimum: 0, maximum: 38 },
+            // Reference asset (a CoinGecko id). Omitted means "price it by
+            // NAME through price-map.ts", which is right for every token the
+            // default map already knows.
+            asset_id: { type: "string" },
           },
         },
       },
@@ -634,9 +643,29 @@ export const apiRouter: StartConfigApiRouter = async function (
         return reply.code(409).send({ error: `Token color already registered as "${colorCheck[0].name}"` });
       }
 
-      await insertKnownToken.run({ token_color: color, name, kind }, dbConn);
+      const decimals =
+        request.body.decimals === undefined ? null : Number(request.body.decimals);
+      const assetId =
+        request.body.asset_id === undefined
+          ? null
+          : String(request.body.asset_id).trim().toLowerCase() || null;
+      // A colour claiming an asset nobody seeded would fail the FK with a
+      // 500; answer it as the client error it is.
+      if (assetId !== null) {
+        const assets = await getAssetPrices.run(undefined, dbConn);
+        if (!assets.some((a) => a.asset_id === assetId)) {
+          return reply.code(400).send({
+            error: `Unknown asset_id "${assetId}" — known: ${assets.map((a) => a.asset_id).join(", ")}`,
+          });
+        }
+      }
+
+      await insertKnownToken.run(
+        { token_color: color, name, kind, decimals, asset_id: assetId },
+        dbConn,
+      );
       emitAppEvent({ type: "token_minted", name, color, kind });
-      return { success: true, color, name, kind };
+      return { success: true, color, name, kind, decimals: decimals ?? 0, asset_id: assetId };
     },
   );
 

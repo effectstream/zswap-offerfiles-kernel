@@ -244,15 +244,23 @@ their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
 - `GET /v1/known-tokens` → `[{ "id": 1, "token_color": "70ce…", "name": "tDUST", "kind": "shielded", "decimals": 0, "asset_id": null }]`
   (`decimals` and `asset_id` are new: base units per coin, and the reference asset
   a price comes from. `POST /v1/known-tokens` accepts both, optionally.)
-- `GET /v1/prices` → `{ "sponsor_discount", "feed": { "provider", "last_run_at", "last_ok_at", "last_error" }, "assets": [...], "tokens": [...] }`.
-  The reference prices behind every quote. Every price is in **USD** and nothing is
+- `GET /v1/prices?tokens=<color>[,<color>…]` → `{ "sponsor_discount", "feed": { "provider", "last_run_at", "last_ok_at", "last_error" }, "assets": [...], "tokens": [...] }`.
+  The reference prices behind every quote. **`tokens` is required**: 1-50 64-hex
+  colours, comma-separated; without it (or with a malformed or over-long list) the
+  answer is `400 { "error": "VALIDATION", "reason" }`. There is no unfiltered form —
+  ask for the pair on screen. Colours are matched case-insensitively and duplicates
+  collapse. A colour this node cannot price is **silently absent** from `tokens`
+  rather than an error, and `assets` carries only the assets the returned prices
+  came from; `sponsor_discount` and `feed` are always present, even when nothing
+  matched.
+  Every price is in **USD** and nothing is
   pinned to a dollar — the stablecoins are quoted from the provider too, so a depeg
   shows. `price_usd` is a decimal **string** and is **per base unit** (a dollar-ish
   stablecoin with 6 decimals reads about `0.000001`). Each entry carries a `source`:
   `feed` (CoinGecko), `seed` (shipped in the schema), `manual` (an operator
   override) or `fallback` (**a demo price derived from the token colour — not
   market data; label it**). `feed` is all-nulls when the
-  refresh service has never run. `tokens` omits tokens with no price at all.
+  refresh service has never run.
 - `GET /v1/pairs` → `[{ "pair_key": "…", "base_color": "…", "quote_color": "…", "trade_count": 3, "last_price": "2.0", "last_traded_at": "…", "open_count": 1 }]`
 - `GET /v1/quote?from_token=…&to_token=…&from_amount=…[&to_amount=…]` →
   `{ "from_token", "to_token", "from_amount", "market_rate", "suggested_to_amount", "to_amount", "implied_rate", "discount", "sponsored", "from_usd", "to_usd", "source", "sponsor_discount", "from_source", "to_source", "prices_updated_at" }`.

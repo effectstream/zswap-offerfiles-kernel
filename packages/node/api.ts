@@ -46,7 +46,12 @@ import {
   type AppEvent,
 } from "./event-bus.ts";
 import { quoteWithPrices } from "./market-mock.ts";
-import { listPrices, loadPricingContext, resolveTokenPrice } from "./prices.ts";
+import {
+  listPricesForTokens,
+  loadPricingContext,
+  parseTokensParam,
+  resolveTokenPrice,
+} from "./prices.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
@@ -467,11 +472,24 @@ export const apiRouter: StartConfigApiRouter = async function (
     return result;
   });
 
-  // GET /v1/prices — the reference prices behind every quote and behind the
-  // batcher's sponsorship gate, plus how old they are and where they came
-  // from. Read-only: unlike the quote path it never writes a demo row, because
-  // the batcher polls this every ten minutes.
-  server.get("/v1/prices", async () => listPrices(dbConn));
+  // GET /v1/prices?tokens=<color>[,<color>...] — the reference prices behind
+  // every quote and behind the batcher's sponsorship gate, plus how old they
+  // are and where they came from.
+  //
+  // `tokens` is REQUIRED and bounded at 50 (Q-11). There is no unfiltered
+  // form: the batcher asks per offer for that offer's leg colours and the UI
+  // asks for the pair on screen, so an endpoint whose cost grew with the size
+  // of the registry served nobody and would have become the slowest route here
+  // the first time a few thousand short-lived tokens were minted.
+  //
+  // Read-only: unlike the quote path it never writes a demo row.
+  server.get("/v1/prices", async (request: any, reply: any) => {
+    const parsed = parseTokensParam((request?.query ?? {})["tokens"]);
+    if (!Array.isArray(parsed)) {
+      return reply.code(400).send({ error: "VALIDATION", reason: parsed.reason });
+    }
+    return listPricesForTokens(dbConn, parsed);
+  });
 
   // GET /v1/quote — price quote for from→to. Prices resolve through
   // packages/prices.ts: a manual override, else the token's reference asset

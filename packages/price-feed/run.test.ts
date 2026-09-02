@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 // schedule. The database and the clock are fakes — what is under test is the
 // control flow an operator sees, not SQL (that is cycle.test.ts).
 
-import { CoinGeckoError, type AssetQuote } from "./src/coingecko.ts";
+import { CoinGeckoError, type AssetQuote, type BatchResult } from "./src/coingecko.ts";
 import type { DbConnection } from "./src/cycle.ts";
 import {
   EXIT_CONFIG,
@@ -24,6 +24,7 @@ const CONFIG: PriceFeedConfig = {
   intervalMs: 86_400_000,
   spacingMs: 1_000,
   requestTimeoutMs: 20_000,
+  batchSize: 50,
   assetIds: ["bitcoin", "ethereum"],
   db: { host: "127.0.0.1", port: 5432, user: "postgres", password: "postgres", database: "postgres" },
 };
@@ -71,10 +72,20 @@ function harness(
       state.cycles++;
       return { db: options.db ?? fakeDb(), end: async () => {} };
     },
-    fetchAsset: async (assetId) => {
-      const answer = respond(assetId, state.cycles - 1);
-      if (answer instanceof Error) throw answer;
-      return answer;
+    fetchAssets: async (assetIds) => {
+      const batch: BatchResult = { quotes: [], failures: [], rateLimit: {} };
+      for (const assetId of assetIds) {
+        const answer = respond(assetId, state.cycles - 1);
+        // A CoinGeckoError is a REQUEST failure, exactly as the real module
+        // throws it; anything else is a per-id problem inside a 200.
+        if (answer instanceof CoinGeckoError) throw answer;
+        if (answer instanceof Error) {
+          batch.failures.push({ assetId, kind: "malformed", message: answer.message });
+          continue;
+        }
+        batch.quotes.push(answer);
+      }
+      return batch;
     },
     sleep: async () => {},
     wait: async (ms) => {
@@ -123,15 +134,22 @@ test("--once exits 0 when every asset updated", async () => {
 });
 
 test("--once exits 2 when an asset failed", async () => {
+  const h = harness((id) => (id === "ethereum" ? new Error("ethereum: usd is null") : ok(id)));
+  expect(await runOnce(h.deps, CONFIG)).toBe(EXIT_CYCLE_INCOMPLETE);
+});
+
+test("--once exits 2 when a whole chunk failed", async () => {
   const h = harness((id) =>
-    id === "ethereum" ? new CoinGeckoError("boom", "http", "ethereum", 500) : ok(id),
+    id === "bitcoin"
+      ? new CoinGeckoError("boom", "http", ["bitcoin", "ethereum"], 500)
+      : ok(id),
   );
   expect(await runOnce(h.deps, CONFIG)).toBe(EXIT_CYCLE_INCOMPLETE);
 });
 
 test("--once exits 2 when a 429 cut the cycle short", async () => {
   const h = harness((id) =>
-    id === "bitcoin" ? new CoinGeckoError("429", "rate_limit", "bitcoin", 429) : ok(id),
+    id === "bitcoin" ? new CoinGeckoError("429", "rate_limit", ["bitcoin"], 429) : ok(id),
   );
   expect(await runOnce(h.deps, CONFIG)).toBe(EXIT_CYCLE_INCOMPLETE);
 });
@@ -145,17 +163,22 @@ test("--once counts the stablecoin like every other asset", async () => {
   );
 
   const partial = harness((id) =>
-    id === "usdm-2" ? new CoinGeckoError("boom", "http", "usdm-2", 500) : ok(id),
+    id === "usdm-2" ? new Error("usdm-2: not present in the response (unknown id?)") : ok(id),
   );
   expect(await runOnce(partial.deps, { ...CONFIG, assetIds: ["bitcoin", "usdm-2"] })).toBe(
     EXIT_CYCLE_INCOMPLETE,
   );
 });
 
-test("--once without a key exits 64 and says why, without running a cycle", async () => {
+test("--once without a key WARNS and exits non-zero, without running a cycle", async () => {
   const h = harness((id) => ok(id));
-  expect(await runOnce(h.deps, { ...CONFIG, apiKey: null })).toBe(EXIT_CONFIG);
+  const code = await runOnce(h.deps, { ...CONFIG, apiKey: null });
+  expect(code).toBe(EXIT_CONFIG);
+  expect(code).not.toBe(EXIT_OK);
   expect(h.cycles).toBe(0);
+  // Q-11 asks for a WARNING, in those words: a stack with no key is a
+  // supported configuration, not a broken one.
+  expect(h.errors.join("\n")).toContain("WARNING");
   expect(h.errors.join("\n")).toContain("COINGECKO_API_KEY is not set");
   // It must also say the stack is fine without it, or an operator will think
   // the deployment is broken.
@@ -195,7 +218,7 @@ test("loop mode runs a cycle at start and then one per interval", async () => {
 test("a failed cycle walks the retry ladder, which is bounded", async () => {
   // Every cycle fails, so the schedule is the ladder and then the interval —
   // never something that keeps shrinking, and never an unbounded backoff.
-  const h = harness(() => new CoinGeckoError("down", "http", "x", 503), { stopAfterCycles: 6 });
+  const h = harness(() => new CoinGeckoError("down", "http", ["x"], 503), { stopAfterCycles: 6 });
   await runLoop(h.deps, CONFIG, h.controller.signal);
   expect(h.waits).toEqual([
     RETRY_LADDER_MS[0]!,
@@ -211,7 +234,7 @@ test("a failed cycle walks the retry ladder, which is bounded", async () => {
 test("the ladder resets after a success", async () => {
   // cycle 0 fails → 5 min; cycle 1 succeeds → interval; cycle 2 fails → 5 min again.
   const h = harness((_id, cycle) =>
-    cycle === 1 ? ok("x") : new CoinGeckoError("down", "http", "x", 503),
+    cycle === 1 ? ok("x") : new CoinGeckoError("down", "http", ["x"], 503),
   { stopAfterCycles: 3 });
   await runLoop(h.deps, CONFIG, h.controller.signal);
   expect(h.waits).toEqual([RETRY_LADDER_MS[0]!, CONFIG.intervalMs, RETRY_LADDER_MS[0]!]);
@@ -228,17 +251,27 @@ test("a cycle that throws (database down) does not kill the loop", async () => {
   expect(h.waits).toEqual([RETRY_LADDER_MS[0]!]);
 });
 
-test("loop mode without a key idles instead of crash-looping", async () => {
+test("loop mode without a key WARNS at start and on every tick, and runs nothing", async () => {
   const h = harness((id) => ok(id));
-  // The idle wait is what the abort has to interrupt.
+  // Three ticks, then abort — the loop must keep waiting the normal interval
+  // rather than exiting (a non-zero exit under `restart: unless-stopped` is a
+  // crash loop) and rather than idling silently forever.
+  let ticks = 0;
   h.deps.wait = async () => {
-    h.waits.push(-1);
+    h.waits.push(CONFIG.intervalMs);
+    if (++ticks >= 3) h.controller.abort();
   };
   const code = await runLoop(h.deps, { ...CONFIG, apiKey: null }, h.controller.signal);
   expect(code).toBe(EXIT_OK);
   expect(h.cycles).toBe(0);
-  expect(h.logs.join("\n")).toContain("idling");
-  expect(h.waits).toEqual([-1]);
+  expect(h.waits).toEqual([CONFIG.intervalMs, CONFIG.intervalMs, CONFIG.intervalMs]);
+
+  // One warning at start, then one per completed tick. A process that logged
+  // once at startup and then went quiet for a week would be indistinguishable
+  // from one that is quietly working.
+  const warnings = h.errors.filter((line) => line.includes("WARNING"));
+  expect(warnings).toHaveLength(3);
+  expect(warnings[0]).toContain("COINGECKO_API_KEY is not set");
 });
 
 test("an already-aborted signal runs nothing", async () => {

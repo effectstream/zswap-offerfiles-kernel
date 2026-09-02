@@ -151,27 +151,17 @@ export default {
       dependsOn: [...midnightDeps, midnightMintTestTokens, "sync"],
     },
 
-    // The price feed refreshes asset_prices from CoinGecko once a day.
+    // The price feed is deliberately NOT registered here (Q-11).
     //
-    // Registered ONLY when a key is present, and never a system-dependency.
-    // The schema ships seeded reference prices (000-init.sql), so a dev stack
-    // quotes real BTC/ETH ratios with this process absent — which is the whole
-    // reason the seeds exist. Starting it without a key would only add a
-    // process that logs "no key" and idles.
+    // Development runs on the reference prices seeded in 000-init.sql, which
+    // is the whole reason the seeds exist: a dev stack quotes real BTC/ETH
+    // ratios with no key, no network and no extra process. Running the feed
+    // here would spend a shared, metered CoinGecko budget every time somebody
+    // starts a stack, to replace correct numbers with slightly newer ones.
     //
-    // Depends on the migrations having run: it writes asset_prices, and `sync`
-    // is what applies the schema.
-    ...(process.env["COINGECKO_API_KEY"]
-      ? [
-          {
-            name: "price-feed",
-            description: "Daily reference prices from CoinGecko (asset_prices)",
-            args: ["run", "packages/price-feed/price-feed.dev.ts"],
-            waitToExit: false,
-            dependsOn: [DbNames.PGLITE_WAIT, "sync"],
-          },
-        ]
-      : []),
+    // To refresh prices deliberately: `bun run --filter @zswap-da/price-feed
+    // once` with COINGECKO_API_KEY set, or the opt-in compose service
+    // (`--profile prices` in deploy/).
 
     // The frontend lives in paima-engine/templates/zswap-da — run it separately
     // against this stack (vite on :10600, fetches API + ZK keys from :9999).

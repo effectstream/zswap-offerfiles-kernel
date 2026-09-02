@@ -22,7 +22,7 @@
 import {
   getAssetPrices,
   getKnownTokenByColor,
-  getKnownTokensWithAssets,
+  getKnownTokensByColors,
   getPriceFeedStatus,
   getTokenPriceRow,
   getTokenPriceRows,
@@ -97,9 +97,16 @@ function resolveWithoutWriting(
   token: TokenRow | undefined,
   existing: { price_usd: string; source: string; updated_at: unknown } | undefined,
   ctx: PricingContext,
-): ResolvedTokenPrice | null {
+): (ResolvedTokenPrice & { asset_used: string | null }) | null {
   if (existing?.source === "manual") {
-    return { price_usd: existing.price_usd, source: "manual", updated_at: iso(existing.updated_at) };
+    return {
+      price_usd: existing.price_usd,
+      source: "manual",
+      updated_at: iso(existing.updated_at),
+      // A manual override wins over the asset, so no asset explains this
+      // price and /v1/prices must not list one as if it did.
+      asset_used: null,
+    };
   }
 
   if (token !== undefined) {
@@ -111,12 +118,18 @@ function resolveWithoutWriting(
         // 'seed' | 'feed', constrained by the CHECK on asset_prices.
         source: asset.source as TokenPriceSource,
         updated_at: iso(asset.updated_at),
+        asset_used: asset.asset_id,
       };
     }
   }
 
   if (existing !== undefined) {
-    return { price_usd: existing.price_usd, source: "fallback", updated_at: iso(existing.updated_at) };
+    return {
+      price_usd: existing.price_usd,
+      source: "fallback",
+      updated_at: iso(existing.updated_at),
+      asset_used: null,
+    };
   }
   return null;
 }
@@ -138,7 +151,10 @@ export async function resolveTokenPrice(
     | undefined;
 
   const resolved = resolveWithoutWriting(token, existing, ctx);
-  if (resolved !== null) return resolved;
+  if (resolved !== null) {
+    const { asset_used: _unused, ...price } = resolved;
+    return price;
+  }
 
   const fallback = priceOf(color);
   await upsertTokenPrice.run({ token_color: color, price_usd: fallback }, dbConn);
@@ -176,22 +192,82 @@ export interface PricesResponse {
   }[];
 }
 
+/** The most colours one `GET /v1/prices?tokens=` may name (Q-11). */
+export const MAX_PRICE_TOKENS = 50;
+
+/** A rejected `?tokens=` value, with the reason the 400 should carry. */
+export interface TokensParamError {
+  reason: string;
+}
+
 /**
- * GET /v1/prices' whole body. Read-only: a token with no price at all is
- * simply absent from `tokens` rather than being given a demo row here — this
- * endpoint is polled (by the batcher, every ten minutes), and an endpoint that
- * writes on read would fill token_prices with demo rows for colours nobody
- * ever traded.
+ * Parse and validate the required `tokens` query parameter: 1-50 64-hex
+ * colours, comma-separated. Returns the deduplicated, lower-cased list or the
+ * reason it is not acceptable.
+ *
+ * Colours are NORMALISED to lower case rather than refused in upper case,
+ * exactly as GET /v1/quote already treats `from_token`/`to_token`. Two routes
+ * in one API disagreeing about the case of the same 64 hex characters would be
+ * a trap, not a contract; the response always spells them lower case.
  */
-export async function listPrices(dbConn: any): Promise<PricesResponse> {
+export function parseTokensParam(raw: unknown): string[] | TokensParamError {
+  if (raw === undefined || raw === null) {
+    return { reason: `tokens is required: 1-${MAX_PRICE_TOKENS} comma-separated 64-hex token colors` };
+  }
+  if (typeof raw !== "string") {
+    return { reason: "tokens must be a single comma-separated string" };
+  }
+  const parts = raw.split(",").map((part) => part.trim()).filter((part) => part !== "");
+  if (parts.length === 0) {
+    return { reason: `tokens is required: 1-${MAX_PRICE_TOKENS} comma-separated 64-hex token colors` };
+  }
+  // Bound BEFORE validating each entry: the length check is what stops a
+  // megabyte of commas from costing 60 000 regex tests.
+  if (parts.length > MAX_PRICE_TOKENS) {
+    return { reason: `tokens accepts at most ${MAX_PRICE_TOKENS} colors, got ${parts.length}` };
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of parts) {
+    const color = part.toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(color)) {
+      return { reason: `tokens entry "${part}" is not a 64-hex token color` };
+    }
+    if (seen.has(color)) continue;
+    seen.add(color);
+    out.push(color);
+  }
+  return out;
+}
+
+/**
+ * GET /v1/prices' body for a BOUNDED set of colours.
+ *
+ * `tokens` is required (Q-11): the unfiltered form scaled with the size of the
+ * registry, and both callers — the batcher's gate and the UI's Market header —
+ * only ever want the two colours of the pair in front of them. A colour that
+ * resolves to no price is silently absent rather than an error, because "this
+ * token has no reference price" is an answer, not a client mistake. `assets`
+ * carries only the assets that actually BACKED one of the returned prices, so
+ * every row in it explains a row in `tokens`.
+ *
+ * Read-only: a token with no price at all is not given a demo row here. The
+ * quote path still writes one (Q-11 keeps that deliberately, so an operator
+ * can inspect and override it), but a lookup must not create state.
+ */
+export async function listPricesForTokens(
+  dbConn: any,
+  colors: readonly string[],
+): Promise<PricesResponse> {
   const ctx = await loadPricingContext(dbConn);
   // Sequential, not Promise.all: `dbConn` is ONE pg client (PGLITE=true is
   // single-connection mode), and pg queues concurrent queries on a client with
   // a deprecation warning rather than running them in parallel. Three
   // small reads in a row cost nothing and keep the connection honest.
   const statusRows = await getPriceFeedStatus.run(undefined, dbConn);
-  const tokenRows = await getKnownTokensWithAssets.run(undefined, dbConn);
-  const priceRows = await getTokenPriceRows.run(undefined, dbConn);
+  const wanted = [...colors];
+  const tokenRows = await getKnownTokensByColors.run({ token_colors: wanted }, dbConn);
+  const priceRows = await getTokenPriceRows.run({ token_colors: wanted }, dbConn);
 
   const overrides = new Map(
     (priceRows as unknown as { token_color: string; price_usd: string; source: string; updated_at: unknown }[]).map(
@@ -201,16 +277,19 @@ export async function listPrices(dbConn: any): Promise<PricesResponse> {
 
   const status = statusRows[0];
   const tokens: PricesResponse["tokens"] = [];
+  const assetsUsed = new Set<string>();
   for (const token of tokenRows as unknown as TokenRow[]) {
     const resolved = resolveWithoutWriting(token, overrides.get(token.token_color), ctx);
     if (resolved === null) continue;
+    const { asset_used: assetUsed, ...price } = resolved;
+    if (assetUsed !== null) assetsUsed.add(assetUsed);
     tokens.push({
       token_color: token.token_color,
       name: token.name,
       kind: token.kind,
       decimals: token.decimals,
       asset_id: token.asset_id,
-      ...resolved,
+      ...price,
     });
   }
 
@@ -222,13 +301,15 @@ export async function listPrices(dbConn: any): Promise<PricesResponse> {
       last_ok_at: isoOrNull(status?.last_ok_at),
       last_error: status?.last_error ?? null,
     },
-    assets: [...ctx.assets.values()].map((asset) => ({
-      asset_id: asset.asset_id,
-      price_usd: asset.price_usd,
-      source: asset.source,
-      provider_updated_at: isoOrNull(asset.provider_updated_at),
-      updated_at: iso(asset.updated_at),
-    })),
+    assets: [...ctx.assets.values()]
+      .filter((asset) => assetsUsed.has(asset.asset_id))
+      .map((asset) => ({
+        asset_id: asset.asset_id,
+        price_usd: asset.price_usd,
+        source: asset.source,
+        provider_updated_at: isoOrNull(asset.provider_updated_at),
+        updated_at: iso(asset.updated_at),
+      })),
     tokens,
   };
 }

@@ -4,8 +4,8 @@
 // schedule and the exit codes are testable without a network, a database or a
 // wall clock. The default deps (defaultRunDeps) are what the entrypoints use.
 
-import type { AssetQuote } from "./coingecko.ts";
-import { fetchAssetPrice } from "./coingecko.ts";
+import type { BatchResult } from "./coingecko.ts";
+import { fetchAssetPrices } from "./coingecko.ts";
 import { runCycle, type CycleResult, type DbConnection } from "./cycle.ts";
 import { describeConfig, type PriceFeedConfig } from "./config.ts";
 
@@ -31,7 +31,7 @@ export interface Connection {
 
 export interface RunDeps {
   connect: (config: PriceFeedConfig) => Promise<Connection>;
-  fetchAsset: (assetId: string, config: PriceFeedConfig) => Promise<AssetQuote>;
+  fetchAssets: (assetIds: readonly string[], config: PriceFeedConfig) => Promise<BatchResult>;
   /** In-cycle spacing between requests. */
   sleep: (ms: number) => Promise<void>;
   /** Between-cycle wait in loop mode. Resolves early when the signal aborts. */
@@ -83,8 +83,8 @@ export function defaultRunDeps(): RunDeps {
         end: () => client.end(),
       };
     },
-    fetchAsset: (assetId, config) =>
-      fetchAssetPrice(assetId, {
+    fetchAssets: (assetIds, config) =>
+      fetchAssetPrices(assetIds, {
         apiKey: config.apiKey ?? "",
         baseUrl: config.baseUrl,
         timeoutMs: config.requestTimeoutMs,
@@ -97,10 +97,17 @@ export function defaultRunDeps(): RunDeps {
   };
 }
 
+/**
+ * The one thing this process says when it has no key. It is a WARNING, not an
+ * error: a stack without a key is a supported, working configuration (the
+ * schema ships seeded prices), and the service is opt-in everywhere — it is
+ * not registered in start.dev.ts at all and its compose service sits behind a
+ * profile (Q-11).
+ */
 const MISSING_KEY_MESSAGE =
-  "[price-feed] COINGECKO_API_KEY is not set. The service cannot fetch prices " +
-  "without it. The database already ships seeded reference prices, so quotes " +
-  "keep working — set the key only when you want them refreshed.";
+  "[price-feed] WARNING: COINGECKO_API_KEY is not set, so this service will do " +
+  "nothing. The database already ships seeded reference prices, so quotes keep " +
+  "working — set the key only when you want them refreshed.";
 
 /**
  * The schema this process writes into must already exist. A pre-00005 database
@@ -138,12 +145,12 @@ export async function runOneCycle(
     return await runCycle(
       {
         db: connection.db,
-        fetchAsset: (assetId) => deps.fetchAsset(assetId, config),
+        fetchAssets: (assetIds) => deps.fetchAssets(assetIds, config),
         sleep: deps.sleep,
         now: deps.now,
         log: deps.log,
       },
-      { assetIds: config.assetIds, spacingMs: config.spacingMs },
+      { assetIds: config.assetIds, spacingMs: config.spacingMs, batchSize: config.batchSize },
     );
   } finally {
     await connection.end().catch(() => {});
@@ -174,9 +181,12 @@ export async function runOnce(deps: RunDeps, config: PriceFeedConfig): Promise<n
  * cycle the next attempt follows RETRY_LADDER_MS, and the ladder resets on the
  * first success.
  *
- * Without a key this logs once and idles rather than exiting: a compose
- * service that exits non-zero would crash-loop, filling the logs with the same
- * message, and the stack is perfectly usable on the seeded prices meanwhile.
+ * Without a key it warns at start and on every tick and does nothing else
+ * (Q-11) — it does NOT exit: a compose service that exits non-zero would
+ * crash-loop, and the stack is perfectly usable on the seeded prices meanwhile.
+ * It also does not idle forever in silence: a process that logged once at
+ * startup and then went quiet for a week is indistinguishable from one that is
+ * quietly working, which is exactly the confusion the tick warning removes.
  */
 export async function runLoop(
   deps: RunDeps,
@@ -186,8 +196,11 @@ export async function runLoop(
   deps.log(describeConfig(config));
   if (config.apiKey === null) {
     deps.logError(MISSING_KEY_MESSAGE);
-    deps.log("[price-feed] idling — nothing to do until a key is configured");
-    await deps.wait(Number.MAX_SAFE_INTEGER, signal);
+    while (!signal.aborted) {
+      await deps.wait(config.intervalMs, signal);
+      if (signal.aborted) break;
+      deps.logError(MISSING_KEY_MESSAGE);
+    }
     return EXIT_OK;
   }
 

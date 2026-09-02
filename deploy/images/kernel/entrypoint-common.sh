@@ -64,6 +64,7 @@ for _optional_env in \
   COINGECKO_BASE_URL \
   PRICE_FEED_INTERVAL_MS \
   PRICE_FEED_REQUEST_SPACING_MS \
+  PRICE_FEED_BATCH_SIZE \
   PRICE_FEED_ASSETS
 do
   if [ -z "${!_optional_env:-}" ]; then unset "${_optional_env}"; fi

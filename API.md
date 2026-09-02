@@ -771,12 +771,30 @@ Validation consults the node's local state only — no live RPC calls are made. 
 > positive `version`, and `pairs` is interpreted as a complete replacement.
 > Solver-backed `/v1/quote` precedence is default-off until explicitly enabled.
 
-#### `GET /v1/prices`
+#### `GET /v1/prices?tokens=<color>[,<color>…]`
 
-Every reference price this node holds, where it came from, and how old it is. This
-is the source of truth behind `GET /v1/quote` and behind the batcher's fee
-sponsorship — the batcher polls it rather than keeping its own prices, so the
-threshold the UI shows and the one the batcher enforces cannot drift apart.
+The reference prices for the colours you name, where they came from, and how old
+they are. This is the source of truth behind `GET /v1/quote` and behind the
+batcher's fee sponsorship — the batcher looks colours up here rather than keeping
+its own prices, so the threshold the UI shows and the one the batcher enforces
+cannot drift apart.
+
+**`tokens` is required.** 1-50 64-hex colours, comma-separated. There is no
+unfiltered form: both callers only ever want the colours in front of them (a
+pair on screen, an offer's legs), and an endpoint whose cost grew with the size
+of the registry would become the slowest route here the first time a few
+thousand short-lived tokens were minted.
+
+| Input | Answer |
+|---|---|
+| missing, empty, or only commas | `400 { "error": "VALIDATION", "reason": "tokens is required: …" }` |
+| an entry that is not 64 hex characters | `400` naming the entry |
+| more than 50 entries | `400` saying how many arrived |
+| a colour this node does not price | `200`, and the colour is simply **absent** from `tokens` — not an error |
+
+Colours are matched case-insensitively and duplicates collapse, exactly as
+`from_token`/`to_token` are treated on `/v1/quote`; responses always spell them
+lower case.
 
 Every price is in **USD** — USD is the numeraire and no asset is assumed to be
 worth one dollar, stablecoins included: they are quoted from the provider like
@@ -788,7 +806,7 @@ divided by `10^known_tokens.decimals`. A dollar-ish stablecoin with 6 decimals i
 about `0.000001` here, and that is the number to multiply an amount by.
 
 ```bash
-curl http://host:9999/v1/prices
+curl "http://host:9999/v1/prices?tokens=e758…a912,d133…3333"
 ```
 
 ```json
@@ -802,9 +820,7 @@ curl http://host:9999/v1/prices
   },
   "assets": [
     { "asset_id": "bitcoin", "price_usd": "77387", "source": "feed",
-      "provider_updated_at": "2026-09-02T20:25:50.000Z", "updated_at": "2026-09-03T00:00:00.000Z" },
-    { "asset_id": "usdm-2", "price_usd": "1.001", "source": "seed",
-      "provider_updated_at": "2026-09-02T22:40:50.000Z", "updated_at": "2026-09-02T22:40:50.000Z" }
+      "provider_updated_at": "2026-09-02T20:25:50.000Z", "updated_at": "2026-09-03T00:00:00.000Z" }
   ],
   "tokens": [
     { "token_color": "e758...a912", "name": "WBTC", "kind": "shielded", "decimals": 0,
@@ -817,6 +833,11 @@ curl http://host:9999/v1/prices
 }
 ```
 
+Only `bitcoin` is in `assets`: it is the asset that produced WBTC's price.
+TESTTOKENA's `fallback` price comes from its colour, not from an asset, so
+nothing is listed for it — and the other four seeded assets were not asked
+about.
+
 `price_usd` is a decimal **string** — the column is `NUMERIC` and the values are
 exact; parsing them as doubles is the caller's decision, not ours.
 
@@ -827,9 +848,11 @@ exact; parsing them as doubles is the caller's decision, not ours.
 | `manual` | an operator's row in `token_prices`. Wins over everything; nothing rewrites it |
 | `fallback` | the deterministic demo price derived from the token's colour. **Not a market price** — label it as such in a UI, and the sponsorship gate treats it as *unpriced* |
 
-`tokens` lists every known token that resolves to a price. A registered token with
-no mapping and no quote yet is simply absent rather than being given a demo row:
-this endpoint never writes.
+`tokens` lists the **requested** colours that resolve to a price, and `assets`
+only the assets those prices came from — every row in `assets` explains a row in
+`tokens`. A requested colour with no mapping and no quote yet is simply absent
+rather than being given a demo row: this endpoint never writes. (The quote path
+still writes one, deliberately, so an operator can inspect and override it.)
 
 `feed` is all-nulls when the service has never run against this database.
 
@@ -842,11 +865,19 @@ the contract address), so tokens map to assets by **name**: `WBTC`/`WSBTC`/`BTC`
 
 **The `price-feed` service.** `packages/price-feed` is a separate process, not part
 of the node: the node never calls CoinGecko. It refreshes `asset_prices` once a day
-(`PRICE_FEED_INTERVAL_MS`), one asset per request at least a second apart
-(`PRICE_FEED_REQUEST_SPACING_MS`), stopping at the first `429` and recording the
-failure in `feed.last_error`. `bun run --filter @zswap-da/price-feed once` (or
-`docker compose run --rm price-feed --once`) takes a single refresh now. It needs
-`COINGECKO_API_KEY`; without one it idles, and the seeded prices keep serving.
+(`PRICE_FEED_INTERVAL_MS`), asking for up to `PRICE_FEED_BATCH_SIZE` ids (default
+50) per request with at least `PRICE_FEED_REQUEST_SPACING_MS` between requests, so
+credits scale with `ceil(assets / 50)` and today's five assets are ONE call. A
+failed request is recorded against every id it carried and the next batch is still
+made; a `429` stops the cycle and lands in `feed.last_error`. A single bad id
+inside an otherwise good response fails only that id.
+
+`bun run --filter @zswap-da/price-feed once` (or `docker compose run --rm
+price-feed --once`) takes a single refresh now. It needs `COINGECKO_API_KEY`;
+without one it only warns — `--once` exits non-zero, loop mode warns on every
+tick and does nothing — and the seeded prices keep serving. **It is not part of a
+development stack**: `bun run dev` does not start it, because the seeds already
+give development real ratios (Q-11).
 
 #### `GET /v1/quote`
 

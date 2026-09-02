@@ -1,12 +1,18 @@
-// The CoinGecko half of the price feed: ONE asset per request.
+// The CoinGecko half of the price feed: MANY assets per request.
 //
-// `simple/price` accepts a comma-separated `ids` list, and one batched call
-// would obviously be cheaper. It is deliberately not used. The demo plan bills
-// in credits whose per-call cost is not documented per endpoint, the whole
-// budget is 10 000 a month, and a batched call is all-or-nothing: one bad id,
-// one truncated body, and the cycle updates nothing. Per-asset requests spaced
-// a second apart cost 5 calls a day (SC-004), keep a partial failure partial,
-// and stay two orders of magnitude under the 100 req/min ceiling.
+// `simple/price` accepts a comma-separated `ids` list, and the feed uses it
+// (Q-11): with thousands of mapped tokens, one request per asset would spend
+// the 10 000-credit monthly demo budget on a single day's cycle. Credits now
+// scale with ceil(assets / PRICE_FEED_BATCH_SIZE) — today's five assets are
+// one call (SC-004).
+//
+// Batching was originally rejected because a batched call looked
+// all-or-nothing. It is not, and this module is the reason: a 2xx body is
+// parsed PER ID, so one delisted or malformed entry is reported as that id's
+// failure and every other id in the same response is still written. Only a
+// failure of the REQUEST itself (429, non-2xx, network, a body that is not an
+// object) takes the whole chunk down, and the cycle then records every id in
+// that chunk — never a silent partial write.
 
 import { toDecimalString } from "@zswap-da/database";
 
@@ -41,17 +47,45 @@ export type CoinGeckoErrorKind =
   /** The request never completed: DNS, connection, timeout, abort. */
   | "network";
 
+/**
+ * A failure of one REQUEST. `assetIds` is the whole chunk that request carried,
+ * because a request-level failure cost every id in it — the cycle records them
+ * all rather than guessing which one was to blame.
+ */
 export class CoinGeckoError extends Error {
   constructor(
     message: string,
     readonly kind: CoinGeckoErrorKind,
-    readonly assetId: string,
+    readonly assetIds: readonly string[],
     readonly status?: number,
     readonly rateLimit?: RateLimit,
   ) {
     super(message);
     this.name = "CoinGeckoError";
   }
+}
+
+/** One id inside an otherwise good response that could not be used. */
+export interface AssetFailure {
+  assetId: string;
+  kind: CoinGeckoErrorKind;
+  message: string;
+}
+
+/** What one batched request produced. */
+export interface BatchResult {
+  /** Ids that parsed, in the order the chunk asked for them. */
+  quotes: AssetQuote[];
+  /** Ids the response answered badly, or not at all. */
+  failures: AssetFailure[];
+  rateLimit: RateLimit;
+}
+
+/** Short label for a chunk, so an error message does not carry 50 ids. */
+export function describeIds(assetIds: readonly string[]): string {
+  return assetIds.length <= 3
+    ? assetIds.join(",")
+    : `${assetIds.slice(0, 3).join(",")}+${assetIds.length - 3} more`;
 }
 
 export interface FetchAssetOptions {
@@ -88,21 +122,29 @@ export function formatRateLimit(rateLimit: RateLimit): string | null {
 }
 
 /**
- * Fetch one asset's USD price.
+ * Fetch the USD price of every id in one chunk, with ONE request.
  *
  * The key travels as the `x-cg-demo-api-key` HEADER and never as a query
  * parameter, even though CoinGecko accepts `x_cg_demo_api_key=` in the URL:
  * query strings land in access logs, proxy logs, browser history and error
  * reports, and this key is shared, unrotated (Q-7) and long-lived.
+ *
+ * Throws `CoinGeckoError` when the REQUEST failed (the caller then treats the
+ * whole chunk as failed, and stops the cycle on `rate_limit`). A resolved
+ * result may still carry per-id `failures`: those ids are the only ones the
+ * response could not answer.
  */
-export async function fetchAssetPrice(
-  assetId: string,
+export async function fetchAssetPrices(
+  assetIds: readonly string[],
   options: FetchAssetOptions,
-): Promise<AssetQuote> {
+): Promise<BatchResult> {
+  if (assetIds.length === 0) return { quotes: [], failures: [], rateLimit: {} };
+
+  const label = describeIds(assetIds);
   const baseUrl = (options.baseUrl ?? COINGECKO_BASE_URL).replace(/\/+$/, "");
   const doFetch = options.fetchImpl ?? fetch;
   const url =
-    `${baseUrl}/simple/price?ids=${encodeURIComponent(assetId)}` +
+    `${baseUrl}/simple/price?ids=${assetIds.map((id) => encodeURIComponent(id)).join(",")}` +
     `&vs_currencies=usd&include_last_updated_at=true`;
 
   const controller = new AbortController();
@@ -123,7 +165,7 @@ export async function fetchAssetPrice(
     const reason = controller.signal.aborted
       ? `no response within ${timeoutMs} ms`
       : String((error as Error)?.message ?? error);
-    throw new CoinGeckoError(`${assetId}: request failed (${reason})`, "network", assetId);
+    throw new CoinGeckoError(`${label}: request failed (${reason})`, "network", assetIds);
   } finally {
     clearTimeout(timer);
   }
@@ -132,76 +174,78 @@ export async function fetchAssetPrice(
 
   if (response.status === 429) {
     throw new CoinGeckoError(
-      `${assetId}: rate limited (429)${formatRateLimit(rateLimit) ? ` — ${formatRateLimit(rateLimit)}` : ""}`,
+      `${label}: rate limited (429)${formatRateLimit(rateLimit) ? ` — ${formatRateLimit(rateLimit)}` : ""}`,
       "rate_limit",
-      assetId,
+      assetIds,
       429,
       rateLimit,
     );
   }
   if (!response.ok) {
-    throw new CoinGeckoError(
-      `${assetId}: HTTP ${response.status}`,
-      "http",
-      assetId,
-      response.status,
-      rateLimit,
-    );
+    throw new CoinGeckoError(`${label}: HTTP ${response.status}`, "http", assetIds, response.status, rateLimit);
   }
 
   let body: unknown;
   try {
     body = await response.json();
   } catch {
-    throw new CoinGeckoError(`${assetId}: response body is not JSON`, "malformed", assetId, response.status, rateLimit);
+    throw new CoinGeckoError(`${label}: response body is not JSON`, "malformed", assetIds, response.status, rateLimit);
   }
 
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     // An array is checked explicitly: `[]["bitcoin"]` is undefined, so without
-    // this an array body would be reported as "unknown id" and send an
-    // operator looking at the asset list instead of at the endpoint.
-    throw new CoinGeckoError(`${assetId}: response is not an object`, "malformed", assetId, response.status, rateLimit);
+    // this an array body would be reported as "unknown id" for every id in the
+    // chunk and send an operator looking at the asset list instead of at the
+    // endpoint.
+    throw new CoinGeckoError(`${label}: response is not an object`, "malformed", assetIds, response.status, rateLimit);
   }
-  const entry = (body as Record<string, unknown>)[assetId];
-  if (entry === undefined) {
-    // A valid answer that simply does not know the id — a renamed or delisted
-    // coin. Distinguished from `malformed` because the fix is a config change,
-    // not a retry.
-    throw new CoinGeckoError(
-      `${assetId}: not present in the response (unknown id?)`,
-      "missing",
+
+  // From here the REQUEST succeeded. Everything else is per id: one bad entry
+  // must not cost the other 49 their refresh.
+  const quotes: AssetQuote[] = [];
+  const failures: AssetFailure[] = [];
+  const fail = (assetId: string, kind: CoinGeckoErrorKind, message: string) =>
+    failures.push({ assetId, kind, message });
+
+  for (const assetId of assetIds) {
+    const entry = (body as Record<string, unknown>)[assetId];
+    if (entry === undefined) {
+      // A valid answer that simply does not know the id — a renamed or
+      // delisted coin. Distinguished from `malformed` because the fix is a
+      // config change, not a retry.
+      fail(assetId, "missing", `${assetId}: not present in the response (unknown id?)`);
+      continue;
+    }
+    if (entry === null || typeof entry !== "object") {
+      fail(assetId, "malformed", `${assetId}: entry is not an object`);
+      continue;
+    }
+
+    const usdRaw = (entry as Record<string, unknown>)["usd"];
+    if (typeof usdRaw !== "number" || !Number.isFinite(usdRaw) || usdRaw <= 0) {
+      fail(
+        assetId,
+        "malformed",
+        `${assetId}: usd is ${JSON.stringify(usdRaw)}, expected a positive finite number`,
+      );
+      continue;
+    }
+
+    const updatedRaw = (entry as Record<string, unknown>)["last_updated_at"];
+    const providerUpdatedAt =
+      typeof updatedRaw === "number" && Number.isFinite(updatedRaw)
+        ? new Date(updatedRaw * 1000).toISOString()
+        : null;
+
+    quotes.push({
       assetId,
-      response.status,
+      // Exact decimal spelling, not toFixed: the value lands in NUMERIC and is
+      // served as a string.
+      usd: toDecimalString(usdRaw),
+      providerUpdatedAt,
       rateLimit,
-    );
-  }
-  if (entry === null || typeof entry !== "object") {
-    throw new CoinGeckoError(`${assetId}: entry is not an object`, "malformed", assetId, response.status, rateLimit);
+    });
   }
 
-  const usdRaw = (entry as Record<string, unknown>)["usd"];
-  if (typeof usdRaw !== "number" || !Number.isFinite(usdRaw) || usdRaw <= 0) {
-    throw new CoinGeckoError(
-      `${assetId}: usd is ${JSON.stringify(usdRaw)}, expected a positive finite number`,
-      "malformed",
-      assetId,
-      response.status,
-      rateLimit,
-    );
-  }
-
-  const updatedRaw = (entry as Record<string, unknown>)["last_updated_at"];
-  const providerUpdatedAt =
-    typeof updatedRaw === "number" && Number.isFinite(updatedRaw)
-      ? new Date(updatedRaw * 1000).toISOString()
-      : null;
-
-  return {
-    assetId,
-    // Exact decimal spelling, not toFixed: the value lands in NUMERIC and is
-    // served as a string.
-    usd: toDecimalString(usdRaw),
-    providerUpdatedAt,
-    rateLimit,
-  };
+  return { quotes, failures, rateLimit };
 }

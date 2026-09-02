@@ -270,8 +270,16 @@ test("a manual token price survives a fallback write; source defaults to fallbac
   expect(fresh.price_usd).toBe("7.5");
   expect(fresh.source).toBe("fallback");
 
-  const all = await getTokenPriceRows.run(undefined, client);
+  // The bounded read (Q-11: there is no unfiltered form) returns exactly the
+  // colours asked for, and silently omits one that has no row.
+  const all = await getTokenPriceRows.run(
+    { token_colors: [COLOR_TEST, "e".repeat(64), "f".repeat(64)] },
+    client,
+  );
   expect(new Set(all.map((r) => r.token_color))).toEqual(new Set([COLOR_TEST, "e".repeat(64)]));
+
+  const none = await getTokenPriceRows.run({ token_colors: [] }, client);
+  expect(none).toEqual([]);
 });
 
 test("token_prices.source accepts only manual and fallback", async () => {

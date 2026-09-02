@@ -95,10 +95,12 @@ rather than a colour-hash rate. See [Reference prices](#reference-prices).
 
 ## Reference prices
 
-`GET /v1/prices` serves the USD prices behind `GET /v1/quote` and behind the
-batcher's fee sponsorship. USD is the numeraire: every price is a USD price and
-no asset — stablecoins included — is assumed to be worth one dollar. Three
-tables back it:
+`GET /v1/prices?tokens=<color>[,<color>…]` serves the USD prices behind
+`GET /v1/quote` and behind the batcher's fee sponsorship. USD is the numeraire:
+every price is a USD price and no asset — stablecoins included — is assumed to be
+worth one dollar. `tokens` is **required** (1-50 colours) and there is no
+unfiltered form: callers ask about the colours in front of them, so the endpoint's
+cost does not grow with the registry. Three tables back it:
 
 | Table | Holds |
 |---|---|
@@ -121,16 +123,24 @@ bun run --filter @zswap-da/price-feed start   # loop, one cycle a day
 docker compose run --rm price-feed --once     # the same, in deploy/
 ```
 
-One cycle is five requests (`bitcoin`, `ethereum`, `usd-coin`, `midnight-3`,
-`usdm-2`) issued one at a time, at least a second apart, stopping at the first
-`429`. About 5 calls a day.
+One cycle asks for up to `PRICE_FEED_BATCH_SIZE` ids per request, with at least
+`PRICE_FEED_REQUEST_SPACING_MS` between requests, stopping at the first `429`.
+Today's five assets (`bitcoin`, `ethereum`, `usd-coin`, `midnight-3`, `usdm-2`)
+are **one request a day**; credits scale with `ceil(assets / 50)`, not with the
+number of tokens.
+
+**It is not part of `bun run dev`.** Development runs on the seeded prices — real
+BTC/ETH ratios with no key, no network and no extra process — so the feed is never
+registered in `start.dev.ts`. Run it deliberately with `--once`, or with the
+opt-in compose service in `deploy/`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `COINGECKO_API_KEY` | — | Required to fetch. Sent as the `x-cg-demo-api-key` header, never in a query string. Without it `--once` exits 64 and loop mode idles |
+| `COINGECKO_API_KEY` | — | Required to fetch. Sent as the `x-cg-demo-api-key` header, never in a query string. Without it the service only WARNS: `--once` exits 64, loop mode warns on every tick and does nothing |
 | `COINGECKO_BASE_URL` | `https://api.coingecko.com/api/v3` | Point at a stub in tests |
 | `PRICE_FEED_INTERVAL_MS` | `86400000` | Loop period |
 | `PRICE_FEED_REQUEST_SPACING_MS` | `1000` | Minimum gap between two requests |
+| `PRICE_FEED_BATCH_SIZE` | `50` | Asset ids per `simple/price` request |
 | `PRICE_FEED_ASSETS` | the five seeded ids | Comma-separated CoinGecko ids |
 | `PRICE_FEED_MAP` | — | Node + feed: `NAME_OR_COLOR=<asset_id>[:decimals],…`. A malformed entry is a startup error, never a silent skip |
 | `SPONSOR_DISCOUNT_BPS` | `250` | How far below reference an offer must be priced to earn fee sponsorship. Published in `/v1/prices.sponsor_discount` |

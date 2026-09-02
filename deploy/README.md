@@ -122,6 +122,8 @@ control.
 once a day. It is **opt-in** (`profiles: ["prices"]`) and the stack is complete
 without it: `000-init.sql` seeds real prices captured on 2026-09-02, so a fresh
 database already quotes 1 WBTC ≈ 32 WETH rather than the colour-hash demo rate.
+For the same reason a development stack never runs it at all (it is not in
+`start.dev.ts`); here it is a deliberate opt-in, not a default.
 
 ```bash
 # one refresh now, then exit (0 = every asset updated, 2 = something did not)
@@ -134,18 +136,25 @@ docker compose --profile prices up -d price-feed
 `COINGECKO_API_KEY` is the only secret in this stack. It lives in `.env`, is
 passed as the `x-cg-demo-api-key` **header** (never a query parameter, which
 would put it in every access log), and is never printed — the service's startup
-line says `key=present` or `key=ABSENT`. With no key, `--once` exits 64 and loop
-mode logs one line and **idles**; it deliberately does not exit, because a
-non-zero exit under `restart: unless-stopped` is a crash loop and the stack is
-usable on the seeds meanwhile.
+line says `key=present` or `key=ABSENT`. With no key the service only **warns**:
+`--once` prints the warning and exits 64, and loop mode prints it at start and on
+every tick while doing nothing else. It deliberately does not exit in loop mode,
+because a non-zero exit under `restart: unless-stopped` is a crash loop and the
+stack is usable on the seeds meanwhile.
 
-One cycle is five requests — `bitcoin`, `ethereum`, `usd-coin`, `midnight-3`,
-`usdm-2` — issued one at a time at least a second apart. Every asset is fetched:
-USD is the numeraire and nothing is pinned to it, so the stablecoins are observed
-like the rest and a depeg shows up in the quotes. A `429` stops the cycle where it
-stands, keeping what was already written, and the failure is visible in
-`GET /v1/prices.feed.last_error`. Roughly 5 calls a day against the demo plan's
-10 000 credits a month.
+One cycle asks for up to `PRICE_FEED_BATCH_SIZE` ids (default 50) per
+`simple/price` request, with at least `PRICE_FEED_REQUEST_SPACING_MS` between
+requests — so today's five assets (`bitcoin`, `ethereum`, `usd-coin`,
+`midnight-3`, `usdm-2`) are **one call a day**, and credits scale with
+`ceil(assets / 50)`. Every asset is fetched: USD is the numeraire and nothing is
+pinned to it, so the stablecoins are observed like the rest and a depeg shows up
+in the quotes.
+
+Failures are graded. One bad id inside an otherwise good response fails only that
+id. A failed **request** is recorded against every id it carried — blaming one
+would be a guess — and the next batch is still made. A `429` stops the cycle where
+it stands, keeping what was already written. All of it is visible in
+`GET /v1/prices.feed.last_error`.
 
 ## Observing the relay
 

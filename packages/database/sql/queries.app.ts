@@ -803,15 +803,22 @@ export const getTokenPriceRow = prepared<IGetTokenPriceRowParams, IGetTokenPrice
       "SELECT price_usd, source, updated_at FROM token_prices WHERE token_color = :token_color!",
 );
 
-export type IGetTokenPriceRowsParams = void;
+export interface IGetTokenPriceRowsParams { token_colors: readonly string[] }
 export interface IGetTokenPriceRowsResult {
   token_color: string;
   price_usd: string;
   source: string;
   updated_at: DateOrString;
 }
+/**
+ * The override/demo rows for a BOUNDED set of colours. There is deliberately
+ * no unfiltered form: `GET /v1/prices` requires `?tokens=` (Q-11), and a query
+ * that could scan the whole table is how an endpoint quietly becomes O(chain).
+ */
 export const getTokenPriceRows = prepared<IGetTokenPriceRowsParams, IGetTokenPriceRowsResult>(
-      "SELECT token_color, price_usd, source, updated_at FROM token_prices",
+      `SELECT token_color, price_usd, source, updated_at
+       FROM token_prices
+       WHERE token_color = ANY(:token_colors!)`,
 );
 
 export interface IUpsertTokenPriceParams { token_color: string; price_usd: number }
@@ -858,6 +865,20 @@ export interface IGetKnownTokensWithAssetsResult {
 export const getKnownTokensWithAssets = prepared<IGetKnownTokensWithAssetsParams, IGetKnownTokensWithAssetsResult>(
       `SELECT token_color, name, kind, decimals, asset_id
        FROM known_tokens
+       ORDER BY name`,
+);
+
+export interface IGetKnownTokensByColorsParams { token_colors: readonly string[] }
+export type IGetKnownTokensByColorsResult = IGetKnownTokensWithAssetsResult;
+/**
+ * The registry rows for a BOUNDED set of colours, which is what
+ * `GET /v1/prices?tokens=` needs. `getKnownTokensWithAssets` (the whole
+ * registry) survives only for the seed/schema tests; no request path uses it.
+ */
+export const getKnownTokensByColors = prepared<IGetKnownTokensByColorsParams, IGetKnownTokensByColorsResult>(
+      `SELECT token_color, name, kind, decimals, asset_id
+       FROM known_tokens
+       WHERE token_color = ANY(:token_colors!)
        ORDER BY name`,
 );
 

@@ -19,6 +19,8 @@ export interface PriceFeedConfig {
   intervalMs: number;
   /** Minimum gap between two requests. Default 1000 ms. */
   spacingMs: number;
+  /** Asset ids per provider request. Default 50. */
+  batchSize: number;
   /** Per-request timeout. */
   requestTimeoutMs: number;
   assetIds: string[];
@@ -27,6 +29,7 @@ export interface PriceFeedConfig {
 
 export const DEFAULT_INTERVAL_MS = 86_400_000; // 24 h
 export const DEFAULT_SPACING_MS = 1_000;
+export const DEFAULT_BATCH_SIZE = 50;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
@@ -46,6 +49,7 @@ export function loadPriceFeedConfig(): PriceFeedConfig {
     baseUrl: ENV.getString("COINGECKO_BASE_URL", COINGECKO_BASE_URL),
     intervalMs: ENV.getNumber("PRICE_FEED_INTERVAL_MS", DEFAULT_INTERVAL_MS),
     spacingMs: ENV.getNumber("PRICE_FEED_REQUEST_SPACING_MS", DEFAULT_SPACING_MS),
+    batchSize: ENV.getNumber("PRICE_FEED_BATCH_SIZE", DEFAULT_BATCH_SIZE),
     requestTimeoutMs: ENV.getNumber("PRICE_FEED_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT_MS),
     assetIds: assets.length > 0 ? assets : [...SEEDED_ASSET_IDS],
     db: {
@@ -62,7 +66,10 @@ export function loadPriceFeedConfig(): PriceFeedConfig {
 export function describeConfig(config: PriceFeedConfig): string {
   return (
     `[price-feed] provider=coingecko base=${config.baseUrl} ` +
-    `assets=${config.assetIds.join(",")} spacing=${config.spacingMs}ms ` +
+    `assets=${config.assetIds.join(",")} ` +
+    `batch=${config.batchSize} ` +
+    `requests/cycle=${Math.ceil(config.assetIds.length / Math.max(1, config.batchSize))} ` +
+    `spacing=${config.spacingMs}ms ` +
     `interval=${config.intervalMs}ms db=${config.db.host}:${config.db.port}/${config.db.database} ` +
     `key=${config.apiKey === null ? "ABSENT" : "present"}`
   );

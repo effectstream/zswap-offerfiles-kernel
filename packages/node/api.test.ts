@@ -255,6 +255,13 @@ const WSBTC8 = `b8${"8".repeat(62)}`;
 const TESTA = `d1${"3".repeat(62)}`;
 const OVERRIDDEN = `c0${"f".repeat(62)}`;
 
+const COLOR_NIGHT = "0".repeat(64);
+const COLOR_USDC = "1".repeat(64);
+const COLOR_USDM = "003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73";
+
+/** `GET /v1/prices` for a set of colours — `tokens` is required (Q-11). */
+const pricesFor = (...colors: string[]) => getJson(`/v1/prices?tokens=${colors.join(",")}`);
+
 const registerToken = (
   color: string,
   name: string,
@@ -269,7 +276,7 @@ const registerToken = (
 
 describe("GET /v1/prices", () => {
   test("a fresh database already serves the seeded reference prices", async () => {
-    const { status, body } = await getJson("/v1/prices");
+    const { status, body } = await pricesFor(COLOR_NIGHT, COLOR_USDC, COLOR_USDM);
     expect(status).toBe(200);
     expect(body.sponsor_discount).toBe(0.025);
 
@@ -282,16 +289,11 @@ describe("GET /v1/prices", () => {
       last_error: null,
     });
 
+    // ONLY the assets the requested tokens reference — bitcoin and ethereum
+    // are seeded but nothing here points at them, so listing them would be
+    // payload nobody asked for.
     const assets = new Map<string, any>(body.assets.map((a: any) => [a.asset_id, a]));
-    expect([...assets.keys()].sort()).toEqual([
-      "bitcoin",
-      "ethereum",
-      "midnight-3",
-      "usd-coin",
-      "usdm-2",
-    ]);
-    expect(assets.get("bitcoin")).toMatchObject({ price_usd: "77387", source: "seed" });
-    expect(assets.get("ethereum")).toMatchObject({ price_usd: "2393.28", source: "seed" });
+    expect([...assets.keys()].sort()).toEqual(["midnight-3", "usd-coin", "usdm-2"]);
     // The stablecoin is an observed price like the rest — not 1, and with a
     // provider timestamp of its own.
     expect(assets.get("usdm-2")).toMatchObject({
@@ -299,7 +301,7 @@ describe("GET /v1/prices", () => {
       source: "seed",
       provider_updated_at: "2026-09-02T22:40:50.000Z",
     });
-    expect(assets.get("bitcoin").provider_updated_at).toBe("2026-09-02T20:25:50.000Z");
+    expect(assets.get("midnight-3").provider_updated_at).toBe("2026-09-02T20:26:20.000Z");
 
     // The three seeded tokens, priced PER BASE UNIT.
     const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
@@ -323,14 +325,78 @@ describe("GET /v1/prices", () => {
   test("the endpoint is read-only — polling it writes no demo rows", async () => {
     await registerToken(TESTA, "TESTTOKENA");
     const before = await client.query("SELECT COUNT(*)::int AS n FROM token_prices");
-    await getJson("/v1/prices");
-    await getJson("/v1/prices");
+    await pricesFor(TESTA);
+    await pricesFor(TESTA);
     const after = await client.query("SELECT COUNT(*)::int AS n FROM token_prices");
     expect(after.rows[0].n).toBe(before.rows[0].n);
 
     // …and an unpriced token is simply absent rather than invented.
-    const { body } = await getJson("/v1/prices");
+    const { body } = await pricesFor(TESTA);
     expect(body.tokens.map((t: any) => t.name)).not.toContain("TESTTOKENA");
+  });
+
+  // ── `tokens` is required and bounded (Q-11) ──────────────────────────────
+
+  test("only the requested colours come back, and unknown ones are silently absent", async () => {
+    const unknown = `ab${"9".repeat(62)}`;
+    const { status, body } = await pricesFor(COLOR_USDC, unknown);
+    expect(status).toBe(200);
+    // NIGHT and USDM are seeded and priced, but were not asked for.
+    expect(body.tokens.map((t: any) => t.name)).toEqual(["USDC"]);
+    // An unknown colour is an answer ("no reference price"), not a client
+    // error: the batcher asks about whatever colours an offer's legs carry.
+    expect(body.tokens.map((t: any) => t.token_color)).not.toContain(unknown);
+    expect(body.assets.map((a: any) => a.asset_id)).toEqual(["usd-coin"]);
+    // The two always-present fields survive a request that matched nothing.
+    const { body: none } = await pricesFor(unknown);
+    expect(none.tokens).toEqual([]);
+    expect(none.assets).toEqual([]);
+    expect(none.sponsor_discount).toBe(0.025);
+    expect(none.feed.provider).toBe("coingecko");
+  });
+
+  test("a missing, empty or malformed `tokens` is 400 VALIDATION with a reason", async () => {
+    const cases: [string, RegExp][] = [
+      ["/v1/prices", /tokens is required/],
+      ["/v1/prices?tokens=", /tokens is required/],
+      ["/v1/prices?tokens=,,", /tokens is required/],
+      [`/v1/prices?tokens=${COLOR_USDC},nothex`, /not a 64-hex token color/],
+      [`/v1/prices?tokens=${"1".repeat(63)}`, /not a 64-hex token color/],
+      [`/v1/prices?tokens=${"1".repeat(65)}`, /not a 64-hex token color/],
+      // Two `tokens=` params arrive as an array, which is not a colour list.
+      [`/v1/prices?tokens=${COLOR_USDC}&tokens=${COLOR_NIGHT}`, /single comma-separated string/],
+    ];
+    for (const [url, reason] of cases) {
+      const { status, body } = await getJson(url);
+      expect(status).toBe(400);
+      expect(body.error).toBe("VALIDATION");
+      expect(body.reason).toMatch(reason);
+    }
+  });
+
+  test("more than 50 colours is refused; exactly 50 is served", async () => {
+    const color = (i: number) => i.toString(16).padStart(2, "0") + "e".repeat(62);
+    const fifty = Array.from({ length: 50 }, (_, i) => color(i));
+    const { status: okStatus } = await getJson(`/v1/prices?tokens=${fifty.join(",")}`);
+    expect(okStatus).toBe(200);
+
+    const { status, body } = await getJson(`/v1/prices?tokens=${[...fifty, color(50)].join(",")}`);
+    expect(status).toBe(400);
+    expect(body.reason).toContain("at most 50 colors, got 51");
+  });
+
+  test("colours are normalised: upper case and duplicates are accepted", async () => {
+    // GET /v1/quote already lower-cases from_token/to_token; two routes in one
+    // API disagreeing about the case of the same 64 hex characters would be a
+    // trap. Duplicates collapse rather than duplicating rows in the response.
+    const { status, body } = await pricesFor(
+      COLOR_USDM.toUpperCase(),
+      COLOR_USDM,
+      ` ${COLOR_USDM} `.replace(/ /g, ""),
+    );
+    expect(status).toBe(200);
+    expect(body.tokens).toHaveLength(1);
+    expect(body.tokens[0].token_color).toBe(COLOR_USDM);
   });
 
   test("feed status is reported once the service has run", async () => {
@@ -338,7 +404,7 @@ describe("GET /v1/prices", () => {
       `INSERT INTO price_feed_status (id, provider, last_run_at, last_ok_at, last_error)
        VALUES (1, 'coingecko', TIMESTAMPTZ '2026-09-03 00:00:00+00', TIMESTAMPTZ '2026-09-03 00:00:00+00', NULL)`,
     );
-    const { body } = await getJson("/v1/prices");
+    const { body } = await pricesFor(COLOR_NIGHT);
     expect(body.feed).toEqual({
       provider: "coingecko",
       last_run_at: "2026-09-03T00:00:00.000Z",
@@ -393,7 +459,7 @@ describe("GET /v1/quote — reference prices (SC-001)", () => {
     expect(body.from_usd).toBeCloseTo(77387, 6);
     expect(body.from_source).toBe("seed");
 
-    const { body: prices } = await getJson("/v1/prices");
+    const { body: prices } = await pricesFor(WSBTC8);
     const wsbtc = prices.tokens.find((t: any) => t.name === "WSBTC");
     expect(wsbtc).toMatchObject({ decimals: 8, price_usd: "0.00077387", source: "seed" });
   });
@@ -458,7 +524,9 @@ describe("GET /v1/quote — reference prices (SC-001)", () => {
     expect(second.rows[0].price_usd).toBe(first.rows[0].price_usd);
 
     // Now that it has a row it appears in /v1/prices, labelled honestly.
-    const { body: prices } = await getJson("/v1/prices");
+    // Q-11 keeps this write deliberately: the demo price stays inspectable
+    // and overridable in token_prices.
+    const { body: prices } = await pricesFor(TESTA);
     expect(prices.tokens.find((t: any) => t.name === "TESTTOKENA")).toMatchObject({
       source: "fallback",
       asset_id: null,

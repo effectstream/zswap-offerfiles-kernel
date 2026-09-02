@@ -5,6 +5,40 @@ import { fileURLToPath } from "node:url";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { ENV } from "@effectstream/utils/node-env";
 
+/**
+ * What the batcher does when an offer is not worth its Celestia fee.
+ *
+ *   enforce — refuse it. The offer never reaches the queue and no fee is paid.
+ *   warn    — sponsor it, but say so in the log. The rollout default (D7): a
+ *             day of `warn` on a live deployment shows what `enforce` WOULD
+ *             have refused before it refuses anything real.
+ *   off     — do not evaluate at all. No node poll, no log noise.
+ */
+export type SponsorPolicy = "enforce" | "warn" | "off";
+
+/**
+ * What to do with an offer whose tokens have no market price at all — every
+ * test token, and anything minted by the faucet.
+ *
+ *   allow  — sponsor it (the default, D7: test tokens must keep flowing, and a
+ *            price feed that fails must not silently close the test site).
+ *   reject — refuse it. Only sensible on a deployment where every tradeable
+ *            token is mapped to a reference asset.
+ */
+export type UnpricedPolicy = "allow" | "reject";
+
+export interface SponsorshipConfig {
+  /** Node API base URL — the batcher polls `${nodeApiUrl}/v1/prices`. */
+  nodeApiUrl: string;
+  priceRefreshMs: number;
+  /** Past this age a snapshot stops counting as an answer at all. */
+  priceMaxAgeMs: number;
+  policy: SponsorPolicy;
+  unpriced: UnpricedPolicy;
+  /** Bootstrap threshold, used ONLY until the node has answered once. */
+  fallbackDiscountBps: number;
+}
+
 export interface BatcherConfig {
   port: number;
   pollingIntervalMs: number;
@@ -38,6 +72,7 @@ export interface BatcherConfig {
     node: string;
     proofServer: string;
   };
+  sponsorship: SponsorshipConfig;
   celestia: {
     rpcUrl: string;
     namespace: string;
@@ -73,6 +108,68 @@ const optionalNumber = (key: string): number | undefined => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
+const SPONSOR_POLICIES: readonly SponsorPolicy[] = ["enforce", "warn", "off"];
+const UNPRICED_POLICIES: readonly UnpricedPolicy[] = ["allow", "reject"];
+
+/**
+ * Every sponsorship knob is validated HERE, at startup, and a bad value throws
+ * before the batcher accepts its first input.
+ *
+ * A typo in `BATCHER_SPONSOR_POLICY` must not silently fall back to a default:
+ * an operator who typed `enfroce` intends to refuse unsponsored offers, and
+ * quietly sponsoring everything instead is the one outcome they were trying to
+ * prevent — with no signal anywhere that it happened.
+ */
+export function loadSponsorshipConfig(): SponsorshipConfig {
+  const oneOf = <T extends string>(key: string, allowed: readonly T[], fallback: T): T => {
+    const raw = ENV.getString(key, "").trim().toLowerCase();
+    if (raw === "") return fallback;
+    if (!(allowed as readonly string[]).includes(raw)) {
+      throw new Error(`${key} must be one of ${allowed.join(" | ")}, got "${raw}"`);
+    }
+    return raw as T;
+  };
+
+  const positiveMs = (key: string, fallback: number): number => {
+    const value = ENV.getNumber(key, fallback);
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`${key} must be a positive number of milliseconds, got "${ENV.getString(key, "")}"`);
+    }
+    return value;
+  };
+
+  const nodeApiUrl = ENV.getString("BATCHER_NODE_API_URL", "http://127.0.0.1:9999").trim();
+  // Checked early: the failure would otherwise be one `fetch` rejection every
+  // refresh, forever. The protocol check is not pedantry — `new URL` happily
+  // accepts "kernel:9999" (scheme "kernel:"), which is exactly the typo a
+  // compose file invites, and `fetch` would then reject on every poll.
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(nodeApiUrl);
+  } catch {
+    throw new Error(`BATCHER_NODE_API_URL must be an absolute http(s) URL, got "${nodeApiUrl}"`);
+  }
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new Error(`BATCHER_NODE_API_URL must be an absolute http(s) URL, got "${nodeApiUrl}"`);
+  }
+
+  const fallbackDiscountBps = ENV.getNumber("SPONSOR_DISCOUNT_BPS", 250);
+  if (!Number.isInteger(fallbackDiscountBps) || fallbackDiscountBps < 0 || fallbackDiscountBps >= 10_000) {
+    throw new Error(
+      `SPONSOR_DISCOUNT_BPS must be an integer in [0, 10000), got "${ENV.getString("SPONSOR_DISCOUNT_BPS", "")}"`,
+    );
+  }
+
+  return {
+    nodeApiUrl,
+    priceRefreshMs: positiveMs("BATCHER_PRICE_REFRESH_MS", 600_000), // 10 min
+    priceMaxAgeMs: positiveMs("BATCHER_PRICE_MAX_AGE_MS", 172_800_000), // 48 h
+    policy: oneOf("BATCHER_SPONSOR_POLICY", SPONSOR_POLICIES, "warn"),
+    unpriced: oneOf("BATCHER_SPONSOR_UNPRICED", UNPRICED_POLICIES, "allow"),
+    fallbackDiscountBps,
+  };
+}
+
 export function loadBatcherConfig(): BatcherConfig {
   const network = ENV.getString("CELESTIA_NETWORK", "devnet") as
     | "devnet"
@@ -96,6 +193,7 @@ export function loadBatcherConfig(): BatcherConfig {
       return raw ? BigInt(raw) : undefined;
     })(),
     maxInputChars: optionalNumber("BATCHER_MAX_INPUT_CHARS"),
+    sponsorship: loadSponsorshipConfig(),
     midnight: {
       id: midnightNetworkConfig.id,
       indexer: midnightNetworkConfig.indexer,

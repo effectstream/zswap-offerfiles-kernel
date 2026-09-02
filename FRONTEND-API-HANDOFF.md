@@ -241,16 +241,33 @@ can be absent only for legacy rows or a rejection too malformed to hash.
 These serve DB/registry rows and did **not** get the camelCase treatment. Take
 their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
 
-- `GET /v1/known-tokens` → `[{ "id": 1, "token_color": "70ce…", "name": "tDUST", "kind": "shielded" }]`
+- `GET /v1/known-tokens` → `[{ "id": 1, "token_color": "70ce…", "name": "tDUST", "kind": "shielded", "decimals": 0, "asset_id": null }]`
+  (`decimals` and `asset_id` are new: base units per coin, and the reference asset
+  a price comes from. `POST /v1/known-tokens` accepts both, optionally.)
+- `GET /v1/prices` → `{ "sponsor_discount", "feed": { "provider", "last_run_at", "last_ok_at", "last_error" }, "assets": [...], "tokens": [...] }`.
+  The reference prices behind every quote. `price_usd` is a decimal **string** and is
+  **per base unit** (a $1 stablecoin with 6 decimals reads `0.000001`). Each entry
+  carries a `source`: `feed` (CoinGecko), `seed` (shipped in the schema), `fixed`
+  (a peg), `manual` (an operator override) or `fallback` (**a demo price derived
+  from the token colour — not market data; label it**). `feed` is all-nulls when the
+  refresh service has never run. `tokens` omits tokens with no price at all.
 - `GET /v1/pairs` → `[{ "pair_key": "…", "base_color": "…", "quote_color": "…", "trade_count": 3, "last_price": "2.0", "last_traded_at": "…", "open_count": 1 }]`
 - `GET /v1/quote?from_token=…&to_token=…&from_amount=…[&to_amount=…]` →
-  `{ "from_token", "to_token", "from_amount", "market_rate", "suggested_to_amount", "to_amount", "implied_rate", "discount", "sponsored", "from_usd", "to_usd", "source" }`.
+  `{ "from_token", "to_token", "from_amount", "market_rate", "suggested_to_amount", "to_amount", "implied_rate", "discount", "sponsored", "from_usd", "to_usd", "source", "sponsor_discount", "from_source", "to_source", "prices_updated_at" }`.
   Tokens must be distinct 64-hex colors (no `0x`). Amounts are canonical decimal
   u256 strings: `from_amount` is positive; neither amount accepts signs, leading
   zeroes, separators, decimals, or exponents. Invalid input is `400 VALIDATION`
   and is never sanitized into a different amount.
   `source` is `"token-prices"` or `"demo-fallback"`. This is market data, not a
   reservation/executable quote.
+  The four new fields are what a UI needs to explain a rate rather than just show it:
+  `sponsor_discount` is the threshold `sponsored` was decided against (a fraction,
+  `0.025` = 2.5%); `from_source`/`to_source` are the per-leg provenance
+  (`feed|seed|fixed|manual|fallback|demo-fallback`) so one leg can be labelled a demo
+  rate while the other is real; `prices_updated_at` is the **older** of the two legs'
+  timestamps — a quote is only as fresh as its stalest side — and is `null` when
+  either leg is `demo-fallback`. `market_rate` now comes from real reference prices
+  (BTC/ETH ≈ 32), not from a hash of the token colour.
   Unregistered colors do NOT error: they quote at a $1 demo fallback (two unknowns ⇒ 1:1). Don't render fallback quotes as real market prices — check the token against `/v1/known-tokens` if the UI needs to distinguish.
 - `GET /v1/chart/stats?base=…&quote=…` → `{ "base", "quote", "last", "change24", "high", "low", "volume_base", "volume_quote" }` (numbers; `change24` in %).
 - `GET /v1/chart/history?base=…&quote=…` → newest-first `[{ "price": n, "amt": n, "up": bool, "at": ms }]`. Derived **only from genuine fills** (consumed, not cancelled) — expect it to be sparser than the old data if the old one counted cancels.

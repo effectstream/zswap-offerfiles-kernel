@@ -243,3 +243,239 @@ describe("GET /v1/quote — unknown-token demo fallback", () => {
     expect(status).toBe(400);
   });
 });
+
+// ── Reference prices (00005) ───────────────────────────────────────────────
+//
+// The same real router over the same real migrations, so the seeds under test
+// are literally the ones a fresh deployment gets.
+
+const WBTC = `e7${"5".repeat(62)}`;
+const WETH = `fd${"a".repeat(62)}`;
+const WSBTC8 = `b8${"8".repeat(62)}`;
+const TESTA = `d1${"3".repeat(62)}`;
+const OVERRIDDEN = `c0${"f".repeat(62)}`;
+
+const registerToken = (
+  color: string,
+  name: string,
+  kind: "shielded" | "unshielded" = "shielded",
+  decimals = 0,
+  assetId: string | null = null,
+) =>
+  client.query(
+    "INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES ($1,$2,$3,$4,$5)",
+    [color, name, kind, decimals, assetId],
+  );
+
+describe("GET /v1/prices", () => {
+  test("a fresh database already serves the seeded reference prices", async () => {
+    const { status, body } = await getJson("/v1/prices");
+    expect(status).toBe(200);
+    expect(body.sponsor_discount).toBe(0.025);
+
+    // Never ran here — every field null, and the shape is still present so a
+    // client does not have to special-case a missing object.
+    expect(body.feed).toEqual({
+      provider: "coingecko",
+      last_run_at: null,
+      last_ok_at: null,
+      last_error: null,
+    });
+
+    const assets = new Map<string, any>(body.assets.map((a: any) => [a.asset_id, a]));
+    expect([...assets.keys()].sort()).toEqual([
+      "bitcoin",
+      "ethereum",
+      "midnight-3",
+      "usd-coin",
+      "usdm",
+    ]);
+    expect(assets.get("bitcoin")).toMatchObject({ price_usd: "77387", source: "seed" });
+    expect(assets.get("ethereum")).toMatchObject({ price_usd: "2393.28", source: "seed" });
+    expect(assets.get("usdm")).toMatchObject({
+      price_usd: "1",
+      source: "fixed",
+      provider_updated_at: null,
+    });
+    expect(assets.get("bitcoin").provider_updated_at).toBe("2026-09-02T20:25:50.000Z");
+
+    // The three seeded tokens, priced PER BASE UNIT.
+    const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
+    expect([...tokens.keys()].sort()).toEqual(["NIGHT", "USDC", "USDM"]);
+    expect(tokens.get("NIGHT")).toMatchObject({
+      asset_id: "midnight-3",
+      decimals: 0,
+      price_usd: "0.01918181",
+      source: "seed",
+    });
+    // 6 decimals: a $1 peg is $0.000001 per base unit, and this is the number
+    // the sponsorship gate multiplies amounts by.
+    expect(tokens.get("USDM")).toMatchObject({
+      kind: "unshielded",
+      decimals: 6,
+      price_usd: "0.000001",
+      source: "fixed",
+    });
+  });
+
+  test("the endpoint is read-only — polling it writes no demo rows", async () => {
+    await registerToken(TESTA, "TESTTOKENA");
+    const before = await client.query("SELECT COUNT(*)::int AS n FROM token_prices");
+    await getJson("/v1/prices");
+    await getJson("/v1/prices");
+    const after = await client.query("SELECT COUNT(*)::int AS n FROM token_prices");
+    expect(after.rows[0].n).toBe(before.rows[0].n);
+
+    // …and an unpriced token is simply absent rather than invented.
+    const { body } = await getJson("/v1/prices");
+    expect(body.tokens.map((t: any) => t.name)).not.toContain("TESTTOKENA");
+  });
+
+  test("feed status is reported once the service has run", async () => {
+    await client.query(
+      `INSERT INTO price_feed_status (id, provider, last_run_at, last_ok_at, last_error)
+       VALUES (1, 'coingecko', TIMESTAMPTZ '2026-09-03 00:00:00+00', TIMESTAMPTZ '2026-09-03 00:00:00+00', NULL)`,
+    );
+    const { body } = await getJson("/v1/prices");
+    expect(body.feed).toEqual({
+      provider: "coingecko",
+      last_run_at: "2026-09-03T00:00:00.000Z",
+      last_ok_at: "2026-09-03T00:00:00.000Z",
+      last_error: null,
+    });
+    await client.query("DELETE FROM price_feed_status");
+  });
+});
+
+describe("GET /v1/quote — reference prices (SC-001)", () => {
+  test("WBTC→WETH registered BY NAME quotes the real BTC/ETH ratio", async () => {
+    // Neither colour is seeded — faucet colours change on every redeploy — so
+    // this is the whole name-mapping path, end to end over HTTP.
+    await registerToken(WBTC, "WBTC");
+    await registerToken(WETH, "WETH");
+
+    const { status, body } = await getJson(
+      `/v1/quote?from_token=${WBTC}&to_token=${WETH}&from_amount=1000`,
+    );
+    expect(status).toBe(200);
+    expect(body.market_rate).toBeCloseTo(77387 / 2393.28, 12);
+    // Before this project preprod answered 0.2153 here, from colour hashes.
+    expect(body.market_rate).toBeGreaterThan(32);
+    expect(body.source).toBe("token-prices");
+    expect(body.from_source).toBe("seed");
+    expect(body.to_source).toBe("seed");
+    expect(body.sponsor_discount).toBe(0.025);
+    expect(typeof body.prices_updated_at).toBe("string");
+    expect(body.from_usd).toBeCloseTo(1000 * 77387, 6);
+    // The auto-suggested amount is the sponsorship threshold, so it is sponsored.
+    expect(body.sponsored).toBe(true);
+    expect(body.discount).toBeGreaterThanOrEqual(0.025);
+  });
+
+  test("an offer priced AT reference is reported as not sponsored", async () => {
+    const atReference = Math.floor(1000 * (77387 / 2393.28));
+    const { body } = await getJson(
+      `/v1/quote?from_token=${WBTC}&to_token=${WETH}&from_amount=1000&to_amount=${atReference}`,
+    );
+    expect(body.sponsored).toBe(false);
+    expect(body.discount).toBeLessThan(0.025);
+  });
+
+  test("decimals divide the per-coin price into a per-base-unit one", async () => {
+    // Same asset as WBTC, eight decimals: one base unit is 1e-8 of a coin.
+    await registerToken(WSBTC8, "WSBTC", "shielded", 8);
+    const { body } = await getJson(
+      `/v1/quote?from_token=${WSBTC8}&to_token=${WETH}&from_amount=100000000`,
+    );
+    // 1e8 base units = 1 coin = one bitcoin's worth.
+    expect(body.from_usd).toBeCloseTo(77387, 6);
+    expect(body.from_source).toBe("seed");
+
+    const { body: prices } = await getJson("/v1/prices");
+    const wsbtc = prices.tokens.find((t: any) => t.name === "WSBTC");
+    expect(wsbtc).toMatchObject({ decimals: 8, price_usd: "0.00077387", source: "seed" });
+  });
+
+  test("a `feed` row replaces the seed and is reported as `feed`", async () => {
+    await client.query(
+      "UPDATE asset_prices SET price_usd = 80000, source = 'feed' WHERE asset_id = 'bitcoin'",
+    );
+    const { body } = await getJson(
+      `/v1/quote?from_token=${WBTC}&to_token=${WETH}&from_amount=1000`,
+    );
+    expect(body.from_source).toBe("feed");
+    expect(body.market_rate).toBeCloseTo(80000 / 2393.28, 12);
+    await client.query(
+      "UPDATE asset_prices SET price_usd = 77387, source = 'seed' WHERE asset_id = 'bitcoin'",
+    );
+  });
+
+  test("a manual override beats the asset price and is labelled `manual`", async () => {
+    await registerToken(OVERRIDDEN, "WSETH");
+    await client.query(
+      "INSERT INTO token_prices (token_color, price_usd, source) VALUES ($1, '5', 'manual')",
+      [OVERRIDDEN],
+    );
+    const { body } = await getJson(
+      `/v1/quote?from_token=${OVERRIDDEN}&to_token=${WETH}&from_amount=1000`,
+    );
+    expect(body.from_source).toBe("manual");
+    expect(body.from_usd).toBeCloseTo(5000, 6);
+
+    // …and the quote does not overwrite it.
+    const row = await client.query("SELECT price_usd, source FROM token_prices WHERE token_color = $1", [
+      OVERRIDDEN,
+    ]);
+    expect(row.rows[0]).toMatchObject({ price_usd: "5", source: "manual" });
+  });
+
+  test("a registered token with no mapping falls back once, and stays put", async () => {
+    const { body } = await getJson(
+      `/v1/quote?from_token=${TESTA}&to_token=${WETH}&from_amount=1000`,
+    );
+    expect(body.from_source).toBe("fallback");
+    expect(body.to_source).toBe("seed");
+    // One side is a demo price, so the pair has no honest age.
+    expect(body.prices_updated_at).toBeTruthy();
+    expect(body.source).toBe("token-prices"); // both colours ARE registered
+
+    const first = await client.query(
+      "SELECT price_usd, source FROM token_prices WHERE token_color = $1",
+      [TESTA],
+    );
+    expect(first.rows).toHaveLength(1);
+    expect(first.rows[0].source).toBe("fallback");
+
+    // A second quote reuses the row rather than writing another one.
+    await getJson(`/v1/quote?from_token=${TESTA}&to_token=${WETH}&from_amount=2000`);
+    const second = await client.query(
+      "SELECT price_usd, source FROM token_prices WHERE token_color = $1",
+      [TESTA],
+    );
+    expect(second.rows).toHaveLength(1);
+    expect(second.rows[0].price_usd).toBe(first.rows[0].price_usd);
+
+    // Now that it has a row it appears in /v1/prices, labelled honestly.
+    const { body: prices } = await getJson("/v1/prices");
+    expect(prices.tokens.find((t: any) => t.name === "TESTTOKENA")).toMatchObject({
+      source: "fallback",
+      asset_id: null,
+    });
+  });
+
+  test("an unregistered colour is `demo-fallback` and prices_updated_at is null", async () => {
+    const unknown = `9${"9".repeat(63)}`;
+    const { body } = await getJson(
+      `/v1/quote?from_token=${WBTC}&to_token=${unknown}&from_amount=1000`,
+    );
+    expect(body.source).toBe("demo-fallback");
+    expect(body.from_source).toBe("seed");
+    expect(body.to_source).toBe("demo-fallback");
+    expect(body.prices_updated_at).toBeNull();
+
+    const persisted = await client.query("SELECT 1 FROM token_prices WHERE token_color = $1", [
+      unknown,
+    ]);
+    expect(persisted.rows).toHaveLength(0);
+  });
+});

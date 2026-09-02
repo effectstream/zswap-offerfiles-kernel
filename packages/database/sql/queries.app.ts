@@ -862,6 +862,16 @@ export const getKnownTokensWithAssets = prepared<IGetKnownTokensWithAssetsParams
        ORDER BY name`,
 );
 
+export interface IGetKnownTokenByColorParams { token_color: string }
+export type IGetKnownTokenByColorResult = IGetKnownTokensWithAssetsResult;
+/** The single-colour form, for the quote path — two of these beat two scans. */
+export const getKnownTokenByColor = prepared<IGetKnownTokenByColorParams, IGetKnownTokenByColorResult>(
+      `SELECT token_color, name, kind, decimals, asset_id
+       FROM known_tokens
+       WHERE token_color = :token_color!
+       LIMIT 1`,
+);
+
 // ── Pair stats ─────────────────────────────────────────────────────────────
 
 export interface IAdjudicateOfferFillParams { offer_id: number }

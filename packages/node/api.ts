@@ -6,8 +6,6 @@ import {
   insertKnownToken,
   getAssetPrices,
   getLatestEffectstreamBlock,
-  getTokenPrice,
-  upsertTokenPrice,
   checkTokenNameExists,
   getTokenByColor,
   getPairs,
@@ -31,6 +29,8 @@ import {
   apiUpdatesMaxConnections,
   isEventGatePollEnabled,
   isTokenRegistryEnabled,
+  sponsorDiscount,
+  sponsorDiscountBps,
   MIDNIGHT_NETWORK_ID,
   OFFER_MAX_BYTES,
   ROOT_WINDOW_SECONDS,
@@ -45,7 +45,8 @@ import {
   markBlockCommitted,
   type AppEvent,
 } from "./event-bus.ts";
-import { quoteWithPrices, priceOf } from "./market-mock.ts";
+import { quoteWithPrices } from "./market-mock.ts";
+import { listPrices, loadPricingContext, resolveTokenPrice } from "./prices.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
@@ -466,18 +467,19 @@ export const apiRouter: StartConfigApiRouter = async function (
     return result;
   });
 
-  // GET /v1/quote — price quote for from→to backed by the token_prices DB table.
-  // On first request for a token the deterministic fallback price is inserted so
-  // subsequent calls are consistent and operators can override rows manually.
+  // GET /v1/prices — the reference prices behind every quote and behind the
+  // batcher's sponsorship gate, plus how old they are and where they came
+  // from. Read-only: unlike the quote path it never writes a demo row, because
+  // the batcher polls this every ten minutes.
+  server.get("/v1/prices", async () => listPrices(dbConn));
+
+  // GET /v1/quote — price quote for from→to. Prices resolve through
+  // packages/prices.ts: a manual override, else the token's reference asset
+  // (÷ 10^decimals), else the deterministic demo price, which is inserted on
+  // first request so subsequent calls are consistent and operators can
+  // override the row by hand.
   // Params: from_token, to_token (hex colors), from_amount (base units),
   // optional to_amount (a user-set receive amount → discount/sponsored vs it).
-  async function resolvePrice(token: string): Promise<number> {
-    const rows = await getTokenPrice.run({ token_color: token }, dbConn);
-    if (rows.length > 0) return Number(rows[0].price_usd);
-    const fallback = priceOf(token);
-    await upsertTokenPrice.run({ token_color: token, price_usd: fallback }, dbConn);
-    return fallback;
-  }
 
   const TOKEN_COLOR_RE = /^[0-9a-f]{64}$/;
   const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,77})$/; // bounded above by u256
@@ -543,9 +545,29 @@ export const apiRouter: StartConfigApiRouter = async function (
           `No token-tracking solution yet; fix before any real pricing. Tokens: ${unknownTokens.join(", ")}`,
       );
     }
+    // An unregistered colour is quoted at $1 without touching the database —
+    // `demo-fallback`, the one source that is not a row anywhere.
+    const DEMO = { price_usd: "1", source: "demo-fallback" as const, updated_at: null };
+    const ctx = await loadPricingContext(dbConn);
     const priceFor = (color: string) =>
-      unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
-    const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
+      unknownTokens.includes(color)
+        ? Promise.resolve(DEMO)
+        : resolveTokenPrice(dbConn, color, ctx);
+    // Sequential: one pg client, and pg serialises concurrent queries on it
+    // anyway (with a deprecation warning). Two reads, not a round trip saved.
+    const fromPrice = await priceFor(fromToken);
+    const toPrice = await priceFor(toToken);
+    const pf = Number(fromPrice.price_usd);
+    const pt = Number(toPrice.price_usd);
+
+    // The OLDER of the two, because a quote is only as fresh as its stalest
+    // side. null when either side has no real price to be stale.
+    const pricesUpdatedAt =
+      fromPrice.updated_at === null || toPrice.updated_at === null
+        ? null
+        : fromPrice.updated_at < toPrice.updated_at
+          ? fromPrice.updated_at
+          : toPrice.updated_at;
 
     // Quotes come from the token-price table (or the demo fallback) only. The
     // backend deliberately holds NO solver state: solver-posted ladders used to
@@ -555,8 +577,15 @@ export const apiRouter: StartConfigApiRouter = async function (
     // relay and the relay does the interpolation, so this backend keeps a
     // single, client-agnostic price source.
     return {
-      ...quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount),
+      ...quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount, sponsorDiscountBps()),
       source: unknownTokens.length > 0 ? "demo-fallback" : "token-prices",
+      // Per-side provenance, so the UI can say "CoinGecko, 3 h ago" for one
+      // leg and "demo rate" for the other instead of collapsing both into the
+      // single top-level `source`.
+      sponsor_discount: sponsorDiscount(),
+      from_source: fromPrice.source,
+      to_source: toPrice.source,
+      prices_updated_at: pricesUpdatedAt,
     };
   });
 

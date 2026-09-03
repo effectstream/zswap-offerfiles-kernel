@@ -7,7 +7,7 @@ import {
   LedgerState,
   Transaction,
   WellFormedStrictness,
-} from "@midnightntwrk/ledger-v9";
+} from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles, OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
 
 import {

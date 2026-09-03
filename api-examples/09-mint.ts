@@ -22,7 +22,7 @@ import { writeFileSync } from "node:fs";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { CompiledContract } from "@midnight-ntwrk/compact-js";
-import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
+import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
 import {
   buildWalletFacade,
   registerNightForDust,

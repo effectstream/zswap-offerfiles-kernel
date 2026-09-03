@@ -1,7 +1,7 @@
 import {
   Transaction,
   type FinalizedTransaction,
-} from "@midnightntwrk/ledger-v9";
+} from "@midnight-ntwrk/ledger-v8";
 import type { PendingTransactions } from "@midnightntwrk/wallet-sdk-capabilities";
 
 /**

@@ -11,7 +11,7 @@
 // directly: what does imbalances(segId) return, per segment, before flattening?
 
 import { readFileSync } from "node:fs";
-import { Transaction } from "@midnightntwrk/ledger-v9";
+import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { blobStorePath } from "./actors/wallets.ts";
 import { OUT_DIR } from "./config.ts";

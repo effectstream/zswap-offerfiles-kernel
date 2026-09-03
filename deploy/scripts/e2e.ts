@@ -503,7 +503,7 @@ async function offlineStandInFee(
   modelledTakerInputs: number,
 ): Promise<{ standInFeeWithMargin: string; plusFlatOverhead: string } | { error: string }> {
   try {
-    const { LedgerParameters } = (await import("@midnightntwrk/ledger-v9")) as {
+    const { LedgerParameters } = (await import("@midnight-ntwrk/ledger-v8")) as {
       LedgerParameters: { initialParameters: () => unknown };
     };
     const standIn = buildTakerHalfStandIn(
@@ -651,7 +651,7 @@ async function fundTakerNight(): Promise<void> {
         { ttl: new Date(Date.now() + 30 * 60_000), payFees: true },
       );
       const signed = await genesis.wallet.signRecipe(recipe, (p: Uint8Array) =>
-        genesis.unshieldedKeystore.signDataAsync(p),
+        genesis.unshieldedKeystore.signData(p),
       );
       await genesis.wallet.submitTransaction(await genesis.wallet.finalizeRecipe(signed));
       lastErr = undefined;

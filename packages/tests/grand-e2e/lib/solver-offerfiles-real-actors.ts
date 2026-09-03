@@ -1057,7 +1057,7 @@ async function submitTransferOnce(
   try {
     const signed = layer === "unshielded"
       ? await (from.wallet as any).signRecipe(recipe, (payload: Uint8Array) =>
-          from.unshieldedKeystore.signDataAsync(payload),
+          from.unshieldedKeystore.signData(payload),
         )
       : recipe;
     finalized = await from.wallet.finalizeRecipe(signed as never);

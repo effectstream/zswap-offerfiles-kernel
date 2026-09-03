@@ -60,7 +60,7 @@ try {
   console.log("finalized via finalizeTransaction()");
 } catch {
   const signed = await (w.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-    w.unshieldedKeystore.signDataAsync(p),
+    w.unshieldedKeystore.signData(p),
   );
   finalized = await w.wallet.finalizeRecipe(signed);
   console.log("finalized via signRecipe() + finalizeRecipe()");

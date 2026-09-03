@@ -66,5 +66,12 @@ main(function* () {
     console.error("[zswap-da-batcher] error:", error);
     yield* batcher.gracefulShutdownOp();
   }
-  yield* suspend();
+  // runBatcher() RETURNS as soon as the HTTP server and the polling loop are
+  // spawned; this suspend is what keeps their scope alive. So the reference-
+  // price poll must be stopped when THIS unwinds, not when runBatcher returns.
+  try {
+    yield* suspend();
+  } finally {
+    celestiaAdapter.stop();
+  }
 });

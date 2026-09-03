@@ -408,9 +408,14 @@ test("a ring leaving the solver short is taken when stock covers the top-up", ()
   );
   const found = findCycleCrossings(book, RING_CFG(), NOW);
   expect(found.length).toBe(1);
-  expect(found[0].payouts.get(C)).toBe(100n);
+  const cycle = found[0]!;
+  expect(cycle.payouts.get(C)).toBe(100n);
+  // findCycleCrossings only ever yields ring (pathB) candidates; asserting it
+  // is what lets the compiler — and the reader — see the ring's `net`.
+  expect(cycle.kind).toBe("pathB");
+  if (cycle.kind !== "pathB") throw new Error(`expected a ring candidate, got ${cycle.kind}`);
   // A surplus of 200 A against a 100 C shortfall, both priced at 1.
-  expect(found[0].net.get(A)).toBe(200n);
+  expect(cycle.net.get(A)).toBe(200n);
 });
 
 test("a ring the solver cannot fund is left alone", () => {

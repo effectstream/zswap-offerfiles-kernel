@@ -409,7 +409,16 @@ const REAL_E1_MIGRATION_NAMES = Object.freeze([
 // application schema from 18 to 22. No relation was dropped. Every entry is a
 // plain CREATE TABLE in `public`: the file declares no view and no
 // partitioning, so `relkind IN ('r','p')` sees exactly this set.
+//
+// 00005 adds asset_prices and price_feed_status (reference prices + feed
+// status). NOTE, pre-existing and NOT introduced here: `pair_stats` is in this
+// list but 000-init.sql does not create it — the table was deliberately
+// dropped (see the comment where it used to be defined) and this frozen list
+// was not updated. Since the assertion below is an EXACT match, this list
+// cannot currently be satisfied; recorded as its own issue rather than fixed
+// in passing.
 const REAL_E1_REQUIRED_DATABASE_RELATIONS = Object.freeze([
+  "asset_prices",
   "commitments",
   "created_unshielded",
   "known_roots",
@@ -429,6 +438,7 @@ const REAL_E1_REQUIRED_DATABASE_RELATIONS = Object.freeze([
   "offer_file_unshielded_spends_history",
   "offer_rejections",
   "pair_stats",
+  "price_feed_status",
   "token_prices",
   "unshielded_creates",
   "unshielded_spends",

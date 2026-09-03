@@ -4,7 +4,7 @@
 // template's contracts-midnight scripts use).
 
 import * as Rx from "rxjs";
-import { UnshieldedAddress } from "@midnightntwrk/wallet-sdk-address-format";
+import { UnshieldedAddress, type MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import { buildWalletFacade } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
@@ -138,9 +138,23 @@ export async function waitForShielded(
   return (await shieldedBalances(w))[color] ?? 0n;
 }
 
-/** The wallet's UnshieldedAddress object (for unshielded swap-output recipients). */
+/** The wallet's UnshieldedAddress object (for unshielded swap-output recipients).
+ *
+ * The bech32m cast is a duplicate-install artifact, not a conversion: the same
+ * library is present under two npm scopes — this workspace pins
+ * `@midnight-ntwrk/wallet-sdk-address-format@3.1.0` while
+ * `@effectstream/midnight-contracts` (which produces the keystore) depends on
+ * `@midnightntwrk/wallet-sdk-address-format@3.1.2`. The two `MidnightBech32m`
+ * classes are structurally identical bech32m wrappers whose branded `network`
+ * field makes them nominally distinct to the compiler. Importing the codec from
+ * the facade's copy instead would swap the codec implementation at runtime,
+ * which is a behaviour change; the cast keeps runtime semantics exactly as they
+ * have always been. */
 export function unshieldedAddressObj(w: WalletResult): unknown {
-  return UnshieldedAddress.codec.decode(net.id as any, w.unshieldedKeystore.getBech32Address());
+  return UnshieldedAddress.codec.decode(
+    net.id as any,
+    w.unshieldedKeystore.getBech32Address() as unknown as MidnightBech32m,
+  );
 }
 
 /** Read current unshielded balances (color → amount). */

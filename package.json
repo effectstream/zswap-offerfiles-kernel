@@ -12,6 +12,8 @@
     "dev": "NODE_ENV=development bunx orchestrator start",
     "pretest": "bun run scripts/patch-macos-celestia.ts",
     "start:mainnet": "bun run start.mainnet.ts",
+    "start:solver": "bun run start.solver.ts",
+    "start:solver-frontend": "bun run start.solver-frontend.ts",
     "test": "bun run packages/tests/run-tests.ts",
     "test:grand": "bun run packages/tests/grand-e2e/run.ts",
     "seed:market": "bun run packages/tests/seed-market.ts",
@@ -22,6 +24,9 @@
     "docs:build": "bun run --filter @zswap-da/docs-playground build",
     "docs:preview": "bun run --filter @zswap-da/docs-playground preview",
     "typecheck:backend": "bun run scripts/backend-typecheck.ts",
+    "typecheck:solver": "bun run scripts/solver-typecheck.ts",
+    "typecheck:price-feed": "bun run scripts/price-feed-typecheck.ts",
+    "typecheck": "bun run typecheck:backend && bun run typecheck:solver && bun run typecheck:price-feed",
     "test:held-open": "bun test ./packages/database/held-open-transaction.pgtest.ts"
   },
   "dependencies": {
@@ -32,7 +37,14 @@
     "@electric-sql/pglite": "^0.3.14",
     "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6",
     "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
+    "@midnightntwrk/wallet-sdk-abstractions": "3.0.0-beta.0",
     "@midnightntwrk/wallet-sdk-address-format": "4.0.0-beta.2",
+    "@midnightntwrk/wallet-sdk-capabilities": "4.0.0-beta.2",
+    "@midnightntwrk/wallet-sdk-dust-wallet": "5.0.0-beta.2",
+    "@midnightntwrk/wallet-sdk-facade": "5.0.0-beta.2",
+    "@midnightntwrk/wallet-sdk-hd": "3.1.0-beta.1",
+    "@midnightntwrk/wallet-sdk-shielded": "4.0.0-beta.2",
+    "@midnightntwrk/wallet-sdk-unshielded-wallet": "4.0.0-beta.2",
     "@scure/bip39": "^2.2.0",
     "wait-on": "8.0.3"
   },

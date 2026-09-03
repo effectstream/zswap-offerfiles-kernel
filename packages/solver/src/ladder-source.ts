@@ -14,6 +14,11 @@
 // fail-closed withdrawal (Q-R2-3), and it is what N4 sends.
 
 import {
+  forwardAdmissionPolicy,
+  type JobAdmissionPolicy,
+  type SpendableInventory,
+} from "@zswap-da/solver-core/admission-policy";
+import {
   buildPriceLevelsFrame,
   buildSolverCapabilitiesFrame,
   deriveLadder,
@@ -32,7 +37,7 @@ export interface LadderCache {
   isCurrent: () => boolean;
 }
 
-export interface LadderPushOptions {
+export interface LadderPushOptions extends JobAdmissionPolicy {
   /** Passed in, never read from the clock: same cache + same `nowMs` ⇒ same
    *  bytes. The caller (N4's push loop) owns the clock. */
   nowMs: number;
@@ -40,8 +45,12 @@ export interface LadderPushOptions {
   /** Offers claimed by an in-flight fill, from `Stock`. Kept as a parameter so
    *  derivation stays pure and this file stays free of executor state. */
   unavailableOfferHashes?: Iterable<string>;
-  supportedPairs?: ReadonlySet<string> | null;
-  minJobOutput?: ReadonlyMap<string, bigint> | null;
+  /** FR-003: what the solver can actually move (`Stock.available`), so
+   *  publication cannot advertise a rung it would refuse. Same reason it is a
+   *  parameter: no executor or wallet state reaches this file. Read for the
+   *  pair's tokenOut only — 00006-R2 removed the tokenIn bound (FR-003), so a
+   *  solver with an empty token wallet still publishes its whole-maker rungs. */
+  spendableInventory?: SpendableInventory | null;
   maxParallelSwaps?: number;
   maxPairs?: number;
   maxRungsPerPair?: number;
@@ -51,9 +60,18 @@ export interface LadderPush {
   capabilities: SolverCapabilitiesMessage;
   priceLevels: PriceLevelsMessage;
   derived: DerivedLadder;
-  /** Null when the push carries the cache's real ladders; otherwise why it is
-   *  an empty withdrawal instead. */
-  withheld: "cache-not-current" | null;
+  /**
+   * Null when the push carries the cache's real ladders; otherwise why it is
+   * an empty withdrawal instead.
+   *
+   * `deriveLadderPush` produces only `"cache-not-current"` — the fail-closed
+   * withdrawal below. `"withdrawn"` exists for the R-41 EXPLICIT withdrawal
+   * frame, which is assembled by the relay client rather than derived here, and
+   * is in this union so that the last-push record a status observer reads
+   * (00007 FR-004) can say which of the two an empty pair was. Every consumer
+   * that only asks "are these the real ladders" keeps testing `=== null`.
+   */
+  withheld: "cache-not-current" | "withdrawn" | null;
 }
 
 /** A fresh object every time: a shared frozen singleton would put one caller's
@@ -91,8 +109,12 @@ export function deriveLadderPush(cache: LadderCache, options: LadderPushOptions)
     ...(options.unavailableOfferHashes === undefined
       ? {}
       : { unavailableOfferHashes: options.unavailableOfferHashes }),
-    ...(options.supportedPairs === undefined ? {} : { supportedPairs: options.supportedPairs }),
-    ...(options.minJobOutput === undefined ? {} : { minJobOutput: options.minJobOutput }),
+    // FR-002: the whole policy in one hop. Never a field-by-field spread —
+    // that is precisely how P4-F02 dropped `supportedPairs`/`minJobOutput`.
+    ...forwardAdmissionPolicy(options),
+    ...(options.spendableInventory === undefined
+      ? {}
+      : { spendableInventory: options.spendableInventory }),
     ...(options.maxPairs === undefined ? {} : { maxPairs: options.maxPairs }),
     ...(options.maxRungsPerPair === undefined ? {} : { maxRungsPerPair: options.maxRungsPerPair }),
   });

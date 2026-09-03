@@ -22,6 +22,45 @@ export interface SubmitBlobOptions {
   fetchImpl?: typeof fetch;
 }
 
+/**
+ * The batcher's fee-sponsorship refusals. These are the one class of batcher
+ * rejection that is the MAKER's fault rather than an infrastructure fault, so
+ * they must not surface as `500 INTERNAL`: the maker can act on them (re-price
+ * and resubmit), and a 500 tells them the opposite — "server problem, try
+ * again unchanged".
+ *
+ * The node's own pre-check answers these before forwarding, so in a healthy
+ * deployment this path is only reached when the two disagree: a node in `warn`
+ * with a batcher in `enforce`, a node whose prices are older than the
+ * batcher's, or a batcher pointed at a different node. Which is exactly when a
+ * precise status code matters most.
+ */
+const SPONSORSHIP_REFUSAL = /^(NOT_SPONSORED|UNPRICED_TOKEN|PRICE_UNAVAILABLE)\b/;
+
+/** An error the API's setErrorHandler will answer as a 4xx with this code. */
+export interface RoutedError extends Error {
+  statusCode: number;
+  error: string;
+}
+
+/**
+ * Turn a batcher refusal message into a 422-carrying error, or null when it is
+ * not one. Exported for the tests: this mapping is the whole difference
+ * between a maker seeing "wants 1.0% below reference, sponsorship needs ≥ 2.5%"
+ * and seeing "INTERNAL".
+ */
+export function sponsorshipRefusalError(reason: string): RoutedError | null {
+  const match = SPONSORSHIP_REFUSAL.exec(reason);
+  if (match === null) return null;
+  // The message is the BATCHER's, verbatim — setErrorHandler forwards it as
+  // `reason`, and rewrapping it ("Failed to submit blob…") would bury the one
+  // sentence the maker needs.
+  const error = new Error(reason) as RoutedError;
+  error.statusCode = 422;
+  error.error = match[1]!;
+  return error;
+}
+
 export function batcherSubmitTimeoutMs(): number {
   const raw = getEnv("BATCHER_SUBMIT_TIMEOUT_MS") ?? String(DEFAULT_TIMEOUT_MS);
   if (!/^[1-9][0-9]*$/.test(raw)) return DEFAULT_TIMEOUT_MS;
@@ -144,6 +183,18 @@ export async function submitBlobViaBatcher(
         : !resp.ok
           ? `HTTP ${resp.status}`
           : "malformed wait-receipt acknowledgement";
+    // BOTH fields, and `message` is the one that usually carries it. Measured
+    // against a real batcher on 2026-09-02: the SDK wraps an adapter refusal as
+    //   {"success":false,"error":"Validation failed",
+    //    "message":"NOT_SPONSORED: wants 0.0% below reference, …"}
+    // so reading only `error` (the field `reason` above prefers) matched
+    // "Validation failed" and answered 500 — the exact defect this mapping
+    // exists to remove.
+    const refusal = [record?.error, record?.message]
+      .filter((value): value is string => typeof value === "string")
+      .map(sponsorshipRefusalError)
+      .find((value) => value !== null);
+    if (refusal !== undefined && refusal !== null) throw refusal;
     throw new Error(`Failed to submit blob to Celestia via batcher: ${reason}`);
   }
 

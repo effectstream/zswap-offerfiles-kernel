@@ -13,14 +13,27 @@ settle via the batcher's `midnight-balancer` target, and connect a wallet to
 inspect balances / mint test tokens (`VITE_PROOF_SERVER_URL`, default
 `http://localhost:6300`).
 
-**Repository validation scope.** `bun run typecheck:backend` is the strict,
-no-emit TypeScript gate for the 27 production `packages/node` roots only; it
-excludes node tests and the grand-E2E entrypoint, builds the real dependency
-graph without modifying it, and fails all node-owned or fileless compiler
-diagnostics. It is deliberately not advertised as a workspace-wide typecheck.
-CI also bundles API examples 01, 03, 05, 07, and 11 before running the docs
-playground typecheck. Example 11's Midnight network-id and ledger-v8 imports
-are direct root dependencies, not transitive assumptions.
+**Repository validation scope.** There are two strict, no-emit TypeScript gates,
+and `bun run typecheck` runs both.
+
+- `bun run typecheck:backend` covers the 27 production `packages/node` roots
+  only; it excludes node tests and the grand-E2E entrypoint, builds the real
+  dependency graph without modifying it, and fails all node-owned or fileless
+  compiler diagnostics.
+- `bun run typecheck:solver` covers the solver: `packages/solver`,
+  `packages/solver-core` and `packages/validator` — **production and test
+  sources alike** — plus every other first-party file that imports the solver's
+  source, discovered by scanning rather than by a maintained list. Zero
+  diagnostics are required. Test sources are inside this gate deliberately: the
+  drift it exists to catch (an E2E harness still passing callbacks the solver no
+  longer accepts) lived in a test file.
+
+Neither gate is a workspace-wide typecheck: each reports, but does not fail on,
+diagnostics in dependencies outside its own roots — including the gitignored
+Compact output, which CI stubs as declarations for both gates. CI also bundles
+API examples 01, 03, 05, 07, and 11 before running the docs playground
+typecheck. Example 11's Midnight network-id and ledger-v9 imports are direct
+root dependencies, not transitive assumptions.
 
 ---
 
@@ -93,15 +106,34 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults
                                         # phantom unfillable offers on the book; too narrow
                                         # ⇒ valid offers rejected ROOT_UNKNOWN.
 
-# ── Solver process (packages/solver) ───────────────────────────────────────────
-SOLVER_DRY_RUN=true                      # mainnet default; mirrors only, never settles
-                                        # current dry-run does NOT load inventory, so it is not Path-A decision parity
-SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
+# ── Solver process (packages/solver, started by `bun run start:solver`) ────────
+# The seven values below are MANDATORY for that entrypoint, in dry-run as well
+# as live mode; it validates all of them before opening a wallet, socket or
+# journal and exits non-zero listing every problem at once.
+MIDNIGHT_NETWORK_ID=undeployed           # declared explicitly: the SDK otherwise assumes undeployed
+ZSWAP_API=http://127.0.0.1:9999          # kernel Offer Files REST/SSE base
+SOLVER_SEED=...                          # the repository dev seed is accepted only on undeployed
 SOLVER_RELAY_WS_URL=wss://relay/solver   # outbound Midnight Intents solver socket
-SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer; backend exact-files is unauthenticated
+SOLVER_RELAY_HTTP_URL=https://relay/api/v1  # public relay HTTP base for durable GET /jobs/:jobId
+                                        # never derived from the websocket URL
+SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer, >= 32 chars; backend exact-files is unauthenticated
+SOLVER_JOURNAL_PATH=/var/lib/cow-solver/operations.sqlite  # absolute, per-instance volume; :memory: refused
+
+SOLVER_DRY_RUN=true                      # mainnet default; mirrors and loads read-only inventory,
+                                        # syncs the REAL wallet, starts no relay jobs, mutates nothing
+SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
+SOLVER_ENABLED=true                      # "false" exits 0 without requiring the values above
 SOLVER_RELAY_MAX_PARALLEL_SWAPS=8        # advertised and enforced proof-build capacity
 SOLVER_STATUS_POLL_MS=5000               # missed-signal backend-consumption backstop
 SOLVER_SETTLE_TTL_MINUTES=30             # wallet rollback window when no terminal signal arrives
+SOLVER_SUPPORTED_PAIRS=                  # JSON ["<64hex>-><64hex>"]; bounds publication AND admission
+SOLVER_MIN_JOB_OUTPUT=                   # JSON {"<64hex out-token>":"<min>"}; same two boundaries
+SOLVER_DUST_MAX_PER_JOB=                 # DUST admission budget; all three DUST values set together
+SOLVER_DUST_MAX_PER_WINDOW=
+SOLVER_DUST_WINDOW_MS=
+SOLVER_FEE_SIZING_TAKER_INPUTS=1          # taker zswap inputs the fee estimate models; [1,64]
+                                        # funds a real taker half of up to n+2 inputs
+                                        # each extra input costs 12-14% more DUST, actually spent
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -574,9 +606,20 @@ curl http://host:9999/v1/known-tokens
 
 ```json
 [
-  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded" }
+  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded" },
+  { "id": 2, "token_color": "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c", "name": "SNIGHT", "kind": "shielded" }
 ]
 ```
+
+`NIGHT`, `SNIGHT`, `USDC` and `USDM` are seeded by the schema. `SNIGHT` — the
+[shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
+held as a shielded token — is the one seed whose colour depends on the network,
+because it derives from the contract address. The schema seeds **preview**
+(`793c29c9…f99c`, shown above); **preprod** is `8fac382b…6819`, and `mainnet` has
+no deployment yet. Another network patches that row in `000-init.sql` before its
+database is created, or registers the colour on an existing database with an
+`UPDATE` / `POST /v1/known-tokens`. It carries NIGHT's `decimals` and prices off
+the same asset, so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
 appearing in an offer says nothing about its name, and an offer's value layer
@@ -683,6 +726,40 @@ API-gate and transport codes are deliberately separate from
 `DUPLICATE_MARKERS` (`409`) is marker dedup, below; `VALIDATION` (`400`)
 is a malformed JSON body; and `RATE_LIMITED` (`429`) is the HTTP limiter.
 
+**Fee-sponsorship error `422`**
+
+The offer is well-formed and settleable — it is simply not a trade this
+deployment will pay a Celestia fee to publish. Nothing was forwarded to the
+batcher, so nothing was spent. Re-price the offer and resubmit; `GET /v1/quote`'s
+`suggested_to_amount` is an amount that passes.
+
+```json
+{
+  "error": "NOT_SPONSORED",
+  "reason": "wants 1.0% below reference, sponsorship needs ≥ 2.5% below",
+  "give_usd": 30656.1,
+  "want_usd": 30349.5,
+  "implied_discount": 0.01,
+  "sponsor_discount": 0.025
+}
+```
+
+| Code | Meaning |
+|---|---|
+| `NOT_SPONSORED` | The wanted value is not at least `sponsor_discount` below the given value at reference prices. Body carries `give_usd`, `want_usd`, `implied_discount`, `sponsor_discount` |
+| `UNPRICED_TOKEN` | A leg's token has no market price and `BATCHER_SPONSOR_UNPRICED=reject`. Body carries `unpriced` (the colours) and `sponsor_discount`. **Not emitted under the default `allow`** |
+| `PRICE_UNAVAILABLE` | Forwarded from the batcher: it could not reach this node's `/v1/prices` and is in `enforce`. The node's own pre-check never emits it — it reads the database directly |
+
+All three also arrive as `422` when the **batcher** refuses after the node
+forwarded (a node in `warn` with a batcher in `enforce`, or a stale batcher
+snapshot); `reason` is then the batcher's own message, verbatim. Before this
+existed those surfaced as `500 INTERNAL`, which told the maker "server problem,
+retry unchanged" — the opposite of the truth.
+
+Under the default `BATCHER_SPONSOR_POLICY=warn` the node emits **no 422 at all**:
+it logs what `enforce` would have refused and forwards. See the fee-sponsorship
+section under *Ingestion pipeline* for the full policy table.
+
 ### Dedup is two rules (`DUPLICATE_OFFER` and `DUPLICATE_MARKERS`)
 
 **BREAKING as of 2026-08-18** — a submission that previously succeeded can now
@@ -739,9 +816,131 @@ Validation consults the node's local state only — no live RPC calls are made. 
 > positive `version`, and `pairs` is interpreted as a complete replacement.
 > Solver-backed `/v1/quote` precedence is default-off until explicitly enabled.
 
+#### `GET /v1/prices?tokens=<color>[,<color>…]`
+
+The reference prices for the colours you name, where they came from, and how old
+they are. This is the source of truth behind `GET /v1/quote` and behind the
+batcher's fee sponsorship — the batcher looks colours up here rather than keeping
+its own prices, so the threshold the UI shows and the one the batcher enforces
+cannot drift apart.
+
+**`tokens` is required.** 1-50 64-hex colours, comma-separated. There is no
+unfiltered form: both callers only ever want the colours in front of them (a
+pair on screen, an offer's legs), and an endpoint whose cost grew with the size
+of the registry would become the slowest route here the first time a few
+thousand short-lived tokens were minted.
+
+| Input | Answer |
+|---|---|
+| missing, empty, or only commas | `400 { "error": "VALIDATION", "reason": "tokens is required: …" }` |
+| an entry that is not 64 hex characters | `400` naming the entry |
+| more than 50 entries | `400` saying how many arrived |
+| a colour this node does not price | `200`, and the colour is simply **absent** from `tokens` — not an error |
+
+Colours are matched case-insensitively and duplicates collapse, exactly as
+`from_token`/`to_token` are treated on `/v1/quote`; responses always spell them
+lower case.
+
+Every price is in **USD** — USD is the numeraire and no asset is assumed to be
+worth one dollar, stablecoins included: they are quoted from the provider like
+everything else, so a depeg is visible here.
+
+Prices are **per base unit**. Amounts everywhere in this API are integer base units
+and carry no decimals metadata, so a token's price is its asset's per-coin price
+divided by `10^known_tokens.decimals`. A dollar-ish stablecoin with 6 decimals is
+about `0.000001` here, and that is the number to multiply an amount by.
+
+```bash
+curl "http://host:9999/v1/prices?tokens=e758…a912,d133…3333"
+```
+
+```json
+{
+  "sponsor_discount": 0.025,
+  "feed": {
+    "provider": "coingecko",
+    "last_run_at": "2026-09-03T00:00:00.000Z",
+    "last_ok_at":  "2026-09-03T00:00:00.000Z",
+    "last_error":  null
+  },
+  "assets": [
+    { "asset_id": "bitcoin", "price_usd": "77387", "source": "feed",
+      "provider_updated_at": "2026-09-02T20:25:50.000Z", "updated_at": "2026-09-03T00:00:00.000Z" }
+  ],
+  "tokens": [
+    { "token_color": "e758...a912", "name": "WBTC", "kind": "shielded", "decimals": 0,
+      "asset_id": "bitcoin", "price_usd": "77387", "source": "feed",
+      "updated_at": "2026-09-03T00:00:00.000Z" },
+    { "token_color": "d133...3333", "name": "TESTTOKENA", "kind": "shielded", "decimals": 0,
+      "asset_id": null, "price_usd": "13.0238", "source": "fallback",
+      "updated_at": "2026-09-02T12:00:00.000Z" }
+  ]
+}
+```
+
+Only `bitcoin` is in `assets`: it is the asset that produced WBTC's price.
+TESTTOKENA's `fallback` price comes from its colour, not from an asset, so
+nothing is listed for it — and the other four seeded assets were not asked
+about.
+
+`price_usd` is a decimal **string** — the column is `NUMERIC` and the values are
+exact; parsing them as doubles is the caller's decision, not ours.
+
+| `source` | Meaning |
+|---|---|
+| `feed` | fetched from CoinGecko by the `price-feed` service |
+| `seed` | the value shipped in `000-init.sql` (captured 2026-09-02). A stack that never runs the feed still quotes real ratios |
+| `manual` | an operator's row in `token_prices`. Wins over everything; nothing rewrites it |
+| `fallback` | the deterministic demo price derived from the token's colour. **Not a market price** — label it as such in a UI, and the sponsorship gate treats it as *unpriced* |
+
+`tokens` lists the **requested** colours that resolve to a price, and `assets`
+only the assets those prices came from — every row in `assets` explains a row in
+`tokens`. A requested colour with no mapping and no quote yet is simply absent
+rather than being given a demo row: this endpoint never writes. (The quote path
+still writes one, deliberately, so an operator can inspect and override it.)
+
+`feed` is all-nulls when the service has never run against this database.
+
+**Mapping.** Faucet-minted colours change on every clean redeploy (they derive from
+the contract address), so tokens map to assets by **name**: `WBTC`/`WSBTC`/`BTC` →
+`bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`
+(Moneta's Cardano USDM, the asset the VIA Labs bridge carries to Midnight),
+`NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3` (the shielded-night wrapper is
+locked 1:1 against NIGHT, so it is the same asset — no new price to fetch).
+`known_tokens.asset_id` overrides the map, and `PRICE_FEED_MAP`
+(`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
+
+**`decimals` is base units per priced coin, not display decimals.** `NIGHT` is
+seeded with `decimals: 6` — 1 NIGHT is 10⁶ Stars, its base unit
+(`STARS_PER_NIGHT` in `midnight-ledger/ledger/src/structure.rs`) — so its
+per-base-unit price is the seeded `midnight-3` coin price divided by `10^6`.
+A colour registered through `POST /v1/known-tokens` without an explicit
+`decimals` still defaults to `0` (base unit == coin), which is correct for
+every faucet-minted dev/test token.
+
+**The `price-feed` service.** `packages/price-feed` is a separate process, not part
+of the node: the node never calls CoinGecko. It refreshes `asset_prices` once a day
+(`PRICE_FEED_INTERVAL_MS`), asking for up to `PRICE_FEED_BATCH_SIZE` ids (default
+50) per request with at least `PRICE_FEED_REQUEST_SPACING_MS` between requests, so
+credits scale with `ceil(assets / 50)` and today's five assets are ONE call. A
+failed request is recorded against every id it carried and the next batch is still
+made; a `429` stops the cycle and lands in `feed.last_error`. A single bad id
+inside an otherwise good response fails only that id.
+
+`bun run --filter @zswap-da/price-feed once` (or `docker compose run --rm
+price-feed --once`) takes a single refresh now. It needs `COINGECKO_API_KEY`;
+without one it only warns — `--once` exits non-zero, loop mode warns on every
+tick and does nothing — and the seeded prices keep serving. **It is not part of a
+development stack**: `bun run dev` does not start it, because the seeds already
+give development real ratios (Q-11).
+
 #### `GET /v1/quote`
 
-Price quote for a token swap, backed by the `token_prices` table. On first request the deterministic fallback price is written; subsequent calls are consistent. Operators can override rows directly in the DB.
+Price quote for a token swap. Prices resolve in this order: an operator's `manual`
+row in `token_prices`, else the token's reference asset from `/v1/prices`
+(÷ `10^decimals`), else the deterministic demo price — which is written to
+`token_prices` on first request so subsequent calls are consistent and an operator
+can override the row by hand.
 
 Unregistered colors quote at a **$1 demo fallback** (two unknown tokens ⇒ 1:1) instead of erroring — loudly logged server-side, never persisted to `token_prices`. This is a stopgap until token identity is chain-derived (TokenMint registry); do not treat fallback quotes as market data. Malformed colors answer `400`.
 
@@ -769,7 +968,11 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
   "sponsored":           true,
   "from_usd":            1.46,
   "to_usd":              1.42,
-  "source":              "token-prices"
+  "source":              "token-prices",
+  "sponsor_discount":    0.025,
+  "from_source":         "seed",
+  "to_source":           "fallback",
+  "prices_updated_at":   "2026-09-02T20:25:50.000Z"
 }
 ```
 
@@ -782,11 +985,16 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 | `discount` | Fractional gap below `market_rate` (e.g. `0.025` = 2.5% under market) |
 | `sponsored` | `true` when the implied rate is at least the sponsorship discount below market (the batcher's fee-sponsorship policy hook) |
 | `from_usd`, `to_usd` | USD value of each leg at the reference price |
-| `source` | `token-prices` or `demo-fallback` |
+| `source` | `token-prices` or `demo-fallback` (unchanged: `demo-fallback` iff either colour is unregistered) |
+| `sponsor_discount` | The threshold `sponsored` was decided against, as a fraction (`SPONSOR_DISCOUNT_BPS / 10000`) |
+| `from_source`, `to_source` | Per-leg provenance: `feed`, `seed`, `fixed`, `manual`, `fallback`, or `demo-fallback`. A UI should label the last two as demo rates |
+| `prices_updated_at` | The **older** of the two legs' `updated_at` — a quote is only as fresh as its stalest side. `null` when either leg is `demo-fallback` |
 
 This backend holds no solver state, so nothing else can win the quote. Solver
 ladders are pushed to the Midnight Intents relay, which does its own
-interpolation; the backend's job is the indexed book and its reads.
+interpolation; the backend's job is the indexed book and its reads. What the
+solver publishes, and what it will settle, is described in
+[The COW solver](#the-cow-solver-midnight-intents-side) below.
 
 ---
 
@@ -949,6 +1157,99 @@ Returns `500` if `MIDNIGHT_CONTRACT_ADDRESS` is not set.
 
 ---
 
+## The COW solver (Midnight Intents side)
+
+The solver is **not** part of this HTTP API and listens on no port. It is a
+separate process (`bun run start:solver`; see README → "Running the COW solver")
+that consumes this backend as a client — `GET /v1/offers`, `GET /v1/offers/updates`,
+`POST /v1/offers/files`, `GET /v1/health/sync` — and connects **outbound** to a
+Midnight Intents relay, where it publishes price ladders and settles the swap
+jobs the relay dispatches to it. Neither `bun run dev` nor `bun run start:mainnet`
+launches it.
+
+**Topology.** Kernel (node), batcher and solver are three independent processes.
+The kernel indexes and serves offers; the batcher publishes blobs to Celestia;
+the solver mirrors the kernel's book and owns its own wallet, journal and relay
+connection. A container deployment gives each of them its own service, with the
+solver depending on the kernel and relay rather than starting them.
+
+**Supported domain.** Midnight 2.x / ledger-v9 only. The solver settles offers
+that normalize to **one shielded give leg and one shielded want leg** with
+distinct token colors and positive amounts, at most **8 makers per job**, plus an
+optional shielded residual paid from its own inventory. Unshielded legs, mixed
+value layers, multi-leg baskets, and Midnight 2.x are refused before admission —
+they are out of scope, not partially supported.
+
+**Fees.** Maker offers are constructed with `payFees:false` (see
+[Encoding offers](#encoding-offers-swapoffer1)), so a maker's offer pays no fee
+itself. The settling side pays: for a relay job, the solver sizes and funds the
+DUST for the transaction it submits, bounded by the `SOLVER_DUST_*` admission
+budget. Sizing that fee requires **no swap-token inventory**: the taker's half is
+modelled by a synthetic transaction built from ledger primitives with the taker
+half's shape, because the DUST fee is a function of transaction structure only,
+not of any coin's value, token type or owner. Earlier builds spent — and
+immediately reverted — the job's full `amountIn` of the input token out of the
+solver's own wallet to do this. The solver still needs NIGHT/DUST for the fee
+itself. See `SOLVER_FEE_SIZING_TAKER_INPUTS` below.
+
+**Quotes are indicative.** A published ladder is authenticated market data for
+the relay's interpolation, not a reservation: nothing is held, and admission is
+re-decided at job time against the current book, inventory and policy. The
+kernel's `GET /v1/quote` is a separate, `token_prices`-backed contract and is not
+replaced by solver data.
+
+**A job's `amountOut` is the taker's exact demand, and may be below the quote.**
+The solver accepts any dispatched job with `0 < amountOut <= interpolate(amountIn)`
+for a published pair:
+
+| Case | Disposition |
+|---|---|
+| Maker prefix pays exactly the demand | Settles; no residual, no surplus. |
+| Prefix pays **less** than the demand | The difference is a **residual** paid from solver inventory, reserved before any wallet call. |
+| Prefix pays **more** than the demand | The difference is **surplus retained by the solver**, along with any unspent input — the same disposition the reference solver makes. |
+| `amountOut > interpolate(amountIn)` | Refused (unchanged). |
+
+Out-of-ladder sizes, non-positive demands, stale routes, disallowed pairs,
+below-minimum outputs, unaffordable residuals and DUST-budget violations remain
+refusals. Lower demands used to be refused as `route_not_current`; they now
+settle.
+
+**Published liquidity is bounded by executability — on the output side only.**
+The solver withholds what it could not execute at the moment of publication:
+
+- **whole-maker rungs need no inventory at all.** A rung is an exact whole-offer
+  cumulative total, paid by the maker offers it consumes, so **a solver holding
+  none of either token publishes and settles every pair's first rung**;
+- a rung whose interpolation interval could demand more residual tokenOut than
+  its inventory can pay is withheld, and so is every rung above it. This is what
+  tokenOut inventory buys: *interior* (interpolated) sizes;
+- `SOLVER_SUPPORTED_PAIRS` and `SOLVER_MIN_JOB_OUTPUT` bound publication as well
+  as admission, and are re-applied after every reconnect;
+- withheld liquidity is surfaced once per change as `ladder-budget-limited` /
+  `ladder-budget-cleared` operator events. Its `detail` carries
+  `residualBudgetOffers`; the `mirrorBudgetOffers` count an earlier build also
+  reported is gone with the bound it counted.
+
+Operators upgrading from an earlier build will see advertised depth **grow**: the
+tokenIn cap that suppressed a whole pair when the solver held none of its input
+token has been removed. Funding the solver with a pair's input token is no longer
+required or useful; funding it with the **output** token is what extends the
+published ladder past its first rung.
+
+**`SOLVER_FEE_SIZING_TAKER_INPUTS`** (optional; integer `[1, 64]`, default `1`).
+The relay dispatches a numeric job and merges the taker's own half, so the solver
+cannot know how many zswap inputs the taker's coin selection produced. This is
+how many it models when sizing the fee. Measured coverage: a stand-in modelling
+`n` inputs funds a real taker half of up to **`n + 2`** inputs. Each extra
+modelled input costs **12–14 %** more DUST, actually spent (not merely reserved),
+and consumes `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` budget
+faster. Under-modelling is an availability failure — the chain rejects the merged
+transaction, the relay reports `submit-failed`, and the solver's contribution is
+reverted — never a loss of funds. A malformed value is a listed `start:solver`
+launch problem; the startup banner prints the effective model and its coverage.
+
+---
+
 ## Batcher API — port 3334
 
 The batcher accepts `swapoffer1…` blobs, validates them, and publishes them as Celestia blobs. In normal usage you go through `/v1/offers` on the node (which calls the batcher internally). Direct batcher access is for advanced integrations.
@@ -1087,7 +1388,57 @@ Rejected blobs are additionally **deleted** from `effectstream.primitive_account
 
 What survives is the *fact* of the rejection, aggregated in `offer_rejections` as one row per `(celestia_height, code)` and surfaced on `GET /v1/health/sync` as `recent_rejections`. Aggregation is what makes that table safe to keep: its row count is bounded by heights × reject codes, never by the number of blobs posted — a million junk blobs in one block produce a single row with `count: 1000000`.
 
-Step 5 of the ideal ladder — *reject offers below a minimum value* — is **not implemented**: it needs a price oracle. MIP-0006 suggests the natural floor is the offer's own publication cost. The derived legs are available at that point in the pipeline, so the hook slot exists.
+#### Fee sponsorship — implemented, and deliberately *not* part of this ladder
+
+Step 5 of the ideal ladder — *reject offers below a minimum value* — is now
+implemented, as a **fee-sponsorship gate**, in two places:
+
+* **the batcher's `validateInput`**, which is authoritative because it holds the
+  wallet: it refuses to pay a Celestia fee for an offer whose wanted value is not
+  at least the sponsorship discount below the reference price. It has no database,
+  so for each offer it asks this node's `GET /v1/prices?tokens=` for exactly that
+  offer's leg colours, caching each colour for `BATCHER_PRICE_TTL_MS` (default 10
+  minutes). It does **not** mirror the price table (Q-11);
+* **`POST /v1/offers`**, which asks the same question earlier and answers
+  `422 NOT_SPONSORED` with the numbers, so a maker learns it from a readable
+  response instead of an opaque failure.
+
+Both call the same `evaluateSponsorship()` in `@zswap-da/offer-guard`, over the
+same prices, so the `sponsored` flag `GET /v1/quote` shows the maker cannot promise
+something the batcher then refuses.
+
+**It is NOT enforced at STM ingestion, and that is intentional.** The MIP-0006
+namespace is permissionless: anyone can post an offer straight to Celestia at their
+own expense, and this node still indexes it. The gate decides who gets a *free ride*
+on the batcher's wallet, not what is a valid offer. So the ladder above is unchanged
+— an unsponsored offer that reaches the namespace is ingested exactly like any
+other, and a UI must not assume every indexed offer was sponsored.
+
+Policy, read from the same variable names by both processes so they cannot drift:
+
+| Variable | Values | Default | Effect |
+|---|---|---|---|
+| `BATCHER_SPONSOR_POLICY` | `enforce` \| `warn` \| `off` | `warn` | `enforce` refuses; `warn` logs what `enforce` would have refused and lets it through; `off` skips the check entirely |
+| `BATCHER_SPONSOR_UNPRICED` | `allow` \| `reject` | `allow` | what to do when a leg's token has no market price (every test token). `allow` keeps them flowing |
+| `SPONSOR_DISCOUNT_BPS` | `0`–`9999` | `250` | the threshold. On the batcher this is only a bootstrap — once the node answers, the node's `sponsor_discount` wins |
+| `BATCHER_NODE_API_URL` | URL | `http://127.0.0.1:9999` | where the batcher asks `/v1/prices?tokens=` (compose: `http://kernel:9999`) |
+| `BATCHER_PRICE_TTL_MS` | ms | `600000` | how long a per-colour answer counts as current before it is asked for again |
+| `BATCHER_PRICE_MAX_AGE_MS` | ms | `172800000` | how old an answer may be and still be served when a re-ask FAILS. Past it the colour is unavailable. Must be ≥ the TTL |
+
+An invalid value for any of these **throws at startup** rather than falling back to
+a default: an operator who typed `enfroce` wants offers refused, and silently
+sponsoring everything is precisely what they were preventing.
+
+A batcher that cannot reach the node behaves per `BATCHER_SPONSOR_POLICY`:
+`enforce` answers `PRICE_UNAVAILABLE`, `warn` sponsors and logs once a minute.
+Note the difference from an *unpriced* leg: "the node answered and has no market
+price for this colour" is `BATCHER_SPONSOR_UNPRICED`'s question, while "I could
+not ask" is the policy's. A colour with a cached answer younger than
+`BATCHER_PRICE_MAX_AGE_MS` is still served during an outage, so a brief node
+restart does not make every offer unavailable.
+
+(`BATCHER_PRICE_REFRESH_MS` configured the old ten-minute table poll and no longer
+does anything.)
 
 ### Manual submission (curl)
 

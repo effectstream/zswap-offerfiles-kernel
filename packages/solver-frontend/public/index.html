@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>COW Solver Console</title>
+<!--
+  00007 FR-014: NOTHING is loaded from another origin. No CDN, no web font, no
+  analytics — the page must render on an air-gapped host. The approved mockup
+  used two Google Fonts to show the intended hierarchy; the deliverable uses the
+  system stack instead (see styles.css), because a build step is not allowed
+  (FR-008) and inlining two variable fonts as data URIs would add ~200 KB to
+  every page load for a typeface an operations console does not need.
+-->
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand"><h1>COW Solver</h1><span class="sub">console</span></div>
+  <div class="identity">
+    <span><b>net</b><span id="id-net">—</span></span>
+    <span><b>kernel</b><span id="id-kernel">—</span></span>
+    <span><b>relay</b><span id="id-relay">—</span></span>
+    <span><b>mode</b><span id="id-mode">—</span></span>
+    <span><b>up</b><span id="id-up">—</span></span>
+  </div>
+  <div class="right">
+    <span class="pill muted" id="pill">CONNECTING</span><span class="help" data-help="pill" tabindex="0" role="button" aria-label="What is this?">?</span>
+    <span class="chip" id="feed">feed connecting</span>
+    <span class="chip" id="updated">updated —</span><span class="help" data-help="updated" tabindex="0" role="button" aria-label="What is this?">?</span>
+    <button class="iconbtn" id="theme" title="Toggle light and dark">theme</button>
+  </div>
+</header>
+
+<main>
+  <!-- The six-stage health strip. The stages are static because their identity
+       never changes; only their state, one-line reason and "since" are data. -->
+  <div class="strip" id="strip">
+    <div class="stage" data-stage="stage-kernel">
+      <div class="n">1 · kernel</div>
+      <div class="t">Kernel sync<span class="help" data-help="stage-kernel" tabindex="0" role="button" aria-label="What is this?">?</span></div>
+      <div class="s">—</div><div class="since"></div>
+    </div>
+    <div class="stage" data-stage="stage-cache">
+      <div class="n">2 · mirror</div>
+      <div class="t">Book cache<span class="help" data-help="stage-cache" tabindex="0" role="button" aria-label="What is this?">?</span></div>
+      <div class="s">—</div><div class="since"></div>
+    </div>
+    <div class="stage" data-stage="stage-inventory">
+      <div class="n">3 · wallet</div>
+      <div class="t">Inventory<span class="help" data-help="stage-inventory" tabindex="0" role="button" aria-label="What is this?">?</span></div>
+      <div class="s">—</div><div class="since"></div>
+    </div>
+    <div class="stage" data-stage="stage-journal">
+      <div class="n">4 · journal</div>
+      <div class="t">Journal &amp; DUST<span class="help" data-help="stage-journal" tabindex="0" role="button" aria-label="What is this?">?</span></div>
+      <div class="s">—</div><div class="since"></div>
+    </div>
+    <div class="stage" data-stage="stage-relay">
+      <div class="n">5 · relay</div>
+      <div class="t">Relay socket<span class="help" data-help="stage-relay" tabindex="0" role="button" aria-label="What is this?">?</span></div>
+      <div class="s">—</div><div class="since"></div>
+    </div>
+    <div class="stage" data-stage="stage-ladder">
+      <div class="n">6 · wire</div>
+      <div class="t">Published ladder<span class="help" data-help="stage-ladder" tabindex="0" role="button" aria-label="What is this?">?</span></div>
+      <div class="s">—</div><div class="since"></div>
+    </div>
+  </div>
+
+  <div class="alarms" id="alarms" hidden></div>
+
+  <div class="tiles solver-owned" id="tiles">
+    <div class="tile" data-tile="tile-pairs"><div class="k">Pairs published<span class="help" data-help="tile-pairs" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+    <div class="tile" data-tile="tile-rungs"><div class="k">Rungs<span class="help" data-help="tile-rungs" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+    <div class="tile" data-tile="tile-tokens"><div class="k">Tokens advertised<span class="help" data-help="tile-tokens" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+    <div class="tile" data-tile="tile-pushes"><div class="k">Pushes<span class="help" data-help="tile-pushes" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+    <div class="tile" data-tile="tile-book"><div class="k">Book offers<span class="help" data-help="tile-book" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+    <div class="tile" data-tile="tile-jobs"><div class="k">Jobs in flight<span class="help" data-help="tile-jobs" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+    <div class="tile" data-tile="tile-completed"><div class="k">Completed<span class="help" data-help="tile-completed" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+    <div class="tile" data-tile="tile-quarantined"><div class="k">Quarantined<span class="help" data-help="tile-quarantined" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+    <div class="tile" data-tile="tile-withdrawals"><div class="k">Withdrawals<span class="help" data-help="tile-withdrawals" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+    <div class="tile" data-tile="tile-dust"><div class="k">DUST reserved<span class="help" data-help="tile-dust" tabindex="0" role="button" aria-label="What is this?">?</span></div><div class="v">—</div><div class="d"></div></div>
+  </div>
+
+  <div class="cols">
+    <div class="stack">
+      <section class="card solver-owned">
+        <header>
+          <h2>Published ladders</h2><span class="help" data-help="section-ladders" tabindex="0" role="button" aria-label="What is this?">?</span>
+          <span class="note">solver-authored — what the relay quotes from</span>
+          <span class="count" id="ladders-count"></span>
+        </header>
+        <div class="body tight" id="ladders"></div>
+      </section>
+
+      <section class="card solver-owned">
+        <header>
+          <h2>Not published</h2><span class="help" data-help="section-exclusions" tabindex="0" role="button" aria-label="What is this?">?</span>
+          <span class="note">the solver's own exclusion reasons, per book offer</span>
+          <span class="count" id="exclusions-count"></span>
+        </header>
+        <div class="body tight" id="exclusions"></div>
+      </section>
+
+      <section class="card">
+        <header>
+          <h2>Book</h2><span class="help" data-help="section-book" tabindex="0" role="button" aria-label="What is this?">?</span>
+          <span class="note">kernel <span class="mono">/v1/offers</span> beside the solver's mirror</span>
+          <span class="count" id="book-count"></span>
+        </header>
+        <div class="body tight" id="book"></div>
+      </section>
+
+      <section class="card solver-owned">
+        <header>
+          <h2>Jobs</h2><span class="help" data-help="section-jobs" tabindex="0" role="button" aria-label="What is this?">?</span>
+          <span class="note">operation journal, newest first</span>
+          <span class="count" id="jobs-count"></span>
+        </header>
+        <div class="body tight" id="jobs"></div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="card solver-owned">
+        <header>
+          <h2>Inventory</h2><span class="help" data-help="section-inventory" tabindex="0" role="button" aria-label="What is this?">?</span>
+          <span class="note">shielded wallet</span>
+          <span class="count" id="inventory-count"></span>
+        </header>
+        <div class="body tight" id="inventory"></div>
+      </section>
+
+      <section class="card solver-owned">
+        <header>
+          <h2>DUST admission</h2><span class="help" data-help="section-dust" tabindex="0" role="button" aria-label="What is this?">?</span>
+          <span class="note">rolling window</span>
+        </header>
+        <div class="body" id="dust"></div>
+      </section>
+
+      <section class="card">
+        <header>
+          <h2>Relay</h2><span class="help" data-help="section-relay" tabindex="0" role="button" aria-label="What is this?">?</span>
+          <span class="note">public <span class="mono">/tokens</span></span>
+        </header>
+        <div class="body" id="relay"></div>
+      </section>
+
+      <section class="card solver-owned">
+        <header>
+          <h2>Configuration</h2><span class="help" data-help="section-config" tabindex="0" role="button" aria-label="What is this?">?</span>
+          <span class="note">as the solver resolved it</span>
+        </header>
+        <div class="body" id="config"></div>
+      </section>
+    </div>
+  </div>
+
+  <section class="card">
+    <header>
+      <h2>Events</h2><span class="help" data-help="section-events" tabindex="0" role="button" aria-label="What is this?">?</span>
+      <span class="note">solver diagnostics and what the console observed</span>
+      <span class="count" id="events-count"></span>
+    </header>
+    <div class="body tight" id="events"></div>
+  </section>
+</main>
+
+<footer>
+  Read-only. Nothing on this page sends anything to the solver, the relay or the kernel; the solver's status listener exposes no route that mutates state. Times are relative to the solver's own clock.
+</footer>
+
+<div id="tip" role="tooltip"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -5,7 +5,6 @@ import {
   buildRealStockSnapshot,
   createSemanticsPreservingMethodWrapper,
   createSemanticsPreservingSubmitWrapper,
-  recordRealValidationTraceEvidence,
   RealSolverCentralRecorder,
   RealSolverEvidenceFailures,
   readRealSolverServiceConfig,
@@ -337,75 +336,16 @@ describe("central solver recorder", () => {
 });
 
 describe("real fixture lifecycle seams", () => {
-  test("execution-start Stock evidence precedes dequeue response with the reserved claim", async () => {
-    const token = "12".repeat(32);
-    const offerHash = "34".repeat(32);
-    const nullifier = "56".repeat(32);
-    const stock = new Stock();
-    stock.setBalances({ [token]: 100n });
-    expect(stock.reserve({
-      offerHashes: [offerHash],
-      nullifiers: [nullifier],
-      payouts: new Map([[token, 30n]]),
-    })).toBe(true);
-
-    const failures = new RealSolverEvidenceFailures();
-    const centrallyRecorded: Array<Record<string, unknown>> = [];
-    const recorder = new RealSolverCentralRecorder({
-      url: "http://telemetry-relay:8080/record",
-      token: "1234567890abcdef",
-      timeoutMs: 1_000,
-      runId: "dequeue-stock-run",
-      failures,
-      request: (async (_input: string | URL | Request, init?: RequestInit) => {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        centrallyRecorded.push(body);
-        return new Response(JSON.stringify({ sequence: centrallyRecorded.length }), {
-          status: 202,
-          headers: { "content-type": "application/json" },
-        });
-      }) as typeof fetch,
-    });
-    let rememberedOffer: string | null = null;
-
-    recordRealValidationTraceEvidence({
-      kind: "execution-start",
-      offerHash,
-      generation: { streamGeneration: 7, backendBlockL2: "42" },
-    }, {
-      recordTrace: (event) => recorder.enqueue("validation", event.kind, event),
-      rememberOffer: (value) => {
-        rememberedOffer = value;
-      },
-      recordExecutionStartStock: (value) => {
-        expect(rememberedOffer).toBe(value);
-        recorder.enqueue(
-          "stock",
-          "execution-start",
-          buildRealStockSnapshot(stock, [{ offerHash: value, inputNullifiers: [nullifier] }]),
-        );
-      },
-    });
-    // The backend proxy records the matched dequeue response only after the
-    // execution-start observer has returned. Use the same serialized seam to
-    // prove the central evidence order expected by the real E1 assertion.
-    recorder.enqueue("backend", "dequeue-response", { offerHash, status: 200 });
-    await recorder.flush();
-
-    expect(centrallyRecorded.map((event) => `${event.phase}/${event.event}`)).toEqual([
-      "validation/execution-start",
-      "stock/execution-start",
-      "backend/dequeue-response",
-    ]);
-    expect(centrallyRecorded[1]).toMatchObject({
-      phase: "stock",
-      event: "execution-start",
-      runId: "dequeue-stock-run",
-      tokens: [{ token, balance: "100", reserved: "30", available: "70" }],
-      offers: [{ offerHash, resolvable: true, claimed: true, nullifiers: [nullifier] }],
-    });
-    failures.assertNone();
-  });
+  // R3/FR-006: the test that used to stand here drove
+  // `recordRealValidationTraceEvidence`, the harness helper for
+  // `runSolver`'s `onValidationTrace` callback. `SolverOptions` has not had
+  // that callback since N5 deleted the pre-match validation gate, so the
+  // helper had no production caller and the ordering it asserted
+  // (validation trace → stock snapshot → dequeue response) can no longer
+  // occur. Helper and test are removed together. The recorder's own
+  // enqueue-order guarantee is still covered by "serializes milestones and
+  // trusts only returned central sequences" above, and the stock-evidence
+  // content by the test below.
 
   test("stock evidence distinguishes a live reservation from its release", () => {
     const token = "ab".repeat(32);

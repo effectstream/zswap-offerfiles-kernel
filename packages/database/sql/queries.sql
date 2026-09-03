@@ -5,8 +5,12 @@
    named query after its @name declaration. */
 
 /* @name InsertKnownToken */
-INSERT INTO known_tokens (token_color, name, kind)
-VALUES (:token_color!, :name!, :kind!)
+-- decimals/asset_id are optional: the mint path in the browser knows neither,
+-- and the defaults (0 base-unit-per-coin, no asset -> priced by NAME through
+-- price-map.ts) are right for every faucet token. COALESCE rather than a
+-- column default so an explicit NULL from a caller still lands on 0.
+INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id)
+VALUES (:token_color!, :name!, :kind!, COALESCE(:decimals::integer, 0), :asset_id)
 ON CONFLICT (token_color) DO NOTHING;
 
 /* @name GetKnownTokens */

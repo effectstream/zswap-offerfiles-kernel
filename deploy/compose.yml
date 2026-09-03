@@ -1,0 +1,1016 @@
+# deploy/compose.yml — the split-component deployment (spec FR-008).
+#
+# Run from THIS directory:  docker compose --env-file .env up -d
+#
+# ── Shape ────────────────────────────────────────────────────────────────────
+# One file, sectioned, rather than the `compose/{core,offerfiles,intents,solver,
+# e2e}.yml` fragment set the brief allowed as an option. At eleven services the
+# fragments would buy nothing but a mandatory `-f a -f b -f c …` incantation in
+# front of every command (and a way to bring up a subset that is missing its
+# dependencies). What the fragments were really for — starting only part of the
+# stack — is served here by native Compose `profiles:` on the two optional
+# components, and by naming services on `up`.
+#
+# ── The rule this file exists to enforce ─────────────────────────────────────
+# EVERY component is its own service with its own single process. The in-repo
+# orchestrator (`bun run dev`, `start.dev.ts`) never runs in a container:
+# `launchMidnight()`/`launchCelestia()` open with `stopProcessAtPort [9944,
+# 8088, 6300, 26657, 26658, 3334]`, which would kill the very chain services
+# this project runs as siblings, and their deploy step would mint a second
+# contract identity while the volumes still referenced the first.
+#
+# ── Ports ────────────────────────────────────────────────────────────────────
+# This is a SHARED host. Nothing binds a wildcard address and nothing takes a
+# well-known port: every published port comes from .env, defaults to >= 10000,
+# and binds ${BIND_ADDR} (127.0.0.1). Container-internal ports stay canonical
+# (9999, 3334, 9944, 8088, 6300, 26657, 26658, 5432, 3000, 9001, 8080, 9100) so
+# the service names read the same as in the code that dials them. One of those
+# is deliberately NOT published at all: the solver's status port 9100 is
+# network-internal, and the monitor site (8080 -> HOST_SOLVER_FRONTEND_PORT) is
+# what an operator opens.
+
+name: ${COMPOSE_PROJECT_NAME:-cow00005_e2e}
+
+# ── shared anchors ───────────────────────────────────────────────────────────
+
+x-midnight-endpoints: &midnight-endpoints
+  # MIDNIGHT_NETWORK_ID is stated on EVERY service. `@effectstream/midnight-contracts`
+  # silently defaults it to `undeployed` with 127.0.0.1 endpoints, which inside a
+  # container means "nothing listening"; and R3's solver launch contract refuses
+  # to start without it precisely so that default can never be inherited by
+  # accident.
+  MIDNIGHT_NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
+  MIDNIGHT_NODE_HTTP: http://midnight-node:9944
+  MIDNIGHT_INDEXER_HTTP: http://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v4/graphql}
+  MIDNIGHT_INDEXER_WS: ws://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v4/graphql}/ws
+  MIDNIGHT_PROOF_SERVER_URL: http://proof-server:6300
+  MIDNIGHT_WALLET_SEED: ${MIDNIGHT_GENESIS_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
+
+x-celestia-endpoints: &celestia-endpoints
+  CELESTIA_RPC_URL: http://celestia:26658
+  CELESTIA_NETWORK: devnet
+  # A devnet's chain starts at height 1. Anything higher waits forever, in
+  # silence, because the reader simply never reaches the configured start.
+  CELESTIA_START_HEIGHT: "1"
+  # ONE shared namespace. Publisher and reader disagreeing here is invisible:
+  # blobs are written and nothing ever reads them. Unset means the MIP-0006
+  # shared default in @zswap-da/offer-guard, which is what we want.
+  CELESTIA_NAMESPACE: ${CELESTIA_NAMESPACE:-}
+  # The bridge runs with --rpc.skip-auth (as @effectstream/celestia does), so
+  # there is deliberately no token to distribute.
+  CELESTIA_AUTH_TOKEN: ""
+  # How often the kernel's Celestia fetcher advances its projection.
+  #
+  # `packages/node/env.ts` defaults this to 6000 ms for a devnet, which is one
+  # poll per six Celestia blocks at the packaged 1s cadence — so between polls
+  # the projection falls further behind than `MAX_CELESTIA_LAG_BLOCKS = 4`
+  # tolerates. The cadence itself is the real fix (see CELESTIA_BLOCK_TIME on
+  # the celestia service); matching the poll to the block time on top of it
+  # removes the remaining sawtooth, which costs one local RPC per second.
+  CELESTIA_POLLING_INTERVAL_MS: ${CELESTIA_POLLING_INTERVAL_MS:-1000}
+
+x-kernel-image: &kernel-image
+  image: ${KERNEL_IMAGE:-cow00005/kernel}:${IMAGE_TAG:-dev}
+  build:
+    context: ..
+    dockerfile: deploy/images/kernel/Dockerfile
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+
+  # ══ chain ═══════════════════════════════════════════════════════════════════
+
+  midnight-node:
+    <<: *logging
+    image: ${MIDNIGHT_NODE_IMAGE:-cow00005/midnight-node}:${IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/images/midnight-node/Dockerfile
+    restart: unless-stopped
+    environment:
+      CFG_PRESET: dev
+      MIDNIGHT_STORAGE_PASSWORD: ${MIDNIGHT_STORAGE_PASSWORD:-YourPasswordMy1!}
+      MIDNIGHT_NODE_BASE_PATH: /data/midnight-node
+    volumes:
+      - midnight-node-data:/data/midnight-node
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_MIDNIGHT_NODE_RPC_PORT:-19944}:9944"
+    healthcheck:
+      # Answering RPC is not the same as having a chain: the indexer's bundled
+      # spo-indexer exits(1) if block #1 is missing, so block #1 IS the health
+      # condition, not merely a nicety.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf -m 5 -H 'Content-Type: application/json'
+          -d '{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[1]}'
+          http://127.0.0.1:9944 | grep -q '"result":"0x'
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+
+  proof-server:
+    <<: *logging
+    image: ${PROOF_SERVER_IMAGE:-cow00005/proof-server}:${IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/images/proof-server/Dockerfile
+    restart: unless-stopped
+    # NEITHER `command:` NOR `entrypoint:`, deliberately: the official rc.5
+    # image's Entrypoint is `bash -c` at a per-digest /nix/store path and its
+    # Cmd one string that reads `$PORT`, so any override changes how the
+    # process is launched. Environment only.
+    environment:
+      RUST_BACKTRACE: full
+      PORT: "6300"
+      SUBSTRATE_NODE_WS_URL: ws://midnight-node:9944
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PROOF_SERVER_PORT:-16300}:6300"
+    # No healthcheck: the nix-built official image ships neither curl nor a
+    # shell at a stable path, so nothing inside the container can probe it.
+    # Readiness is asserted by every consumer instead — the kernel entrypoints
+    # `wait_http` on MIDNIGHT_PROOF_SERVER_URL before they start — which is
+    # why the `depends_on` entries below use `service_started`.
+    healthcheck:
+      disable: true
+
+  indexer:
+    <<: *logging
+    image: ${INDEXER_IMAGE:-cow00005/indexer}:${IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/images/indexer/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      midnight-node:
+        condition: service_healthy
+    environment:
+      LEDGER_NETWORK_ID: Undeployed
+      FEATURES_WALLET_ENABLED: "true"
+      # 32 random bytes, uppercase hex. Generated into .env by bootstrap.sh —
+      # it is the indexer's own wallet-encryption secret, not a shared secret.
+      APP__INFRA__SECRET: ${INDEXER_SECRET:?INDEXER_SECRET is required — run deploy/bootstrap.sh}
+      APP__INFRA__NODE__URL: ws://midnight-node:9944
+      SUBSTRATE_NODE_WS_URL: ws://midnight-node:9944
+      APP__INFRA__PROOF_SERVER__URL: http://proof-server:6300
+      # SPO/Cardano indexing is not exercised on an undeployed devnet. Pointed
+      # at a dead port with a practically infinite retry budget, exactly as this
+      # repo's own `midnight-indexer:start` script does, so the spo task neither
+      # connects nor gives up and kills the process.
+      APP__INFRA__SPO_NODE__URL: ws://127.0.0.1:1
+      APP__INFRA__SPO_NODE__RECONNECT_MAX_ATTEMPTS: "1000000000"
+      APP__INFRA__API__PORT: "8088"
+    volumes:
+      - indexer-data:/var/lib/indexer/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_INDEXER_PORT:-18088}:8088"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -o /dev/null -m 5 http://127.0.0.1:8088/ || curl -s -o /dev/null -m 5 http://127.0.0.1:8088/"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+
+  celestia:
+    <<: *logging
+    image: ${CELESTIA_IMAGE:-cow00005/celestia}:${IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: deploy/images/celestia/Dockerfile
+    # Release 0.3.120 has no celestia linux/arm64 asset (see the image's header
+    # comment), so on an arm64 host this one service runs emulated.
+    platform: ${CELESTIA_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    environment:
+      CELESTIA_HOME: /data/celestia-app
+      CELESTIA_BRIDGE_HOME: /data/celestia-bridge
+      CELESTIA_FORCE_NO_BBR: "1"
+      # Settlement-critical: at the packaged wrapper's 1s the kernel's Celestia
+      # projection never gets inside MAX_CELESTIA_LAG_BLOCKS = 4 and the
+      # solver's job-time exact-files read is permanently 503. Full reasoning in
+      # images/celestia/entrypoint.sh.
+      CELESTIA_BLOCK_TIME: ${CELESTIA_BLOCK_TIME:-3s}
+    volumes:
+      - celestia-data:/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_CELESTIA_BRIDGE_PORT:-16658}:26658"
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_CELESTIA_RPC_PORT:-16657}:26657"
+    healthcheck:
+      # The BRIDGE is what the kernel and batcher talk to; a healthy consensus
+      # node with a dead bridge would be a lie.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf -m 5 -X POST -H 'Content-Type: application/json'
+          -d '{"jsonrpc":"2.0","id":1,"method":"header.NetworkHead","params":[]}'
+          http://127.0.0.1:26658 | grep -q '"result"'
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+
+  # ══ kernel-side infrastructure ══════════════════════════════════════════════
+
+  pglite:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-pglite.sh"]
+    restart: unless-stopped
+    environment:
+      PGLITE_DATA_DIR: /var/lib/pglite/data
+      DB_PORT: "5432"
+    volumes:
+      - pglite-data:/var/lib/pglite/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PGLITE_PORT:-15432}:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const s = await Bun.connect({hostname:"127.0.0.1",port:5432,socket:{data(){}}});
+          s.end(); process.exit(0);'
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 15s
+
+  # One-shot. Deploys the Compact contract exactly once per volume and publishes
+  # its address; everything downstream waits on service_completed_successfully.
+  offerfiles-deploy:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-deploy.sh"]
+    restart: "no"
+    depends_on:
+      midnight-node:
+        condition: service_healthy
+      proof-server:
+        condition: service_started
+      indexer:
+        condition: service_healthy
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      MIDNIGHT_STORAGE_PASSWORD: ${MIDNIGHT_STORAGE_PASSWORD:-YourPasswordMy1!}
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy
+
+  # ══ kernel components ═══════════════════════════════════════════════════════
+
+  kernel:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-kernel.sh"]
+    restart: unless-stopped
+    depends_on:
+      pglite:
+        condition: service_healthy
+      celestia:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      EFFECTSTREAM_API_PORT: "9999"
+      DB_HOST: pglite
+      DB_PORT: "5432"
+      # Client-side single-connection mode for the pg-gateway/PGlite server.
+      PGLITE: "true"
+      # PGlite ships no pg_ivm; the engine falls back to plain SQL views over
+      # the trigger-maintained tables. Fine for a devnet, and the same fallback
+      # the dev stack uses.
+      ALLOW_NO_PG_IVM: "true"
+      BATCHER_SUBMIT_URL: http://batcher:3334
+      # Co-located automated clients (the solver's book mirror, the E2E driver)
+      # burst well past the shared per-IP budget during a page-through plus
+      # settlement polls. This is a private network on a throwaway devnet.
+      API_RATE_LIMIT_ALLOWLIST: ${API_RATE_LIMIT_ALLOWLIST:-}
+      API_RATE_LIMIT_MAX: ${API_RATE_LIMIT_MAX:-6000}
+      ENABLE_TOKEN_REGISTRY: ${ENABLE_TOKEN_REGISTRY:-true}
+      # The SAME two knobs the batcher reads: POST /v1/offers mirrors the
+      # batcher's fee gate so a maker gets a readable 422 instead of an opaque
+      # failure. They must be set to the same values in both services — a node
+      # in `enforce` with a batcher in `warn` refuses offers the batcher would
+      # have paid for.
+      BATCHER_SPONSOR_POLICY: ${BATCHER_SPONSOR_POLICY:-warn}
+      BATCHER_SPONSOR_UNPRICED: ${BATCHER_SPONSOR_UNPRICED:-allow}
+      SPONSOR_DISCOUNT_BPS: ${SPONSOR_DISCOUNT_BPS:-250}
+      PRICE_FEED_MAP: ${PRICE_FEED_MAP:-}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_KERNEL_PORT:-19999}:9999"
+    healthcheck:
+      # bun images ship no curl; `bun -e fetch` is the probe.
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const r = await fetch("http://127.0.0.1:9999/v1/health");
+          process.exit(r.ok ? 0 : 1);'
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+
+  batcher:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-batcher.sh"]
+    restart: unless-stopped
+    depends_on:
+      celestia:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      BATCHER_PORT: "3334"
+      BATCHER_STORAGE_DIR: /var/lib/batcher
+      # …0003 by default (packages/batcher/config.ts). It must differ from every
+      # other wallet on the stack: two facades on one seed against one node
+      # force each other's connection down.
+      BATCHER_WALLET_SEED: ${BATCHER_WALLET_SEED:-0000000000000000000000000000000000000000000000000000000000000003}
+      # Fee sponsorship. The batcher has no database, so for each offer it asks
+      # the kernel's GET /v1/prices?tokens= for that offer's leg colours — and
+      # for the threshold the UI already promised the maker. Defaults
+      # (warn/allow) change nothing about what gets published — they only log
+      # what `enforce` would have refused.
+      BATCHER_NODE_API_URL: ${BATCHER_NODE_API_URL:-http://kernel:9999}
+      BATCHER_SPONSOR_POLICY: ${BATCHER_SPONSOR_POLICY:-warn}
+      BATCHER_SPONSOR_UNPRICED: ${BATCHER_SPONSOR_UNPRICED:-allow}
+      # Per-colour cache TTL, and how stale an answer may be when a re-ask
+      # fails (must be >= the TTL).
+      BATCHER_PRICE_TTL_MS: ${BATCHER_PRICE_TTL_MS:-600000}
+      BATCHER_PRICE_MAX_AGE_MS: ${BATCHER_PRICE_MAX_AGE_MS:-172800000}
+      SPONSOR_DISCOUNT_BPS: ${SPONSOR_DISCOUNT_BPS:-250}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - batcher-data:/var/lib/batcher
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_BATCHER_PORT:-13334}:3334"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const r = await fetch("http://127.0.0.1:3334/health");
+          process.exit(r.ok ? 0 : 1);'
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+
+  # ══ devnet seeding (one-shots) ══════════════════════════════════════════════
+  #
+  # These two exist because of a silent failure mode, not for convenience. Since
+  # R2, ladder publication is bounded by the solver's own spendable inventory,
+  # and the ladder itself is derived from the mirrored maker book. With an
+  # unfunded solver or an empty book the stack reaches all-services-healthy, the
+  # solver authenticates to the relay, and it publishes empty capabilities and
+  # empty levels forever — with nothing logged as an error. Both halves are
+  # therefore provisioned by the deployment, and both fail LOUDLY.
+  #
+  # DEVNET ONLY: they mint to public dev seeds on a throwaway chain. Set
+  # SOLVER_PROVISION_ENABLED=false / MAKER_OFFER_ENABLED=false for a deployment
+  # that funds its solver and sources its book out of band.
+
+  solver-provision:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-solver-provision.sh"]
+    restart: "no"
+    depends_on:
+      midnight-node:
+        condition: service_healthy
+      proof-server:
+        condition: service_started
+      indexer:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      SOLVER_PROVISION_ENABLED: ${SOLVER_PROVISION_ENABLED:-true}
+      # ── 00006-V1: which HALF of provisioning runs ──────────────────────────
+      # "true"  → packages/solver/scripts/bootstrap-dev.ts: NIGHT + dust
+      #           registration + MINT both swap tokens. The pre-00006 funded
+      #           path, kept as SC-004's control.
+      # "false" → deploy/scripts/provision-solver-fees.ts: NIGHT + dust
+      #           registration and NOTHING ELSE. The solver's wallet is left
+      #           holding zero of every swap token, which since 00006 is enough
+      #           to publish and settle whole-maker rungs.
+      # Distinct from SOLVER_PROVISION_ENABLED=false, which skips fee currency
+      # too and leaves a solver that cannot pay for anything.
+      SOLVER_PROVISION_MINT_TOKENS: ${SOLVER_PROVISION_MINT_TOKENS:-true}
+      # Where the fee-only path writes its machine-readable receipt: the solver
+      # wallet's balances as MEASURED by the only process entitled to open that
+      # facade, at the moment provisioning finished and before the solver boots.
+      # The E2E driver asserts on it — "no tokens were provisioned" has to be an
+      # observation, not a configuration claim.
+      SOLVER_PROVISION_RECEIPT: ${SOLVER_PROVISION_RECEIPT:-/srv/solver-config/provision-receipt.json}
+      # Drives a wallet on this seed, which is why `solver` must wait for this
+      # service to COMPLETE: two facades on one seed against one node force
+      # each other's connection down.
+      SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
+      SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-/srv/solver-config/ladders.dev.json}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - solver-config:/srv/solver-config
+
+  maker-offer:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-maker-offer.sh"]
+    restart: "no"
+    depends_on:
+      kernel:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      MAKER_OFFER_ENABLED: ${MAKER_OFFER_ENABLED:-true}
+      ZSWAP_API: http://kernel:9999
+      # The genesis wallet by default: `mint-test-tokens` credits exactly that
+      # wallet, so it is the one that can actually give a test token away.
+      MAKER_SEED: ${MAKER_OFFER_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
+      # Unset ⇒ read from minted-tokens.json, published on the shared volume by
+      # the deploy one-shot. Colors derive from the deployed contract address,
+      # so they differ on every fresh stack and cannot be written down here.
+      GIVE_TOKEN: ${MAKER_OFFER_GIVE_TOKEN:-}
+      WANT_TOKEN: ${MAKER_OFFER_WANT_TOKEN:-}
+      GIVE_AMOUNT: ${MAKER_OFFER_GIVE_AMOUNT:-500000}
+      WANT_AMOUNT: ${MAKER_OFFER_WANT_AMOUNT:-750000}
+      TTL_MINUTES: ${MAKER_OFFER_TTL_MINUTES:-120}
+      MAKER_OFFER_MARKER_DIR: /var/lib/maker-offer
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - maker-offer-state:/var/lib/maker-offer
+
+  # Give the faucet-minted colours their NAMES (00007, issues/00008).
+  #
+  # `mint-test-tokens.ts` tries to register TestTokenA/B/U itself and cannot
+  # succeed here: it posts to a path the node never served and to its own
+  # loopback while the kernel does not exist yet (`kernel` waits on the deploy
+  # one-shot). Only Compose knows when the kernel is healthy, so this is where
+  # the registration actually lands. It reads `minted-tokens.json` from the
+  # shared volume and POSTs `/v1/known-tokens` with the spellings preprod uses
+  # (TESTTOKENA/B/U). Cosmetic and NON-FATAL: the stack trades without names,
+  # and the monitor site falls back to short hex.
+  register-minted-tokens:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-register-minted-tokens.sh"]
+    restart: "no"
+    depends_on:
+      kernel:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      ZSWAP_API: http://kernel:9999
+      REGISTER_MINTED_TOKENS_ENABLED: ${REGISTER_MINTED_TOKENS_ENABLED:-true}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+
+  # ══ Midnight Intents relay (UNMODIFIED reference) ═══════════════════════════
+
+
+  # ── the offer poster (00007, profile: poster) ────────────────────────────────
+  # OPT-IN, and unlike `maker-offer` above it is not a seeding one-shot: it is a
+  # LOOP that every POST_INTERVAL_MS either re-offers a coin its journal says
+  # came back, or mints one fresh GIVE_TOKEN coin from the faucet circuit (fees
+  # from its OWN dust) and posts a single ZSwap offer whose only input is that
+  # exact coin. `docker compose up` does not start it; see deploy/README.md.
+  #
+  # ── why the *midnight-endpoints anchor is NOT merged here ───────────────────
+  # That anchor carries `MIDNIGHT_WALLET_SEED: ${MIDNIGHT_GENESIS_SEED:-…0001}`,
+  # and MIDNIGHT_WALLET_SEED is one of the SEVEN seeds `poster-config.ts` refuses
+  # to share a wallet with (two facades on one seed against one node force each
+  # other's connection down). Inheriting it would make the poster exit 78 the
+  # moment an operator pointed OFFER_POSTER_SEED at the genesis wallet — a
+  # failure with no visible cause in this file. Overriding it to "" would not
+  # help either: `entrypoint-common.sh`'s unset-if-empty list does not contain
+  # MIDNIGHT_WALLET_SEED, so the variable would still be PRESENT in the
+  # container. So the four endpoints the poster actually needs are spelled out,
+  # and the seed simply never arrives. Keep them in step with the anchor.
+  #
+  # The *celestia-endpoints anchor is left out for a simpler reason: the poster
+  # never touches Celestia. It posts to the kernel; the BATCHER pays the blob.
+  offer-poster:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-offer-poster.sh"]
+    profiles: ["poster"]
+    # A crash is the only way this process ends other than SIGTERM, and its
+    # state is durable (the journal volume), so restarting is always right.
+    # A misconfiguration restart-LOOPS on exit 78 — deliberately visible, and
+    # `docker compose logs offer-poster` says which variable in one line.
+    restart: unless-stopped
+    depends_on:
+      kernel:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      MIDNIGHT_NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
+      MIDNIGHT_NODE_HTTP: http://midnight-node:9944
+      MIDNIGHT_INDEXER_HTTP: http://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v4/graphql}
+      MIDNIGHT_INDEXER_WS: ws://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v4/graphql}/ws
+      MIDNIGHT_PROOF_SERVER_URL: http://proof-server:6300
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      ZSWAP_API: http://kernel:9999
+      # REQUIRED, and deliberately WITHOUT a default. A shared default seed
+      # would put two posters — or a poster and a maker — on one wallet on the
+      # first stack that copied this file. There is no `:?` guard on it because
+      # Compose interpolates EVERY service before it filters by profile
+      # (measured): a `:?` here would make plain `docker compose up` fail for
+      # everyone who never opted into this profile. The entrypoint fails fast
+      # instead, naming OFFER_POSTER_SEED, with exit 78.
+      POSTER_SEED: ${OFFER_POSTER_SEED:-}
+      # The alternative wallet input: a BIP-39 phrase, derived Lace-compatibly.
+      # Set exactly ONE of the two — both together is a startup error.
+      POSTER_MNEMONIC: ${OFFER_POSTER_MNEMONIC:-}
+      # Every knob below is blank-by-default ON PURPOSE: blank means "the code's
+      # default", which is the single place those numbers are written down
+      # (deploy/scripts/lib/poster-config.ts). The entrypoint unsets the blank
+      # ones so the container's environment never claims otherwise.
+      GIVE_TOKEN: ${OFFER_POSTER_GIVE_TOKEN:-}
+      GIVE_AMOUNT: ${OFFER_POSTER_GIVE_AMOUNT:-}
+      WANT_TOKEN: ${OFFER_POSTER_WANT_TOKEN:-}
+      # Blank = the want leg is sized from GET /v1/quote every tick, which is
+      # what keeps the offer sponsorable. Setting it FORCES an amount and
+      # downgrades the sponsorship check to a warning.
+      WANT_AMOUNT: ${OFFER_POSTER_WANT_AMOUNT:-}
+      POST_INTERVAL_MS: ${OFFER_POSTER_INTERVAL_MS:-}
+      OFFER_TTL_MINUTES: ${OFFER_POSTER_TTL_MINUTES:-}
+      COIN_VISIBLE_TIMEOUT_MS: ${OFFER_POSTER_COIN_VISIBLE_TIMEOUT_MS:-}
+      RECONCILE_INTERVAL_MS: ${OFFER_POSTER_RECONCILE_INTERVAL_MS:-}
+      POSTER_MAX_REOFFERS_PER_TICK: ${OFFER_POSTER_MAX_REOFFERS_PER_TICK:-}
+      SHUTDOWN_GRACE_MS: ${OFFER_POSTER_SHUTDOWN_GRACE_MS:-}
+      HEALTH_STALE_TICKS: ${OFFER_POSTER_HEALTH_STALE_TICKS:-}
+      # The floor of spendable DUST a tick requires before it will MINT (a
+      # re-offer costs none). P5 measures the real per-mint cost; until then the
+      # code's default of 1 means "any dust at all".
+      POSTER_MIN_DUST: ${OFFER_POSTER_MIN_DUST:-}
+      POSTER_SYNC_TIMEOUT_MS: ${OFFER_POSTER_SYNC_TIMEOUT_MS:-}
+      POSTER_DUST_WAIT_TIMEOUT_MS: ${OFFER_POSTER_DUST_WAIT_TIMEOUT_MS:-}
+      # POST /v1/offers retry ladder (ROOT_UNKNOWN / UTXO_NOT_LIVE only) and the
+      # liveness poll that follows an accepted post.
+      POSTER_POST_RETRIES: ${OFFER_POSTER_POST_RETRIES:-}
+      POSTER_POST_RETRY_MS: ${OFFER_POSTER_POST_RETRY_MS:-}
+      POSTER_LIVE_TRIES: ${OFFER_POSTER_LIVE_TRIES:-}
+      POSTER_LIVE_INTERVAL_MS: ${OFFER_POSTER_LIVE_INTERVAL_MS:-}
+      # Startup-only: derive the colours, read a quote, report, exit 0. Never
+      # mints, never posts. `restart: unless-stopped` will keep re-running it,
+      # so use `docker compose run --rm offer-poster` for a one-off dry run.
+      DRY_RUN: ${OFFER_POSTER_DRY_RUN:-}
+      # Refuses to start on a corrupt or foreign journal unless this is true —
+      # silently losing the coin record would defeat the journal's purpose.
+      POSTER_JOURNAL_RESET: ${OFFER_POSTER_JOURNAL_RESET:-}
+      # Fixed, not a knob: the file has to be on the named volume below, and
+      # the two would drift apart the first time someone changed one of them.
+      POSTER_JOURNAL_FILE: /var/lib/offer-poster/journal.json
+      # Fixed for the same reason as EFFECTSTREAM_API_PORT on the kernel: the
+      # healthcheck and the port publish below are literals, so the port the
+      # process listens on must be one too. Change the HOST side with
+      # HOST_OFFER_POSTER_HEALTH_PORT.
+      POSTER_HEALTH_PORT: "9977"
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - offer-poster-state:/var/lib/offer-poster
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_OFFER_POSTER_HEALTH_PORT:-19977}:9977"
+    healthcheck:
+      # bun images ship no curl; `bun -e fetch` is the probe, as on the kernel.
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const r = await fetch("http://127.0.0.1:9977/health");
+          process.exit(r.ok ? 0 : 1);'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # /health answers 200 while the poster is `starting` and while it is
+      # `degraded` (no dust yet) — 503 arrives only after HEALTH_STALE_TICKS
+      # consecutive FAILED ticks. So this window is not about the first 200: it
+      # is how long the SERVER may take to bind at all, and binding happens
+      # after wallet sync + dust registration + the dust wait + the contract
+      # join. Fifteen minutes covers a cold indexer sync with room to spare.
+      start_period: 15m
+  relay:
+    <<: *logging
+    image: ${RELAY_IMAGE:-cow00005/relay}:${IMAGE_TAG:-dev}
+    build:
+      context: ./images/relay
+      dockerfile: Dockerfile
+      additional_contexts:
+        # The pinned, read-only reference clone. Nothing writes here.
+        # Relative paths here are resolved from the directory holding this file.
+        reference: ${RELAY_REFERENCE_DIR:-../../../resources/00003-midnight-intents-swaps-reference/phase1-native-swaps}
+    restart: unless-stopped
+    depends_on:
+      midnight-node:
+        condition: service_healthy
+      indexer:
+        condition: service_healthy
+      proof-server:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${RELAY_LOG_LEVEL:-info}
+      # 0.0.0.0 inside the container: the reference's preprod compose binds
+      # 127.0.0.1 because Caddy fronts it on the same host, but here the solver
+      # and the E2E driver reach it across the Compose network. Host exposure is
+      # still bounded — the published ports bind ${BIND_ADDR}.
+      BIND_HOST: 0.0.0.0
+      RELAY_PORT: "3000"
+      RELAY_WS_PORT: "9001"
+      RELAY_PUBLIC_URL: http://127.0.0.1:${HOST_RELAY_HTTP_PORT:-13000}
+      RELAY_PUBLIC_DOCS_ENABLED: ${RELAY_PUBLIC_DOCS_ENABLED:-true}
+      NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
+      # Mode B (explicit URLs). Mode A (MIDNIGHT_HOST + *_PORT) is deliberately
+      # NOT used: it hard-codes the indexer path to /api/v4/graphql, and the
+      # API path stays switchable from .env (see MIDNIGHT_INDEXER_API_PATH)
+      # for an indexer that mounts something else.
+      MIDNIGHT_NODE_URL: ws://midnight-node:9944
+      INDEXER_HTTP_URL: http://indexer:8088${RELAY_INDEXER_API_PATH:-/api/v4/graphql}
+      INDEXER_WS_URL: ws://indexer:8088${RELAY_INDEXER_API_PATH:-/api/v4/graphql}/ws
+      PROOF_SERVER_URL: http://proof-server:6300
+      # The relay calls the shared solver bearer SOLVER_AUTH_TOKEN; the candidate
+      # calls the same secret SOLVER_RELAY_AUTH_TOKEN. Both read ${SOLVER_AUTH_TOKEN}
+      # so they cannot drift. Refused by BOTH sides below 32 characters.
+      SOLVER_AUTH_TOKEN: ${SOLVER_AUTH_TOKEN:?SOLVER_AUTH_TOKEN is required (>= 32 chars) — run deploy/bootstrap.sh}
+      INTENT_TIMEOUT_MS: ${INTENT_TIMEOUT_MS:-300000}
+      SUBMIT_TIMEOUT_MS: ${SUBMIT_TIMEOUT_MS:-180000}
+      # 0 disables rate limiting. The E2E driver polls job status in a tight
+      # loop; the public default of 60/min would throttle the proof itself.
+      RATE_LIMIT_MAX: ${RELAY_RATE_LIMIT_MAX:-0}
+      WALLET_CACHE_DIR: /app/data/wallet-sync-cache
+      NODE_OPTIONS: ${RELAY_NODE_OPTIONS:---max-old-space-size=4096}
+    volumes:
+      - relay-wallet-cache:/app/data/wallet-sync-cache
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_RELAY_HTTP_PORT:-13000}:3000"
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_RELAY_WS_PORT:-19001}:9001"
+    healthcheck:
+      # The relay has NO /health route. GET /tokens is the only unauthenticated
+      # public route; it answers 200 with an empty array when no solver is
+      # connected, which is exactly the "serving but idle" state we want to
+      # call healthy.
+      test: ["CMD-SHELL", "wget -q -O /dev/null -T 5 http://127.0.0.1:3000/tokens || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  # ══ COW solver ══════════════════════════════════════════════════════════════
+
+  solver:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-solver.sh"]
+    # on-failure, NOT unless-stopped: a solver that exits 1 because its
+    # configuration is incomplete must stay down and visible. `start.solver.ts`
+    # reports every problem at once, so one restart shows the whole list — but a
+    # perpetual loop would bury it. `SOLVER_ENABLED=false` exits 0 and is
+    # therefore not restarted at all.
+    restart: on-failure:3
+    depends_on:
+      kernel:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+      # NOT just ordering: solver-provision drives a wallet on SOLVER_SEED, and
+      # two facades on one seed against one node force each other's connection
+      # down. It also writes the ladder config this service reads.
+      solver-provision:
+        condition: service_completed_successfully
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      # ── the seven mandatory boundaries of `bun run start.solver.ts` ────────
+      # (MIDNIGHT_NETWORK_ID arrives via *midnight-endpoints.) Omitting ANY of
+      # these is a deterministic exit 1 listing all of them — SC-004's
+      # fail-fast negative control. All seven are stated explicitly here even
+      # where a default exists, because every one of those defaults is a
+      # developer convenience that would be wrong in a deployment.
+      ZSWAP_API: http://kernel:9999
+      SOLVER_RELAY_WS_URL: ws://relay:9001
+      SOLVER_RELAY_HTTP_URL: http://relay:3000
+      SOLVER_RELAY_AUTH_TOKEN: ${SOLVER_AUTH_TOKEN:?SOLVER_AUTH_TOKEN is required (>= 32 chars) — run deploy/bootstrap.sh}
+      SOLVER_JOURNAL_PATH: /var/lib/cow-solver/operations.sqlite
+      SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
+      # ── mode ───────────────────────────────────────────────────────────────
+      # Strict "true"/"false" strings — a typo is a startup failure, never a
+      # silent "enabled".
+      SOLVER_ENABLED: ${SOLVER_ENABLED:-true}
+      SOLVER_DRY_RUN: ${SOLVER_DRY_RUN:-false}
+      SOLVER_SUPPORTED_PAIRS: ${SOLVER_SUPPORTED_PAIRS:-}
+      SOLVER_MIN_JOB_OUTPUT: ${SOLVER_MIN_JOB_OUTPUT:-}
+      # ── read-only status listener (00007) ──────────────────────────────────
+      # OPT-IN BY THE PORT, and by nothing else: with SOLVER_STATUS_PORT unset
+      # the solver behaves byte-for-byte as it did before 00007. Set, it serves
+      # GET /health (open, no internal data, so a healthcheck needs no secret)
+      # plus GET /status/snapshot and GET /status/stream. Collection reads
+      # IN-MEMORY state only — no wallet call, no proof, no kernel or relay I/O
+      # — and no route mutates anything. It exists for `solver-frontend` below.
+      #
+      # 0.0.0.0 INSIDE THE CONTAINER, which is not a relaxation: this port is
+      # deliberately NOT published to the host (see the note under `volumes:`),
+      # so the only thing that can reach it is a sibling on this Compose
+      # network. `launch.ts` WARNS about a non-loopback status host rather than
+      # refusing, precisely so a container can bind the network it lives on.
+      SOLVER_STATUS_HOST: 0.0.0.0
+      SOLVER_STATUS_PORT: "9100"
+      # MANDATORY whenever the port is set, and >= 32 characters — the same rule
+      # both sides of the relay wire apply to their bearer. /status/* serves the
+      # solver's ENTIRE internal state (book, inventory, journal tail, ladder,
+      # configuration), so a status listener must never be able to come up open;
+      # a missing or short value is one of the LISTED start:solver launch
+      # problems, not a late 401. bootstrap.sh generates it exactly as it
+      # generates SOLVER_AUTH_TOKEN, and the SAME .env variable feeds
+      # `solver-frontend` as SOLVER_FRONTEND_SOLVER_STATUS_TOKEN, so the two
+      # sides cannot drift.
+      SOLVER_STATUS_AUTH_TOKEN: ${SOLVER_STATUS_AUTH_TOKEN:?SOLVER_STATUS_AUTH_TOKEN is required (>= 32 chars) — run deploy/bootstrap.sh}
+      # ── capital-free fee sizing (00006) ────────────────────────────────────
+      # How many taker zswap inputs the DUST estimate models. Unset = 1, which
+      # is the value the E1/V1 single-coin taker exercises and which reserves
+      # byte-for-byte what the pre-00006 mirror did. Coverage is n + 2.
+      #
+      # Forwarded even though it is normally blank BECAUSE blank is malformed
+      # for this knob, not "unset": `entrypoint-common.sh` unsets an empty one
+      # before `start.solver.ts` ever sees it. Both halves are required — see
+      # the note in .env.example.
+      SOLVER_FEE_SIZING_TAKER_INPUTS: ${SOLVER_FEE_SIZING_TAKER_INPUTS:-}
+      # ── DUST admission accounting (RF3) ────────────────────────────────────
+      # All three or none (packages/solver/env.ts refuses a partial group), and
+      # an empty one is malformed, so `entrypoint-common.sh` unsets the whole
+      # group when blank.
+      #
+      # 00006-V1 turns this ON in the deployment for the first time. It is not a
+      # new mechanism: it is the accounting FR-002 requires be left untouched,
+      # and switching it on is the only way the amount `estimateDustAmount`
+      # computed for each settled job becomes OBSERVABLE — `reserveDust` writes
+      # it to `journal_dust_reservations.amount_text`, which the E2E driver
+      # reads to record design-note §6's live-chain DUST figures. The defaults
+      # are deliberately far above the measured per-job estimate (~2.8e15
+      # SPECKs) so admission records rather than gates.
+      SOLVER_DUST_MAX_PER_JOB: ${SOLVER_DUST_MAX_PER_JOB:-}
+      SOLVER_DUST_MAX_PER_WINDOW: ${SOLVER_DUST_MAX_PER_WINDOW:-}
+      SOLVER_DUST_WINDOW_MS: ${SOLVER_DUST_WINDOW_MS:-}
+      # The GENERATED ladder, not the in-repo one. Token colors derive from the
+      # deployed contract address, so the checked-in `ladders.dev.json` names
+      # colors from an older deployment; `solver-provision` rewrites it with
+      # this stack's real ones onto the shared volume. (Publication itself
+      # derives from the mirrored book and ignores this file — but the
+      # direct-fill engine's `ladders.maxPayout()` does not.)
+      SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-/srv/solver-config/ladders.dev.json}
+    # NO PUBLISHED PORT FOR :9100, deliberately.
+    #
+    # The status snapshot is the solver's whole internal state. The monitor site
+    # reaches it over this Compose network — that is what `solver-frontend` is
+    # for, and IT is the service with a host port and the readable page. Reading
+    # the raw JSON by hand needs nothing published either:
+    #
+    #   docker compose exec solver bun -e 'const r = await fetch(
+    #     "http://127.0.0.1:9100/status/snapshot",
+    #     { headers: { authorization: `Bearer ${process.env.SOLVER_STATUS_AUTH_TOKEN}` } });
+    #     console.log(await r.text());'
+    #
+    # Uncomment ONLY for a debugging session, and never with a non-loopback
+    # BIND_ADDR: nothing about /status/* is meant to face a network you do not
+    # own, and the bearer would then be the only thing between it and the world.
+    # ports:
+    #   - "${BIND_ADDR:-127.0.0.1}:${HOST_SOLVER_STATUS_PORT:-19100}:9100"
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - solver-config:/srv/solver-config:ro
+      # Per-instance and chain-keyed: a journal that outlives the genesis it was
+      # written against is worse than no journal, so this volume is torn down
+      # together with the chain volumes (see deploy/down.sh).
+      - solver-journal:/var/lib/cow-solver
+
+  # ══ COW solver monitor site (00007) ═════════════════════════════════════════
+
+  # The read-only operations page: "is the solver quoting, and if not, why".
+  #
+  # It is a SEPARATE service rather than a route on the solver for one reason:
+  # the moment anyone actually opens it is the moment the solver is down. So it
+  # depends on `kernel` ONLY — never on `solver`, and least of all with
+  # `service_healthy` on it — and it comes up, renders the kernel's book, and
+  # says SOLVER UNREACHABLE with the time it was last seen instead of dying
+  # alongside the process it exists to describe.
+  #
+  # What it does NOT do: it holds no wallet, no seed and no journal; it opens no
+  # relay socket; it has no route that mutates anything here or upstream; and it
+  # never proxies an arbitrary path anywhere. It reads three sources — the
+  # solver's bearer-gated /status/* across this network, the kernel's REST API,
+  # and the relay's public GET /tokens — and serves one page plus /api/snapshot,
+  # /api/stream and its own /health.
+  #
+  # It has NO AUTHENTICATION OF ITS OWN. That is why its host port binds
+  # ${BIND_ADDR} (127.0.0.1) like everything else here. Put the host's reverse
+  # proxy in front of it before it reaches any wider network — and note that the
+  # SSE feed needs response buffering off and a read timeout longer than the
+  # five-minute stream lifetime (packages/solver-frontend/README.md).
+  solver-frontend:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-solver-frontend.sh"]
+    # unless-stopped, unlike the solver's on-failure:3. This process trades
+    # nothing, so restarting it costs nothing and a monitor that stays down
+    # after a blip is worse than useless. A CONFIGURATION problem is still
+    # visible: `start.solver-frontend.ts` exits 1 with EVERY problem listed at
+    # once, and the loop reprints the same list rather than burying it.
+    restart: unless-stopped
+    depends_on:
+      # The kernel, and nothing else. The book, sync and token-name panels come
+      # from it, and a monitor that starts before its only always-on source is
+      # up would open on a screen of errors. `solver` is deliberately absent —
+      # see the note above.
+      kernel:
+        condition: service_healthy
+    environment:
+      # 0.0.0.0 inside the container so the published port below reaches it.
+      # The site's own env resolver warns about a non-loopback host (it has no
+      # authentication) and starts anyway, which is right for this case.
+      SOLVER_FRONTEND_HOST: 0.0.0.0
+      SOLVER_FRONTEND_PORT: "8080"
+      # The solver's status listener, over this network. The bearer is the SAME
+      # .env variable the solver enforces, so the two cannot drift; it is sent
+      # as `Authorization: Bearer` to the solver and reaches neither the browser
+      # nor /api/*.
+      SOLVER_FRONTEND_SOLVER_STATUS_URL: http://solver:9100
+      SOLVER_FRONTEND_SOLVER_STATUS_TOKEN: ${SOLVER_STATUS_AUTH_TOKEN:?SOLVER_STATUS_AUTH_TOKEN is required (>= 32 chars) — run deploy/bootstrap.sh}
+      # Read directly, not through the solver: the page must keep showing the
+      # book and the sync state while the solver is down.
+      SOLVER_FRONTEND_ZSWAP_API: http://kernel:9999
+      # GET /tokens is the only relay route this service knows, and the only
+      # unauthenticated one the reference relay has.
+      SOLVER_FRONTEND_RELAY_HTTP_URL: http://relay:3000
+      # How often the kernel and relay are polled. The solver half prefers SSE
+      # and only polls while the stream is down. 4000 is also the code default,
+      # so a blank .env entry lands on the same number either way.
+      SOLVER_FRONTEND_POLL_MS: ${SOLVER_FRONTEND_POLL_MS:-4000}
+      # Monitor-side transition history (solver up/down, relay connected,
+      # quoting/withdrawn, kernel sync). Bounded, in memory, never persisted —
+      # it is gone on restart by design, like everything else this service
+      # knows. 500 is the code default too.
+      SOLVER_FRONTEND_HISTORY_LIMIT: ${SOLVER_FRONTEND_HISTORY_LIMIT:-500}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_SOLVER_FRONTEND_PORT:-18080}:8080"
+    healthcheck:
+      # bun images ship no curl; `bun -e fetch` is the probe, as on the kernel.
+      # /health is the SITE's own liveness (three keys, no internal data) and
+      # says nothing about the solver — a monitor whose health followed the
+      # thing it monitors would restart itself exactly when it is needed.
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const r = await fetch("http://127.0.0.1:8080/health");
+          process.exit(r.ok ? 0 : 1);'
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  # ══ reference prices ════════════════════════════════════════════════════════
+
+  # The daily CoinGecko refresh of `asset_prices` (00005 / D1).
+  #
+  # OPT-IN (`profiles: ["prices"]`): the schema ships seeded reference prices,
+  # so every quote in this stack is already a real BTC/ETH ratio without it —
+  # and it is the one service that needs an internet-reachable third party and
+  # an API key. `docker compose up` therefore leaves it out; bring it up with
+  # `--profile prices`, or run a single cycle with
+  #   docker compose run --rm price-feed --once
+  # which forwards the flag through the entrypoint and exits 0/2 depending on
+  # whether every asset landed.
+  price-feed:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-price-feed.sh"]
+    profiles: ["prices"]
+    # unless-stopped, unlike the solver: this process is DESIGNED not to exit.
+    # Without a key it idles rather than failing, and a bad cycle is handled by
+    # its own bounded retry ladder, so an actual exit here means a crash and a
+    # restart is the right answer.
+    restart: unless-stopped
+    depends_on:
+      pglite:
+        condition: service_healthy
+      # Ordering only, and only for the SCHEMA: the kernel applies
+      # 000-init.sql, and asset_prices has to exist before the first upsert.
+      # `run.ts` checks for the tables and says so plainly if they are absent.
+      kernel:
+        condition: service_healthy
+    environment:
+      DB_HOST: pglite
+      DB_PORT: "5432"
+      # The ONLY secret this stack holds. Never in the image, never in a
+      # compose default, never on a command line — .env only, and the service
+      # sends it as the x-cg-demo-api-key header, never in a query string.
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+      COINGECKO_BASE_URL: ${COINGECKO_BASE_URL:-}
+      # 24 h between cycles; >= 1 s between requests; up to 50 ids per request,
+      # so today's five assets are ONE call a day against a 10 000/month budget.
+      PRICE_FEED_INTERVAL_MS: ${PRICE_FEED_INTERVAL_MS:-}
+      PRICE_FEED_REQUEST_SPACING_MS: ${PRICE_FEED_REQUEST_SPACING_MS:-}
+      PRICE_FEED_BATCH_SIZE: ${PRICE_FEED_BATCH_SIZE:-}
+      PRICE_FEED_ASSETS: ${PRICE_FEED_ASSETS:-}
+
+  # ══ provisioning / E2E driver (E1 owns the driver itself) ═══════════════════
+
+  scripts:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-scripts.sh"]
+    restart: "no"
+    profiles: ["e2e"]
+    depends_on:
+      kernel:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+      batcher:
+        condition: service_healthy
+    environment:
+      <<: [*midnight-endpoints, *celestia-endpoints]
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      ZSWAP_API: http://kernel:9999
+      BATCHER_SUBMIT_URL: http://batcher:3334
+      RELAY_HTTP_URL: http://relay:3000
+      RELAY_WS_URL: ws://relay:9001
+      SOLVER_AUTH_TOKEN: ${SOLVER_AUTH_TOKEN:-}
+      SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
+      # The MAKER is the genesis wallet: `mint-test-tokens` credits exactly that
+      # wallet, so it is the only one holding a test token to give away — and
+      # the driver posts its own extra offers (one per case, since a settled
+      # case consumes the one it used).
+      MAKER_SEED: ${MAKER_OFFER_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
+      TAKER_SEED: ${TAKER_SEED:-0000000000000000000000000000000000000000000000000000000000000032}
+      E2E_EVIDENCE_DIR: /var/lib/e2e
+      # The solver's own journal, so the driver can assert the SETTLED terminal
+      # and that no operation is left holding a claim. Mounted rw (not ro)
+      # because the journal is a WAL database: a reader has to be able to touch
+      # the -shm sidecar. The driver copies the fileset before opening it, so it
+      # never writes through this mount.
+      SOLVER_JOURNAL_PATH: /var/lib/cow-solver/operations.sqlite
+      # Which lower-demand shape case B proves, as a fraction of the relay's own
+      # quote (see deploy/scripts/e2e.ts).
+      E2E_CASE_B_DEMAND_NUM: ${E2E_CASE_B_DEMAND_NUM:-4}
+      E2E_CASE_B_DEMAND_DEN: ${E2E_CASE_B_DEMAND_DEN:-5}
+      E2E_CASE_C_DEMAND_NUM: ${E2E_CASE_C_DEMAND_NUM:-6}
+      E2E_CASE_C_DEMAND_DEN: ${E2E_CASE_C_DEMAND_DEN:-5}
+      E2E_CASES: ${E2E_CASES:-A,B,C,D}
+      E2E_SKIP_PROVISION: ${E2E_SKIP_PROVISION:-false}
+      # ── 00006-V1 / SC-004 ──────────────────────────────────────────────────
+      # When true the driver REFUSES to run unless the solver-provision receipt
+      # proves the solver was given fee currency only — zero of every swap
+      # token, nothing minted. The receipt is a measurement taken with the
+      # solver's own facade while the solver was stopped; this driver cannot
+      # take it itself (two facades on one seed against one node force each
+      # other's connection down).
+      E2E_REQUIRE_UNFUNDED_SOLVER: ${E2E_REQUIRE_UNFUNDED_SOLVER:-false}
+      SOLVER_PROVISION_RECEIPT: ${SOLVER_PROVISION_RECEIPT:-/srv/solver-config/provision-receipt.json}
+      # Recorded into the driver's evidence next to the reserved-DUST amounts it
+      # reads out of the journal — design-note §6 asks for the model that was in
+      # force alongside the number it produced. Blank = the solver's default, 1.
+      SOLVER_FEE_SIZING_TAKER_INPUTS: ${SOLVER_FEE_SIZING_TAKER_INPUTS:-}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - e2e-evidence:/var/lib/e2e
+      - solver-journal:/var/lib/cow-solver
+      # Read-only: the driver asserts on the provisioning receipt, never writes
+      # it, and must not be able to touch the ladder config the solver reads.
+      - solver-config:/srv/solver-config:ro
+
+volumes:
+  # The poster's coin journal (profile `poster`). Chain-keyed like the rest and
+  # then some: the journal records the contract address it was written against
+  # and REFUSES to start on a mismatch, because a coin minted under another
+  # deployment does not exist here. `down.sh` passes --profile poster so this
+  # volume goes with the containers.
+  offer-poster-state:
+  # Chain-keyed. These MUST be wiped together: a kernel ledger mirror, a solver
+  # journal or an indexer database that survives a chain reset refers to
+  # nullifiers, offers and contract addresses that no longer exist, and every
+  # symptom of that shows up somewhere else entirely. deploy/down.sh removes the
+  # whole set.
+  midnight-node-data:
+  indexer-data:
+  celestia-data:
+  pglite-data:
+  offerfiles-deploy:
+  batcher-data:
+  solver-journal:
+  relay-wallet-cache:
+  e2e-evidence:
+  # The ladder config generated against THIS chain's contract address, and the
+  # marker recording that the solver was funded. Chain-keyed like the rest:
+  # carrying either across a chain reset would point the solver at token colors
+  # that no longer exist.
+  solver-config:
+  maker-offer-state:

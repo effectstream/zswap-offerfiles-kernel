@@ -130,4 +130,30 @@ export class Stock {
   tokens(): string[] {
     return [...new Set([...this.#balances.keys(), ...this.#reserved.keys()])];
   }
+
+  /**
+   * One snapshot of `available` for every token this Stock knows about — what
+   * publication is allowed to advertise as executable (spec 00005 FR-003).
+   *
+   * A snapshot, not a live view: the ladder derivation must be reproducible
+   * from its inputs, so the push loop takes one of these per push and the
+   * derivation never reads back into executor state. A token absent from the
+   * result means zero available, which is what the derivation assumes — so a
+   * refresh that emptied the balances withdraws every budget-bounded rung on
+   * the next push, exactly as it already withdraws residual authority.
+   *
+   * `deriveLadder` reads only a PAIR'S tokenOut entry from this: the residual
+   * payout. It read the tokenIn entry too until 00006-R2 removed that bound
+   * (spec 00006 FR-003) — fee sizing no longer spends tokenIn — so an empty
+   * snapshot no longer means "publish nothing", it means "whole-maker rungs
+   * only".
+   */
+  spendable(): Map<string, bigint> {
+    const snapshot = new Map<string, bigint>();
+    for (const token of this.tokens()) {
+      const available = this.available(token);
+      if (available > 0n) snapshot.set(token, available);
+    }
+    return snapshot;
+  }
 }

@@ -407,21 +407,24 @@ afterAll(async () => {
 
 describe("V0 shared validation-context matrix", () => {
   test("batcher pre-fee admission has local dedup but no indexed liveness", async () => {
-    const malformed = adapter().validateInput(
+    // `await`: the batcher's validateInput became async with the fee-
+    // sponsorship gate (the SDK core already awaited it). This adapter is
+    // built with no gate, so its verdicts here are unchanged.
+    const malformed = await adapter().validateInput(
       batcherInput("definitely-not-an-offer") as any,
     );
     expect(malformed.error).toContain(EXPECTED_MATRIX.transportGarbage.batcher);
 
-    const junk = adapter().validateInput(batcherInput(DECODABLE_JUNK) as any);
+    const junk = await adapter().validateInput(batcherInput(DECODABLE_JUNK) as any);
     expect(junk.error).toContain(EXPECTED_MATRIX.decodableJunk.batcher);
 
-    const live = adapter().validateInput(batcherInput(VALID_OFFER) as any);
+    const live = await adapter().validateInput(batcherInput(VALID_OFFER) as any);
     expect(live).toEqual({ valid: true });
 
     // The identical proven bytes remain valid at this context even when the
     // authoritative backend state says their nullifier is spent: this adapter
     // has no DB/indexed liveness input at all.
-    const spentButInvisibleHere = adapter().validateInput(
+    const spentButInvisibleHere = await adapter().validateInput(
       batcherInput(VALID_OFFER) as any,
     );
     expect(spentButInvisibleHere.valid).toBe(true);
@@ -429,7 +432,7 @@ describe("V0 shared validation-context matrix", () => {
     // Marker overlap is a BOOK question, and this context has no book: its
     // dedup keys on the bytes it has itself published in this process. A blob
     // whose markers the backend's live book already claims is admitted here.
-    const markerClaimedButInvisibleHere = adapter().validateInput(
+    const markerClaimedButInvisibleHere = await adapter().validateInput(
       batcherInput(VALID_OFFER) as any,
     );
     expect(markerClaimedButInvisibleHere.valid).toBe(true);
@@ -437,7 +440,7 @@ describe("V0 shared validation-context matrix", () => {
 
     const published = adapter();
     await markPublished(published, VALID_OFFER);
-    const duplicate = published.validateInput(batcherInput(VALID_OFFER) as any);
+    const duplicate = await published.validateInput(batcherInput(VALID_OFFER) as any);
     expect(duplicate.error).toContain(EXPECTED_MATRIX.indexedLiveDuplicate.batcher);
   });
 

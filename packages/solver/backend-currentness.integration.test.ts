@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   ApiRequestError,
   type BackendSyncHealth,
+  type OfferUpdatesStreamOpts,
 } from "@zswap-da/solver-core/api-client";
 import { createInventoryRefreshController } from "./src/run.ts";
 import {
@@ -45,7 +46,9 @@ function harness(
   loadHealth: SyncDependencies["getBackendSyncHealth"],
   onCurrentnessChange?: (state: BackendCurrentnessState) => void,
 ) {
-  let handlers!: { onOpen?: () => void; onDisconnect?: () => void };
+  // The real option shape, so a test double cannot drift from what
+  // `openOfferUpdatesStream` actually hands the book mirror.
+  let handlers!: OfferUpdatesStreamOpts;
   let pageCalls = 0;
   const dependencies: SyncDependencies = {
     getZswapsPage: async () => {
@@ -56,7 +59,7 @@ function harness(
       throw new Error("empty book must not fetch offer detail");
     },
     getBackendSyncHealth: loadHealth,
-    openUpdatesStream: (_onEvent, options) => {
+    openUpdatesStream: (_onEvent, options = {}) => {
       handlers = options;
       options.onOpen?.({ streamId: "0".repeat(32), blockL2Height: null });
       return { close: async () => {} };
@@ -186,7 +189,10 @@ test("a late old-generation health result cannot revoke exactly-once recovery", 
   await waitUntil(() => healthCalls >= 3, "old generation health request");
 
   handlers().onDisconnect?.();
-  handlers().onOpen?.();
+  // Resubscribed with a fresh subscription, exactly as the stream client does.
+  // `blockL2Height: null` keeps the anchor absent, which is what the previous
+  // argument-less call produced (`subscription?.blockL2Height ?? null`).
+  handlers().onOpen?.({ streamId: "1".repeat(32), blockL2Height: null });
   await waitUntil(
     () => sync.currentness().kind === "current" && sync.currentness().streamGeneration === 3,
     "new generation recovery",

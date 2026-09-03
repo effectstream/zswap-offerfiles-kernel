@@ -2,7 +2,9 @@
 // instead of shelling out to an entrypoint.
 
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
+import { getEnv } from "@effectstream/utils/runtime";
 
+import { forwardAdmissionPolicy } from "@zswap-da/solver-core/admission-policy";
 import { buildWallet, shieldedBalances, shieldedKeys, waitForSync } from "@zswap-da/solver-core/wallet";
 import { MAX_EXACT_FILES_PER_READ } from "@zswap-da/solver-core/exact-files-contract";
 
@@ -10,6 +12,7 @@ import {
   isDryRun,
   loadRelayClientEnv,
   loadSolverAdmissionEnv,
+  loadSolverFeeSizingTakerInputs,
   loadSolverRelayHttpEnv,
   loadSolverJournalEnv,
   parseSolverRelayHttpUrl,
@@ -27,6 +30,13 @@ import {
   type SolverAdmissionEnv,
 } from "../env.ts";
 import { startAdmissionWarnings, type AdmissionWarningTimers } from "./admission.ts";
+import {
+  SOLVER_NETWORK_IDS,
+  SolverLaunchConfigError,
+  type SolverStatusLaunchConfig,
+} from "./launch.ts";
+import { createStatusCollector, type StatusCollector, type StatusTimers } from "./status.ts";
+import { startStatusServer, type StatusServerHandle } from "./status-server.ts";
 import { Book, type BookOffer } from "./book.ts";
 import { loadLadderConfig, type LoadedLadders } from "./config.ts";
 import {
@@ -109,7 +119,24 @@ export interface SolverOptions {
   journalOptions?: SolverOperationJournalOptions;
   journalOpen?: typeof SolverOperationJournal.open;
   admission?: SolverAdmissionEnv;
+  /** 00006 FR-001. Defaults to SOLVER_FEE_SIZING_TAKER_INPUTS (1). */
+  feeSizingTakerInputs?: number;
   admissionWarningTimers?: AdmissionWarningTimers;
+  /**
+   * 00007 FR-001/FR-007. The read-only status listener, already resolved and
+   * validated by `resolveSolverLaunchConfig`. Absent or null means NO listener:
+   * no bind, no collector, no observer wiring — byte-for-byte today's process.
+   *
+   * It is bound BEFORE the wallet is acquired, so a port clash is a startup
+   * failure an operator sees at once rather than a crash minutes into a slow
+   * wallet sync, and so the listener can answer `ready: false` for the whole of
+   * startup instead of refusing connections until the solver is up.
+   */
+  status?: SolverStatusLaunchConfig | null;
+  /** Build provenance for the status snapshot. Defaults to `GIT_COMMIT`. */
+  gitCommit?: string | null;
+  /** Deterministic seam for the status collector's coalescing timer. */
+  statusTimers?: StatusTimers;
   /** Deadline applied to wallet build/sync/first balance and, separately, to
    * the initial authoritative book snapshot plus buffered SSE drain. */
   startupTimeoutMs?: number;
@@ -448,6 +475,22 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   }
   const walletRequired = !dryRun || dryRunWalletMode === "real";
   const admission = opts.admission ?? loadSolverAdmissionEnv();
+  const feeSizingTakerInputs = opts.feeSizingTakerInputs ?? loadSolverFeeSizingTakerInputs();
+  // 00006 FR-001. `net.id` is the SINGLE source the wallet facade
+  // (`solver-core/wallet.ts` → `buildWalletFacade(…, net.id)`) and the fee-sizing
+  // stand-in both read, so they cannot disagree — but an unrecognized value is
+  // still a misconfiguration, and the ledger accepts ANY string as a network id
+  // and only refuses at merge time. Assert it here so every entrypoint fails at
+  // boot with one message instead of refusing each job as
+  // `wallet_build_failed`. `start:solver` checks the same thing earlier and more
+  // loudly; direct `runSolver` callers (solver.dev.ts, e2e harnesses) get it here.
+  if (!(SOLVER_NETWORK_IDS as readonly string[]).includes(net.id)) {
+    throw new Error(
+      `MIDNIGHT_NETWORK_ID resolved to ${JSON.stringify(net.id)}, which is not ` +
+        `one of ${SOLVER_NETWORK_IDS.join(", ")}; the wallet and the fee-sizing ` +
+        "stand-in would be built for a network that does not exist",
+    );
+  }
   const relayEnv = loadRelayClientEnv();
   const relayUrl = opts.relayUrl ?? SOLVER_RELAY_WS_URL;
   const relayHttpUrl = opts.relayHttpUrl === undefined
@@ -527,6 +570,10 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   let balanceWallet: SolverWallet | null = null;
   let jobExecutor: SwapJobExecutorHandle | null = null;
   let relayClient: RelayClientHandle | null = null;
+  // Declared here rather than at its assignment below so the status collector,
+  // which is built before the mirror starts, can close over it without a
+  // temporal-dead-zone read from a snapshot taken during startup.
+  let sync: SyncHandle | null = null;
   let backendCurrent = false;
   let inventoryChanged = (_ready: boolean): void => {};
   const book = new Book();
@@ -545,6 +592,104 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     }
     await inventory.refresh(signal);
   };
+
+  // ── read-only status surface (00007 FR-001/FR-003/FR-007) ─────────────────
+  //
+  // Bound HERE: after the journal (whose open failure is a configuration
+  // problem the operator should see first) and BEFORE the wallet, so a port
+  // clash fails startup in a second instead of after a multi-minute wallet
+  // sync, and so the listener answers `/health` with `ready: false` for the
+  // whole of startup rather than refusing connections until the solver is up.
+  //
+  // Everything below is inert when `opts.status` is absent: no collector, no
+  // observer, no timer, no bind (FR-018).
+  let solverIsReady = false;
+  let statusCollector: StatusCollector | null = null;
+  let statusServer: StatusServerHandle | null = null;
+  const stopStatusSurface = (): void => {
+    try {
+      statusServer?.stop();
+    } catch (error) {
+      log(`[solver] status listener stop failed: ${asError(error, "unknown error").message}`);
+    }
+    statusServer = null;
+    try {
+      statusCollector?.stop();
+    } catch {
+      // A status teardown never owns the solver's shutdown outcome.
+    }
+    statusCollector = null;
+  };
+  /** Wake the status stream. Never throws: it is called from observers that own
+   *  trading decisions, and a monitor may not interfere with any of them. */
+  const notifyStatus = (): void => {
+    try {
+      statusCollector?.notify();
+    } catch {
+      // The status surface is strictly downstream of every caller here.
+    }
+  };
+  if (opts.status) {
+    statusCollector = createStatusCollector({
+      process: {
+        startedAt: Date.now(),
+        network: net.id,
+        api,
+        relayWsUrl: relayUrl === "" ? null : relayUrl,
+        relayHttpUrl,
+        // FR-006: the LENGTH only, exactly as the startup banner prints it.
+        relayAuthTokenLength: relayAuthToken.length,
+        mode: dryRun ? "dry-run" : "live",
+        solverEnabled: true,
+        gitCommit: opts.gitCommit ?? getEnv("GIT_COMMIT") ?? null,
+        runtime: typeof Bun === "undefined" ? null : `bun ${Bun.version}`,
+      },
+      admission: {
+        supportedPairs: admission.supportedPairs,
+        minJobOutput: admission.minJobOutput,
+        dust: admission.dust,
+        openGroups: admission.openGroups,
+        feeSizingTakerInputs,
+        expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
+        pushIntervalMs: opts.relayPushIntervalMs ?? relayEnv.pushIntervalMs,
+        maxParallelSwaps,
+        maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
+        maxPairs: null,
+        settleTtlMinutes: SOLVER_SETTLE_TTL_MINUTES,
+      },
+      sync: () => sync,
+      stock: () => stock,
+      inventory: () => inventory,
+      relay: () => relayClient,
+      executor: () => jobExecutor,
+      journal: () => operationJournal,
+      ready: () => solverIsReady,
+      ...(opts.statusTimers ? { timers: opts.statusTimers } : {}),
+    });
+    try {
+      statusServer = startStatusServer({
+        host: opts.status.host,
+        port: opts.status.port,
+        authToken: opts.status.authToken,
+        collector: statusCollector,
+        log,
+      });
+      log(
+        `[solver] status listener on http://${statusServer.host}:${statusServer.port} ` +
+          "(read-only; /status/* requires the bearer)",
+      );
+    } catch (error) {
+      // FR-007: a bind failure is a LAUNCH problem, reported in the same shape
+      // as every other one, not a late crash after the wallet is up.
+      stopStatusSurface();
+      operationJournal?.close();
+      admissionWarnings.stop();
+      throw new SolverLaunchConfigError([
+        `SOLVER_STATUS_PORT=${opts.status.port} could not be bound on ` +
+          `SOLVER_STATUS_HOST=${opts.status.host}: ${asError(error, "unknown error").message}`,
+      ]);
+    }
+  }
 
   if (walletRequired) {
     try {
@@ -567,6 +712,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     } catch (err) {
       inventory.stop();
       balanceWallet = null;
+      stopStatusSurface();
       operationJournal?.close();
       admissionWarnings.stop();
       throw err;
@@ -578,6 +724,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   }
 
   const onChange = (change: BookChange): void => {
+    notifyStatus();
     if (change.kind === "removed") {
       log(`[solver] − ${change.offerHash.slice(0, 10)} (${change.reason})`);
       if (change.reason === "consumed") jobExecutor?.notifyConsumed(change.offerHash);
@@ -586,7 +733,6 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     log(`[solver] + ${describeOffer(change.offer)}`);
   };
 
-  let sync: SyncHandle | null = null;
   let recoveryRunning = false;
   let recoveryRequested = false;
   let initialSyncReady = false;
@@ -607,17 +753,44 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       (dryRunWalletMode === "skip-test-only" || inventory.isReady())
     ) {
       solverReadySettled = true;
+      solverIsReady = true;
       resolveSolverReady();
+      // `/health` flips from `ready: false` to `ready: true` here, and the
+      // stream carries the whole transition rather than the page inferring it.
+      notifyStatus();
     }
   };
 
+  /** Publish NOW instead of waiting for the next tick. Used where inventory
+   *  authority changes, so a withdrawal is not delayed by up to one push
+   *  interval and a recovery is not either. Never throws and never blocks: the
+   *  relay client coalesces this into any push already in flight. */
+  const republishLadder = (reason: string): void => {
+    void relayClient?.push().catch((error) => {
+      log(`[solver] ${reason} republication failed: ${asError(error, "unknown error").message}`);
+    });
+  };
+
   // A failed/started refresh empties Stock, which withdraws residual inventory
-  // authority. Maker-backed rungs still come from the current book cache.
+  // authority. Maker-backed rungs still come from the current book cache — but
+  // FR-003 bounds the PUBLISHED rungs by that same authority, so an emptied
+  // Stock also withdraws every rung whose interpolation interval needs a
+  // residual payout. STILL LOAD-BEARING after 00006-R2 dropped the tokenIn
+  // bound: the tokenOut half alone changes what is publishable on both edges.
+  // (What changed is the floor — an emptied Stock now withdraws the interior
+  // rungs and keeps the whole-maker ones, instead of withdrawing everything.)
+  // Both directions are republished immediately rather than at the next tick:
+  // withdrawing late would keep advertising liquidity the executor has already
+  // started refusing, and recovering late would strand the solver unquotable
+  // for a full interval after each settlement (every terminal outcome triggers
+  // a refresh).
   inventoryChanged = (ready): void => {
+    notifyStatus();
     if (ready && !backendCurrent) {
       inventory.invalidate(new Error("inventory read completed outside backend readiness"));
       return;
     }
+    republishLadder(ready ? "inventory readiness" : "inventory withdrawal");
     if (ready && backendCurrent) maybeResolveSolverReady();
   };
 
@@ -653,6 +826,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   };
 
   const onCurrentnessChange = (state: ReturnType<SyncHandle["currentness"]>): void => {
+    notifyStatus();
     if (state.kind !== "current") {
       backendCurrent = false;
       if (walletRequired) {
@@ -721,6 +895,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     }
     await Promise.all(cleanups);
     balanceWallet = null;
+    stopStatusSurface();
     operationJournal?.close();
     admissionWarnings.stop();
     throw err;
@@ -742,6 +917,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         Promise.resolve().then(() => (wallet?.wallet as any)?.stop?.()),
       ]);
       balanceWallet = null;
+      stopStatusSurface();
       operationJournal?.close();
       admissionWarnings.stop();
       throw error;
@@ -761,13 +937,17 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       wallet: ownedWallet.wallet as any,
       journal: operationJournal,
       keys: walletDependencies.shieldedKeys(ownedWallet) as any,
+      // FR-001: the same network id `buildWallet` handed the facade, so the
+      // fee-sizing stand-in can merge with the wallet's own half.
+      networkId: net.id,
+      modelledTakerInputs: feeSizingTakerInputs,
       api,
       relayHttpUrl: relayHttpUrl!,
       maxParallelSwaps,
       expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
       settleTtlMinutes: SOLVER_SETTLE_TTL_MINUTES,
-      supportedPairs: admission.supportedPairs,
-      minJobOutput: admission.minJobOutput,
+      // FR-002: the same policy object publication gets, forwarded whole.
+      ...forwardAdmissionPolicy(admission),
       dustAdmission: admission.dust,
       walletOperationTimeoutMs,
       sweepIntervalMs: opts.jobSweepIntervalMs ?? SOLVER_STATUS_POLL_MS,
@@ -778,6 +958,9 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         if (activeSync.book.remove(offerHash)) {
           log(`[solver] − ${offerHash.slice(0, 10)} (consumed by status sweeper)`);
         }
+        // A terminal settlement outcome: the book, the claims and the journal
+        // all just changed, and the page should show it without waiting.
+        notifyStatus();
       },
       refreshBalances: async () => {
         if (!backendCurrent || inventory.isRefreshing()) return;
@@ -785,6 +968,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         await refreshBalances(owner.signal);
       },
       onDustWindowBlocked: () => {
+        notifyStatus();
         log("[ADMISSION] rolling DUST window refused a routed job; withdrawing every ladder");
         void relayClient?.push().catch((error) => {
           log(`[ADMISSION] immediate DUST withdrawal failed: ${asError(error, "unknown error").message}`);
@@ -810,8 +994,16 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
           // whose whole-offer prefix cannot fit that read.
           maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
           unavailableOfferHashes: activeJobs.unavailableOfferHashes,
-          supportedPairs: admission.supportedPairs,
-          minJobOutput: admission.minJobOutput,
+          // FR-002: ONE policy object, the same one the executor admits with, so
+          // a field cannot reach admission without reaching the wire (P4-F02).
+          ...forwardAdmissionPolicy(admission),
+          // FR-003: never advertise a rung this solver could not pay the
+          // residual for. Read per push, so an inventory refresh — including the
+          // deliberate emptying that follows a lost backend authority —
+          // withdraws the affected rungs on the very next push. Whole-maker
+          // rungs survive an empty snapshot: 00006-R2 removed the tokenIn bound
+          // that used to withdraw them too.
+          spendableInventory: () => stock.spendable(),
         },
         pushIntervalMs: opts.relayPushIntervalMs ?? relayEnv.pushIntervalMs,
         reconnectDelayMs: opts.relayReconnectDelayMs ?? relayEnv.reconnectDelayMs,
@@ -822,6 +1014,15 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         onSwap: activeJobs.onSwap,
         onTxSubmitted: activeJobs.onTxSubmitted,
         onSubmitFailed: activeJobs.onSubmitFailed,
+        // 00007 FR-003: the relay's 18 diagnostic kinds are the solver's own
+        // account of the socket, and they reach a wire for the first time here.
+        // Both consumers sit inside the client's R-37 catch, so a status
+        // collector that threw could not fail a push.
+        onEvent: (event) => statusCollector?.recordRelayEvent(event),
+        // FR-004: the derived ladder itself. `recordRelayEvent` already wakes
+        // the stream on the `push` event that follows, but a derivation whose
+        // frames then fail on the wire must still update the page.
+        onPush: () => notifyStatus(),
         log,
       });
       await jobExecutor.ready;
@@ -834,6 +1035,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         Promise.resolve().then(() => (ownedWallet.wallet as any)?.stop?.()),
       ]);
       balanceWallet = null;
+      stopStatusSurface();
       operationJournal.close();
       admissionWarnings.stop();
       throw error;
@@ -872,6 +1074,11 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         rejectSolverReady(new Error("solver stopped before combined readiness"));
       }
       if (balanceRetryTimer) clearInterval(balanceRetryTimer);
+      solverIsReady = false;
+      // FR-007: the listener closes WITH the solver, before the long-running
+      // relay/executor teardown, so a monitor stops being told "ok" the moment
+      // shutdown begins rather than at the end of it.
+      stopStatusSurface();
       admissionWarnings.stop();
       inventory.stop();
       const retainedInventoryOperations = inventory.retainedOperations();

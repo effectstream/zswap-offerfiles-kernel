@@ -44,9 +44,15 @@
 // so a withheld push leaves the previous ladder quoting.
 
 import {
+  forwardAdmissionPolicy,
+  type JobAdmissionPolicy,
+  type SpendableInventory,
+} from "@zswap-da/solver-core/admission-policy";
+import {
   buildSolverCapabilitiesFrame,
   withdrawalPriceLevelsFrame,
   type LadderExclusion,
+  type LadderExclusionReason,
 } from "@zswap-da/solver-core/ladder-derivation";
 import {
   parseJobError,
@@ -146,6 +152,8 @@ export type RelayClientEventKind =
   | "cache-current"
   | "ladder-truncated"
   | "ladder-truncation-cleared"
+  | "ladder-budget-limited"
+  | "ladder-budget-cleared"
   | "job-refused"
   | "message-refused"
   | "withdrawn"
@@ -166,7 +174,16 @@ export interface RelayClientEvent {
   detail?: Readonly<Record<string, unknown>>;
 }
 
-export interface RelayLadderOptions {
+/**
+ * Everything the push loop needs to derive one ladder.
+ *
+ * EXTENDS `JobAdmissionPolicy` rather than restating its fields: P4-F02 was
+ * exactly this interface silently lacking `supportedPairs`/`minJobOutput` while
+ * `run.ts` passed them and `runPush` dropped them, so the solver advertised
+ * pairs and sizes its own executor refused. Inheriting the declarations means
+ * this layer cannot fall behind the policy again.
+ */
+export interface RelayLadderOptions extends JobAdmissionPolicy {
   /** Same margin the engine/executor enforce at dequeue (R-38). */
   expiryMarginSeconds: number;
   /** Advertised capacity. N5 is what actually enforces it (FR-019). */
@@ -177,6 +194,11 @@ export interface RelayLadderOptions {
    *  by the next one. A function, not a snapshot, precisely because the loop
    *  outlives any single view of executor state. */
   unavailableOfferHashes?: () => Iterable<string>;
+  /** FR-003: `Stock.available` per token, read per push for the same reason — a
+   *  balance refresh or a new reservation between two pushes must change what
+   *  the next one advertises. Only the pair's tokenOut is read (the residual
+   *  payout); since 00006-R2 nothing bounds publication by tokenIn. */
+  spendableInventory?: () => SpendableInventory;
 }
 
 type RelaySwapTerminalMessage = Extract<
@@ -203,6 +225,22 @@ export interface RelayClientOptions {
   timers?: RelayClientTimers;
   /** Untrusted diagnostic consumer. Contained (R-37). */
   onEvent?: (event: RelayClientEvent) => void;
+  /**
+   * The DERIVED ladder itself, as an observation (00007 FR-004).
+   *
+   * The `push` event above carries counts only, and the `LadderPush` was
+   * previously dropped the moment it left `runPush` — so the provenance and the
+   * per-offer exclusion reasons the derivation computed, which are the single
+   * most useful thing an operator can see, reached no wire at all.
+   *
+   * Invoked inside the same R-37 catch discipline as `onEvent`: a throwing
+   * observer cannot fail a push, cannot stop the send, and cannot produce an
+   * unhandled rejection. It is called after a SUCCESSFUL derivation and before
+   * the frames go out, because "what the solver decided to publish" is the fact
+   * being reported; whether the wire took it is the `push` / `push-failed`
+   * event's job.
+   */
+  onPush?: (push: LadderPush, cause: string) => void;
   /** Untrusted string logger, the `runSolver` idiom. Contained (R-37). */
   log?: (message: string) => void;
   /** N5's seam. Without it, every routed job is answered `job-error`. */
@@ -231,6 +269,23 @@ export interface RelayClientStats {
   stopped: boolean;
 }
 
+/**
+ * The last ladder this client derived (or explicitly withdrew), retained so a
+ * read-only status observer can report it without sitting on the wire
+ * (00007 FR-003/FR-004).
+ *
+ * One slot, replaced in place: this is a status seam, not a history, and an
+ * unbounded list of derivations would be exactly the kind of growth the status
+ * surface is required not to introduce.
+ */
+export interface RelayLadderPushRecord {
+  push: LadderPush;
+  /** The injected clock value the derivation was reproducible from. */
+  derivedAt: number;
+  /** `tick`, `connect`, `manual`, `coalesced`, or `withdraw`. */
+  cause: string;
+}
+
 export interface RelayClientHandle {
   /** Derive and send one push now, coalescing with any push in flight.
    *  Resolves when the resulting push (and any push it coalesced into) is
@@ -252,6 +307,10 @@ export interface RelayClientHandle {
    *  rejects. */
   stop: () => Promise<void>;
   stats: () => RelayClientStats;
+  /** The last derived push, or the R-41 withdrawal, or `null` before the first
+   *  derivation. A defensive copy: a status reader cannot mutate the record the
+   *  next push compares against. */
+  lastPush: () => RelayLadderPushRecord | null;
 }
 
 const isOpen = (socket: RelayWebSocketLike | null): socket is RelayWebSocketLike =>
@@ -278,6 +337,40 @@ const truncates = (signal: TruncationSignal): boolean =>
 
 const sameTruncation = (a: TruncationSignal, b: TruncationSignal): boolean =>
   a.pairCapOffers === b.pairCapOffers && a.rungCapOffers === b.rungCapOffers;
+
+/**
+ * Rungs withheld because the solver could not EXECUTE them (FR-003), as counts.
+ *
+ * Reported separately from the cap signal above, not folded into it: a cap is a
+ * configured ceiling and this is inventory, so the operator's remedy is
+ * different (fund the wallet / free a reservation, not raise a limit). It is
+ * every bit as loud, because withheld liquidity is invisible at the relay —
+ * takers simply stop being quoted.
+ *
+ * ONE count since 00006-R2. 00005-R2 also reported `mirrorBudgetOffers`, the
+ * rungs withheld because the solver could not spend the tokenIn the fee-sizing
+ * mirror needed; fee sizing spends no tokenIn any more, so that bound and its
+ * count are gone (FR-003). The event kinds are unchanged, so an operator's
+ * alerting on `ladder-budget-limited` / `ladder-budget-cleared` still fires —
+ * only the `detail` object lost a field that is now always 0.
+ */
+interface BudgetSignal {
+  residualBudgetOffers: number;
+}
+
+const countExcluded = (
+  excluded: readonly LadderExclusion[],
+  reason: LadderExclusionReason,
+): number => excluded.reduce((total, entry) => total + (entry.reason === reason ? 1 : 0), 0);
+
+const budgetOf = (excluded: readonly LadderExclusion[]): BudgetSignal => ({
+  residualBudgetOffers: countExcluded(excluded, "residual-budget"),
+});
+
+const limitsLiquidity = (signal: BudgetSignal): boolean => signal.residualBudgetOffers > 0;
+
+const sameBudget = (a: BudgetSignal, b: BudgetSignal): boolean =>
+  a.residualBudgetOffers === b.residualBudgetOffers;
 
 const rungCount = (push: LadderPush): number =>
   push.priceLevels.levels.reduce((total, pair) => total + pair.levels.length, 0);
@@ -327,7 +420,9 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   const terminalTasks = new Set<Promise<void>>();
   let queued = false;
   let lastTruncation: TruncationSignal = { pairCapOffers: 0, rungCapOffers: 0 };
+  let lastBudget: BudgetSignal = { residualBudgetOffers: 0 };
   let lastCurrent: boolean | null = null;
+  let lastPushRecord: RelayLadderPushRecord | null = null;
 
   const stats: RelayClientStats = {
     connected: false,
@@ -360,6 +455,23 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       options.log?.(`[relay] ${message}`);
     } catch {
       // Same, for the string-logger idiom.
+    }
+  };
+
+  /**
+   * Retain the push and hand it to the (untrusted) status observer.
+   *
+   * The retention happens FIRST and unconditionally, so a throwing `onPush`
+   * cannot also cost the snapshot its ladder — R-37 says a diagnostic consumer
+   * never participates in transport authority, and here it does not participate
+   * in observability authority either.
+   */
+  const recordPush = (push: LadderPush, derivedAt: number, cause: string): void => {
+    lastPushRecord = { push, derivedAt, cause };
+    try {
+      options.onPush?.(push, cause);
+    } catch {
+      // A status observer never fails a push.
     }
   };
 
@@ -414,10 +526,14 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
    *  tokens before the ladder that prices them arrives. */
   const runPush = async (cause: string): Promise<void> => {
     if (retired || !isOpen(socket)) return;
+    // Hoisted so the retained record names the exact clock value the frames are
+    // reproducible from. Reading `now()` twice would make the record a
+    // near-miss instead of the derivation's own input.
+    const derivedAt = now();
     let push: LadderPush;
     try {
       push = deriveLadderPush(options.cache, {
-        nowMs: now(),
+        nowMs: derivedAt,
         expiryMarginSeconds: options.ladder.expiryMarginSeconds,
         ...(options.ladder.maxParallelSwaps === undefined
           ? {}
@@ -429,6 +545,15 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         ...(options.ladder.unavailableOfferHashes === undefined
           ? {}
           : { unavailableOfferHashes: options.ladder.unavailableOfferHashes() }),
+        // FR-002: forward the ENTIRE policy in one hop. The per-field spread
+        // that used to live here is what dropped `supportedPairs`/
+        // `minJobOutput` between config and the wire (P4-F02).
+        ...forwardAdmissionPolicy(options.ladder),
+        // FR-003: read the executability budget per push, like the claim set
+        // above.
+        ...(options.ladder.spendableInventory === undefined
+          ? {}
+          : { spendableInventory: options.ladder.spendableInventory() }),
       });
     } catch (error) {
       // A frame the builders refuse is NEVER sent: the relay discards a bad
@@ -440,8 +565,10 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       return;
     }
 
+    recordPush(push, derivedAt, cause);
     reportCurrentness(push);
     reportTruncation(push.derived.excluded);
+    reportBudgetLimits(push.derived.excluded);
 
     try {
       await send(push.capabilities);
@@ -507,6 +634,36 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         "ladder-truncation-cleared",
         "info",
         "publication caps no longer drop any offer",
+      );
+    }
+  };
+
+  /**
+   * FR-003's operator half: liquidity the solver OWNS but withheld because it
+   * could not execute it.
+   *
+   * Change-triggered like the cap signal, and at error severity, because the
+   * relay shows nothing at all when a rung is withheld — the failure mode is a
+   * solver that looks healthy and quotes nothing. Recovery is reported too.
+   */
+  const reportBudgetLimits = (excluded: readonly LadderExclusion[]): void => {
+    const signal = budgetOf(excluded);
+    if (sameBudget(signal, lastBudget)) return;
+    const wasLimiting = limitsLiquidity(lastBudget);
+    lastBudget = signal;
+    if (limitsLiquidity(signal)) {
+      emit(
+        "ladder-budget-limited",
+        "error",
+        `solver inventory withheld real liquidity: ${signal.residualBudgetOffers} offer(s) ` +
+          "past the residual tokenOut budget",
+        { residualBudgetOffers: signal.residualBudgetOffers },
+      );
+    } else if (wasLimiting) {
+      emit(
+        "ladder-budget-cleared",
+        "info",
+        "solver inventory no longer withholds any offer",
       );
     }
   };
@@ -773,6 +930,33 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     }
   };
 
+  /**
+   * Retain the R-41 withdrawal as the last push (00007 FR-003).
+   *
+   * Without this, `lastPush()` after a graceful stop would still name the last
+   * LIVE ladder, and a monitor would paint a solver that has explicitly
+   * retracted its quotes as still quoting them — the one moment the page must
+   * not get wrong. The empty pair is exactly what went on the wire, marked
+   * `withheld: "withdrawn"` so it is distinguishable from the fail-closed
+   * `cache-not-current` empty pair.
+   */
+  const recordWithdrawal = (): void => {
+    try {
+      recordPush(
+        {
+          capabilities: buildSolverCapabilitiesFrame([], options.ladder.maxParallelSwaps),
+          priceLevels: withdrawalPriceLevelsFrame(),
+          derived: { levels: [], tokenIds: [], provenance: [], excluded: [] },
+          withheld: "withdrawn",
+        },
+        now(),
+        "withdraw",
+      );
+    } catch {
+      // Building the record must never be able to fail a withdrawal.
+    }
+  };
+
   const runWithdraw = async (): Promise<void> => {
     // Let an in-flight push finish first, bounded: a withdrawal overtaken by
     // the ladder it raced would leave the solver quotable.
@@ -783,6 +967,9 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       // outcome. Recorded rather than silently skipped.
       emit("withdrawn", "info", "no open socket to withdraw on; the relay already dropped us");
       stats.withdrawn = true;
+      // The relay has forgotten our ladder either way, so the observable state
+      // is withdrawn — recording it keeps `lastPush()` honest on this path too.
+      recordWithdrawal();
       return;
     }
     // Levels first: quoting needs a live ladder, so this is the frame that
@@ -793,8 +980,15 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     })();
     const sent = await bounded(work, withdrawTimeoutMs, "withdrawal");
     stats.withdrawn = sent;
-    if (sent) emit("withdrawn", "info", "explicit empty capabilities+levels withdrawal sent");
-    else emit("withdraw-failed", "warn", "withdrawal did not complete within its deadline");
+    if (sent) {
+      recordWithdrawal();
+      emit("withdrawn", "info", "explicit empty capabilities+levels withdrawal sent");
+    } else {
+      // Deliberately NOT recorded: a withdrawal that did not complete leaves
+      // the relay's view unknown, and claiming "withdrawn" would be the same
+      // lie in the other direction.
+      emit("withdraw-failed", "warn", "withdrawal did not complete within its deadline");
+    }
   };
 
   const withdraw = (): Promise<void> => {
@@ -854,5 +1048,6 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     idle,
     stop,
     stats: () => ({ ...stats }),
+    lastPush: () => (lastPushRecord === null ? null : { ...lastPushRecord }),
   };
 }

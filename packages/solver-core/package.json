@@ -5,9 +5,11 @@
   "type": "module",
   "exports": {
     ".": "./mod.ts",
+    "./admission-policy": "./admission-policy.ts",
     "./api-client": "./api-client.ts",
     "./batcher": "./batcher.ts",
     "./exact-files-contract": "./exact-files-contract.ts",
+    "./fee-sizing": "./fee-sizing.ts",
     "./wallet": "./wallet.ts",
     "./offer-files": "./offer-files.ts",
     "./ladder-derivation": "./ladder-derivation.ts",
@@ -15,6 +17,7 @@
     "./offer-updates-contract": "./offer-updates-contract.ts",
     "./receipt-client": "./receipt-client.ts",
     "./relay-ws-contract": "./relay-ws-contract.ts",
+    "./status-contract": "./status-contract.ts",
     "./validation-contract": "./validation-contract.ts"
   },
   "scripts": {

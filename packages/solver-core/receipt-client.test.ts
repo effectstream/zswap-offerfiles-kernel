@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   MAX_RECEIPT_BODY_BYTES,
   ReceiptRequestError,
+  type OfferConsumptionResponse,
   canonicalRelayExtrinsicHash,
   getOfferConsumptionEvidence,
   getRelayJobStatus,
@@ -19,7 +20,7 @@ const jsonFetch = (body: unknown, init: ResponseInit = {}): typeof fetch =>
   (async () => new Response(JSON.stringify(body), {
     headers: { "content-type": "application/json" },
     ...init,
-  })) as typeof fetch;
+  })) as unknown as typeof fetch;
 
 describe("relay receipt grammar", () => {
   test("accepts only the pinned exact union and canonicalizes the extrinsic", () => {
@@ -52,7 +53,9 @@ describe("relay receipt grammar", () => {
 
 describe("backend consumption grammar", () => {
   test("binds the requested offer and accepts positive evidence only for consumed", () => {
-    const positive = {
+    // Annotated, not inferred: an inferred `version: number` is not the
+    // literal `1` the parser returns, and the comparison would not typecheck.
+    const positive: OfferConsumptionResponse = {
       version: 1,
       offerId: OFFER_A,
       status: "consumed",
@@ -84,7 +87,7 @@ describe("bounded receipt clients", () => {
     const fetchImpl: typeof fetch = (async (input: RequestInfo | URL) => {
       urls.push(String(input));
       return new Response(JSON.stringify({ status: "done", txId: RELAY_TX }));
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     await expect(getRelayJobStatus("job/a", {
       baseUrl: "https://relay.example/api/v1/",
       fetchImpl,
@@ -114,7 +117,7 @@ describe("bounded receipt clients", () => {
   });
 
   test("absolute timeout wins even when a fetch implementation ignores AbortSignal", async () => {
-    const never: typeof fetch = (() => new Promise<Response>(() => undefined)) as typeof fetch;
+    const never: typeof fetch = (() => new Promise<Response>(() => undefined)) as unknown as typeof fetch;
     const started = Date.now();
     await expect(getRelayJobStatus("job", {
       baseUrl: "https://relay.example",
@@ -127,14 +130,14 @@ describe("bounded receipt clients", () => {
   test("rejects declared and streamed bodies over the fixed ceiling", async () => {
     const declared: typeof fetch = (async () => new Response("{}", {
       headers: { "content-length": String(MAX_RECEIPT_BODY_BYTES + 1) },
-    })) as typeof fetch;
+    })) as unknown as typeof fetch;
     await expect(getRelayJobStatus("job", {
       baseUrl: "https://relay.example",
       fetchImpl: declared,
     })).rejects.toBeInstanceOf(ReceiptRequestError);
     await expect(getRelayJobStatus("job", {
       baseUrl: "https://relay.example",
-      fetchImpl: (async () => new Response("x".repeat(MAX_RECEIPT_BODY_BYTES + 1))) as typeof fetch,
+      fetchImpl: (async () => new Response("x".repeat(MAX_RECEIPT_BODY_BYTES + 1))) as unknown as typeof fetch,
     })).rejects.toMatchObject({ kind: "malformed" });
   });
 });

@@ -185,3 +185,57 @@ For whoever does that upstream work, the delta as it appears in generated code
 
 The async flip has the widest blast radius: `initialState` returning a promise
 touches every deploy path.
+
+---
+
+## Unified branch: `ledger-v9` (2026-09-03)
+
+`00001-ledger-v9` (this migration, PR #49) and `00001-solver-v9` (the COW
+solver port stacked on it, PR #50) are folded into one branch, `ledger-v9`,
+with `main` merged in. Everything `main` gained after the branches forked at
+`feat/cow-solver` @ `381022d` — the token price service (#54–#56), the offer
+poster and its deployment (#57, #60), the solver status listener and console
+(#58, #59), sNight seeding (#61) — was written against the ledger-v8 line and
+is ported here rather than merged as-is:
+
+* **Root manifest.** The wallet-sdk set `main` added for the offer poster
+  (`abstractions` 2.1.0, `capabilities` 3.3.1, `dust-wallet` 4.2.0, `facade`
+  4.1.0, `hd` 3.0.3, `shielded` 3.0.2, `unshielded-wallet` 3.1.0) moves to the
+  v2 line `@effectstream/midnight-contracts@0.200.2` itself resolves
+  (`3.0.0-beta.0` / `4.0.0-beta.2` / `5.0.0-beta.2` / `5.0.0-beta.2` /
+  `3.1.0-beta.1` / `4.0.0-beta.2` / `4.0.0-beta.2`). `packages/price-feed`'s
+  `@effectstream/{db,utils}@0.103.1` — the last thing still dragging
+  `ledger-v8@8.1.0` into the store — moves to `0.200.2`. The lockfile again
+  carries exactly one ledger: `@midnightntwrk/ledger-v9@1.0.0-rc.3`.
+* **`deploy/scripts/lib/pinned-wallet.ts`** — the offer poster's copy of
+  `buildWalletFacade` is re-diffed against `midnight-contracts@0.200.2`:
+  tagged `createKeystore({kind: "schnorr", secret})`, facade sub-wallet
+  factories that receive their configuration, `DustAddress.encodePublicKey`
+  from the DUST public key instead of `getInitialDustState` + `MidnightBech32m`,
+  `TransactionHistoryEntryCommonSchema`, `setNetworkId`, HD key material
+  cleared after derivation. The pinned coin selector — the reason the file
+  exists — is untouched.
+* **`waitForDustFunds`** now resolves a readiness record, not a bigint; the
+  poster reads `.balance`.
+* Import-site rename `@midnight-ntwrk/ledger-v8` → `@midnightntwrk/ledger-v9`
+  in the seven files `main` added (faucet mint, fee sizing, asset-price and
+  batcher tests, the deploy e2e driver); the two sync `signData` callbacks in
+  `deploy/scripts` moved to `signDataAsync`. The fee-sizing model measured on
+  ledger-v8 8.1.0 passes its structure tests unchanged on v9.
+* **`deploy/` Compose stack** moves to the 2.x chain: midnight-node
+  `2.0.0-rc.4` and indexer-standalone `v4.4.0-rc.3` from binaries 0.3.120
+  (sha256-pinned, both linux arches), the official multi-arch
+  `midnightntwrk/proof-server:9.0.0-rc.5` image pinned by digest (release
+  0.3.120 has no linux-arm64 rc.5 binary), the kernel image compiling with the
+  same LFDT `compactc` 0.33.0-rc.2 asset `infra/compact-toolchain.Dockerfile`
+  fetches (handed to `infra/compact.sh` as `$COMPACTC`), indexer config from
+  `npm-midnight-indexer@0.200.2`, `/api/v4` as the default indexer path on both
+  the kernel and relay sides.
+* **`start.dev.ts`** `compact-check` no longer demands a `compact`-manager
+  install of 0.30.0; it reads `infra/compact-version.txt` and verifies the
+  route `infra/compact.sh` will take (`$COMPACTC`, else Docker).
+
+Not re-verified here: the Midnight Intents reference relay (`deploy/relay`,
+built from the reference checkout at `061f4d3`) was never run against a 2.x
+chain from this stack; the ledger-v9 demo stack (`acedward/midnight-2-offers`)
+runs the solver in OBSERVATION mode without it.

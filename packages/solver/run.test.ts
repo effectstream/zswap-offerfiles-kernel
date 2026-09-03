@@ -9,11 +9,12 @@ import {
   initializeOwnedResource,
   runSolver,
 } from "./src/run.ts";
+import { SolverLaunchConfigError } from "./src/launch.ts";
 import type { SyncDependencies } from "./src/book-sync.ts";
 import { RELAY_WS_OPEN, type RelayWebSocketLike } from "./src/relay-client.ts";
 import { Stock } from "./src/stock.ts";
 import { SolverOperationJournal } from "./src/operation-journal.ts";
-import { JOB_RECONCILING } from "./src/swap-job-executor.ts";
+import { JOB_RECONCILING, JOB_ROUTE_UNAVAILABLE } from "./src/swap-job-executor.ts";
 
 const TOKEN = "a".repeat(64);
 
@@ -149,10 +150,29 @@ const row = {
   },
 };
 
-function syncHarness(lifecycle: string[]): SyncDependencies {
+const OFFER_HASH_2 = "12".repeat(32);
+const NULLIFIER_2 = "32".repeat(32);
+
+/** A second, WORSE-rate offer on the same pair, so the seeded book has an
+ *  INTERIOR interval — the only thing the F03 residual budget is ever about.
+ *  Rate 1 against `row`'s rate 2, so the unbounded ladder is (10, 20) then
+ *  (20, 30) and the interval (10, 20) can demand up to floor(10 · 9 / 10) = 9
+ *  of tokenOut out of the solver's own inventory. */
+const row2 = {
+  ...row,
+  offerId: OFFER_HASH_2,
+  computed: {
+    ...row.computed,
+    gives: [{ token: B, amount: "10", type: "SHIELDED" as const }],
+    inputNullifiers: [NULLIFIER_2],
+  },
+};
+
+function syncHarness(lifecycle: string[], rows: Array<typeof row> = [row]): SyncDependencies {
   return {
-    getZswapsPage: async () => ({ offers: [row], nextCursor: null }),
-    getZswapByHash: async () => row as any,
+    getZswapsPage: async () => ({ offers: rows, nextCursor: null }),
+    getZswapByHash: async (hash: string) =>
+      (rows.find((entry) => entry.offerId === hash) ?? rows[0]) as any,
     getBackendSyncHealth: async () => ({
       ts: Date.now(),
       status: "ok",
@@ -161,7 +181,7 @@ function syncHarness(lifecycle: string[]): SyncDependencies {
       midnight: { current: 7, fetched: 7, tip: 7, pct: 100, lagBlocks: 0 },
       celestia: { current: 7, fetched: 7, tip: 7, pct: 100, lagBlocks: 0 },
     }),
-    openUpdatesStream: (_handler, options) => {
+    openUpdatesStream: (_handler, options = {}) => {
       queueMicrotask(() => options.onOpen?.({ streamId: "00".repeat(16), blockL2Height: null }));
       return { close: async () => { lifecycle.push("mirror-stop"); } };
     },
@@ -370,6 +390,12 @@ test("relay publishes empty and rejects jobs until journal reconciliation finish
     walletDependencies: {
       buildWallet: async () => ({ wallet }),
       waitForSync: async () => {},
+      // tokenOUT only, which is all this solver ever needs (00006-R2). `B: 1000`
+      // is load-bearing here for a different reason: the durable journal claim
+      // rebuilt during reconciliation pays out 5 B, and `Stock.reserve` must be
+      // able to hold it. Was `{[A]: 1_000n, [B]: 1_000n}`, because the 00005-R2
+      // tokenIn cap would otherwise have published nothing and the
+      // "post-reconciliation ladder" wait below would have hung.
       shieldedBalances: async () => ({ [B]: 1_000n }),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
     } as any,
@@ -413,7 +439,10 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
     dust: { balanceTransactions: async () => tx("dust-unproved", [
       { seg: 0, tag: "dust", raw: "dust", amount: 1n },
     ]) },
-    initSwap: async () => ({ transaction: tx("mirror") }),
+    // The solver's own balancing leg — the ONLY `initSwap` caller since 00006-R1
+    // (it was labelled "mirror" while fee sizing had one). Never reached by the
+    // exact-rung job below, which pays no residual and keeps no surplus.
+    initSwap: async () => ({ transaction: tx("solver-leg") }),
     finalizeTransaction: async () => tx("dust-final", [
       { seg: 0, tag: "dust", raw: "dust", amount: 1n },
     ]),
@@ -448,7 +477,10 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
     walletDependencies: {
       buildWallet: async () => walletOwner,
       waitForSync: async () => {},
-      shieldedBalances: async () => ({ [B]: 1_000n }),
+      // SC-002 at the wiring layer: NO inventory of either token. The job below
+      // is an exact whole-maker rung, so it pays no residual, and 00006-R2
+      // removed the tokenIn bound that used to require `A` here.
+      shieldedBalances: async () => ({}),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
     } as any,
     jobDependencies: {
@@ -533,4 +565,282 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
     (frame) => frame.type === "price-levels" && Array.isArray(frame.levels) && frame.levels.length === 0,
   );
   expect(withdrawal).toBeGreaterThanOrEqual(0);
+});
+
+// FR-002/FR-003 through the real wiring. This is the layer P4-F02 lived at:
+// `runSolver` handed the admission policy to the relay client, the relay
+// client's options did not declare it, and it evaporated. The residual budget
+// (F03) is wired the same way, so it is asserted here too — end to end from the
+// wallet's balance read to the bytes on the socket and back through admission.
+//
+// RE-ENCODED at 00006-R2 (FR-003 / SC-002). This test was
+// "an underfunded solver publishes nothing and refuses the job its ladder would
+// have implied": the wallet held only tokenOut, the tokenIn publication cap
+// therefore withheld EVERY rung, and the assertion was an empty `price-levels`
+// frame plus a `route_unavailable` refusal of the exact-rung job. Both halves
+// have changed meaning now that fee sizing spends no tokenIn:
+//
+//   * publication is NOT empty — the whole-maker rung publishes from a wallet
+//     holding NOTHING, which is the availability this project exists to restore;
+//   * the refusal that remains is the one that was always a solvency fact: an
+//     INTERIOR job whose residual tokenOut the solver cannot pay, refused
+//     fail-closed with zero wallet mutation (spec 00006 edge case
+//     "zero-tokenOut + interior-demand job racing publication").
+test("a solver with NO inventory publishes its whole-maker rung and still refuses an unaffordable residual", async () => {
+  const lifecycle: string[] = [];
+  const socket = new RunSocket(lifecycle);
+  let mutations = 0;
+  const wallet = {
+    shielded: { getAddress: async () => "solver-address" },
+    dust: { balanceTransactions: async () => { mutations += 1; throw new Error("must not size fees"); } },
+    // Every wallet entry point counts a mutation: the residual refusal happens
+    // inside `resolveSwapJobRoute`, before `buildHalf` touches the wallet at all.
+    initSwap: async () => { mutations += 1; throw new Error("must not mutate"); },
+    finalizeTransaction: async () => { mutations += 1; throw new Error("must not mutate"); },
+    revertTransaction: async () => { mutations += 1; },
+    revert: async () => { mutations += 1; },
+    stop: async () => { lifecycle.push("wallet-stop"); },
+  };
+
+  const handle = await runSolver({
+    dryRun: false,
+    api: "http://backend.test",
+    relayUrl: "ws://relay.test/solver",
+    relayHttpUrl: "http://relay.test/api/v1",
+    relayAuthToken: "r".repeat(64),
+    relayPushIntervalMs: 60_000,
+    relayReconnectDelayMs: 60_000,
+    relayConnectTimeoutMs: 1_000,
+    relayWithdrawTimeoutMs: 100,
+    jobSweepIntervalMs: 60_000,
+    resyncIntervalMs: 60_000,
+    backendHealthCheckIntervalMs: 30_000,
+    backendHealthMaxAgeMs: 60_000,
+    startupTimeoutMs: 1_000,
+    stopTimeoutMs: 1_000,
+    journalOptions: { path: ":memory:", allowMemory: true },
+    syncDependencies: syncHarness(lifecycle, [row, row2]),
+    relayCreateWebSocket: () => {
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+    walletDependencies: {
+      buildWallet: async () => ({ wallet, dustSecretKey: "dust-key", zswapSecretKeys: {} }),
+      waitForSync: async () => {},
+      // NOTHING. Not the pair's tokenIn (which nothing reads any more), and not
+      // its tokenOut either. Was `{[B]: 1_000n}` — tokenOut had to be funded so
+      // that the empty ladder could be attributed to the tokenIn cap alone.
+      shieldedBalances: async () => ({}),
+      shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
+    } as any,
+    log: () => {},
+  });
+
+  try {
+    await handle.ready;
+    await waitFor(
+      () => socket.sent.some((frame) => frame.type === "price-levels" &&
+        Array.isArray(frame.levels) && frame.levels.length > 0),
+      "the first non-empty ladder push",
+    );
+    // AVAILABILITY RESTORED, on the wire, from a wallet with no tokens at all:
+    // the whole-maker first rung publishes because the maker offer it consumes
+    // pays it, and it opens no interpolation interval. The SECOND rung is
+    // withheld by the unchanged F03 residual bound, since the interval it opens
+    // could demand 9 of tokenOut this solver does not have.
+    expect(handle.book.get(OFFER_HASH)).toBeDefined();
+    expect(handle.book.get(OFFER_HASH_2)).toBeDefined();
+    const levels = socket.sent.filter((frame) => frame.type === "price-levels");
+    expect(levels.at(-1)).toEqual({
+      type: "price-levels",
+      levels: [{ tokenIn: A, tokenOut: B, levels: [{ input: "10", output: "20" }] }],
+    });
+    const capabilities = socket.sent.filter((frame) => frame.type === "solver-capabilities");
+    expect(capabilities.at(-1)).toMatchObject({ tokenIds: [A, B] });
+
+    // And if the relay dispatches an INTERIOR job anyway (a stale quote, or an
+    // operator running with the publication budget open), admission refuses it
+    // fail-closed with zero wallet mutation. Size 15 quotes 25 against the full
+    // book; the maker prefix pays 20, so 5 of tokenOut would come out of a Stock
+    // holding none.
+    socket.receive({
+      type: "swap", jobId: "unaffordable-residual", tokenIn: A, tokenOut: B,
+      amountIn: "15", amountOut: "25",
+    });
+    await waitFor(
+      () => socket.sent.some((frame) =>
+        frame.type === "job-error" && frame.jobId === "unaffordable-residual"),
+      "the fail-closed job refusal",
+    );
+    expect(socket.sent.findLast((frame) => frame.type === "job-error")).toEqual({
+      type: "job-error",
+      jobId: "unaffordable-residual",
+      reason: JOB_ROUTE_UNAVAILABLE,
+    });
+    expect(mutations).toBe(0);
+    expect(handle.stock.reserved(B)).toBe(0n);
+  } finally {
+    await handle.stop();
+  }
+});
+
+// ── 00007 FR-001 / FR-003 / FR-007: the status listener, wired by runSolver ──
+//
+// The unit suites cover the collector and the listener in isolation. What is
+// only provable HERE is the wiring: that `runSolver` binds before the wallet,
+// hands the collector the real seams, reports a dry-run process honestly, turns
+// a bind failure into a listed launch problem, closes the listener with the
+// solver — and, when no port is configured, does none of it.
+
+/** `Bun.serve` types `port` as optional; a bound TCP server always has one. */
+const boundPort = (server: { port?: number }): number => {
+  if (server.port === undefined) throw new Error("the test server reported no port");
+  return server.port;
+};
+
+/** A port nothing is listening on, obtained by binding and releasing one. */
+const freePort = (): number => {
+  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("") });
+  const port = boundPort(probe);
+  probe.stop(true);
+  return port;
+};
+
+const STATUS_TOKEN = `run-status-${"t".repeat(28)}`;
+const statusFetch = (port: number, path: string, token = STATUS_TOKEN): Promise<Response> =>
+  fetch(`http://127.0.0.1:${port}${path}`, { headers: { authorization: `Bearer ${token}` } });
+
+test("runSolver serves a dry-run snapshot over the status listener and closes it on stop", async () => {
+  const port = freePort();
+  const handle = await runSolver({
+    dryRun: true,
+    dryRunWalletMode: "skip-test-only",
+    syncDependencies: syncHarness([]),
+    resyncIntervalMs: 60_000,
+    backendHealthCheckIntervalMs: 30_000,
+    backendHealthMaxAgeMs: 60_000,
+    status: { host: "127.0.0.1", port, authToken: STATUS_TOKEN },
+    gitCommit: "cafe1234",
+    walletDependencies: {
+      buildWallet: async () => { throw new Error("must skip"); },
+    } as any,
+    log: () => {},
+  });
+  try {
+    await handle.ready;
+
+    // `/health` is open — a container healthcheck needs no secret.
+    const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json() as
+      Record<string, unknown>;
+    expect(health["status"]).toBe("ok");
+    expect(health["mode"]).toBe("dry-run");
+    expect(health["ready"]).toBe(true);
+
+    // `/status/*` does not.
+    expect((await fetch(`http://127.0.0.1:${port}/status/snapshot`)).status).toBe(401);
+    expect((await statusFetch(port, "/status/snapshot", "wrong")).status).toBe(401);
+
+    const response = await statusFetch(port, "/status/snapshot");
+    expect(response.status).toBe(200);
+    const snapshot = await response.json() as Record<string, any>;
+
+    // The real seams, not doubles: the process line, the mirror's own
+    // currentness, and the book the sync harness actually produced.
+    expect(snapshot["process"]["mode"]).toBe("dry-run");
+    expect(snapshot["process"]["gitCommit"]).toBe("cafe1234");
+    expect(snapshot["backend"]["currentness"]["kind"]).toBe("current");
+    expect(snapshot["book"]["size"]).toBe(1);
+    expect(snapshot["book"]["offers"][0]["offerHash"]).toBe(OFFER_HASH);
+    // Base units as a decimal STRING: `row` gives 20 B and wants 10 A, and no
+    // bigint may reach the wire.
+    expect(snapshot["book"]["offers"][0]["gives"][0]).toEqual({
+      token: B, amount: "20", kind: "SHIELDED",
+    });
+    expect(snapshot["book"]["offers"][0]["wants"][0]["amount"]).toBe("10");
+    // The nullifier COUNT, never the nullifier.
+    expect(snapshot["book"]["offers"][0]["inputNullifierCount"]).toBe(1);
+    expect(JSON.stringify(snapshot)).not.toContain(NULLIFIER);
+
+    // Dry-run: not-started is a STATE, not an alarm. The page says
+    // "not started (dry-run)" instead of painting the strip red.
+    expect(snapshot["relay"]["state"]).toBe("not-started");
+    expect(snapshot["ladder"]).toEqual({ state: "not-started", last: null });
+    expect(snapshot["executor"]["state"]).toBe("not-started");
+    expect(snapshot["journal"]["state"]).toBe("not-opened");
+
+    // FR-006: the relay bearer as a length, and no secret anywhere.
+    expect(typeof snapshot["process"]["relayAuthTokenLength"]).toBe("number");
+    expect(JSON.stringify(snapshot)).not.toContain(STATUS_TOKEN);
+
+    // The listener reports its own counters, including the two 401s above.
+    expect(snapshot["listener"]["port"]).toBe(port);
+    expect(snapshot["listener"]["unauthorizedRequests"]).toBe(2);
+  } finally {
+    await handle.stop();
+  }
+
+  // FR-007: the listener closes WITH the solver.
+  await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+});
+
+test("no SOLVER_STATUS_PORT means nothing binds at all (SC-001)", async () => {
+  const port = freePort();
+  const handle = await runSolver({
+    dryRun: true,
+    dryRunWalletMode: "skip-test-only",
+    syncDependencies: syncHarness([]),
+    resyncIntervalMs: 60_000,
+    backendHealthCheckIntervalMs: 30_000,
+    backendHealthMaxAgeMs: 60_000,
+    walletDependencies: { buildWallet: async () => { throw new Error("must skip"); } } as any,
+    log: () => {},
+  });
+  try {
+    await handle.ready;
+    // The default is no listener, no collector, no observer, no timer.
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+  } finally {
+    await handle.stop();
+  }
+});
+
+test("a status port already in use is a LISTED launch problem, before the wallet", async () => {
+  const occupied = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("busy") });
+  const occupiedPort = boundPort(occupied);
+  let walletBuilds = 0;
+  try {
+    await expect(runSolver({
+      dryRun: true,
+      dryRunWalletMode: "skip-test-only",
+      syncDependencies: syncHarness([]),
+      status: { host: "127.0.0.1", port: occupiedPort, authToken: STATUS_TOKEN },
+      walletDependencies: {
+        buildWallet: async () => { walletBuilds += 1; throw new Error("must skip"); },
+      } as any,
+      log: () => {},
+    })).rejects.toThrow(SolverLaunchConfigError);
+
+    // FR-007: reported in the same shape as a missing variable, and BEFORE any
+    // resource an operator would have to wait minutes for.
+    expect(walletBuilds).toBe(0);
+    try {
+      await runSolver({
+        dryRun: true,
+        dryRunWalletMode: "skip-test-only",
+        syncDependencies: syncHarness([]),
+        status: { host: "127.0.0.1", port: occupiedPort, authToken: STATUS_TOKEN },
+        walletDependencies: { buildWallet: async () => { throw new Error("x"); } } as any,
+        log: () => {},
+      });
+      throw new Error("expected the bind to be refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(SolverLaunchConfigError);
+      const problems = (error as SolverLaunchConfigError).problems;
+      expect(problems.length).toBe(1);
+      expect(problems[0]).toContain(`SOLVER_STATUS_PORT=${occupiedPort}`);
+      expect(problems[0]).toContain("could not be bound");
+    }
+  } finally {
+    occupied.stop(true);
+  }
 });

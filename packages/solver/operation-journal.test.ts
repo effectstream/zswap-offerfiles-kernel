@@ -233,7 +233,7 @@ test("terminal pruning cannot erase active DUST accounting before its own safe p
 test("canonical JSON sorts object keys and rejects lossy values or noncanonical rows", () => {
   expect(canonicalJson({ z: [2, 1], a: { y: "2", x: "1" } }))
     .toBe('{"a":{"x":"1","y":"2"},"z":[2,1]}');
-  expect(parseCanonicalJson('{"a":1,"b":2}')).toEqual({ a: 1, b: 2 });
+  expect(parseCanonicalJson<{ a: number; b: number }>('{"a":1,"b":2}')).toEqual({ a: 1, b: 2 });
   expect(() => parseCanonicalJson('{"b":2,"a":1}')).toThrow(/non-canonical/);
   expect(() => canonicalJson({ missing: undefined })).toThrow(/undefined/);
   expect(() => canonicalJson({ unsafe: Number.MAX_SAFE_INTEGER + 1 })).toThrow(/safe integers/);
@@ -474,4 +474,126 @@ test("memory mode is explicit, warns safely, and remains schema-identical", () =
     warn: () => { throw new Error("logger failure"); },
   });
   throwingWarningJournal.close();
+});
+
+// ── 00007 FR-003 / Q-S-4: the read-only observer projection ──────────────────
+//
+// `listRecent` exists so a status snapshot can answer "what just happened"
+// without either (a) materialising the whole journal — up to `maxRows` rows
+// with proved transactions attached — or (b) carrying a single artifact byte
+// out of the process. Both halves are asserted here, because both are the
+// reason the method exists rather than a `list().slice(-100)`.
+
+const memoryJournal = (nowMs = 1_000): SolverOperationJournal =>
+  SolverOperationJournal.open({ path: ":memory:", allowMemory: true, nowMs: () => nowMs });
+
+test("listRecent returns the newest rows first, bounded by its limit", () => {
+  const journal = memoryJournal();
+  try {
+    for (let index = 0; index < 5; index += 1) {
+      journal.createPrepared(prepared(`op-recent-${index}`, { jobId: `job-${index}` }));
+    }
+
+    // Newest FIRST — the opposite of `list()`, which stays insertion-ordered
+    // because recovery replays in that order and must not change.
+    expect(journal.list().map((row) => row.operationKey)).toEqual([
+      "op-recent-0", "op-recent-1", "op-recent-2", "op-recent-3", "op-recent-4",
+    ]);
+    expect(journal.listRecent(100).map((row) => row.operationKey)).toEqual([
+      "op-recent-4", "op-recent-3", "op-recent-2", "op-recent-1", "op-recent-0",
+    ]);
+
+    // The limit takes the NEWEST n, not the first n.
+    expect(journal.listRecent(2).map((row) => row.operationKey))
+      .toEqual(["op-recent-4", "op-recent-3"]);
+    expect(journal.listRecent(1).length).toBe(1);
+    expect(() => journal.listRecent(0)).toThrow();
+    expect(() => journal.listRecent(1.5)).toThrow();
+  } finally {
+    journal.close();
+  }
+});
+
+test("listRecent carries no artifact bytes and no claim inputs, only their sizes", () => {
+  const journal = memoryJournal();
+  try {
+    journal.createPrepared(prepared("op-redacted", {
+      walletArtifactKind: "FINALIZED_TRANSACTION",
+      walletArtifactBytes: new Uint8Array([9, 8, 7, 6, 5]),
+    }));
+    const [row] = journal.listRecent(10);
+    expect(row).toBeDefined();
+
+    // The blob is replaced by its length INSIDE SQLite, so the bytes never
+    // reach this process at all — the property FR-006 needs, and the reason
+    // this is not a post-hoc delete on a `list()` row.
+    expect(row!.walletArtifactByteLength).toBe(5);
+    expect(row!.walletArtifactKind).toBe("FINALIZED_TRANSACTION");
+    expect(Object.keys(row!)).not.toContain("walletArtifactBytes");
+    expect((row as unknown as Record<string, unknown>)["walletArtifactBytes"]).toBeUndefined();
+
+    // Claim inputs are coin nullifiers. Only the count survives; the payouts,
+    // which are the row's economics, do.
+    expect(row!.claim).toEqual({ inputCount: 2, payouts: { [TOKEN_A]: "10", [TOKEN_B]: "20" } });
+    expect(JSON.stringify(row)).not.toContain(N1);
+    expect(JSON.stringify(row)).not.toContain(N2);
+
+    // Everything an operator actually asks about is still there.
+    expect(row!.offerHashes).toEqual([H1, H2]);
+    expect(row!.receipt).toEqual({ relayJobId: "relay-job-1" });
+    expect(row!.lifecycleState).toBe("PREPARED");
+
+    // A row with no artifact reports null rather than 0 — "none" and "empty"
+    // are different answers.
+    journal.createPrepared(prepared("op-no-artifact", {
+      walletArtifactKind: undefined,
+      walletArtifactBytes: undefined,
+    }));
+    expect(journal.listRecent(1)[0]!.walletArtifactByteLength).toBeNull();
+  } finally {
+    journal.close();
+  }
+});
+
+test("countsByState covers the whole journal and names every state", () => {
+  const journal = memoryJournal();
+  try {
+    // Every state is present at 0 on an empty journal, so a consumer renders a
+    // complete table without knowing the lifecycle grammar.
+    const empty = journal.countsByState();
+    expect(empty["PREPARED"]).toBe(0);
+    expect(empty["QUARANTINED"]).toBe(0);
+    expect(Object.keys(empty).sort()).toEqual([
+      "APPLIED", "AWAITING_RELAY", "CONFIRMING", "FAILED", "PREPARED",
+      "QUARANTINED", "RELAY_SUBMITTED", "REVERTED", "REVERTING", "SETTLED",
+    ]);
+
+    journal.createPrepared(prepared("op-a"));
+    journal.createPrepared(prepared("op-b"));
+    journal.createPrepared(prepared("op-c"));
+    journal.transition("op-b", "PREPARED", "APPLIED");
+    journal.transition("op-c", "PREPARED", "QUARANTINED");
+
+    const counts = journal.countsByState();
+    expect(counts["PREPARED"]).toBe(1);
+    expect(counts["APPLIED"]).toBe(1);
+    expect(counts["QUARANTINED"]).toBe(1);
+    expect(counts["SETTLED"]).toBe(0);
+    // The counts are over the WHOLE journal, not the tail `listRecent` returns.
+    expect(Object.values(counts).reduce((sum, count) => sum + count, 0)).toBe(3);
+    expect(journal.listRecent(1).length).toBe(1);
+  } finally {
+    journal.close();
+  }
+});
+
+test("listRecent and countsByState refuse to read a closed journal", () => {
+  const journal = memoryJournal();
+  journal.createPrepared(prepared("op-closed"));
+  journal.close();
+  // A status collector reading a journal mid-teardown must get a THROW it can
+  // degrade into one failed section (FR-005), not silent empty data that would
+  // read on the page as "no operations".
+  expect(() => journal.listRecent(10)).toThrow();
+  expect(() => journal.countsByState()).toThrow();
 });

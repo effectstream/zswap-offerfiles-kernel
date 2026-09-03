@@ -57,9 +57,20 @@ export async function getContractAddress(): Promise<string> {
 }
 
 /** Join the deployed offer-files contract using `walletResult`'s wallet/keys.
- *  The wallet must be synced and registered for dust (circuit calls pay fees). */
-export async function joinOfferFiles(walletResult: WalletResult): Promise<any> {
-  const contractAddress = await getContractAddress();
+ *  The wallet must be synced and registered for dust (circuit calls pay fees).
+ *
+ *  `contractAddress` is optional and defaults to `getContractAddress()`, i.e.
+ *  the `…undeployed.json` file the local deploy writes — which is right for the
+ *  compose stack and wrong for any other network, since the file name carries
+ *  the network id. A caller that already knows the address (from
+ *  `MIDNIGHT_CONTRACT_ADDRESS`, which `entrypoint-common.sh` exports, or from
+ *  the shared `offerfiles-deploy` volume) passes it here instead. Existing
+ *  one-argument callers are unaffected. */
+export async function joinOfferFiles(
+  walletResult: WalletResult,
+  address?: string,
+): Promise<any> {
+  const contractAddress = address ?? (await getContractAddress());
   const providers = (await configureMidnightNodeProviders(
     walletResult.wallet,
     walletResult.zswapSecretKeys,

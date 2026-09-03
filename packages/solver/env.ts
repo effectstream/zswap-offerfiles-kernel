@@ -3,6 +3,13 @@ import { isAbsolute } from "node:path";
 
 import { getEnv } from "@effectstream/utils/runtime";
 
+import type { JobAdmissionPolicy } from "@zswap-da/solver-core/admission-policy";
+import {
+  DEFAULT_MODELLED_TAKER_INPUTS,
+  MAX_MODELLED_TAKER_INPUTS,
+  MIN_MODELLED_TAKER_INPUTS,
+} from "@zswap-da/solver-core/fee-sizing";
+
 // Dev seed. Must avoid every other wallet on the dev stack — genesis, the
 // batcher's (…0003/…0004), and the ring-maker range (…0005+) — because two
 // facades on one seed against one node force each other's connection down.
@@ -25,11 +32,15 @@ export const SOLVER_RELAY_WS_URL = getEnv("SOLVER_RELAY_WS_URL") ?? "";
 export const SOLVER_RELAY_HTTP_URL = getEnv("SOLVER_RELAY_HTTP_URL") ?? "";
 export const SOLVER_RELAY_AUTH_TOKEN = getEnv("SOLVER_RELAY_AUTH_TOKEN") ?? "";
 
-export const SOLVER_LADDER_CONFIG =
-  getEnv("SOLVER_LADDER_CONFIG") ??
+/** Ladder file used when `SOLVER_LADDER_CONFIG` is unset. Exported so an
+ * entrypoint can report the effective path from an injected environment reader
+ * without going through this module's process-wide constant. */
+export const DEFAULT_SOLVER_LADDER_CONFIG =
   // fileURLToPath, not URL.pathname: pathname percent-encodes, so a checkout
   // under a directory with a space yields a path readFile cannot open.
   fileURLToPath(new URL("./config/ladders.dev.json", import.meta.url));
+
+export const SOLVER_LADDER_CONFIG = getEnv("SOLVER_LADDER_CONFIG") ?? DEFAULT_SOLVER_LADDER_CONFIG;
 
 type EnvReader = (name: string) => string | undefined;
 
@@ -42,7 +53,17 @@ export interface SolverDustAdmissionEnv {
   windowMs: number;
 }
 
-export interface SolverAdmissionEnv {
+/**
+ * The parsed admission configuration.
+ *
+ * EXTENDS the shared `JobAdmissionPolicy` (FR-002) so config, publication and
+ * executor admission all declare the same fields under the same names — the
+ * policy is carried between layers by `forwardAdmissionPolicy`, never
+ * re-listed. The two policy fields are redeclared here only to make them
+ * REQUIRED: a loader must decide open-versus-configured explicitly, whereas a
+ * consumer may legitimately leave them out.
+ */
+export interface SolverAdmissionEnv extends JobAdmissionPolicy {
   /** null means intentionally OPEN under Q-RF-2, with a recurring warning. */
   supportedPairs: ReadonlySet<string> | null;
   /** null means intentionally OPEN under Q-RF-2, with a recurring warning. */
@@ -155,12 +176,52 @@ export function loadSolverAdmissionEnv(read: EnvReader = getEnv): SolverAdmissio
   return { supportedPairs, minJobOutput, dust, warningIntervalMs, openGroups };
 }
 
+/**
+ * How many taker zswap inputs capital-free fee sizing models
+ * (`SOLVER_FEE_SIZING_TAKER_INPUTS`, 00006 FR-001).
+ *
+ * THE `n + 2` RULE. The solver pays the DUST fee for the transaction the RELAY
+ * submits, which includes the taker's half — a half this process never sees.
+ * Fee sizing therefore models it, and the only unknown is how many zswap inputs
+ * the taker's own coin selection produced. Measured coverage: a stand-in
+ * modelling `n` inputs funds a real taker half of up to **`n + 2`** inputs (the
+ * headroom is the `feeBlocksMargin = 5` multiplier plus the flat
+ * `additionalFeeOverhead`).
+ *
+ * Raising it is not free: each extra modelled input costs ~12–14% more DUST,
+ * and that DUST is actually SPENT, not merely reserved, so it also consumes
+ * `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` budget faster.
+ * Lowering it below coverage is an AVAILABILITY failure, not a loss: the chain
+ * rejects the merged transaction, the relay reports `submit-failed`, and the
+ * existing revert path reclaims the solver's contribution.
+ *
+ * Default 1 — the shape 00005's deployed E2E actually observed (1 input + 1
+ * change + 1 receive, byte-identical 15 480-byte taker halves), which keeps the
+ * reserved DUST identical to the pre-00006 mirror's. Raise it if
+ * `submit-failed` from a fee shortfall ever shows up against takers with
+ * fragmented balances.
+ */
+export function loadSolverFeeSizingTakerInputs(read: EnvReader = getEnv): number {
+  return parseBoundedIntegerEnv(
+    "SOLVER_FEE_SIZING_TAKER_INPUTS",
+    read("SOLVER_FEE_SIZING_TAKER_INPUTS"),
+    DEFAULT_MODELLED_TAKER_INPUTS,
+    MIN_MODELLED_TAKER_INPUTS,
+    MAX_MODELLED_TAKER_INPUTS,
+  );
+}
+
 export interface SolverRelayHttpEnvOptions {
   relayExecutionEnabled: boolean;
 }
 
-export function parseSolverRelayHttpUrl(raw: string): string {
-  const name = "SOLVER_RELAY_HTTP_URL";
+/**
+ * One canonical HTTP(S) base URL. Shared by every mandatory HTTP boundary of
+ * the solver process (the relay's public status base and the kernel API) so a
+ * deployment cannot pass a credential-bearing, query-bearing, or
+ * trailing-slash-inconsistent URL to one of them and a strict one to the other.
+ */
+export function parseHttpBaseUrl(name: string, raw: string): string {
   if (raw.length === 0 || raw.trim() !== raw || raw.includes("\0")) {
     throw new Error(`${name} must be a non-empty canonical HTTP(S) URL without whitespace or NUL`);
   }
@@ -182,6 +243,9 @@ export function parseSolverRelayHttpUrl(raw: string): string {
   parsed.pathname = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/$/, "");
   return parsed.toString().replace(/\/$/, "");
 }
+
+export const parseSolverRelayHttpUrl = (raw: string): string =>
+  parseHttpBaseUrl("SOLVER_RELAY_HTTP_URL", raw);
 
 /** The public relay status authority is configured explicitly. It is never
  * guessed by rewriting the websocket URL because the deployed HTTP prefix may

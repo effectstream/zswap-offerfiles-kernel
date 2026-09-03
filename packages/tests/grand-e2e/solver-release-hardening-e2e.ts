@@ -357,6 +357,7 @@ function startReopenedExecutor(
     wallet,
     journal,
     keys: { dustSecretKey: "rf7a-dust" },
+    networkId: "undeployed",
     api: baseUrl,
     relayHttpUrl: baseUrl,
     maxParallelSwaps: 2,

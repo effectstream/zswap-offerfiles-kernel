@@ -89,6 +89,13 @@ COPY packages/contracts-midnight/contract-offer-files/package.json  packages/con
 COPY packages/database/package.json                                 packages/database/
 COPY packages/node/package.json                                     packages/node/
 COPY packages/offer-guard/package.json                              packages/offer-guard/
+# Added by 00007-P5: `packages/price-feed` joined the workspace with the 00005
+# price service (bc5c673) but never joined this list, so `bun install
+# --frozen-lockfile` below refused every build of this image from that merge
+# onwards ("lockfile had changes, but lockfile is frozen") — the workspace set
+# bun resolves from the copied manifests did not match the one the lockfile
+# records. EVERY workspace member in the root package.json must be copied here.
+COPY packages/price-feed/package.json                               packages/price-feed/
 COPY packages/solver/package.json                                   packages/solver/
 COPY packages/solver-core/package.json                              packages/solver-core/
 COPY packages/tests/package.json                                    packages/tests/

@@ -23,8 +23,11 @@
 # This is a SHARED host. Nothing binds a wildcard address and nothing takes a
 # well-known port: every published port comes from .env, defaults to >= 10000,
 # and binds ${BIND_ADDR} (127.0.0.1). Container-internal ports stay canonical
-# (9999, 3334, 9944, 8088, 6300, 26657, 26658, 5432, 3000, 9001) so the service
-# names read the same as in the code that dials them.
+# (9999, 3334, 9944, 8088, 6300, 26657, 26658, 5432, 3000, 9001, 8080, 9100) so
+# the service names read the same as in the code that dials them. One of those
+# is deliberately NOT published at all: the solver's status port 9100 is
+# network-internal, and the monitor site (8080 -> HOST_SOLVER_FRONTEND_PORT) is
+# what an operator opens.
 
 name: ${COMPOSE_PROJECT_NAME:-cow00005_e2e}
 
@@ -559,6 +562,31 @@ services:
       SOLVER_DRY_RUN: ${SOLVER_DRY_RUN:-false}
       SOLVER_SUPPORTED_PAIRS: ${SOLVER_SUPPORTED_PAIRS:-}
       SOLVER_MIN_JOB_OUTPUT: ${SOLVER_MIN_JOB_OUTPUT:-}
+      # ── read-only status listener (00007) ──────────────────────────────────
+      # OPT-IN BY THE PORT, and by nothing else: with SOLVER_STATUS_PORT unset
+      # the solver behaves byte-for-byte as it did before 00007. Set, it serves
+      # GET /health (open, no internal data, so a healthcheck needs no secret)
+      # plus GET /status/snapshot and GET /status/stream. Collection reads
+      # IN-MEMORY state only — no wallet call, no proof, no kernel or relay I/O
+      # — and no route mutates anything. It exists for `solver-frontend` below.
+      #
+      # 0.0.0.0 INSIDE THE CONTAINER, which is not a relaxation: this port is
+      # deliberately NOT published to the host (see the note under `volumes:`),
+      # so the only thing that can reach it is a sibling on this Compose
+      # network. `launch.ts` WARNS about a non-loopback status host rather than
+      # refusing, precisely so a container can bind the network it lives on.
+      SOLVER_STATUS_HOST: 0.0.0.0
+      SOLVER_STATUS_PORT: "9100"
+      # MANDATORY whenever the port is set, and >= 32 characters — the same rule
+      # both sides of the relay wire apply to their bearer. /status/* serves the
+      # solver's ENTIRE internal state (book, inventory, journal tail, ladder,
+      # configuration), so a status listener must never be able to come up open;
+      # a missing or short value is one of the LISTED start:solver launch
+      # problems, not a late 401. bootstrap.sh generates it exactly as it
+      # generates SOLVER_AUTH_TOKEN, and the SAME .env variable feeds
+      # `solver-frontend` as SOLVER_FRONTEND_SOLVER_STATUS_TOKEN, so the two
+      # sides cannot drift.
+      SOLVER_STATUS_AUTH_TOKEN: ${SOLVER_STATUS_AUTH_TOKEN:?SOLVER_STATUS_AUTH_TOKEN is required (>= 32 chars) — run deploy/bootstrap.sh}
       # ── capital-free fee sizing (00006) ────────────────────────────────────
       # How many taker zswap inputs the DUST estimate models. Unset = 1, which
       # is the value the E1/V1 single-coin taker exercises and which reserves
@@ -592,6 +620,23 @@ services:
       # derives from the mirrored book and ignores this file — but the
       # direct-fill engine's `ladders.maxPayout()` does not.)
       SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-/srv/solver-config/ladders.dev.json}
+    # NO PUBLISHED PORT FOR :9100, deliberately.
+    #
+    # The status snapshot is the solver's whole internal state. The monitor site
+    # reaches it over this Compose network — that is what `solver-frontend` is
+    # for, and IT is the service with a host port and the readable page. Reading
+    # the raw JSON by hand needs nothing published either:
+    #
+    #   docker compose exec solver bun -e 'const r = await fetch(
+    #     "http://127.0.0.1:9100/status/snapshot",
+    #     { headers: { authorization: `Bearer ${process.env.SOLVER_STATUS_AUTH_TOKEN}` } });
+    #     console.log(await r.text());'
+    #
+    # Uncomment ONLY for a debugging session, and never with a non-loopback
+    # BIND_ADDR: nothing about /status/* is meant to face a network you do not
+    # own, and the bearer would then be the only thing between it and the world.
+    # ports:
+    #   - "${BIND_ADDR:-127.0.0.1}:${HOST_SOLVER_STATUS_PORT:-19100}:9100"
     volumes:
       - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - solver-config:/srv/solver-config:ro
@@ -599,6 +644,89 @@ services:
       # written against is worse than no journal, so this volume is torn down
       # together with the chain volumes (see deploy/down.sh).
       - solver-journal:/var/lib/cow-solver
+
+  # ══ COW solver monitor site (00007) ═════════════════════════════════════════
+
+  # The read-only operations page: "is the solver quoting, and if not, why".
+  #
+  # It is a SEPARATE service rather than a route on the solver for one reason:
+  # the moment anyone actually opens it is the moment the solver is down. So it
+  # depends on `kernel` ONLY — never on `solver`, and least of all with
+  # `service_healthy` on it — and it comes up, renders the kernel's book, and
+  # says SOLVER UNREACHABLE with the time it was last seen instead of dying
+  # alongside the process it exists to describe.
+  #
+  # What it does NOT do: it holds no wallet, no seed and no journal; it opens no
+  # relay socket; it has no route that mutates anything here or upstream; and it
+  # never proxies an arbitrary path anywhere. It reads three sources — the
+  # solver's bearer-gated /status/* across this network, the kernel's REST API,
+  # and the relay's public GET /tokens — and serves one page plus /api/snapshot,
+  # /api/stream and its own /health.
+  #
+  # It has NO AUTHENTICATION OF ITS OWN. That is why its host port binds
+  # ${BIND_ADDR} (127.0.0.1) like everything else here. Put the host's reverse
+  # proxy in front of it before it reaches any wider network — and note that the
+  # SSE feed needs response buffering off and a read timeout longer than the
+  # five-minute stream lifetime (packages/solver-frontend/README.md).
+  solver-frontend:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-solver-frontend.sh"]
+    # unless-stopped, unlike the solver's on-failure:3. This process trades
+    # nothing, so restarting it costs nothing and a monitor that stays down
+    # after a blip is worse than useless. A CONFIGURATION problem is still
+    # visible: `start.solver-frontend.ts` exits 1 with EVERY problem listed at
+    # once, and the loop reprints the same list rather than burying it.
+    restart: unless-stopped
+    depends_on:
+      # The kernel, and nothing else. The book, sync and token-name panels come
+      # from it, and a monitor that starts before its only always-on source is
+      # up would open on a screen of errors. `solver` is deliberately absent —
+      # see the note above.
+      kernel:
+        condition: service_healthy
+    environment:
+      # 0.0.0.0 inside the container so the published port below reaches it.
+      # The site's own env resolver warns about a non-loopback host (it has no
+      # authentication) and starts anyway, which is right for this case.
+      SOLVER_FRONTEND_HOST: 0.0.0.0
+      SOLVER_FRONTEND_PORT: "8080"
+      # The solver's status listener, over this network. The bearer is the SAME
+      # .env variable the solver enforces, so the two cannot drift; it is sent
+      # as `Authorization: Bearer` to the solver and reaches neither the browser
+      # nor /api/*.
+      SOLVER_FRONTEND_SOLVER_STATUS_URL: http://solver:9100
+      SOLVER_FRONTEND_SOLVER_STATUS_TOKEN: ${SOLVER_STATUS_AUTH_TOKEN:?SOLVER_STATUS_AUTH_TOKEN is required (>= 32 chars) — run deploy/bootstrap.sh}
+      # Read directly, not through the solver: the page must keep showing the
+      # book and the sync state while the solver is down.
+      SOLVER_FRONTEND_ZSWAP_API: http://kernel:9999
+      # GET /tokens is the only relay route this service knows, and the only
+      # unauthenticated one the reference relay has.
+      SOLVER_FRONTEND_RELAY_HTTP_URL: http://relay:3000
+      # How often the kernel and relay are polled. The solver half prefers SSE
+      # and only polls while the stream is down. 4000 is also the code default,
+      # so a blank .env entry lands on the same number either way.
+      SOLVER_FRONTEND_POLL_MS: ${SOLVER_FRONTEND_POLL_MS:-4000}
+      # Monitor-side transition history (solver up/down, relay connected,
+      # quoting/withdrawn, kernel sync). Bounded, in memory, never persisted —
+      # it is gone on restart by design, like everything else this service
+      # knows. 500 is the code default too.
+      SOLVER_FRONTEND_HISTORY_LIMIT: ${SOLVER_FRONTEND_HISTORY_LIMIT:-500}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_SOLVER_FRONTEND_PORT:-18080}:8080"
+    healthcheck:
+      # bun images ship no curl; `bun -e fetch` is the probe, as on the kernel.
+      # /health is the SITE's own liveness (three keys, no internal data) and
+      # says nothing about the solver — a monitor whose health followed the
+      # thing it monitors would restart itself exactly when it is needed.
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const r = await fetch("http://127.0.0.1:8080/health");
+          process.exit(r.ok ? 0 : 1);'
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
 
   # ══ reference prices ════════════════════════════════════════════════════════
 

@@ -677,12 +677,34 @@ export function createStatusCollector(deps: StatusCollectorDependencies): Status
     recordRelayEvent: (event: RelayClientEvent): void => {
       if (stopped) return;
       eventsObserved += 1;
+      const message = event.message.slice(0, 1024);
+      // Fold a consecutive repeat (same kind, severity and message — the
+      // once-a-second `push` above all) into the previous entry: the ring then
+      // keeps one row per CHANGE and `count`/`lastAt` carry the repetition.
+      // The detail is refreshed to the latest occurrence, so a folded `push`
+      // row still says how many pairs/rungs the newest push carried.
+      const previous = events.at(-1);
+      if (
+        previous !== undefined &&
+        previous.kind === event.kind &&
+        previous.severity === event.severity &&
+        previous.message === message
+      ) {
+        previous.count = (previous.count ?? 1) + 1;
+        previous.lastAt = nowMs();
+        const latestDetail = flattenDetail(event.detail);
+        if (latestDetail !== undefined) previous.detail = latestDetail;
+        else delete previous.detail;
+        lastEventByKind.set(previous.kind, previous);
+        notify();
+        return;
+      }
       const entry: StatusRelayEvent = {
         seq: ++eventSeq,
         at: nowMs(),
         kind: event.kind,
         severity: event.severity,
-        message: event.message.slice(0, 1024),
+        message,
         ...(flattenDetail(event.detail) === undefined
           ? {}
           : { detail: flattenDetail(event.detail)! }),

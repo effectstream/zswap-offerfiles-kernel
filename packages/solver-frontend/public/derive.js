@@ -1017,12 +1017,20 @@ export function eventRows(snapshot, limit = 200) {
   const rows = [];
   const relay = solverSection(snapshot, "relay");
   for (const event of relay?.events ?? []) {
+    // A folded entry (consecutive repeats, see the contract) is shown once,
+    // at its LATEST occurrence, with how many times it repeated since when.
+    const count = Number(event.count ?? 1);
+    const at = event.lastAt ?? event.at;
     rows.push({
-      at: event.at,
+      at,
       kind: event.kind,
       source: "solver",
       tone: event.severity === "error" ? "bad" : event.severity === "warn" ? "warn" : "ok",
-      message: event.message,
+      message:
+        count > 1
+          ? `${event.message} — ×${count} since ${clockLabel(event.at)}`
+          : event.message,
+      count,
     });
   }
   for (const transition of snapshot?.history ?? []) {

@@ -503,6 +503,23 @@ describe("book, jobs, inventory, DUST, relay, config, events", () => {
     }
   });
 
+  test("a folded solver event renders once, at its latest time, with its repeat count", () => {
+    const now = 1_770_000_001_000;
+    const snapshot = buildMonitorSnapshot({ now });
+    const relay = (snapshot as any).solver.snapshot.relay;
+    relay.events = [
+      { seq: 1, at: now - 300_000, lastAt: now - 1_000, count: 300, kind: "push", severity: "info", message: "pushed 1 pair(s)" },
+      { seq: 2, at: now - 500, kind: "disconnected", severity: "warn", message: "relay socket closed" },
+    ];
+    const rows = eventRows(snapshot).filter((row: any) => row.source === "solver");
+    expect(rows.map((row: any) => row.kind)).toEqual(["disconnected", "push"]);
+    expect(rows[1].at).toBe(now - 1_000);
+    expect(rows[1].count).toBe(300);
+    expect(rows[1].message).toMatch(/^pushed 1 pair\(s\) — ×300 since /);
+    expect(rows[0].count).toBe(1);
+    expect(rows[0].message).toBe("relay socket closed");
+  });
+
   test("the identity line falls back to `unreachable` rather than inventing a mode", () => {
     expect(identity(buildMonitorSnapshot())).toMatchObject({ network: "undeployed", mode: "live" });
     expect(identity(buildMonitorSnapshot({ status: null, solverState: "never-reached" })).mode).toBe(

@@ -305,13 +305,20 @@ function inventoryStage(snapshot) {
 
 /** Journal rows that have not reached a terminal state. */
 const TERMINAL_JOURNAL_STATES = new Set([
-  "COMPLETED",
-  "REFUSED",
+  // The operation journal's own terminal lifecycle states
+  // (packages/solver/src/operation-journal.ts): everything else — PREPARED,
+  // APPLIED, AWAITING_RELAY, RELAY_SUBMITTED, CONFIRMING, REVERTING and
+  // QUARANTINED — is still open and needs the executor or an operator.
+  "SETTLED",
   "REVERTED",
   "FAILED",
-  "EXPIRED",
-  "ABANDONED",
 ]);
+
+/** Whether the solver reports itself in dry-run (no relay client, no
+ *  executor, no journal) — the only case in which "not started" is permanent. */
+export function isDryRun(snapshot) {
+  return solverSection(snapshot, "process")?.mode === "dry-run";
+}
 
 export function openJournalRows(journal) {
   if (!journal || !journal.countsByState) return 0;
@@ -327,7 +334,9 @@ function journalStage(snapshot) {
   const executor = solverSection(snapshot, "executor");
   if (!journal) return { tone: "muted", summary: "unknown", since: UNKNOWN_SINCE(snapshot) };
   if (journal.state === "not-opened") {
-    return { tone: "muted", summary: "not opened (dry-run)", since: "no journal in dry-run" };
+    return isDryRun(snapshot)
+      ? { tone: "muted", summary: "not opened (dry-run)", since: "no journal in dry-run" }
+      : { tone: "muted", summary: "not opened yet", since: "the solver is still coming up" };
   }
   const open = openJournalRows(journal);
   const dust = journal.dust;
@@ -362,7 +371,9 @@ function relayStage(snapshot) {
   const relay = solverSection(snapshot, "relay");
   if (!relay) return { tone: "muted", summary: "unknown", since: UNKNOWN_SINCE(snapshot) };
   if (relay.state === "not-started") {
-    return { tone: "muted", summary: "not started (dry-run)", since: "no relay client in dry-run" };
+    return isDryRun(snapshot)
+      ? { tone: "muted", summary: "not started (dry-run)", since: "no relay client in dry-run" }
+      : { tone: "muted", summary: "not started yet", since: "the solver is still coming up" };
   }
   const stats = relay.stats;
   if (!stats) return { tone: "muted", summary: "unknown", since: "" };
@@ -389,7 +400,9 @@ function ladderStage(snapshot) {
   const ladder = solverSection(snapshot, "ladder");
   if (!ladder) return { tone: "muted", summary: "unknown", since: UNKNOWN_SINCE(snapshot) };
   if (ladder.state === "not-started") {
-    return { tone: "muted", summary: "not started (dry-run)", since: "nothing is published" };
+    return isDryRun(snapshot)
+      ? { tone: "muted", summary: "not started (dry-run)", since: "nothing is published" }
+      : { tone: "muted", summary: "not started yet", since: "nothing is published yet" };
   }
   if (ladder.state === "never-derived" || ladder.last === null) {
     return { tone: "warn", summary: "nothing published yet", since: "no push derived" };

@@ -510,7 +510,7 @@ export function createMonitor(config: FrontendConfig, deps: MonitorDeps = {}): M
       return `fail-closed withdrawal: ${state.slice("withheld:".length)}`;
     }
     if (state === "empty") return "the last push carried no pair";
-    if (state === "not-started") return "dry-run: no relay client, so nothing is published";
+    if (state === "not-started") return "no relay client yet — dry-run, or the solver is still coming up";
     if (state === "never-derived") return "no push has been derived yet";
     return "unknown";
   };

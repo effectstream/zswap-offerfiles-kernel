@@ -329,7 +329,8 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
           ],
           rowCap: 100,
           total: 4,
-          countsByState: { COMPLETED: 2, REFUSED: 1, AWAITING_CONSUMPTION: 1 },
+          // The journal's REAL lifecycle names (operation-journal.ts): two terminal, one in flight.
+          countsByState: { SETTLED: 2, REVERTED: 1, AWAITING_RELAY: 1 },
           dust: {
             configured: true,
             maxPerJob: "5000000000000000",

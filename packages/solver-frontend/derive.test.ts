@@ -216,11 +216,32 @@ describe("the six-stage health strip (FR-012)", () => {
 
   test("a journal with nothing in flight is green", () => {
     const status = buildStatusSnapshot();
-    (status.journal as any).countsByState = { COMPLETED: 3 };
+    (status.journal as any).countsByState = { SETTLED: 3, REVERTED: 1, FAILED: 1 };
     expect(stageStates(buildMonitorSnapshot({ status }))[3]).toMatchObject({
       tone: "ok",
       summary: "reconciled · 0 open",
     });
+  });
+
+  test("QUARANTINED rows are open, not terminal — they need an operator", () => {
+    const status = buildStatusSnapshot();
+    (status.journal as any).countsByState = { SETTLED: 11, QUARANTINED: 2 };
+    expect(stageStates(buildMonitorSnapshot({ status }))[3]).toMatchObject({
+      tone: "warn",
+      summary: "reconciled · 2 open",
+    });
+  });
+
+  test("a LIVE solver whose relay client has not started yet is 'not started yet', never 'dry-run'", () => {
+    const status = buildStatusSnapshot();
+    (status.relay as any) = { state: "not-started", stats: null, lastEventByKind: {}, events: [], eventCap: 200, eventsObserved: 0 };
+    (status.ladder as any) = { state: "not-started", last: null };
+    (status.journal as any) = { state: "not-opened", path: null, rows: [], rowCap: 100, total: 0, countsByState: {}, dust: null };
+    const stages = stageStates(buildMonitorSnapshot({ status }));
+    expect(stages[3]).toMatchObject({ tone: "muted", summary: "not opened yet" });
+    expect(stages[4]).toMatchObject({ tone: "muted", summary: "not started yet" });
+    expect(stages[5]).toMatchObject({ tone: "muted", summary: "not started yet" });
+    for (const stage of stages) expect(stage.summary).not.toContain("dry-run");
   });
 
   test("a blocked cache names the solver's OWN reason string", () => {
@@ -459,7 +480,7 @@ describe("book, jobs, inventory, DUST, relay, config, events", () => {
   });
 
   test("open journal rows are the non-terminal ones", () => {
-    expect(openJournalRows({ countsByState: { COMPLETED: 2, REFUSED: 1, AWAITING_CONSUMPTION: 1 } })).toBe(1);
+    expect(openJournalRows({ countsByState: { SETTLED: 2, REVERTED: 1, FAILED: 1, AWAITING_RELAY: 1 } })).toBe(1);
     expect(openJournalRows({ countsByState: {} })).toBe(0);
   });
 

@@ -46,6 +46,7 @@ import {
   presetKind,
   resolveColour,
 } from "./faucet-mint.ts";
+import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../../../packages/solver-core/amount.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -554,7 +555,12 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
     giveToken: give.token,
     giveTokenName: give.name,
     giveColour: give.colour,
-    giveAmount: readBigint(env, "GIVE_AMOUNT", 1000n, { min: 1n }),
+    // BASE UNITS, as the env has always been. The default is ONE WHOLE COIN
+    // at the registry's 6 decimals (00024 Q5), so a poster journal reads in
+    // round coins instead of in millionths.
+    giveAmount: readBigint(env, "GIVE_AMOUNT", coinsToBaseUnits(1n, DEFAULT_TOKEN_DECIMALS), {
+      min: 1n,
+    }),
     wantToken: want.token,
     wantTokenName: want.name,
     wantColour: want.colour,

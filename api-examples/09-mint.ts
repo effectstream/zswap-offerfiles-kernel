@@ -15,7 +15,9 @@
 //
 // Env overrides:
 //   WALLET_SEED=<64-hex>   maker wallet seed (must have NIGHT for dust fees)
-//   MINT_AMOUNT=1000000000 amount to mint per token in base units
+//   MINT_AMOUNT=1000000000 amount to mint per token in BASE UNITS
+//                         (= 1,000 whole coins — every token this stack
+//                          mints or registers has 6 decimals)
 
 import { dirname, resolve } from "node:path";
 import { writeFileSync } from "node:fs";
@@ -148,10 +150,12 @@ minted.unshielded = (ures instanceof Uint8Array ? toHex(ures) : String(ures ?? t
 console.log(`  ✅ unshielded: ${minted.unshielded.slice(0, 16)}…\n`);
 
 // ── 5. Register names ──────────────────────────────────────────────────────────
+// `decimals` is stated, not left to the column default (00024 FR-002):
+// MINT_AMOUNT is base units, i.e. 1,000 whole coins at 6 decimals.
 const registrations = [
-  { color: minted.shieldedA,  name: "TESTA", kind: "shielded"   },
-  { color: minted.shieldedB,  name: "TESTB", kind: "shielded"   },
-  { color: minted.unshielded, name: "TESTU", kind: "unshielded" },
+  { color: minted.shieldedA,  name: "TESTA", kind: "shielded",   decimals: 6 },
+  { color: minted.shieldedB,  name: "TESTB", kind: "shielded",   decimals: 6 },
+  { color: minted.unshielded, name: "TESTU", kind: "unshielded", decimals: 6 },
 ];
 
 console.log("Registering token names…");

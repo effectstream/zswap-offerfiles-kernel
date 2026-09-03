@@ -25,10 +25,11 @@
 import { coinNullifier, decodeShieldedCoinInfo, rawTokenType } from "@midnight-ntwrk/ledger-v8";
 import type { CoinSecretKey, ShieldedCoinInfo } from "@midnight-ntwrk/ledger-v8";
 
-// The faucet derivation itself, imported rather than copied. `mintable.ts` has
-// no imports of its own — it is 40 lines of TextEncoder and Math.imul — so
-// reaching into `docs/` costs nothing and pulls in no frontend dependency, and
-// the kernel image `COPY . .`s the whole tree, so it is present at runtime too.
+// The faucet derivation itself, imported rather than copied. `mintable.ts` is
+// TextEncoder, Math.imul and the mint allotment, and its only import is the
+// equally pure `packages/solver-core/amount.ts` — so reaching into `docs/`
+// costs nothing and pulls in no frontend dependency, and the kernel image
+// `COPY . .`s the whole tree, so both files are present at runtime too.
 // Importing it (instead of copying) is what guarantees the poster can never
 // drift from the browser faucet.
 import {
@@ -37,6 +38,9 @@ import {
   PRESET_TOKENS,
 } from "../../../docs/src/wallet/mintable.ts";
 import type { MintableKind } from "../../../docs/src/wallet/mintable.ts";
+
+// Base units per coin for everything this stack mints (00024 FR-001/FR-004).
+import { DEFAULT_TOKEN_DECIMALS } from "../../../packages/solver-core/amount.ts";
 
 // The same map the node uses to price a token BY NAME. Also import-only-pure.
 // Knowing it here lets `verifyTokenName` answer "will this leg be priced?"
@@ -476,13 +480,16 @@ export async function registerTokenName(
   const wantedName = normaliseTokenName(name);
   if (wantedName === "") throw new Error("token name is empty");
 
-  // `decimals` is deliberately omitted: the faucet mints BASE units (1 coin ==
-  // 1 base unit) and the column defaults to 0. Sending a wrong non-zero value
-  // would scale the USD price by 10^decimals and break sponsorship silently.
+  // `decimals` is stated, not left to the column default (00024 FR-002): the
+  // faucet mints WHOLE COINS scaled by 10^6, so the registry has to say 6 or
+  // every USD price and sponsorship verdict for this colour is off by 10^6.
+  // Explicit beats implicit here — a node that predates the default would
+  // otherwise silently record 0.
   const { status, body } = await client.post<unknown>("/v1/known-tokens", {
     color,
     name: wantedName,
     kind,
+    decimals: DEFAULT_TOKEN_DECIMALS,
   });
 
   if (status === 200 || status === 201) {

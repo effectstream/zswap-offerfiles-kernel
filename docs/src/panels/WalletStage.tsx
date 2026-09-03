@@ -1,6 +1,14 @@
-import { MINT_AMOUNT, NIGHT_COLOR } from '../wallet/mintable'
+import { MINT_AMOUNT, MINT_COINS, NIGHT_COLOR } from '../wallet/mintable'
+import { baseUnitsToCoins } from '../../../packages/solver-core/amount.ts'
 import { PROOF_SERVER_URL } from '../config'
 import type { WalletApp } from '../wallet/useWalletApp'
+
+/** Base units → whole coins for display. The wallet hands back base-unit
+ *  strings; anything else (an empty bag, a value from a stale shape) is shown
+ *  verbatim rather than crashing the panel. */
+function coinsOf(baseUnits: string): string {
+  return /^[0-9]+$/.test(baseUnits) ? baseUnitsToCoins(BigInt(baseUnits)) : baseUnits
+}
 
 function short(a: string | null | undefined, n = 18) {
   if (!a) return '—'
@@ -145,7 +153,10 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
             <h3>Mintable tokens</h3>
             <p>
               Preset shortcuts plus whatever <code>/v1/known-tokens</code> already has for this
-              network. Each mint adds <code>+{String(MINT_AMOUNT)}</code>.
+              network. Every token here has 6 decimals, so each mint adds{' '}
+              <code>+{String(MINT_COINS)}</code> whole coins —{' '}
+              <code>{String(MINT_AMOUNT)}</code> base units, which is what the circuit is called
+              with.
             </p>
             {wallet.mintable.map((t) => {
               const bal = wallet.balanceFor(t)
@@ -155,7 +166,7 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
                   <div>
                     <div className="name">{t.name} <span className="meta-line">({t.kind})</span></div>
                     <div className="meta-line">
-                      balance {bal}
+                      balance {coinsOf(bal)} ({bal} base units)
                       {color ? ` · ${short(color, 20)}` : ' · color unknown until first mint / known-tokens'}
                     </div>
                   </div>
@@ -165,7 +176,7 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
                     disabled={!wallet.canMint || wallet.mintingId === t.name || wallet.contractLoading}
                     onClick={() => wallet.mint(t)}
                   >
-                    {wallet.mintingId === t.name ? 'Minting…' : `Mint +${String(MINT_AMOUNT)}`}
+                    {wallet.mintingId === t.name ? 'Minting…' : `Mint +${String(MINT_COINS)}`}
                   </button>
                 </div>
               )

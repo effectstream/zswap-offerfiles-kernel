@@ -29,6 +29,8 @@ import {
 } from "./faucet-mint.ts";
 import type { FaucetContract, KnownTokenRow, MintShieldedTx } from "./faucet-mint.ts";
 import { KernelApi } from "./kernel-api.ts";
+import { MINT_AMOUNT, MINT_COINS } from "../../../docs/src/wallet/mintable.ts";
+import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../../../packages/solver-core/amount.ts";
 
 // Preprod's deployed offer-files contract, and the colours it produced.
 const PREPROD_CONTRACT = "6fc44c272d866574cefc14e25474fdfa144e6427f299a8222a8ad8a7b374bb7c";
@@ -334,11 +336,21 @@ const row = (color: string, name: string, extra: Partial<KnownTokenRow> = {}): K
   token_color: color,
   name,
   kind: "shielded",
-  decimals: 0,
+  decimals: 6,
   asset_id: null,
   ...extra,
 });
 const quiet = { warn: () => {} };
+
+describe("the faucet allotment (00024 FR-003)", () => {
+  test("one press is 1 000 WHOLE COINS, scaled to base units for the circuit", () => {
+    // The browser playground and every deploy script mint this exact value, so
+    // the constant is the one place the allotment can be read or changed.
+    expect(MINT_COINS).toBe(1000n);
+    expect(MINT_AMOUNT).toBe(1_000_000_000n);
+    expect(MINT_AMOUNT).toBe(coinsToBaseUnits(MINT_COINS, DEFAULT_TOKEN_DECIMALS));
+  });
+});
 
 describe("registerTokenName", () => {
   test("200 — the row was created", async () => {
@@ -346,9 +358,14 @@ describe("registerTokenName", () => {
     try {
       const r = await registerTokenName(API, PREPROD_WBTC, "WBTC", "shielded", quiet);
       expect(r).toMatchObject({ registered: true, reason: "registered", status: 200 });
-      // The body is exactly what the route's schema requires, with decimals
-      // deliberately omitted so the column keeps its 0 default.
-      expect(m.posts[0]).toEqual({ color: PREPROD_WBTC, name: "WBTC", kind: "shielded" });
+      // The body is exactly what the route's schema requires, and it STATES
+      // decimals (00024 FR-002) instead of leaning on the column default.
+      expect(m.posts[0]).toEqual({
+        color: PREPROD_WBTC,
+        name: "WBTC",
+        kind: "shielded",
+        decimals: 6,
+      });
     } finally {
       m.restore();
     }
@@ -358,7 +375,12 @@ describe("registerTokenName", () => {
     const m = mockRegistry({ post: { status: 200, body: {} } });
     try {
       await registerTokenName(API, `0x${PREPROD_WBTC.toUpperCase()}`, " wbtc ", "shielded", quiet);
-      expect(m.posts[0]).toEqual({ color: PREPROD_WBTC, name: "WBTC", kind: "shielded" });
+      expect(m.posts[0]).toEqual({
+        color: PREPROD_WBTC,
+        name: "WBTC",
+        kind: "shielded",
+        decimals: 6,
+      });
     } finally {
       m.restore();
     }

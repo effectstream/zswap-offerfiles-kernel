@@ -607,17 +607,19 @@ curl http://host:9999/v1/known-tokens
 ```json
 [
   { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded" },
-  { "id": 4, "token_color": "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819", "name": "SNIGHT", "kind": "shielded" }
+  { "id": 2, "token_color": "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c", "name": "SNIGHT", "kind": "shielded" }
 ]
 ```
 
-`NIGHT`, `USDC` and `USDM` are seeded by the schema. `SNIGHT` — the
+`NIGHT`, `SNIGHT`, `USDC` and `USDM` are seeded by the schema. `SNIGHT` — the
 [shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
-held as a shielded token — is registered by the node at start for the network it
-runs on, because its colour derives from the contract address: `8fac382b…6819` on
-**preprod** (shown above), `793c29c9…f99c` on **preview**, and nothing on
-`undeployed`/`mainnet`, where the contract is not deployed. It carries NIGHT's
-`decimals` and prices off the same asset, so equal base units are at par.
+held as a shielded token — is the one seed whose colour depends on the network,
+because it derives from the contract address. The schema seeds **preview**
+(`793c29c9…f99c`, shown above); **preprod** is `8fac382b…6819`, and `mainnet` has
+no deployment yet. Another network patches that row in `000-init.sql` before its
+database is created, or registers the colour on an existing database with an
+`UPDATE` / `POST /v1/known-tokens`. It carries NIGHT's `decimals` and prices off
+the same asset, so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
 appearing in an offer says nothing about its name, and an offer's value layer

@@ -117,12 +117,14 @@ defaults.
 
 `SNIGHT` is the [shielded-night](https://github.com/effectstream/shielded-night)
 wrapper — NIGHT held as a shielded (Zswap) token, locked 1:1, so it prices off
-`midnight-3` like NIGHT and carries NIGHT's `decimals`. Its colour derives from the
-contract address and therefore differs per network, so it is **not** in
-`000-init.sql`: `packages/database/network-tokens.ts` holds one colour per network
-and the node registers the running network's row at start (`preview` and `preprod`
-today; nothing on `undeployed`/`mainnet`, where the contract is not deployed). A
-deployment picks it up at its next restart — no SQL, no manual `POST`.
+`midnight-3` like NIGHT and is seeded with NIGHT's `decimals`. It is the one seeded
+token whose colour depends on the network, because it derives from the contract
+address: `000-init.sql` seeds **preview** (`793c29c9…f99c`) as the default and
+documents, right beside the row, the preprod colour (`8fac382b…6819`) and the fact
+that mainnet has no deployment yet. Deploying to another network means patching
+that row before the database is created — or, on a database that already exists
+(preprod included), one `UPDATE known_tokens …` or `POST /v1/known-tokens`, since
+`000-init.sql` only ever runs against an empty database.
 
 `packages/price-feed` refreshes `asset_prices` from CoinGecko. It is a process of
 its own — the node never makes an outbound price call:

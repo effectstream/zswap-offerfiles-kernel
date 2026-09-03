@@ -130,10 +130,15 @@ that row before the database is created — or, on a database that already exist
 price is divided by `10^decimals` to get the per-base-unit price this API
 serves — never the colour's own display decimals. NIGHT is seeded with
 `decimals: 6`: 1 NIGHT = 10⁶ Stars (its base unit; `STARS_PER_NIGHT` in
-`midnight-ledger/ledger/src/structure.rs`). A faucet-minted dev/test token
-registered without an explicit `decimals` still defaults to `0` (base unit ==
-coin), which is genuinely correct for it — see the seed's own comment in
-`packages/database/migrations/000-init.sql`.
+`midnight-ledger/ledger/src/structure.rs`).
+
+**Every token this stack mints or registers has 6 decimals** (00024). The
+faucets hand out WHOLE COINS scaled by `10^6` — one press is 1 000 coins, i.e.
+`1000000000` base units — every registration path sends `decimals: 6`
+explicitly, and the column defaults to `6` for a client too old to send it.
+`coinsToBaseUnits` / `baseUnitsToCoins` in `packages/solver-core/amount.ts` are
+the one place the conversion lives; amounts on the wire and on chain stay
+integer base units.
 
 `packages/price-feed` refreshes `asset_prices` from CoinGecko. It is a process of
 its own — the node never makes an outbound price call:

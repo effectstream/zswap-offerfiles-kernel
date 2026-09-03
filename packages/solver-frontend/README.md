@@ -39,7 +39,9 @@ withdrawal). They look different on purpose.
 **Amounts are integer base units everywhere.** The solver, the relay wire and
 the journal are base-unit only. Where the kernel's token registry gives a colour
 `decimals > 0`, the coin-denominated value is shown *beside* the base units and
-marked as derived — never instead of them. A colour with no registry row is
+marked as derived — never instead of them. Since 00024 that is every token the
+stack mints, so a registry row (or an older node) that states no `decimals` is
+read as **6**, not as "base units are coins". A colour with no registry row is
 shown as short hex, never hidden.
 
 ## Configuration

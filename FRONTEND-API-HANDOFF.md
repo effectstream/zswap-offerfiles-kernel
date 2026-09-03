@@ -241,12 +241,16 @@ can be absent only for legacy rows or a rejection too malformed to hash.
 These serve DB/registry rows and did **not** get the camelCase treatment. Take
 their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
 
-- `GET /v1/known-tokens` → `[{ "id": 1, "token_color": "70ce…", "name": "tDUST", "kind": "shielded", "decimals": 0, "asset_id": null }]`
+- `GET /v1/known-tokens` → `[{ "id": 1, "token_color": "70ce…", "name": "tDUST", "kind": "shielded", "decimals": 6, "asset_id": null }]`
   (`decimals` and `asset_id` are new: base units per PRICED coin — never the
   colour's own display decimals — and the reference asset a price comes from.
   `POST /v1/known-tokens` accepts both, optionally, and defaults `decimals` to
-  `0`, correct for every faucet-minted token. `NIGHT` itself is seeded with
-  `decimals: 6` — 1 NIGHT is 10⁶ Stars, its base unit.)
+  **`6`**: every token this stack mints or registers has 6 decimals, and the
+  faucets hand out whole coins scaled by `10^6` (1 000 coins = `1000000000` base
+  units). `NIGHT` is seeded with the same 6 — 1 NIGHT is 10⁶ Stars, its base
+  unit. **A UI must divide by `10^decimals` before showing an amount**, and
+  multiply the number a user types before putting it on the wire; a node too old
+  to send the field is one of these tokens, so read a missing `decimals` as 6.)
 - `GET /v1/prices?tokens=<color>[,<color>…]` → `{ "sponsor_discount", "feed": { "provider", "last_run_at", "last_ok_at", "last_error" }, "assets": [...], "tokens": [...] }`.
   The reference prices behind every quote. **`tokens` is required**: 1-50 64-hex
   colours, comma-separated; without it (or with a malformed or over-long list) the

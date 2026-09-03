@@ -60,9 +60,18 @@ export interface LadderPush {
   capabilities: SolverCapabilitiesMessage;
   priceLevels: PriceLevelsMessage;
   derived: DerivedLadder;
-  /** Null when the push carries the cache's real ladders; otherwise why it is
-   *  an empty withdrawal instead. */
-  withheld: "cache-not-current" | null;
+  /**
+   * Null when the push carries the cache's real ladders; otherwise why it is
+   * an empty withdrawal instead.
+   *
+   * `deriveLadderPush` produces only `"cache-not-current"` — the fail-closed
+   * withdrawal below. `"withdrawn"` exists for the R-41 EXPLICIT withdrawal
+   * frame, which is assembled by the relay client rather than derived here, and
+   * is in this union so that the last-push record a status observer reads
+   * (00007 FR-004) can say which of the two an empty pair was. Every consumer
+   * that only asks "are these the real ladders" keeps testing `=== null`.
+   */
+  withheld: "cache-not-current" | "withdrawn" | null;
 }
 
 /** A fresh object every time: a shared frozen singleton would put one caller's

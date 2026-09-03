@@ -55,6 +55,10 @@ import {
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
+import {
+  checkOfferSponsorship,
+  describeSponsorshipPolicy,
+} from "./offer-sponsorship.ts";
 import { registerExactFilesRoute } from "./offer-files-read.ts";
 import { registerOfferConsumptionRoute } from "./offer-consumption-read.ts";
 import { registerOfferUpdatesStream } from "./offer-updates-stream.ts";
@@ -153,6 +157,12 @@ export const apiRouter: StartConfigApiRouter = async function (
       .code(500)
       .send({ error: "INTERNAL", reason: error?.message ?? "Unknown error" });
   });
+
+  // State the fee-sponsorship policy once, at startup. Two jobs: an operator
+  // can see what POST /v1/offers will do without reading code, and a typo in
+  // BATCHER_SPONSOR_POLICY throws HERE — before the server is ready — instead
+  // of on the first submission.
+  console.log(`[API] ${describeSponsorshipPolicy()}`);
 
   // GET /keys/*, /zkir/* — ZK assets for the browser prover (the frontend now
   // lives in its own repo and fetches these from this API instead of staging
@@ -886,6 +896,28 @@ export const apiRouter: StartConfigApiRouter = async function (
           status: existing[0].status,
         });
       }
+
+      // Fee-sponsorship pre-check. Placed HERE — after the byte-identical
+      // dedup probe, before liveness and crypto — for two reasons:
+      //
+      //   * cost: dedup is one indexed probe on a hash that has already been
+      //     computed, so it stays first; this is two small point reads per
+      //     distinct colour, still far below a liveness sweep and orders of
+      //     magnitude below proof verification.
+      //   * usefulness: "we will not pay for this trade" is the answer the
+      //     maker can act on (re-price and resubmit), so it should not sit
+      //     behind the most expensive checks in the ladder.
+      //
+      // Reading `gives`/`wants` from an as-yet cryptographically unverified
+      // transaction is safe HERE and only here, because the worst a forged
+      // offer can do with it is get itself refused — nothing is logged as fact
+      // and no fee is spent. The BATCHER, which does spend the fee, evaluates
+      // the same rule only after verifying the proofs.
+      const refusal = await checkOfferSponsorship(dbConn, {
+        gives: validation.gives ?? [],
+        wants: validation.wants ?? [],
+      });
+      if (refusal !== null) return reply.code(422).send(refusal);
 
       // Indexed liveness uses the same ordered descriptors and normalized
       // reasons as STM ingestion and the future validate-for-use route. The

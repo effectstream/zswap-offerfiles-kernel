@@ -7,7 +7,14 @@ import {
   resolveOfferTtlSeconds,
   resolveRootWindowSeconds,
 } from "./network-windows.ts";
-import { MIP6_NAMESPACE_ID_SUFFIX_HEX, sponsorDiscountFromBps } from "@zswap-da/offer-guard";
+import {
+  MIP6_NAMESPACE_ID_SUFFIX_HEX,
+  parseSponsorPolicy,
+  parseUnpricedPolicy,
+  sponsorDiscountFromBps,
+  type SponsorPolicy,
+  type UnpricedPolicy,
+} from "@zswap-da/offer-guard";
 import { parsePriceMapEnv, type PriceMapEntry } from "@zswap-da/database";
 import { DEFAULT_SPONSOR_DISCOUNT_BPS } from "./market-mock.ts";
 
@@ -189,6 +196,28 @@ export const sponsorDiscountBps = (): number => {
 
 /** The same threshold as a fraction, for evaluateSponsorship(). */
 export const sponsorDiscount = (): number => sponsorDiscountFromBps(sponsorDiscountBps());
+
+// ── Sponsorship policy — the SAME two variables the batcher reads (Q-6 = A) ──
+//
+// The node's POST /v1/offers pre-check exists so a maker learns "this offer
+// will not be sponsored" from a 422 with numbers, instead of from an opaque
+// failure after the blob has already crossed the network. It is a MIRROR of
+// the batcher's gate, never a second opinion: the batcher holds the wallet and
+// remains authoritative (anyone can POST to /send-input directly), and both
+// evaluate the same `evaluateSponsorship`.
+//
+// Sharing the variable names is what makes that mirror honest. A node that
+// answered 422 while the batcher was still in `warn` would close the site on
+// day one — exactly what D7's `warn`/`allow` defaults exist to prevent — so
+// the node reads the policy too and, at `warn`, logs and forwards.
+//
+// Parsing (including the throw on a typo) is in @zswap-da/offer-guard so the
+// two processes cannot disagree about what a value means. Read per call, like
+// every knob above, so a router built after the env was set sees it.
+export const sponsorPolicy = (): SponsorPolicy => parseSponsorPolicy(getEnv("BATCHER_SPONSOR_POLICY"));
+
+export const sponsorUnpriced = (): UnpricedPolicy =>
+  parseUnpricedPolicy(getEnv("BATCHER_SPONSOR_UNPRICED"));
 
 // Default asset map overrides — `NAME_OR_COLOR=<asset_id>[:decimals],…`,
 // merged over the built-in map in @zswap-da/database. Parsed once per distinct

@@ -59,6 +59,61 @@ export interface SponsorshipVerdict {
  */
 export const SPONSORSHIP_EPSILON_USD = 1e-9;
 
+/**
+ * What a process does with an offer that is not worth its Celestia fee.
+ * `warn` is the rollout default (D7): a day of warn logs shows what `enforce`
+ * would have refused before anything real is refused.
+ */
+export type SponsorPolicy = "enforce" | "warn" | "off";
+
+/** What to do with an offer whose tokens have no market price at all. */
+export type UnpricedPolicy = "allow" | "reject";
+
+export const SPONSOR_POLICIES: readonly SponsorPolicy[] = ["enforce", "warn", "off"];
+export const UNPRICED_POLICIES: readonly UnpricedPolicy[] = ["allow", "reject"];
+
+/**
+ * Parse one of the two policy variables.
+ *
+ * Shared because the node and the batcher read the SAME variable names (Q-6):
+ * `BATCHER_SPONSOR_POLICY` and `BATCHER_SPONSOR_UNPRICED`. If they parsed them
+ * separately, one process could end up in `enforce` and the other in `warn`
+ * over the same string — the node answering 422 for offers the batcher would
+ * happily have paid for, or worse, the reverse.
+ *
+ * An unrecognised value THROWS rather than falling back to the default. An
+ * operator who typed `enfroce` intends to refuse unsponsored offers; quietly
+ * sponsoring everything instead is the exact outcome they were preventing,
+ * with nothing anywhere to say it happened.
+ */
+function parsePolicy<T extends string>(
+  key: string,
+  raw: string | undefined,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (value === "") return fallback;
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new Error(`${key} must be one of ${allowed.join(" | ")}, got "${value}"`);
+  }
+  return value as T;
+}
+
+export function parseSponsorPolicy(
+  raw: string | undefined,
+  key = "BATCHER_SPONSOR_POLICY",
+): SponsorPolicy {
+  return parsePolicy(key, raw, SPONSOR_POLICIES, "warn");
+}
+
+export function parseUnpricedPolicy(
+  raw: string | undefined,
+  key = "BATCHER_SPONSOR_UNPRICED",
+): UnpricedPolicy {
+  return parsePolicy(key, raw, UNPRICED_POLICIES, "allow");
+}
+
 /** Basis points → fraction. 250 bps = 0.025 = the 2.5% default. */
 export function sponsorDiscountFromBps(bps: number): number {
   if (!Number.isFinite(bps) || bps < 0 || bps >= 10_000) {

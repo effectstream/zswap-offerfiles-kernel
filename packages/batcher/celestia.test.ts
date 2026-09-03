@@ -9,6 +9,11 @@ import { ZswapCelestiaAdapter } from "./celestia.ts";
 // /send-input repeatedly and the batcher paid a Celestia fee every time — the
 // SDK has no input dedup (verified: its only checks are non-empty + max
 // size). These tests drive the real adapter with the RPC boundary stubbed.
+//
+// `validateInput` is AWAITED here: it became async when the fee-sponsorship
+// gate landed (it may have to consult the node's reference prices). The SDK
+// core already awaited it (batcher-sdk core/batcher.ts:513), so nothing on the
+// production path changed — only direct callers like these tests.
 
 const adapter = () =>
   new ZswapCelestiaAdapter(
@@ -54,7 +59,7 @@ describe("batcher dedup (published-hash store)", () => {
     const blob = craftBlob(7);
     await publishViaAdapter(a, blob);
 
-    const verdict = a.validateInput(inputFor(blob) as any);
+    const verdict = await a.validateInput(inputFor(blob) as any);
     expect(verdict.valid).toBe(false);
     // The dedup message, not a crypto/structure error: proves the replay was
     // caught by the store, before deserialize/wellFormed ever ran. (This blob
@@ -63,9 +68,9 @@ describe("batcher dedup (published-hash store)", () => {
     expect(verdict.error).toContain(offerHashFromBlob(blob));
   });
 
-  test("unpublished blobs still fall through to full validation", () => {
+  test("unpublished blobs still fall through to full validation", async () => {
     const a = adapter();
-    const verdict = a.validateInput(inputFor(craftBlob(8)) as any);
+    const verdict = await a.validateInput(inputFor(craftBlob(8)) as any);
     expect(verdict.valid).toBe(false);
     expect(verdict.error).toContain("BAD_DESERIALIZE"); // not DUPLICATE
   });
@@ -83,7 +88,7 @@ describe("batcher dedup (published-hash store)", () => {
       ),
     ).rejects.toThrow("celestia down");
 
-    const verdict = a.validateInput(inputFor(blob) as any);
+    const verdict = await a.validateInput(inputFor(blob) as any);
     expect(verdict.error ?? "").not.toContain("DUPLICATE_OFFER");
   });
 
@@ -91,7 +96,7 @@ describe("batcher dedup (published-hash store)", () => {
     const a = adapter();
     const blob = craftBlob(11);
     await publishViaAdapter(a, blob);
-    const verdict = a.validateInput({ ...inputFor(blob), address: "someone-else" } as any);
+    const verdict = await a.validateInput({ ...inputFor(blob), address: "someone-else" } as any);
     expect(verdict.error).toContain("DUPLICATE_OFFER");
   });
 });
@@ -138,7 +143,7 @@ describe("node/batcher parity on shared fixtures", () => {
     expect(nodeVerdict.ok).toBe(false);
     expect(nodeVerdict.code).toBe(code as any);
 
-    const batcherVerdict = adapter().validateInput(inputFor(blob) as any);
+    const batcherVerdict = await adapter().validateInput(inputFor(blob) as any);
     expect(batcherVerdict.valid).toBe(false);
     expect(batcherVerdict.error).toContain(code);
   });

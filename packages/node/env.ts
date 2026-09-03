@@ -27,6 +27,13 @@ import { DEFAULT_SPONSOR_DISCOUNT_BPS } from "./market-mock.ts";
 // rejected-blob cleanup can never drift apart.
 export const CELESTIA_PRIMITIVE_NAME = "ZswapBlob";
 
+// Accept offers whose maker is a CONTRACT CALL (e.g. an AA-Manager open swap).
+// Default OFF. See ValidateOpts.contractMakerRetry in @zswap-da/validator for
+// exactly what is and is not verified on this lane.
+export const ALLOW_CONTRACT_MAKER_OFFERS = /^(1|true|yes)$/i.test(
+  getEnv("ALLOW_CONTRACT_MAKER_OFFERS") ?? "",
+);
+
 export const CELESTIA_RPC_URL = getEnv("CELESTIA_RPC_URL") ?? "http://127.0.0.1:26658";
 // MIP-0006 shared namespace by default — see MIP6_NAMESPACE_ID_SUFFIX_HEX in
 // @zswap-da/offer-guard for why overriding re-silos liquidity (dev/e2e only).

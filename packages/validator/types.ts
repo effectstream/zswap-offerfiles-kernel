@@ -1,4 +1,4 @@
-import type { LedgerState, UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
+import type { LedgerState, UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 
 // Why an offer is rejected. Ordered roughly cheap → expensive in the pipeline.
 export type OfferRejectCode =
@@ -115,6 +115,20 @@ export interface ValidateOpts {
   // evaluateOfferLiveness. Indexed live-set absence normalizes to
   // UTXO_NOT_LIVE; these split predicates retain UTXO_SPENT / UTXO_UNKNOWN for
   // callers that genuinely hold both facts separately.
+  //
+  // CONTRACT-MAKER OFFERS (2026-08-26, demo-infra Phase 9): an offer whose
+  // maker is a CONTRACT CALL (e.g. the AA Manager's open swap) cannot pass
+  // `wellFormed` against a blank reference state — contract-call proof
+  // verification reads the contract's verifier keys FROM STATE, and a blank
+  // state has no contracts ("call to non-existant contract"). When this flag
+  // is set, `verifyOfferCrypto` runs STRICT FIRST and, only on that exact
+  // failure class, retries with `verifyContractProofs=false` — native zswap
+  // proofs and signatures stay verified; the contract-call proof is verified
+  // by the node itself at settlement. Default off (fail-closed): the relaxed
+  // lane admits ingestion-time spam of unprovable contract-call offers,
+  // bounded by liveness checks, size caps and the rate limiter.
+  contractMakerRetry?: boolean;
+
   isNullifierSpent?: (nullifierHex: string) => boolean;
   isUnshieldedSpent?: (ref: UnshieldedSpendRef) => boolean;
   // Existence checks (same sync-vs-async note as above): UTXO ever created;

@@ -1,7 +1,7 @@
 # `deploy/` — split-component Docker Compose stack
 
 The whole system as **separate Compose services**, one process each: the Midnight
-1.x / ledger-v8 chain, the Offer Files kernel, the batcher, the COW solver, and
+2.x / ledger-v9 chain, the Offer Files kernel, the batcher, the COW solver, and
 the **unmodified** Midnight Intents reference relay.
 
 Local/dev networks only. Every seed in `.env.example` is a public dev seed.
@@ -26,9 +26,9 @@ Static gates only (no stack, safe on a shared host):
 
 | Service | Image | Process | Internal | Host (default) |
 |---|---|---|---|---|
-| `midnight-node` | `images/midnight-node` (binaries 0.3.120, `1.0.0`) | `midnight-node --dev` | 9944 | `19944` |
-| `proof-server` | `images/proof-server` (binaries 0.3.120, `ledger-8.1.0`) | `midnight-proof-server` | 6300 | `16300` |
-| `indexer` | `images/indexer` (binaries 0.3.120, `v4.3.3`) | `indexer-standalone` | 8088 | `18088` |
+| `midnight-node` | `images/midnight-node` (binaries 0.3.120, `2.0.0-rc.4`) | `midnight-node --dev` | 9944 | `19944` |
+| `proof-server` | `images/proof-server` (official `midnightntwrk/proof-server:9.0.0-rc.5`, digest-pinned) | `midnight-proof-server` | 6300 | `16300` |
+| `indexer` | `images/indexer` (binaries 0.3.120, `v4.4.0-rc.3`) | `indexer-standalone` | 8088 | `18088` |
 | `celestia` | `images/celestia` (`celestia-appd v6.4.10` + `celestia-node v0.28.4`) | supervisor: consensus + bridge | 26657 / 26658 | `16657` / `16658` |
 | `pglite` | kernel image | `@effectstream/db` pg-gateway server | 5432 | `15432` |
 | `offerfiles-deploy` | kernel image | one-shot: deploy contract, then mint | — | — |
@@ -69,11 +69,11 @@ and every asset is sha256-verified at build time:
 
 | Component | Version | Pinned by |
 |---|---|---|
-| midnight-node | `1.0.0` | `@effectstream/npm-midnight-node@0.103.1` |
-| proof-server | `ledger-8.1.0` | `@effectstream/npm-midnight-proof-server@0.103.1` (matches the `@midnight-ntwrk/ledger-v8: 8.1.0` override) |
-| indexer-standalone | `v4.3.3` | `@effectstream/npm-midnight-indexer@0.103.1` |
-| celestia-appd / celestia-node | `v6.4.10` / `v0.28.4` | `@effectstream/celestia@0.103.1` |
-| Compact CLI | `0.30.0` | `start.dev.ts` **and** `contract-offer-files/package.json` |
+| midnight-node | `2.0.0-rc.4` | `@effectstream/npm-midnight-node@0.200.2` |
+| proof-server | `9.0.0-rc.5` (plain build) | `@effectstream/npm-midnight-proof-server@0.200.2` (matches the `@midnightntwrk/ledger-v9: 1.0.0-rc.3` override). Release 0.3.120 has no linux-arm64 binary, so this one runs the official multi-arch image the same package falls back to, pinned by digest |
+| indexer-standalone | `v4.4.0-rc.3` | `@effectstream/npm-midnight-indexer@0.200.2` pins the 4.4.0 line (rc.1); rc.3 is the one published for both linux arches and fixes rc.1's SQLite starvation — see `images/indexer/Dockerfile` |
+| celestia-appd / celestia-node | `v6.4.10` / `v0.28.4` | `@effectstream/celestia@0.200.2` |
+| compactc | `0.33.0-rc.2` | `infra/compact-version.txt`, run through `infra/compact.sh` (the `compact` version manager does not publish the 0.33 line) |
 | bun | `1.3.11` | the runtime this clone is developed and tested on; 1.3.14 breaks `midnight-contract:deploy` via graphql-tag |
 
 `0.3.120` is a rolling mirror release, not an immutable tag. The sha256 pins are
@@ -353,8 +353,8 @@ endpoints and a funded, dedicated seed:
 
 ```dotenv
 MIDNIGHT_NETWORK_ID=preprod
-MIDNIGHT_INDEXER_HTTP=https://indexer.preprod.midnight.network/api/v3/graphql
-MIDNIGHT_INDEXER_WS=wss://indexer.preprod.midnight.network/api/v3/graphql/ws
+MIDNIGHT_INDEXER_HTTP=https://indexer.preprod.midnight.network/api/v4/graphql
+MIDNIGHT_INDEXER_WS=wss://indexer.preprod.midnight.network/api/v4/graphql/ws
 MIDNIGHT_NODE_HTTP=https://rpc.preprod.midnight.network
 # The proof server stays LOCAL — proving is the one step that must not leave
 # the operator's machine, and it is the slowest (~30 s per transaction).
@@ -405,9 +405,8 @@ symptom of that surfaces somewhere else entirely.
 
 ## Known open points (D2 resolves)
 
-- **Indexer GraphQL API path.** This repo's `undeployed` defaults say
-  `/api/v3/graphql`; the reference relay's devnet mode assumes
-  `/api/v4/graphql`. Both are parameterised (`MIDNIGHT_INDEXER_API_PATH`,
-  `RELAY_INDEXER_API_PATH`) so whichever `indexer-standalone v4.3.3` actually
-  serves can be selected without touching either codebase.
+- **Indexer GraphQL API path.** Resolved on the ledger-v9 line: the kernel
+  (`@effectstream/midnight-contracts@0.200.x`) and the reference relay both use
+  `/api/v4/graphql`, the canonical mount of the 4.x indexer. Both stay
+  parameterised (`MIDNIGHT_INDEXER_API_PATH`, `RELAY_INDEXER_API_PATH`).
 - **Celestia under emulation** — throughput on an arm64 host is unmeasured.

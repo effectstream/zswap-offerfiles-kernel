@@ -19,6 +19,9 @@ mnemonic-to-seed.ts
 packages/contracts-midnight/contract-offer-files.undeployed.json
 PLAN.md
 
+# compactc params (SRS) cache — infra/compact.sh
+.compact-cache/
+
 # The split-component Compose deployment under deploy/ IS a committed deliverable,
 # so it is exempted from the "Preview Docker test setup" block above (which ignores
 # `Dockerfile`, `.dockerignore` and `.env` at ANY depth). Un-ignored last so it wins.

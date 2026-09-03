@@ -124,7 +124,7 @@ try {
           );
           const signed = await (genesis.wallet as never as {
             signRecipe: (r: unknown, s: (p: Uint8Array) => unknown) => Promise<unknown>;
-          }).signRecipe(recipe, (p: Uint8Array) => genesis.unshieldedKeystore.signData(p));
+          }).signRecipe(recipe, (p: Uint8Array) => genesis.unshieldedKeystore.signDataAsync(p));
           await genesis.wallet.submitTransaction(
             await genesis.wallet.finalizeRecipe(signed as never),
           );

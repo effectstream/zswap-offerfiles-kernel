@@ -49,37 +49,43 @@
 # the unit-test runner only and is deliberately NOT this pin.
 FROM oven/bun:1.3.11 AS build
 
-# `compact` is a system toolchain, not an npm dependency. The version is pinned
-# to 0.30.0 by this repo in two independent places — `start.dev.ts`
-# (`COMPACT_VERSION = "0.30.0"`, enforced by its `compact-check` process) and
-# `packages/contracts-midnight/contract-offer-files/package.json`
-# (`compact compile +0.30.0 …`). Do not bump one without the others.
-ARG COMPACT_VERSION=0.30.0
-# The toolchain MANAGER is pinned too. README/`start.dev.ts` both quote the
-# `releases/latest/...` installer URL, but `latest` is mutable, so this build
-# uses the equivalent versioned asset — same script, reproducible.
-ARG COMPACT_INSTALLER_RELEASE=compact-v0.5.2
-ENV COMPACT_DIRECTORY=/opt/compact/toolchains
-ENV PATH="/opt/compact/bin:${PATH}"
+# `compactc` is a system toolchain, not an npm dependency. The pin has ONE
+# source of truth, `infra/compact-version.txt` (0.33.0-rc.2), and one runner,
+# `infra/compact.sh`, which `bun run build:midnight` goes through. On a host
+# that script builds and runs the `compact-toolchain` container; inside this
+# build there is no Docker, so the SAME release asset that
+# `infra/compact-toolchain.Dockerfile` fetches is installed here and handed to
+# the script as `$COMPACTC`. The `compact` version manager is deliberately not
+# used: it does not publish the 0.33 line (see infra/compact-toolchain.Dockerfile).
+ARG TARGETARCH
+COPY infra/compact-version.txt /opt/compact-version.txt
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils \
+ && apt-get install -y --no-install-recommends ca-certificates curl unzip \
  && rm -rf /var/lib/apt/lists/*
 
-# `COMPACT_UNMANAGED_INSTALL` is the cargo-dist installer's install-prefix hook:
-# it drops the binary straight into the given directory and skips the
-# self-updater and the PATH-rewriting shell profile, neither of which a
-# container wants. `compact list` is echoed into the build log so the record
-# shows which toolchains the pinned manager actually offered.
+# Same fetch as infra/compact-toolchain.Dockerfile: musl-static assets, one per
+# platform triple, from the LFDT-Minokawa/compact release tagged after the pin.
+# The wrapper resolves `compactc.bin`/`zkir` from `dirname $0`, so it is exec'd
+# in place through a two-line shim rather than symlinked onto PATH.
 RUN set -eux; \
-    curl --proto '=https' --tlsv1.2 -LsSf \
-      "https://github.com/midnightntwrk/compact/releases/download/${COMPACT_INSTALLER_RELEASE}/compact-installer.sh" \
-      -o /tmp/compact-installer.sh; \
-    COMPACT_UNMANAGED_INSTALL=/opt/compact/bin sh /tmp/compact-installer.sh; \
-    rm -f /tmp/compact-installer.sh; \
-    compact --version; \
-    compact update "${COMPACT_VERSION}"; \
-    compact list
+    COMPACT_VERSION="$(tr -d ' \t\n' < /opt/compact-version.txt)"; \
+    case "${TARGETARCH:-arm64}" in \
+      arm64) triple="aarch64-unknown-linux-musl" ;; \
+      amd64) triple="x86_64-unknown-linux-musl" ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v${COMPACT_VERSION}/compactc_v${COMPACT_VERSION}_${triple}.zip"; \
+    curl --proto '=https' --tlsv1.2 -fLsS -o /tmp/compactc.zip "$url"; \
+    mkdir -p /opt/compactc; \
+    unzip -q /tmp/compactc.zip -d /opt/compactc; \
+    rm /tmp/compactc.zip; \
+    chmod +x /opt/compactc/*; \
+    test -x /opt/compactc/zkir || { echo "compactc asset lacks the default zkir backend" >&2; exit 1; }; \
+    printf '#!/bin/sh\nexec /opt/compactc/compactc "$@"\n' > /usr/local/bin/compactc; \
+    chmod +x /usr/local/bin/compactc; \
+    compactc --version
+ENV COMPACTC=/usr/local/bin/compactc
 
 WORKDIR /app
 
@@ -118,6 +124,9 @@ RUN bun install --frozen-lockfile
 # driver, a README — invalidated it. The later `COPY . .` re-lands these same
 # files, and `src/managed/` survives it because the generated tree is gitignored
 # and therefore not in the build context at all.
+# `infra/` carries the compile script (`infra/compact.sh`) the package's
+# `compact` script calls; without it the step cannot even start.
+COPY infra ./infra
 COPY packages/contracts-midnight ./packages/contracts-midnight
 RUN bun run build:midnight \
  && test -d packages/contracts-midnight/contract-offer-files/src/managed

@@ -360,7 +360,7 @@ describe("knobs and defaults (FR-014)", () => {
 
     const preprod = await parse({ MIDNIGHT_NETWORK_ID: "preprod" });
     expect(preprod.networkUrls.indexer).toBe(
-      "https://indexer.preprod.midnight.network/api/v3/graphql",
+      "https://indexer.preprod.midnight.network/api/v4/graphql",
     );
     expect(preprod.networkUrls.node).toBe("https://rpc.preprod.midnight.network");
     expect(preprod.networkUrls.proofServer).toBe("http://127.0.0.1:6300");

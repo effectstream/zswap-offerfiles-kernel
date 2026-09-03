@@ -41,8 +41,8 @@ x-midnight-endpoints: &midnight-endpoints
   # accident.
   MIDNIGHT_NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
   MIDNIGHT_NODE_HTTP: http://midnight-node:9944
-  MIDNIGHT_INDEXER_HTTP: http://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}
-  MIDNIGHT_INDEXER_WS: ws://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}/ws
+  MIDNIGHT_INDEXER_HTTP: http://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v4/graphql}
+  MIDNIGHT_INDEXER_WS: ws://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v4/graphql}/ws
   MIDNIGHT_PROOF_SERVER_URL: http://proof-server:6300
   MIDNIGHT_WALLET_SEED: ${MIDNIGHT_GENESIS_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
 
@@ -74,8 +74,6 @@ x-kernel-image: &kernel-image
   build:
     context: ..
     dockerfile: deploy/images/kernel/Dockerfile
-    args:
-      COMPACT_VERSION: ${COMPACT_VERSION:-0.30.0}
 
 x-logging: &logging
   logging:
@@ -125,19 +123,23 @@ services:
       context: ..
       dockerfile: deploy/images/proof-server/Dockerfile
     restart: unless-stopped
+    # NEITHER `command:` NOR `entrypoint:`, deliberately: the official rc.5
+    # image's Entrypoint is `bash -c` at a per-digest /nix/store path and its
+    # Cmd one string that reads `$PORT`, so any override changes how the
+    # process is launched. Environment only.
     environment:
       RUST_BACKTRACE: full
+      PORT: "6300"
       SUBSTRATE_NODE_WS_URL: ws://midnight-node:9944
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${HOST_PROOF_SERVER_PORT:-16300}:6300"
+    # No healthcheck: the nix-built official image ships neither curl nor a
+    # shell at a stable path, so nothing inside the container can probe it.
+    # Readiness is asserted by every consumer instead — the kernel entrypoints
+    # `wait_http` on MIDNIGHT_PROOF_SERVER_URL before they start — which is
+    # why the `depends_on` entries below use `service_started`.
     healthcheck:
-      # The binary image has no shell tooling beyond what we installed; a plain
-      # TCP-ish probe via curl is enough — any HTTP answer means it is serving.
-      test: ["CMD-SHELL", "curl -sf -o /dev/null -m 5 http://127.0.0.1:6300/ || curl -s -o /dev/null -m 5 http://127.0.0.1:6300/"]
-      interval: 10s
-      timeout: 10s
-      retries: 30
-      start_period: 20s
+      disable: true
 
   indexer:
     <<: *logging
@@ -248,7 +250,7 @@ services:
       midnight-node:
         condition: service_healthy
       proof-server:
-        condition: service_healthy
+        condition: service_started
       indexer:
         condition: service_healthy
     environment:
@@ -384,7 +386,7 @@ services:
       midnight-node:
         condition: service_healthy
       proof-server:
-        condition: service_healthy
+        condition: service_started
       indexer:
         condition: service_healthy
       offerfiles-deploy:
@@ -516,8 +518,8 @@ services:
     environment:
       MIDNIGHT_NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
       MIDNIGHT_NODE_HTTP: http://midnight-node:9944
-      MIDNIGHT_INDEXER_HTTP: http://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}
-      MIDNIGHT_INDEXER_WS: ws://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}/ws
+      MIDNIGHT_INDEXER_HTTP: http://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v4/graphql}
+      MIDNIGHT_INDEXER_WS: ws://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v4/graphql}/ws
       MIDNIGHT_PROOF_SERVER_URL: http://proof-server:6300
       CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
       ZSWAP_API: http://kernel:9999
@@ -616,7 +618,7 @@ services:
       indexer:
         condition: service_healthy
       proof-server:
-        condition: service_healthy
+        condition: service_started
     environment:
       NODE_ENV: production
       LOG_LEVEL: ${RELAY_LOG_LEVEL:-info}
@@ -631,12 +633,12 @@ services:
       RELAY_PUBLIC_DOCS_ENABLED: ${RELAY_PUBLIC_DOCS_ENABLED:-true}
       NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
       # Mode B (explicit URLs). Mode A (MIDNIGHT_HOST + *_PORT) is deliberately
-      # NOT used: it hard-codes the indexer path to /api/v4/graphql, and which
-      # API version indexer-standalone v4.3.3 actually serves is exactly what
-      # must stay switchable from .env (see MIDNIGHT_INDEXER_API_PATH).
+      # NOT used: it hard-codes the indexer path to /api/v4/graphql, and the
+      # API path stays switchable from .env (see MIDNIGHT_INDEXER_API_PATH)
+      # for an indexer that mounts something else.
       MIDNIGHT_NODE_URL: ws://midnight-node:9944
-      INDEXER_HTTP_URL: http://indexer:8088${RELAY_INDEXER_API_PATH:-/api/v3/graphql}
-      INDEXER_WS_URL: ws://indexer:8088${RELAY_INDEXER_API_PATH:-/api/v3/graphql}/ws
+      INDEXER_HTTP_URL: http://indexer:8088${RELAY_INDEXER_API_PATH:-/api/v4/graphql}
+      INDEXER_WS_URL: ws://indexer:8088${RELAY_INDEXER_API_PATH:-/api/v4/graphql}/ws
       PROOF_SERVER_URL: http://proof-server:6300
       # The relay calls the shared solver bearer SOLVER_AUTH_TOKEN; the candidate
       # calls the same secret SOLVER_RELAY_AUTH_TOKEN. Both read ${SOLVER_AUTH_TOKEN}

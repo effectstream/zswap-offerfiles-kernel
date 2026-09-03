@@ -104,7 +104,12 @@ echo "gates output: ${OUT}"
 } | tee -a "${SUMMARY}"
 
 # ── G1: the Compose model renders ───────────────────────────────────────────
-run_gate compose-config docker compose --profile e2e config
+# The rendered model carries every generated secret in clear. The transcript is
+# evidence that gets copied around, so the values are redacted on the way out
+# (audit 00007 F-05); the gate still fails on a render error because `set -o
+# pipefail` is on and the sed never fails.
+run_gate compose-config sh -c \
+  'docker compose --profile e2e config | sed -E "s/^([[:space:]]*[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API_KEY)[A-Z0-9_]*:[[:space:]]*).*/\\1<redacted>/"'
 
 # G1b — the 00007 services are part of the rendered model. `config --services`
 # is the cheapest proof that the monitor site and the token-name one-shot are

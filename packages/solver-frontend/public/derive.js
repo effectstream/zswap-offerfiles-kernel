@@ -421,6 +421,17 @@ function ladderStage(snapshot) {
       since: `pushed ${agoLabel(now, push.derivedAt)}`,
     };
   }
+  // A ladder is only ON THE WIRE while the relay socket is open: the relay
+  // drops every per-solver frame with the socket, so what was last derived is
+  // what will be re-pushed on reconnect, not what is live (audit 00007 F-02).
+  const relayStats = solverSection(snapshot, "relay")?.stats;
+  if (relayStats && relayStats.connected === false) {
+    return {
+      tone: "bad",
+      summary: "not on the wire",
+      since: `relay down · last push ${agoLabel(now, push.derivedAt)}`,
+    };
+  }
   return {
     tone: push.pairs > 0 ? "ok" : "warn",
     summary: `${push.pairs} pair(s) · ${push.rungs} rung(s)`,
@@ -897,11 +908,16 @@ export function jobRows(snapshot, registry) {
   }));
 }
 
+/** Tone for a journal row's lifecycle state — the journal's REAL states
+ *  (operation-journal.ts): SETTLED is the good terminal, REVERTED/FAILED the
+ *  unhappy terminals, QUARANTINED needs an operator, everything else is in
+ *  flight (PREPARED, APPLIED, AWAITING_RELAY, RELAY_SUBMITTED, CONFIRMING,
+ *  REVERTING). Audit 00007 F-01. */
 export function journalTone(state) {
   const upper = String(state ?? "").toUpperCase();
-  if (upper === "COMPLETED") return "ok";
-  if (upper === "QUARANTINED" || upper === "REVERT_FAILED") return "bad";
-  if (upper === "REFUSED" || upper === "REVERTED" || upper === "FAILED") return "warn";
+  if (upper === "SETTLED") return "ok";
+  if (upper === "QUARANTINED") return "bad";
+  if (upper === "REVERTED" || upper === "FAILED") return "warn";
   return "acc";
 }
 

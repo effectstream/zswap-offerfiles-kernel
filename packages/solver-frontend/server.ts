@@ -259,6 +259,10 @@ const FETCH_TIMEOUT_MS = 8_000;
 /** Hard ceiling on one solver stream, comfortably above the solver's own
  *  5-minute lifetime, so a wedged connection cannot live forever. */
 const STREAM_HARD_TIMEOUT_MS = STATUS_STREAM_MAX_LIFETIME_MS + 30_000;
+/** Per-frame inactivity deadline on the solver stream. The solver's listener
+ *  heartbeats every STATUS_STREAM_HEARTBEAT_MS (5 s); three missed beats is a
+ *  dead socket, not a quiet solver (audit 00007 F-04). */
+const STREAM_IDLE_TIMEOUT_MS = 15_000;
 /** After a stream that DELIVERED frames, reconnect essentially at once — the
  *  solver's lifetime rollover must be invisible (Q-A-1). Not zero, so a
  *  pathological "200 with an empty body" cannot become a tight loop. */
@@ -641,6 +645,21 @@ export function createMonitor(config: FrontendConfig, deps: MonitorDeps = {}): M
    * once, silently) and a peer that accepts the connection and says nothing
    * (zero frames → back off like any other failure).
    */
+  const readWithin = <T,>(
+    reader: { read: () => Promise<T> },
+    ms: number,
+  ): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`status stream idle for ${Math.round(ms / 1000)} s — treating the socket as dead`)),
+        ms,
+      );
+      reader.read().then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error) => { clearTimeout(timer); reject(error); },
+      );
+    });
+
   const consumeSolverStream = async (): Promise<number> => {
     return await withTimeout(STREAM_HARD_TIMEOUT_MS, async (signal) => {
       const response = await fetchImpl(`${config.solverStatusUrl}/status/stream`, {
@@ -657,7 +676,11 @@ export function createMonitor(config: FrontendConfig, deps: MonitorDeps = {}): M
       let frames = 0;
       try {
         for (;;) {
-          const { done, value } = await reader.read();
+          // The solver heartbeats every 5 s, so a frame that does not arrive
+          // within STREAM_IDLE_TIMEOUT_MS means a half-open socket, not a quiet
+          // solver; without this deadline the page would read "reachable" with
+          // a frozen snapshot until the 5.5-minute hard timeout (audit F-04).
+          const { done, value } = await readWithin(reader, STREAM_IDLE_TIMEOUT_MS);
           if (done) return frames;
           buffer += decoder.decode(value, { stream: true });
           if (buffer.length > MAX_SSE_BUFFER_BYTES) {
@@ -1176,7 +1199,10 @@ export function startFrontendServer(
   };
 
   const serveStatic = async (name: string): Promise<Response> => {
-    const contentType = STATIC_FILES[name];
+    // OWN property only: a plain object inherits `constructor`, `__proto__`,
+    // `toString`… from its prototype, and those names would otherwise pass the
+    // manifest check and reach the filesystem (audit 00007 F-06).
+    const contentType = Object.hasOwn(STATIC_FILES, name) ? STATIC_FILES[name] : undefined;
     // Belt AND braces: the manifest lookup already excludes traversal, and the
     // shape test keeps a future manifest edit from introducing one.
     if (contentType === undefined || !/^[a-zA-Z0-9._-]+$/.test(name)) return notFound();

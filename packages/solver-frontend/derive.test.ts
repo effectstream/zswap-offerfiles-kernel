@@ -20,6 +20,7 @@ import {
   dustPercent,
   dustView,
   eventRows,
+  journalTone,
   exclusionDetail,
   exponential,
   groupDigits,
@@ -471,12 +472,30 @@ describe("book, jobs, inventory, DUST, relay, config, events", () => {
     const snapshot = buildMonitorSnapshot();
     const rows = jobRows(snapshot, registryOf(snapshot));
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ state: "AWAITING_CONSUMPTION", tone: "acc" });
+    expect(rows[0]).toMatchObject({ state: "RELAY_SUBMITTED", tone: "acc" });
     expect(rows[0].receipt).toContain("relay");
-    expect(rows[1]).toMatchObject({ state: "COMPLETED", tone: "ok" });
+    expect(rows[1]).toMatchObject({ state: "SETTLED", tone: "ok" });
     expect(rows[1].receipt).toContain("ledger");
     expect(rows[1].receipt).toContain("@ 1 176");
     expect(JSON.stringify(rows)).not.toContain("walletArtifact");
+  });
+
+  test("journal row tones follow the journal's real lifecycle states (audit F-01)", () => {
+    expect(journalTone("SETTLED")).toBe("ok");
+    expect(journalTone("QUARANTINED")).toBe("bad");
+    expect(journalTone("REVERTED")).toBe("warn");
+    expect(journalTone("FAILED")).toBe("warn");
+    for (const inFlight of ["PREPARED", "APPLIED", "AWAITING_RELAY", "RELAY_SUBMITTED", "CONFIRMING", "REVERTING"]) {
+      expect(journalTone(inFlight)).toBe("acc");
+    }
+  });
+
+  test("the published-ladder stage is red while the relay socket is down (audit F-02)", () => {
+    const status = buildStatusSnapshot();
+    (status.relay as any).stats.connected = false;
+    const stage = stageStates(buildMonitorSnapshot({ status }))[5];
+    expect(stage).toMatchObject({ tone: "bad", summary: "not on the wire" });
+    expect(stage.since).toContain("relay down");
   });
 
   test("open journal rows are the non-terminal ones", () => {

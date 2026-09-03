@@ -8,9 +8,14 @@ import { closeTestPglite } from "../database/test-pglite.ts";
 // it has to mock the batcher client and drive the whole ingestion ladder.
 //
 // The offer is the real proven fixture:
-//   gives 1_000_000 × 0000…0000 (NIGHT, seeded at 0.01918181/base unit)
+//   gives 1_000_000 × 0000…0000 (NIGHT, seeded at 0.01918181/COIN; NIGHT is
+//     6 decimals — 1,000,000 base units is exactly 1 NIGHT — so the per-BASE-
+//     UNIT price is 0.01918181 / 1e6, and give_usd for this fixture is
+//     numerically the coin price itself: 0.01918181, rounded to 0.02 by the
+//     API's 2-decimal display)
 //   wants 5_000_000 × ffff…ffff (priced per test, by a `manual` row)
-// so give_usd is 19181.81 and the wanted colour's price is the only dial.
+// so give_usd (rounded for display) is 0.02, and the wanted colour's price is
+// the only dial.
 process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
@@ -59,8 +64,11 @@ const { apiRouter } = await import("./api.ts");
 const PORT = 54373;
 const GIVE_COLOR = "0".repeat(64);
 const WANT_COLOR = "f".repeat(64);
-const NIGHT_PRICE = 0.01918181;
-const GIVE_USD = 1_000_000 * NIGHT_PRICE; // 19181.81
+const NIGHT_COIN_PRICE_USD = 0.01918181; // the seeded midnight-3 reference, per COIN
+const NIGHT_DECIMALS = 6; // 1 NIGHT = 10^6 Stars (base units) — known_tokens.decimals
+const NIGHT_PRICE = NIGHT_COIN_PRICE_USD / 10 ** NIGHT_DECIMALS; // per BASE UNIT
+const GIVE_USD = 1_000_000 * NIGHT_PRICE; // 1_000_000 base units == 1 NIGHT, so this is 0.01918181
+const GIVE_USD_DISPLAY = 0.02; // round2() in offer-sponsorship.ts rounds the API's give_usd/want_usd to 2dp
 const FIXTURE_ROOT = "73b35bda8df702a240f2b7605bca3ea4f7bdb4110f5c6d35c58ed512faf7697303";
 
 const blob = readFileSync(
@@ -156,8 +164,8 @@ describe("POST /v1/offers — 422 NOT_SPONSORED (the RED probe's 500-after-forwa
     expect(body.error).toBe("NOT_SPONSORED");
     expect(body.reason).toContain("wants 0.0% below reference");
     expect(body.reason).toContain("needs ≥ 2.5%");
-    expect(body.give_usd).toBe(19181.81);
-    expect(body.want_usd).toBe(19181.81);
+    expect(body.give_usd).toBe(GIVE_USD_DISPLAY);
+    expect(body.want_usd).toBe(GIVE_USD_DISPLAY);
     expect(body.implied_discount).toBe(0);
     expect(body.sponsor_discount).toBe(0.025);
     // The point of a PRE-check: the batcher was never asked, so no fee was
@@ -185,15 +193,16 @@ describe("POST /v1/offers — 422 NOT_SPONSORED (the RED probe's 500-after-forwa
 
   test("the seeded NIGHT asset price is what prices the give leg — no manual row for it", async () => {
     // Nothing in token_prices for 0000…0000; its price comes from
-    // asset_prices via known_tokens.asset_id ('midnight-3'). If that path were
-    // broken the offer would read as unpriced, not as 19181.81.
+    // asset_prices via known_tokens.asset_id ('midnight-3'), divided by
+    // 10^known_tokens.decimals (6). If that path were broken the offer would
+    // read as unpriced, not as GIVE_USD_DISPLAY.
     const rows = await client.query("SELECT * FROM token_prices WHERE token_color = $1", [
       GIVE_COLOR,
     ]);
     expect(rows.rows).toHaveLength(0);
     await priceWanted(wantPriceFor(1.0));
     const { body } = await post();
-    expect(body.give_usd).toBe(19181.81);
+    expect(body.give_usd).toBe(GIVE_USD_DISPLAY);
   });
 
   test("the pre-check writes NO demo price rows — a refused offer leaves no trace", async () => {

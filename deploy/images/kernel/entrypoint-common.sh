@@ -43,6 +43,9 @@ set -euo pipefail
 #     and `parsePositiveBigint` rejects "". Three empty strings therefore count
 #     as "all set" and fail. Unsetting them here is what makes DUST admission
 #     genuinely optional in the deployment.
+#   * PRICE_FEED_MAP — `parsePriceMapEnv` throws on a malformed entry; "" is
+#     not malformed, but listing it here keeps "unset" and "blank" identical
+#     for the one variable an operator is most likely to leave empty.
 #   * COINGECKO_BASE_URL / PRICE_FEED_* — `ENV.getString(x, default)` would
 #     take "" as the value, and an empty base URL turns every request into a
 #     relative path against nothing. COINGECKO_API_KEY is in the list for a
@@ -65,7 +68,8 @@ for _optional_env in \
   PRICE_FEED_INTERVAL_MS \
   PRICE_FEED_REQUEST_SPACING_MS \
   PRICE_FEED_BATCH_SIZE \
-  PRICE_FEED_ASSETS
+  PRICE_FEED_ASSETS \
+  PRICE_FEED_MAP
 do
   if [ -z "${!_optional_env:-}" ]; then unset "${_optional_env}"; fi
 done

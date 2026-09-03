@@ -715,6 +715,40 @@ API-gate and transport codes are deliberately separate from
 `DUPLICATE_MARKERS` (`409`) is marker dedup, below; `VALIDATION` (`400`)
 is a malformed JSON body; and `RATE_LIMITED` (`429`) is the HTTP limiter.
 
+**Fee-sponsorship error `422`**
+
+The offer is well-formed and settleable — it is simply not a trade this
+deployment will pay a Celestia fee to publish. Nothing was forwarded to the
+batcher, so nothing was spent. Re-price the offer and resubmit; `GET /v1/quote`'s
+`suggested_to_amount` is an amount that passes.
+
+```json
+{
+  "error": "NOT_SPONSORED",
+  "reason": "wants 1.0% below reference, sponsorship needs ≥ 2.5% below",
+  "give_usd": 30656.1,
+  "want_usd": 30349.5,
+  "implied_discount": 0.01,
+  "sponsor_discount": 0.025
+}
+```
+
+| Code | Meaning |
+|---|---|
+| `NOT_SPONSORED` | The wanted value is not at least `sponsor_discount` below the given value at reference prices. Body carries `give_usd`, `want_usd`, `implied_discount`, `sponsor_discount` |
+| `UNPRICED_TOKEN` | A leg's token has no market price and `BATCHER_SPONSOR_UNPRICED=reject`. Body carries `unpriced` (the colours) and `sponsor_discount`. **Not emitted under the default `allow`** |
+| `PRICE_UNAVAILABLE` | Forwarded from the batcher: it could not reach this node's `/v1/prices` and is in `enforce`. The node's own pre-check never emits it — it reads the database directly |
+
+All three also arrive as `422` when the **batcher** refuses after the node
+forwarded (a node in `warn` with a batcher in `enforce`, or a stale batcher
+snapshot); `reason` is then the batcher's own message, verbatim. Before this
+existed those surfaced as `500 INTERNAL`, which told the maker "server problem,
+retry unchanged" — the opposite of the truth.
+
+Under the default `BATCHER_SPONSOR_POLICY=warn` the node emits **no 422 at all**:
+it logs what `enforce` would have refused and forwards. See the fee-sponsorship
+section under *Ingestion pipeline* for the full policy table.
+
 ### Dedup is two rules (`DUPLICATE_OFFER` and `DUPLICATE_MARKERS`)
 
 **BREAKING as of 2026-08-18** — a submission that previously succeeded can now
@@ -1333,15 +1367,57 @@ Rejected blobs are additionally **deleted** from `effectstream.primitive_account
 
 What survives is the *fact* of the rejection, aggregated in `offer_rejections` as one row per `(celestia_height, code)` and surfaced on `GET /v1/health/sync` as `recent_rejections`. Aggregation is what makes that table safe to keep: its row count is bounded by heights × reject codes, never by the number of blobs posted — a million junk blobs in one block produce a single row with `count: 1000000`.
 
-Step 5 of the ideal ladder — *reject offers below a minimum value* — now has the
-price oracle it was waiting for: `GET /v1/prices` (above), refreshed daily by the
-`price-feed` service, with the shared rule in `@zswap-da/offer-guard`'s
-`evaluateSponsorship()`. The gate itself — the batcher refusing to pay a Celestia
-fee for an offer priced above market minus the sponsorship discount, and the node's
-matching `422 NOT_SPONSORED` pre-check — is the second half of this work and is not
-in this release yet. MIP-0006 suggests the natural floor is the offer's own
-publication cost; the derived legs are available at that point in the pipeline, so
-the hook slot exists.
+#### Fee sponsorship — implemented, and deliberately *not* part of this ladder
+
+Step 5 of the ideal ladder — *reject offers below a minimum value* — is now
+implemented, as a **fee-sponsorship gate**, in two places:
+
+* **the batcher's `validateInput`**, which is authoritative because it holds the
+  wallet: it refuses to pay a Celestia fee for an offer whose wanted value is not
+  at least the sponsorship discount below the reference price. It has no database,
+  so for each offer it asks this node's `GET /v1/prices?tokens=` for exactly that
+  offer's leg colours, caching each colour for `BATCHER_PRICE_TTL_MS` (default 10
+  minutes). It does **not** mirror the price table (Q-11);
+* **`POST /v1/offers`**, which asks the same question earlier and answers
+  `422 NOT_SPONSORED` with the numbers, so a maker learns it from a readable
+  response instead of an opaque failure.
+
+Both call the same `evaluateSponsorship()` in `@zswap-da/offer-guard`, over the
+same prices, so the `sponsored` flag `GET /v1/quote` shows the maker cannot promise
+something the batcher then refuses.
+
+**It is NOT enforced at STM ingestion, and that is intentional.** The MIP-0006
+namespace is permissionless: anyone can post an offer straight to Celestia at their
+own expense, and this node still indexes it. The gate decides who gets a *free ride*
+on the batcher's wallet, not what is a valid offer. So the ladder above is unchanged
+— an unsponsored offer that reaches the namespace is ingested exactly like any
+other, and a UI must not assume every indexed offer was sponsored.
+
+Policy, read from the same variable names by both processes so they cannot drift:
+
+| Variable | Values | Default | Effect |
+|---|---|---|---|
+| `BATCHER_SPONSOR_POLICY` | `enforce` \| `warn` \| `off` | `warn` | `enforce` refuses; `warn` logs what `enforce` would have refused and lets it through; `off` skips the check entirely |
+| `BATCHER_SPONSOR_UNPRICED` | `allow` \| `reject` | `allow` | what to do when a leg's token has no market price (every test token). `allow` keeps them flowing |
+| `SPONSOR_DISCOUNT_BPS` | `0`–`9999` | `250` | the threshold. On the batcher this is only a bootstrap — once the node answers, the node's `sponsor_discount` wins |
+| `BATCHER_NODE_API_URL` | URL | `http://127.0.0.1:9999` | where the batcher asks `/v1/prices?tokens=` (compose: `http://kernel:9999`) |
+| `BATCHER_PRICE_TTL_MS` | ms | `600000` | how long a per-colour answer counts as current before it is asked for again |
+| `BATCHER_PRICE_MAX_AGE_MS` | ms | `172800000` | how old an answer may be and still be served when a re-ask FAILS. Past it the colour is unavailable. Must be ≥ the TTL |
+
+An invalid value for any of these **throws at startup** rather than falling back to
+a default: an operator who typed `enfroce` wants offers refused, and silently
+sponsoring everything is precisely what they were preventing.
+
+A batcher that cannot reach the node behaves per `BATCHER_SPONSOR_POLICY`:
+`enforce` answers `PRICE_UNAVAILABLE`, `warn` sponsors and logs once a minute.
+Note the difference from an *unpriced* leg: "the node answered and has no market
+price for this colour" is `BATCHER_SPONSOR_UNPRICED`'s question, while "I could
+not ask" is the policy's. A colour with a cached answer younger than
+`BATCHER_PRICE_MAX_AGE_MS` is still served during an outage, so a brief node
+restart does not make every offer unavailable.
+
+(`BATCHER_PRICE_REFRESH_MS` configured the old ten-minute table poll and no longer
+does anything.)
 
 ### Manual submission (curl)
 

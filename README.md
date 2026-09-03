@@ -146,6 +146,35 @@ opt-in compose service in `deploy/`.
 | `SPONSOR_DISCOUNT_BPS` | `250` | How far below reference an offer must be priced to earn fee sponsorship. Published in `/v1/prices.sponsor_discount` |
 | `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PW` / `DB_NAME` | `127.0.0.1` / `5432` / `postgres` / `postgres` / `postgres` | Where the feed writes |
 
+### Fee sponsorship
+
+Reference prices exist so the batcher can decide **which offers are worth a
+Celestia fee**. The rule (`evaluateSponsorship` in `@zswap-da/offer-guard`) is the
+one `GET /v1/quote` already shows the maker as `sponsored`, and it is applied in
+two places: the batcher's `validateInput` (authoritative — it holds the wallet,
+and anyone can POST to its `/send-input` directly) and `POST /v1/offers`, which
+answers `422 NOT_SPONSORED` with the numbers before forwarding.
+
+It is **not** applied at STM ingestion: the MIP-0006 namespace is permissionless,
+so an offer posted straight to Celestia is still indexed. The gate decides who
+rides the batcher's wallet for free, not what is a valid offer.
+
+The node and the batcher read the **same variable names**, so they cannot drift.
+An invalid value throws at startup rather than defaulting.
+
+| Variable | Default | Read by | Meaning |
+|---|---|---|---|
+| `BATCHER_SPONSOR_POLICY` | `warn` | node + batcher | `enforce` refuses; `warn` logs what `enforce` would have refused and lets it through; `off` skips the check |
+| `BATCHER_SPONSOR_UNPRICED` | `allow` | node + batcher | What to do when a leg's token has no market price (every test token). `allow` keeps them flowing |
+| `BATCHER_NODE_API_URL` | `http://127.0.0.1:9999` | batcher | Where it asks `/v1/prices?tokens=` for each offer's leg colours (compose: `http://kernel:9999`) — it has no database |
+| `BATCHER_PRICE_TTL_MS` | `600000` | batcher | How long a per-colour answer counts as current |
+| `BATCHER_PRICE_MAX_AGE_MS` | `172800000` | batcher | How old an answer may be and still be used when a re-ask fails. Must be ≥ the TTL |
+| `SPONSOR_DISCOUNT_BPS` | `250` | node + batcher | The threshold. On the batcher a bootstrap only: once the node answers, the node's `sponsor_discount` wins |
+
+Roll out with the defaults (`warn` + `allow`), read a day of
+`would refuse (policy=warn) — NOT_SPONSORED: …` lines from both processes, then
+switch `BATCHER_SPONSOR_POLICY=enforce`.
+
 ## Running the COW solver
 
 The solver is a **component of its own**, not part of the backend command. It is

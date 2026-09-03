@@ -1,9 +1,45 @@
 import path from "node:path";
-import { MIP6_NAMESPACE_ID_SUFFIX_HEX } from "@zswap-da/offer-guard";
+import {
+  MIP6_NAMESPACE_ID_SUFFIX_HEX,
+  parseSponsorPolicy,
+  parseUnpricedPolicy,
+  type SponsorPolicy,
+  type UnpricedPolicy,
+} from "@zswap-da/offer-guard";
 import { fileURLToPath } from "node:url";
 
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { ENV } from "@effectstream/utils/node-env";
+
+// The two policy types and their parsing live in @zswap-da/offer-guard, which
+// the node also reads: both processes are configured by the SAME variable
+// names (Q-6), so they must not be able to disagree about what a value means.
+//
+//   policy   enforce — refuse; no fee is paid, and the offer never queues.
+//            warn    — sponsor it, but log what enforce WOULD have refused.
+//                      The rollout default (D7).
+//            off     — do not evaluate at all: no node poll, no log noise.
+//   unpriced allow   — sponsor tokens with no market price (the default: test
+//                      tokens must keep flowing, D7).
+//            reject  — refuse them. Only sensible where every tradeable token
+//                      is mapped to a reference asset.
+export type { SponsorPolicy, UnpricedPolicy };
+
+export interface SponsorshipConfig {
+  /** Node API base URL — the batcher asks `${nodeApiUrl}/v1/prices?tokens=`. */
+  nodeApiUrl: string;
+  /** How long a per-colour answer counts as current before it is re-asked. */
+  priceTtlMs: number;
+  /**
+   * How old an answer may be and still be served when a re-ask FAILS. Past it
+   * the colour is unavailable and the policy decides.
+   */
+  priceMaxAgeMs: number;
+  policy: SponsorPolicy;
+  unpriced: UnpricedPolicy;
+  /** Bootstrap threshold, used ONLY until the node has answered once. */
+  fallbackDiscountBps: number;
+}
 
 export interface BatcherConfig {
   port: number;
@@ -38,6 +74,7 @@ export interface BatcherConfig {
     node: string;
     proofServer: string;
   };
+  sponsorship: SponsorshipConfig;
   celestia: {
     rpcUrl: string;
     namespace: string;
@@ -73,6 +110,71 @@ const optionalNumber = (key: string): number | undefined => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
+/**
+ * Every sponsorship knob is validated HERE, at startup, and a bad value throws
+ * before the batcher accepts its first input.
+ *
+ * A typo in `BATCHER_SPONSOR_POLICY` must not silently fall back to a default:
+ * an operator who typed `enfroce` intends to refuse unsponsored offers, and
+ * quietly sponsoring everything instead is the one outcome they were trying to
+ * prevent — with no signal anywhere that it happened.
+ */
+export function loadSponsorshipConfig(): SponsorshipConfig {
+  const positiveMs = (key: string, fallback: number): number => {
+    const value = ENV.getNumber(key, fallback);
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`${key} must be a positive number of milliseconds, got "${ENV.getString(key, "")}"`);
+    }
+    return value;
+  };
+
+  const nodeApiUrl = ENV.getString("BATCHER_NODE_API_URL", "http://127.0.0.1:9999").trim();
+  // Checked early: the failure would otherwise be one `fetch` rejection every
+  // refresh, forever. The protocol check is not pedantry — `new URL` happily
+  // accepts "kernel:9999" (scheme "kernel:"), which is exactly the typo a
+  // compose file invites, and `fetch` would then reject on every poll.
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(nodeApiUrl);
+  } catch {
+    throw new Error(`BATCHER_NODE_API_URL must be an absolute http(s) URL, got "${nodeApiUrl}"`);
+  }
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new Error(`BATCHER_NODE_API_URL must be an absolute http(s) URL, got "${nodeApiUrl}"`);
+  }
+
+  const priceTtlMs = positiveMs("BATCHER_PRICE_TTL_MS", 600_000); // 10 min
+  const priceMaxAgeMs = positiveMs("BATCHER_PRICE_MAX_AGE_MS", 172_800_000); // 48 h
+  // A max age below the TTL would mean "re-ask after 10 minutes, but refuse to
+  // serve anything older than 5" — every failed re-ask would then make a colour
+  // unavailable even though a perfectly recent answer is in hand. Reject it at
+  // startup rather than discovering it during a node outage.
+  if (priceMaxAgeMs < priceTtlMs) {
+    throw new Error(
+      `BATCHER_PRICE_MAX_AGE_MS (${priceMaxAgeMs}) must be >= BATCHER_PRICE_TTL_MS (${priceTtlMs}): ` +
+        "max age is how long a stale answer may still be used when a refresh fails",
+    );
+  }
+
+  const fallbackDiscountBps = ENV.getNumber("SPONSOR_DISCOUNT_BPS", 250);
+  if (!Number.isInteger(fallbackDiscountBps) || fallbackDiscountBps < 0 || fallbackDiscountBps >= 10_000) {
+    throw new Error(
+      `SPONSOR_DISCOUNT_BPS must be an integer in [0, 10000), got "${ENV.getString("SPONSOR_DISCOUNT_BPS", "")}"`,
+    );
+  }
+
+  return {
+    nodeApiUrl,
+    // Per-colour TTL, not a poll period: prices are looked up when an offer
+    // needs them (Q-11). BATCHER_PRICE_REFRESH_MS is gone with the poll.
+    priceTtlMs,
+    priceMaxAgeMs,
+    policy: parseSponsorPolicy(ENV.getString("BATCHER_SPONSOR_POLICY", "")),
+    unpriced: parseUnpricedPolicy(ENV.getString("BATCHER_SPONSOR_UNPRICED", "")),
+    fallbackDiscountBps,
+  };
+}
+
 export function loadBatcherConfig(): BatcherConfig {
   const network = ENV.getString("CELESTIA_NETWORK", "devnet") as
     | "devnet"
@@ -96,6 +198,7 @@ export function loadBatcherConfig(): BatcherConfig {
       return raw ? BigInt(raw) : undefined;
     })(),
     maxInputChars: optionalNumber("BATCHER_MAX_INPUT_CHARS"),
+    sponsorship: loadSponsorshipConfig(),
     midnight: {
       id: midnightNetworkConfig.id,
       indexer: midnightNetworkConfig.indexer,

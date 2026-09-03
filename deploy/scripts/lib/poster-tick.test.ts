@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { type Journal, openJournal } from "./poster-journal.ts";
+import { makeGiveSizer } from "./poster-size.ts";
 import { NotSponsoredError, type QuoteResponse, type SizedWant } from "./poster-quote.ts";
 import type { TickOutcome } from "./poster-scheduler.ts";
 import {
@@ -31,6 +32,7 @@ import {
   type LogFields,
   type MintedCoinRef,
   type PostResult,
+  type SizeWantArgs,
   type SpendableCoin,
   type TickApi,
   type TickBuilder,
@@ -798,5 +800,145 @@ describe("outcome shape", () => {
     const outcome: TickOutcome = await runTick(h.deps, 1);
     expect(["mint", "reoffer", "degraded", "idle"]).toContain(outcome.mode);
     expect(typeof outcome.ok).toBe("boolean");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Randomised give size (00027 FR-002, AC-4, SC-003)
+// ---------------------------------------------------------------------------
+
+describe("randomised give size", () => {
+  const RANGE = { minBase: 100_000n, maxBase: 10_000_000n };
+
+  /** A minter whose coins have DISTINCT nonces, so two mints in one test do not
+   *  collide in the journal the way the shared fixture's fixed nonce would. */
+  function distinctMinter(h: Harness): TickMinter {
+    let i = 0;
+    return {
+      freshNonce: () => BigInt((i += 1)),
+      mint: async (name, amount, nonce) => {
+        h.calls.mint.push({ name, amount, nonce });
+        const coin = { nonce: hex(`${i}f`), type: GIVE, value: amount };
+        const minted: MintedCoinRef = {
+          coin,
+          nullifier: hex(`${i}e`),
+          txHash: hex("11"),
+          mintNonce: nonce,
+        };
+        h.free.set(coin.nonce, { ...coin, nullifier: minted.nullifier });
+        return minted;
+      },
+    };
+  }
+
+  /** Wrap the fake kernel so the `sizeWant` arguments can be inspected. */
+  function recordingApi(h: Harness, into: SizeWantArgs[]): TickApi {
+    return {
+      ...h.deps.api,
+      sizeWant: async (args) => {
+        into.push(args);
+        h.calls.quote += 1;
+        return h.quoteResult;
+      },
+    };
+  }
+
+  test("without a range nothing changes: every mint asks for GIVE_AMOUNT (SC-003)", async () => {
+    const h = harness();
+    expect(h.deps.drawGiveAmount).toBeUndefined();
+    await mintCoin(h.deps, { tick: 1 });
+    expect(h.calls.mint.map((m) => m.amount)).toEqual([1000n]);
+  });
+
+  test("with a seeded range each FRESH mint draws its own size", async () => {
+    const h = harness();
+    const sizer = makeGiveSizer(RANGE, "tick-seed");
+    const deps: TickDeps = {
+      ...h.deps,
+      minter: distinctMinter(h),
+      drawGiveAmount: () => sizer.draw(),
+    };
+
+    const first = await mintCoin(deps, { tick: 1 });
+    const second = await mintCoin(deps, { tick: 2 });
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    const amounts = h.calls.mint.map((m) => m.amount);
+    expect(amounts).toHaveLength(2);
+    expect(amounts[0]).not.toBe(amounts[1]);
+    for (const amount of amounts) {
+      expect(amount).toBeGreaterThanOrEqual(RANGE.minBase);
+      expect(amount).toBeLessThanOrEqual(RANGE.maxBase);
+    }
+    // The coin the wallet ends up holding IS the drawn size, so the journal
+    // records the drawn value per coin (FR-003) with no extra bookkeeping.
+    expect(first.coin?.value).toBe(amounts[0]!);
+    expect(second.coin?.value).toBe(amounts[1]!);
+    // …and the mint log line carries it, so a live run can be audited.
+    const mintLogs = h.logs.filter((l) => l.phase === "mint" && l["give"] !== undefined);
+    expect(mintLogs.map((l) => l["give"])).toEqual(amounts);
+  });
+
+  test("the same seed replays the same sizes across processes", async () => {
+    const run = async (): Promise<bigint[]> => {
+      const h = harness();
+      const sizer = makeGiveSizer(RANGE, "replay");
+      const deps: TickDeps = {
+        ...h.deps,
+        minter: distinctMinter(h),
+        drawGiveAmount: () => sizer.draw(),
+      };
+      await mintCoin(deps, { tick: 1 });
+      await mintCoin(deps, { tick: 2 });
+      await mintCoin(deps, { tick: 3 });
+      return h.calls.mint.map((m) => m.amount);
+    };
+    expect(await run()).toEqual(await run());
+  });
+
+  test("each want leg is quoted for THAT tick's give (AC-3)", async () => {
+    const h = harness();
+    const sizer = makeGiveSizer(RANGE, "quote-per-give");
+    const quotes: SizeWantArgs[] = [];
+    const deps: TickDeps = {
+      ...h.deps,
+      minter: distinctMinter(h),
+      api: recordingApi(h, quotes),
+      drawGiveAmount: () => sizer.draw(),
+    };
+
+    const first = await runTick(deps, 1);
+    expect(first.mode).toBe("mint");
+    // The second tick would re-offer the first coin (its offer is not live in
+    // the fake kernel), so mint again explicitly and offer that coin.
+    const second = await mintCoin(deps, { tick: 2 });
+    await offerCoin(deps, second.coin!, { tick: 2, mode: "mint" });
+
+    const amounts = h.calls.mint.map((m) => m.amount);
+    expect(quotes.map((q) => q.giveValue)).toEqual(amounts);
+    expect(amounts[0]).not.toBe(amounts[1]);
+  });
+
+  test("a re-offer never draws: the released coin keeps its own value (AC-4)", async () => {
+    const h = harness();
+    const quotes: SizeWantArgs[] = [];
+    let draws = 0;
+    const deps: TickDeps = {
+      ...h.deps,
+      api: recordingApi(h, quotes),
+      drawGiveAmount: () => {
+        draws += 1;
+        return 7_777_777n;
+      },
+    };
+    seedReleasedCoin(h, coinA);
+
+    const outcome = await runTick(deps, 1);
+    expect(outcome.mode).toBe("reoffer");
+    expect(outcome.ok).toBe(true);
+    expect(draws).toBe(0);
+    expect(h.calls.mint).toHaveLength(0);
+    expect(quotes.map((q) => q.giveValue)).toEqual([coinA.value]);
   });
 });

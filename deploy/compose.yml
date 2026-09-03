@@ -538,6 +538,14 @@ services:
       # ones so the container's environment never claims otherwise.
       GIVE_TOKEN: ${OFFER_POSTER_GIVE_TOKEN:-}
       GIVE_AMOUNT: ${OFFER_POSTER_GIVE_AMOUNT:-}
+      # A RANGE instead of the fixed amount above (00027): whole coins, at most
+      # 6 decimals, drawn log-uniformly per FRESH mint so the book carries a
+      # spread of sizes. Both ends or neither; mutually exclusive with
+      # GIVE_AMOUNT (the poster exits 78 naming both). GIVE_SIZE_SEED makes the
+      # sequence reproducible and is not a secret.
+      GIVE_MIN: ${OFFER_POSTER_GIVE_MIN:-}
+      GIVE_MAX: ${OFFER_POSTER_GIVE_MAX:-}
+      GIVE_SIZE_SEED: ${OFFER_POSTER_SIZE_SEED:-}
       WANT_TOKEN: ${OFFER_POSTER_WANT_TOKEN:-}
       # Blank = the want leg is sized from GET /v1/quote every tick, which is
       # what keeps the offer sponsorable. Setting it FORCES an amount and

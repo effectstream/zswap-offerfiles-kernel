@@ -62,6 +62,8 @@ import {
   type PosterConfig,
 } from "./lib/poster-config.ts";
 import { type Journal, openJournal, JournalError } from "./lib/poster-journal.ts";
+import { type GiveSizer, makeGiveSizer } from "./lib/poster-size.ts";
+import { baseUnitsToCoins } from "../../packages/solver-core/amount.ts";
 import { NotSponsoredError, quoteSnapshot, sizeWant, type SizedWant } from "./lib/poster-quote.ts";
 import { PosterScheduler, type SchedulerStats, type TickOutcome } from "./lib/poster-scheduler.ts";
 import {
@@ -414,6 +416,14 @@ interface Started {
   dustBalance: bigint;
   firstQuote: SizedWant | null;
   registry: { give: unknown; want: unknown };
+  /** `null` unless GIVE_MIN/GIVE_MAX are configured (00027). */
+  sizer: GiveSizer | null;
+}
+
+/** `100000` -> `0.1 WBTC (100000 base units)`. One spelling for every log line
+ *  and report that shows a give size, so an operator never has to count zeros. */
+function describeAmount(base: bigint, token: string): string {
+  return `${baseUnitsToCoins(base)} ${token} (${base} base units)`;
 }
 
 async function startup(cfg: PosterConfig): Promise<Started> {
@@ -422,7 +432,19 @@ async function startup(cfg: PosterConfig): Promise<Started> {
   info(`kernel      : ${api.base}`);
   info(`network     : ${cfg.networkId} (indexer ${cfg.networkUrls.indexer})`);
   info(`contract    : ${cfg.contractAddress} (from ${cfg.contractAddressSource})`);
-  info(`give        : ${cfg.giveAmount} of ${cfg.giveToken} = ${cfg.giveColour}`);
+  // 00027: one sizer per process, so a seeded run replays the same sequence of
+  // sizes across every tick rather than restarting it each time.
+  const sizer =
+    cfg.giveRange === undefined ? null : makeGiveSizer(cfg.giveRange, cfg.giveSizeSeed);
+  if (sizer === null) {
+    info(`give        : ${cfg.giveAmount} of ${cfg.giveToken} = ${cfg.giveColour}`);
+  } else {
+    info(
+      `give        : ${describeAmount(sizer.range.minBase, cfg.giveToken)} … ` +
+        `${describeAmount(sizer.range.maxBase, cfg.giveToken)}, drawn log-uniformly per fresh mint ` +
+        `(seed ${cfg.giveSizeSeed ?? "<random>"}) = ${cfg.giveColour}`,
+    );
+  }
   info(`want        : ${cfg.wantToken} = ${cfg.wantColour}${
     cfg.forcedWantAmount === undefined ? " (amount from the kernel quote)" : ` (forced ${cfg.forcedWantAmount})`
   }`);
@@ -553,6 +575,9 @@ async function startup(cfg: PosterConfig): Promise<Started> {
     api: makeApi(api),
     clock: realClock,
     log,
+    // Absent when no range is configured, which is what keeps the fixed-size
+    // path byte-identical to `main` (SC-003).
+    ...(sizer === null ? {} : { drawGiveAmount: () => sizer.draw() }),
   };
 
   // ── first reconcile + first quote, so the log shows the starting picture ─
@@ -565,16 +590,20 @@ async function startup(cfg: PosterConfig): Promise<Started> {
       `${reconciled.candidates.length} re-offer candidate(s)`,
   );
 
+  // With a range the first quote is priced for the FIRST DRAW, not for a size
+  // no tick will ever post; `sizer.last()` then carries that number into the
+  // DRY_RUN report and /health until the first mint replaces it.
+  const firstGiveAmount = sizer === null ? cfg.giveAmount : sizer.draw();
   let firstQuote: SizedWant | null = null;
   try {
     firstQuote = await deps.api.sizeWant({
       giveColour: cfg.giveColour,
       wantColour: cfg.wantColour,
-      giveValue: cfg.giveAmount,
+      giveValue: firstGiveAmount,
       forcedWantAmount: cfg.forcedWantAmount,
     });
     info(
-      `first quote : ${cfg.giveAmount} ${cfg.giveToken} -> ${firstQuote.wantAmount} ${cfg.wantToken} ` +
+      `first quote : ${firstGiveAmount} ${cfg.giveToken} -> ${firstQuote.wantAmount} ${cfg.wantToken} ` +
         `(sponsored=${firstQuote.sponsored} rate=${firstQuote.marketRate} ` +
         `sources=${firstQuote.fromSource}/${firstQuote.toSource})`,
     );
@@ -587,7 +616,7 @@ async function startup(cfg: PosterConfig): Promise<Started> {
     }
   }
 
-  return { cfg, walletResult, api, journal, deps, shieldedAddress, dustBalance, firstQuote, registry };
+  return { cfg, walletResult, api, journal, deps, shieldedAddress, dustBalance, firstQuote, registry, sizer };
 }
 
 // ---------------------------------------------------------------------------
@@ -657,7 +686,26 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
       shieldedAddress: started.shieldedAddress,
       unshieldedAddress: started.walletResult.unshieldedAddress,
       dustBalance: started.dustBalance.toString(),
-      give: { token: cfg.giveToken, colour: cfg.giveColour, amount: cfg.giveAmount.toString() },
+      give: {
+        token: cfg.giveToken,
+        colour: cfg.giveColour,
+        // With a range, `amount` is the size the quote below was priced for —
+        // the first draw — and `range`/`lastGiveAmount` say where it came from.
+        amount: (started.sizer?.last() ?? cfg.giveAmount).toString(),
+        ...(started.sizer === null
+          ? {}
+          : {
+              range: {
+                min: baseUnitsToCoins(started.sizer.range.minBase),
+                max: baseUnitsToCoins(started.sizer.range.maxBase),
+                minBase: started.sizer.range.minBase.toString(),
+                maxBase: started.sizer.range.maxBase.toString(),
+                seed: cfg.giveSizeSeed ?? null,
+                distribution: "log-uniform",
+              },
+              lastGiveAmount: started.sizer.last()?.toString() ?? null,
+            }),
+      },
       want: { token: cfg.wantToken, colour: cfg.wantColour },
       registry: started.registry,
       quote:
@@ -718,6 +766,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     now: Date.now(),
     shuttingDown,
     ready,
+    ...(started.sizer === null
+      ? {}
+      : { giveRange: started.sizer.range, lastGiveAmount: started.sizer.last() }),
   });
 
   let health: HealthServer | null = null;

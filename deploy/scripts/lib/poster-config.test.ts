@@ -388,6 +388,106 @@ describe("knobs and defaults (FR-014)", () => {
   });
 });
 
+describe("give size range (00027 FR-001, AC-2, AC-5)", () => {
+  test("unset means unset: no range, and the fixed amount is untouched (FR-005/SC-003)", async () => {
+    const cfg = await parse();
+    expect(cfg.giveRange).toBeUndefined();
+    expect(cfg.giveSizeSeed).toBeUndefined();
+    expect(cfg.giveAmount).toBe(1_000_000n);
+  });
+
+  test("GIVE_MIN/GIVE_MAX are WHOLE COINS at 6 decimals", async () => {
+    const cfg = await parse({ GIVE_AMOUNT: "", GIVE_MIN: "0.1", GIVE_MAX: "10" });
+    expect(cfg.giveRange).toEqual({ minBase: 100_000n, maxBase: 10_000_000n });
+    expect(cfg.giveRange?.minBase).toBe(coinsToBaseUnits("0.1", DEFAULT_TOKEN_DECIMALS));
+    expect(cfg.giveRange?.maxBase).toBe(coinsToBaseUnits("10", DEFAULT_TOKEN_DECIMALS));
+  });
+
+  test("a range of one value is legal and degenerates to a fixed size", async () => {
+    const cfg = await parse({ GIVE_MIN: "1", GIVE_MAX: "1" });
+    expect(cfg.giveRange).toEqual({ minBase: 1_000_000n, maxBase: 1_000_000n });
+  });
+
+  test("blank bounds are absent, not zero", async () => {
+    const cfg = await parse({ GIVE_MIN: "", GIVE_MAX: "   ", GIVE_SIZE_SEED: "" });
+    expect(cfg.giveRange).toBeUndefined();
+    expect(cfg.giveSizeSeed).toBeUndefined();
+  });
+
+  test("GIVE_SIZE_SEED is carried through when set", async () => {
+    expect((await parse({ GIVE_MIN: "0.1", GIVE_MAX: "10", GIVE_SIZE_SEED: "abc" })).giveSizeSeed).toBe("abc");
+  });
+
+  test("GIVE_AMOUNT and a range together are refused, naming both spellings (AC-2)", async () => {
+    const err = await parse({ GIVE_AMOUNT: "1000000", GIVE_MIN: "0.1", GIVE_MAX: "10" }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as ConfigError).code).toBe("CONFLICT");
+    expect((err as ConfigError).message).toContain("GIVE_AMOUNT");
+    expect((err as ConfigError).message).toContain("GIVE_MIN");
+    expect((err as ConfigError).message).toContain("OFFER_POSTER_GIVE_AMOUNT");
+  });
+
+  test("a BLANK GIVE_AMOUNT does not conflict — blank is not set", async () => {
+    const cfg = await parse({ GIVE_AMOUNT: "  ", GIVE_MIN: "0.5", GIVE_MAX: "2" });
+    expect(cfg.giveRange).toEqual({ minBase: 500_000n, maxBase: 2_000_000n });
+  });
+
+  test("half a range is refused, naming the missing end", async () => {
+    await expect(parse({ GIVE_MIN: "0.1" })).rejects.toMatchObject({
+      code: "MISSING",
+      variable: "GIVE_MAX",
+    });
+    await expect(parse({ GIVE_MAX: "10" })).rejects.toMatchObject({
+      code: "MISSING",
+      variable: "GIVE_MIN",
+    });
+  });
+
+  test("min > max, min <= 0, 7 fraction digits and non-numbers all fail, naming the variable (AC-5)", async () => {
+    await expect(parse({ GIVE_MIN: "10", GIVE_MAX: "0.1" })).rejects.toMatchObject({
+      code: "MALFORMED",
+      variable: "GIVE_MAX",
+    });
+    await expect(parse({ GIVE_MIN: "0", GIVE_MAX: "10" })).rejects.toMatchObject({
+      code: "MALFORMED",
+      variable: "GIVE_MIN",
+    });
+    // Spec edge case 1: a bound finer than the 6-decimal grid, so a range
+    // narrower than one base unit can never be expressed in the first place.
+    await expect(parse({ GIVE_MIN: "0.1000001", GIVE_MAX: "0.1000002" })).rejects.toMatchObject({
+      code: "MALFORMED",
+      variable: "GIVE_MIN",
+    });
+    await expect(parse({ GIVE_MIN: "0.1", GIVE_MAX: "ten" })).rejects.toMatchObject({
+      code: "MALFORMED",
+      variable: "GIVE_MAX",
+    });
+    await expect(parse({ GIVE_MIN: "-1", GIVE_MAX: "10" })).rejects.toMatchObject({
+      code: "MALFORMED",
+      variable: "GIVE_MIN",
+    });
+    await expect(parse({ GIVE_MIN: "1e3", GIVE_MAX: "10" })).rejects.toMatchObject({
+      code: "MALFORMED",
+      variable: "GIVE_MIN",
+    });
+  });
+
+  test("a GIVE_MAX beyond the exactly-drawable ceiling is refused, not silently rounded", async () => {
+    await expect(parse({ GIVE_MIN: "1", GIVE_MAX: "10000000000" })).rejects.toMatchObject({
+      code: "MALFORMED",
+      variable: "GIVE_MAX",
+    });
+  });
+
+  test("the range reaches the dump as base units, and the seed is not treated as a secret", async () => {
+    const dump = JSON.parse(configDump(await parse({ GIVE_MIN: "0.1", GIVE_MAX: "10", GIVE_SIZE_SEED: "s1" })));
+    expect(dump.giveRange).toEqual({ minBase: "100000", maxBase: "10000000" });
+    expect(dump.giveSizeSeed).toBe("s1");
+  });
+});
+
 describe("redaction (FR-015)", () => {
   test("redactConfig replaces the seed and keeps everything else", async () => {
     const cfg = await parse();

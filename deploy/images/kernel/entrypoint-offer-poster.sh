@@ -75,6 +75,9 @@ fi
 for _poster_env in \
   GIVE_TOKEN \
   GIVE_AMOUNT \
+  GIVE_MIN \
+  GIVE_MAX \
+  GIVE_SIZE_SEED \
   WANT_TOKEN \
   WANT_AMOUNT \
   POST_INTERVAL_MS \
@@ -119,5 +122,12 @@ mkdir -p "${POSTER_JOURNAL_DIR}"
 cd "${REPO_ROOT}"
 log "starting the offer poster (deploy/scripts/offer-poster.ts)"
 log "  kernel=${ZSWAP_API} network=${MIDNIGHT_NETWORK_ID} journal=${POSTER_JOURNAL_FILE:-/var/lib/offer-poster/journal.json}"
-log "  give=${GIVE_TOKEN:-WBTC}/${GIVE_AMOUNT:-1000000} want=${WANT_TOKEN:-WETH}/${WANT_AMOUNT:-<quoted>} interval=${POST_INTERVAL_MS:-60000}ms"
+if [ -n "${GIVE_MIN:-}" ] || [ -n "${GIVE_MAX:-}" ]; then
+  # A range: the size is drawn per fresh mint, so there is no single number to
+  # print here. The poster's own banner prints the resolved base units.
+  log "  give=${GIVE_TOKEN:-WBTC}/${GIVE_MIN:-<unset>}..${GIVE_MAX:-<unset>} coins (log-uniform per mint, seed=${GIVE_SIZE_SEED:-<random>})"
+else
+  log "  give=${GIVE_TOKEN:-WBTC}/${GIVE_AMOUNT:-1000000}"
+fi
+log "  want=${WANT_TOKEN:-WETH}/${WANT_AMOUNT:-<quoted>} interval=${POST_INTERVAL_MS:-60000}ms"
 exec bun run deploy/scripts/offer-poster.ts

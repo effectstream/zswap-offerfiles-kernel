@@ -39,6 +39,13 @@ export interface HealthInputs {
   /** `true` once startup finished; a poster still syncing its wallet reports
    *  `starting` rather than pretending to be healthy. */
   ready: boolean;
+  /** The configured give-size range in BASE UNITS, when the poster draws its
+   *  size per mint (00027 FR-003). `undefined`/absent = the fixed `GIVE_AMOUNT`
+   *  is in force, and `/health` looks exactly as it did before 00027. */
+  giveRange?: { minBase: bigint; maxBase: bigint } | undefined;
+  /** The size the poster last asked the faucet for, base units — the answer to
+   *  "what is it posting right now?". `null` before the first draw. */
+  lastGiveAmount?: bigint | null | undefined;
 }
 
 export interface HealthAnswer {
@@ -87,6 +94,18 @@ export function healthSnapshot(input: HealthInputs): HealthAnswer {
     p95TickMs: stats.p95TickMs,
     journal: input.journalSummary,
   };
+  // Added ONLY when a range is configured, so a fixed-size poster's /health is
+  // byte-identical to what it answered before 00027 (SC-003).
+  if (input.giveRange !== undefined) {
+    body["giveRange"] = {
+      minBase: input.giveRange.minBase.toString(),
+      maxBase: input.giveRange.maxBase.toString(),
+    };
+    body["lastGiveAmount"] =
+      input.lastGiveAmount === undefined || input.lastGiveAmount === null
+        ? null
+        : input.lastGiveAmount.toString();
+  }
   return { status: unhealthy ? 503 : 200, body };
 }
 
@@ -115,6 +134,18 @@ export function renderMetrics(input: HealthInputs): string {
   metric("free_coins", input.freeCoins, "Spendable give-colour coins in the wallet.", "gauge");
   metric("candidates", input.candidates, "Journaled coins eligible for re-offer.", "gauge");
   metric("ready", input.ready ? 1 : 0, "1 once startup completed.", "gauge");
+  if (input.giveRange !== undefined) {
+    // Base units, printed unrounded for the same reason DUST is below.
+    lines.push("# HELP offer_poster_last_give_amount Size of the last coin minted, base units.");
+    lines.push("# TYPE offer_poster_last_give_amount gauge");
+    lines.push(
+      `offer_poster_last_give_amount ${
+        input.lastGiveAmount === undefined || input.lastGiveAmount === null
+          ? "NaN"
+          : input.lastGiveAmount.toString()
+      }`,
+    );
+  }
   metric(
     "up",
     healthSnapshot(input).status === 200 ? 1 : 0,

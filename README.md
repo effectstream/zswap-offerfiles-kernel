@@ -292,7 +292,7 @@ run the page against fixture data with no stack at all.
 
 ### What the solver supports (and what it does not)
 
-- **Midnight 1.x / ledger-v8 only**, single-leg **shielded** offers with two
+- **Midnight 2.x / ledger-v9 only**, single-leg **shielded** offers with two
   distinct token colors and positive amounts, at most **8 makers** per job, plus
   an optional shielded residual paid from solver inventory. Unshielded legs,
   mixed value layers, multi-leg baskets and Midnight 2.x are out of scope and

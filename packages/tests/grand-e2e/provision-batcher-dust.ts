@@ -85,7 +85,7 @@ async function main(): Promise<void> {
 
     // Decode the Bech32m OBJECT (not its string form) — same call shape as
     // unshieldedAddressObj() in packages/tests/lib/wallet.ts.
-    const { UnshieldedAddress } = await import("@midnight-ntwrk/wallet-sdk-address-format");
+    const { UnshieldedAddress } = await import("@midnightntwrk/wallet-sdk-address-format");
     const receiver = UnshieldedAddress.codec.decode(net.id as any, targetBech32 as any);
 
     // Chunked: one output per UTXO, ≤12 per tx (the node rejects large
@@ -107,7 +107,7 @@ async function main(): Promise<void> {
             { ttl: new Date(Date.now() + 30 * 60_000), payFees: true },
           );
           const signed = await (genesis.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-            genesis.unshieldedKeystore.signData(p),
+            genesis.unshieldedKeystore.signDataAsync(p),
           );
           const finalized = await genesis.wallet.finalizeRecipe(signed);
           await genesis.wallet.submitTransaction(finalized);

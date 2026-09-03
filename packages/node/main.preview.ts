@@ -1,6 +1,6 @@
-import "@midnight-ntwrk/onchain-runtime-v3";
+import "@midnightntwrk/onchain-runtime-v4";
 
-import { ZswapChainState } from "@midnight-ntwrk/ledger-v8";
+import { ZswapChainState } from "@midnightntwrk/ledger-v9";
 
 const origTryApply = ZswapChainState.prototype.tryApply;
 ZswapChainState.prototype.tryApply = function (...args) {

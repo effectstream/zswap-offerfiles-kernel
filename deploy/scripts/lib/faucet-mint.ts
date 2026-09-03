@@ -22,8 +22,8 @@
 // package.json — `deploy/` is not a workspace member, so nothing else resolves
 // (see `maker-offer.ts`'s header and P0 note 3 of the plan).
 
-import { coinNullifier, decodeShieldedCoinInfo, rawTokenType } from "@midnight-ntwrk/ledger-v8";
-import type { CoinSecretKey, ShieldedCoinInfo } from "@midnight-ntwrk/ledger-v8";
+import { coinNullifier, decodeShieldedCoinInfo, rawTokenType } from "@midnightntwrk/ledger-v9";
+import type { CoinSecretKey, ShieldedCoinInfo } from "@midnightntwrk/ledger-v9";
 
 // The faucet derivation itself, imported rather than copied. `mintable.ts` has
 // no imports of its own — it is 40 lines of TextEncoder and Math.imul — so

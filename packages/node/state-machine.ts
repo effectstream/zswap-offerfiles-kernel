@@ -3,7 +3,7 @@ import { World } from "@effectstream/coroutine";
 import { Stm } from "@effectstream/sm";
 import type { BaseStfInput } from "@effectstream/sm";
 import type { StartConfigGameStateTransitions } from "@effectstream/runtime";
-import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
+import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
@@ -88,11 +88,12 @@ import {
   OFFER_MAX_BYTES,
   OFFER_TTL_SECONDS,
   ROOT_WINDOW_SECONDS,
+  ALLOW_CONTRACT_MAKER_OFFERS,
 } from "./env.ts";
 
 // Normalize a value that may be a Uint8Array or a hex string into lowercase
 // hex (no `0x` prefix). Used at offer-indexing for nullifiers, owner keys,
-// and intent hashes — ledger-v8 returns these as either form depending on
+// and intent hashes — the ledger returns these as either form depending on
 // the field.
 function bytesOrStringToHex(value: unknown): string {
   if (value instanceof Uint8Array) {
@@ -631,6 +632,7 @@ addTransition("celestia-zswap", function* (data) {
   const crypto = verifyOfferCrypto(result.tx!, {
     refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(data.blockTimestamp),
+    contractMakerRetry: ALLOW_CONTRACT_MAKER_OFFERS,
   });
   if (!crypto.ok) {
     yield* rejectOffer(crypto.code, crypto.reason, { offerHash });

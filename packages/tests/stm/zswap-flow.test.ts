@@ -17,7 +17,7 @@ import {
   waitFor,
 } from "../lib/db.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { Transaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -27,6 +27,7 @@ import {
   shieldedKeys,
   waitForShielded,
   waitForSync,
+  waitForWalletSettlement,
 } from "../lib/wallet.ts";
 import { submitOffer } from "../lib/api.ts";
 
@@ -76,7 +77,11 @@ export async function zswapFlowTest(db: Client): Promise<void> {
     const deployed = await joinOfferFiles(genesis);
     const nonce = BigInt(Date.now());
     const shieldedA = await mintShielded(deployed, SEP.A, MINT_AMOUNT, nonce);
+    // Same error-170 guard as multi-token: never reuse the facade for a second
+    // prove+submit before it has replayed the first.
+    await waitForWalletSettlement(genesis, { label: "post-mint-A" });
     const shieldedB = await mintShielded(deployed, SEP.B, MINT_AMOUNT, nonce + 1n);
+    await waitForWalletSettlement(genesis, { label: "post-mint-B" });
 
     const haveMinted =
       (await waitForShielded(genesis, shieldedA, GIVE_AMOUNT, 24)) >= GIVE_AMOUNT &&
@@ -127,6 +132,10 @@ export async function zswapFlowTest(db: Client): Promise<void> {
     if (!offerRow) return;
 
     console.log("[lifecycle] balancing + settling the A↔B offer on Midnight…");
+    // The genesis facade just minted and made offers; reusing it for a second
+    // prove+submit before it has replayed its own transactions is the exact
+    // rc.4 error-170 (InvalidDustSpendProof) trap — see waitForWalletSettlement.
+    await waitForWalletSettlement(genesis, { label: "pre-settle" });
     const offerTx = Transaction.deserialize(
       "signature",
       "proof",

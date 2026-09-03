@@ -8,9 +8,9 @@ import {
   type CoinPublicKey,
   type EncPublicKey,
   type FinalizedTransaction,
-  Transaction as LedgerV8Transaction,
+  Transaction as LedgerV9Transaction,
   type TransactionId,
-} from '@midnight-ntwrk/ledger-v8'
+} from '@midnightntwrk/ledger-v9'
 import {
   type MidnightProvider,
   type MidnightProviders,
@@ -67,7 +67,7 @@ function createWalletProvider(
     async balanceTx(tx: UnboundTransaction): Promise<FinalizedTransaction> {
       const serialized = toHex(tx.serialize())
       const { tx: balancedHex } = await connectedApi.balanceUnsealedTransaction(serialized, { payFees: false })
-      return LedgerV8Transaction.deserialize('signature', 'proof', 'binding', fromHex(balancedHex)) as FinalizedTransaction
+      return LedgerV9Transaction.deserialize('signature', 'proof', 'binding', fromHex(balancedHex)) as FinalizedTransaction
     },
     async submitTx(tx: FinalizedTransaction): Promise<TransactionId> {
       const serializedHex = toHex(tx.serialize())
@@ -105,7 +105,11 @@ async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig
     return res
   }) as typeof fetch
 
-  const zkConfigProvider = new FetchZkConfigProvider<OfferFilesCircuits>(API_BASE, safeFetch.bind(window))
+  // midnight-js 5: the custom fetch moved from a positional argument into an
+  // options object ({ fetchFunc }), which also carries the compactc integrity
+  // options — the v5 provider verifies artifacts against the compiler's
+  // integrity manifest by default, so the API must serve that manifest too.
+  const zkConfigProvider = new FetchZkConfigProvider<OfferFilesCircuits>(API_BASE, { fetchFunc: safeFetch.bind(window) })
   // VITE_PROOF_SERVER_URL wins over whatever /v1/midnight/config reports.
   const proofServerUri = PROOF_SERVER_URL || config.proofServerUri
 

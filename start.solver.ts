@@ -22,7 +22,10 @@
  *
  * Optional but validated the same way: SOLVER_FEE_SIZING_TAKER_INPUTS (00006
  * FR-001; default 1, funds a real taker half of up to that many `+ 2` zswap
- * inputs — the banner prints the effective coverage).
+ * inputs — the banner prints the effective coverage), and the read-only status
+ * listener SOLVER_STATUS_PORT / SOLVER_STATUS_HOST / SOLVER_STATUS_AUTH_TOKEN
+ * (00007 FR-001; unset port = no listener and no behaviour change at all, and a
+ * set port makes the bearer MANDATORY so `/status/*` can never come up open).
  */
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -62,36 +65,51 @@ console.log(describeSolverLaunchConfig(config));
 globalThis.WebSocket = WebSocket;
 setNetworkId(net.id as any);
 
-await startWithSignalOwnership(
-  (signal) =>
-    runSolver({
-      // Everything this entrypoint validated is passed explicitly, so the
-      // running process cannot disagree with the banner it just printed. The
-      // journal is the one exception: `runSolver` reads SOLVER_JOURNAL_PATH
-      // itself through the production path (`journalOptions` is a test-only
-      // seam), and the launch resolver validated the same variable with the
-      // same parser before we got here.
-      api: config.api,
-      seed: config.seed,
-      dryRun: config.dryRun,
-      relayUrl: config.relayWsUrl,
-      relayHttpUrl: config.relayHttpUrl,
-      relayAuthToken: config.relayAuthToken,
-      ladderConfigPath: config.ladderConfigPath,
-      feeSizingTakerInputs: config.feeSizingTakerInputs,
-      signal,
-    }),
-  {
-    onSecondSignal: (signal) => {
-      console.error(`[solver] second ${signal} received — forcing shutdown`);
-      process.exit(1);
-    },
-    onSignalHandled: ({ signal, stopError }) => {
-      if (stopError !== undefined) {
-        console.error(`[solver] ${signal} shutdown failed`, stopError);
+try {
+  await startWithSignalOwnership(
+    (signal) =>
+      runSolver({
+        // Everything this entrypoint validated is passed explicitly, so the
+        // running process cannot disagree with the banner it just printed. The
+        // journal is the one exception: `runSolver` reads SOLVER_JOURNAL_PATH
+        // itself through the production path (`journalOptions` is a test-only
+        // seam), and the launch resolver validated the same variable with the
+        // same parser before we got here.
+        api: config.api,
+        seed: config.seed,
+        dryRun: config.dryRun,
+        relayUrl: config.relayWsUrl,
+        relayHttpUrl: config.relayHttpUrl,
+        relayAuthToken: config.relayAuthToken,
+        ladderConfigPath: config.ladderConfigPath,
+        feeSizingTakerInputs: config.feeSizingTakerInputs,
+        // 00007 FR-001. Null when SOLVER_STATUS_PORT is unset, and then nothing
+        // downstream of this line changes.
+        status: config.status,
+        signal,
+      }),
+    {
+      onSecondSignal: (signal) => {
+        console.error(`[solver] second ${signal} received — forcing shutdown`);
         process.exit(1);
-      }
-      process.exit(0);
+      },
+      onSignalHandled: ({ signal, stopError }) => {
+        if (stopError !== undefined) {
+          console.error(`[solver] ${signal} shutdown failed`, stopError);
+          process.exit(1);
+        }
+        process.exit(0);
+      },
     },
-  },
-);
+  );
+} catch (error) {
+  // A boundary `runSolver` can only discover by trying — today that is the
+  // status listener's bind (00007 FR-007) — is reported in the SAME shape as
+  // the boundaries resolved above, so an operator reads one kind of message
+  // whether the problem was a missing variable or an occupied port.
+  if (error instanceof SolverLaunchConfigError) {
+    console.error(`[solver] ${error.message}`);
+    process.exit(1);
+  }
+  throw error;
+}

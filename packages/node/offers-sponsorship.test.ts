@@ -120,7 +120,11 @@ beforeAll(async () => {
     [FIXTURE_ROOT, String(Date.now())],
   );
   await client.query(
-    "INSERT INTO known_tokens (token_color, name, kind, decimals) VALUES ($1, 'WANTX', 'shielded', 0)",
+    // 6 like everything else this stack registers (00024). Inert for this
+    // fixture — the want leg is priced by a MANUAL token_prices row, which is
+    // already per BASE UNIT and never divided by 10^decimals — but a fixture
+    // that contradicts the registry is a trap for the next reader.
+    "INSERT INTO known_tokens (token_color, name, kind, decimals) VALUES ($1, 'WANTX', 'shielded', 6)",
     [WANT_COLOR],
   );
 

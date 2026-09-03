@@ -37,6 +37,7 @@ import {
   midnightContract,
 } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
+import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/solver-core/amount";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
 import {
@@ -657,9 +658,11 @@ export const apiRouter: StartConfigApiRouter = async function (
             color: { type: "string" },
             name: { type: "string" },
             kind: { type: "string", enum: ["shielded", "unshielded"] },
-            // Base units per coin. Omitted means 0 (base unit == coin), which
-            // is what the faucet mints; a bridged token that mints 10^6 units
-            // per coin states it, or its USD price would be off by 10^6.
+            // Base units per coin. Omitted means 6 (00024): every token this
+            // stack mints or registers has 6 decimals, and the faucet hands
+            // out whole coins scaled by 10^6. Registrants SHOULD still send it
+            // explicitly — a token on another scale states its own value, or
+            // its USD price would be off by 10^(6 − its decimals).
             decimals: { type: "integer", minimum: 0, maximum: 38 },
             // Reference asset (a CoinGecko id). Omitted means "price it by
             // NAME through price-map.ts", which is right for every token the
@@ -722,7 +725,16 @@ export const apiRouter: StartConfigApiRouter = async function (
         dbConn,
       );
       emitAppEvent({ type: "token_minted", name, color, kind });
-      return { success: true, color, name, kind, decimals: decimals ?? 0, asset_id: assetId };
+      // `?? DEFAULT_TOKEN_DECIMALS` mirrors the COALESCE in InsertKnownToken and
+      // the column DEFAULT: what the row actually holds is what is answered.
+      return {
+        success: true,
+        color,
+        name,
+        kind,
+        decimals: decimals ?? DEFAULT_TOKEN_DECIMALS,
+        asset_id: assetId,
+      };
     },
   );
 

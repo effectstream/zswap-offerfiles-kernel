@@ -468,7 +468,9 @@ export function buildMonitorSnapshot(options: {
         nextCursor: null,
       },
       knownTokens: [
-        { color: NIGHT, name: "NIGHT", kind: "unshielded", decimals: 0 },
+        // NIGHT is seeded with 6 (1 NIGHT = 10^6 Stars); the `decimals` option
+        // above is the knob for what a node claims about the TEST tokens.
+        { color: NIGHT, name: "NIGHT", kind: "unshielded", decimals: 6 },
         { color: TKA, name: "TKA", kind: "shielded", decimals },
         { color: TKB, name: "TKB", kind: "shielded", decimals },
       ],
@@ -663,7 +665,7 @@ export function startFakeKernel(
       }
       if (url.pathname === "/v1/known-tokens") {
         return Response.json([
-          { id: 1, token_color: NIGHT, name: "NIGHT", kind: "unshielded", decimals: 0 },
+          { id: 1, token_color: NIGHT, name: "NIGHT", kind: "unshielded", decimals: 6 },
           { id: 2, token_color: TKA, name: "TKA", kind: "shielded", decimals },
           { id: 3, token_color: TKB, name: "TKB", kind: "shielded", decimals },
         ]);

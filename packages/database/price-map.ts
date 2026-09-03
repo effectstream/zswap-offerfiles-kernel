@@ -169,7 +169,12 @@ export function resolveAssetId(
   const assetId = token.asset_id ?? override?.assetId ?? fallbackMap?.assetId;
   if (assetId === undefined || assetId === null || assetId === "") return null;
 
-  const decimals = override?.decimals ?? token.decimals ?? 0;
+  // The literal mirrors `known_tokens.decimals DEFAULT 6` in 000-init.sql —
+  // this package IS the registry layer, so the schema is its authority, not the
+  // DEFAULT_TOKEN_DECIMALS constant the scripts share (@zswap-da/solver-core/
+  // amount). Reached only when a CALLER hands over a partial token: the column
+  // is NOT NULL, so a real row always carries its own value.
+  const decimals = override?.decimals ?? token.decimals ?? 6;
   return { assetId, decimals };
 }
 

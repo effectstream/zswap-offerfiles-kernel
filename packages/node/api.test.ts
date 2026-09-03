@@ -12,7 +12,8 @@ delete process.env["ENABLE_TOKEN_REGISTRY"]; // default-off is part of the contr
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
-const { migrationTable } = await import("@zswap-da/database");
+const { migrationTable, SHIELDED_NIGHT_BY_NETWORK } = await import("@zswap-da/database");
+const { startNetworkTokenSeed } = await import("./network-token-seed.ts");
 const fastify = (await import("fastify")).default;
 const { apiRouter } = await import("./api.ts");
 
@@ -547,5 +548,80 @@ describe("GET /v1/quote — reference prices (SC-001)", () => {
       unknown,
     ]);
     expect(persisted.rows).toHaveLength(0);
+  });
+});
+
+// ── sNight, the per-network default token (00021) ──────────────────────────
+//
+// MIDNIGHT_NETWORK_ID is unset here, so the router's own seed call was a
+// no-op (`undeployed` has no shielded-night contract) — which is itself the
+// dev-stack assertion. These tests drive the same startup helper with
+// `preprod` against the same real router and migrations, so what they read
+// back over HTTP is what a preprod deployment serves after its next restart.
+
+describe("sNight is registered for the network the node runs on", () => {
+  const SNIGHT = SHIELDED_NIGHT_BY_NETWORK.get("preprod")!.color;
+  const lines: string[] = [];
+  const sink = {
+    log: (line: string) => lines.push(line),
+    warn: (line: string) => lines.push(`WARN ${line}`),
+  };
+
+  test("the startup seed writes the preprod colour once, then says so and stops", async () => {
+    const first = startNetworkTokenSeed(client, "preprod", sink);
+    await first.settled;
+    expect(lines).toEqual([`known_tokens: seeded SNIGHT ${SNIGHT} for preprod`]);
+
+    // Restart: no duplicate, no throw, and not a warning — this is the
+    // steady state of every start after the first.
+    const second = startNetworkTokenSeed(client, "preprod", sink);
+    await second.settled;
+    expect(lines[1]).toBe(
+      `known_tokens: SNIGHT not seeded for preprod — colour ${SNIGHT} is already registered as SNIGHT`,
+    );
+
+    // A network with nothing deployed says nothing at all.
+    const dev = startNetworkTokenSeed(client, "undeployed", sink);
+    await dev.settled;
+    expect(lines).toHaveLength(2);
+
+    const rows = await client.query(
+      "SELECT token_color FROM known_tokens WHERE name = 'SNIGHT'",
+    );
+    expect(rows.rows).toEqual([{ token_color: SNIGHT }]);
+  });
+
+  test("GET /v1/known-tokens lists it with NIGHT's shape", async () => {
+    const { status, body } = await getJson("/v1/known-tokens");
+    expect(status).toBe(200);
+    const byName = new Map<string, any>(body.map((t: any) => [t.name, t]));
+    expect(byName.get("SNIGHT")).toMatchObject({
+      token_color: SNIGHT,
+      kind: "shielded",
+      // Q3: NIGHT's decimals, so equal base units are at par under the gate.
+      decimals: byName.get("NIGHT").decimals,
+      asset_id: "midnight-3",
+    });
+    // The other network's colour is not registered here.
+    expect(
+      body.some(
+        (t: any) => t.token_color === SHIELDED_NIGHT_BY_NETWORK.get("preview")!.color,
+      ),
+    ).toBe(false);
+  });
+
+  test("GET /v1/prices prices it exactly as NIGHT, per base unit", async () => {
+    const { status, body } = await pricesFor(SNIGHT, COLOR_NIGHT);
+    expect(status).toBe(200);
+    const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
+    const night = tokens.get("NIGHT");
+    expect(tokens.get("SNIGHT")).toMatchObject({
+      asset_id: "midnight-3",
+      decimals: night.decimals,
+      price_usd: night.price_usd,
+      source: "seed",
+    });
+    // One asset behind both legs — sNight adds no new price to fetch.
+    expect(body.assets.map((a: any) => a.asset_id)).toEqual(["midnight-3"]);
   });
 });

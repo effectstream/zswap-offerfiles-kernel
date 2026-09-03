@@ -114,6 +114,15 @@ because faucet-minted colours derive from the contract address and change on eve
 clean redeploy. `known_tokens.asset_id` overrides the map; `PRICE_FEED_MAP`
 (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
+`decimals` here always means **base units per priced coin** — a token's asset
+price is divided by `10^decimals` to get the per-base-unit price this API
+serves — never the colour's own display decimals. NIGHT is seeded with
+`decimals: 6`: 1 NIGHT = 10⁶ Stars (its base unit; `STARS_PER_NIGHT` in
+`midnight-ledger/ledger/src/structure.rs`). A faucet-minted dev/test token
+registered without an explicit `decimals` still defaults to `0` (base unit ==
+coin), which is genuinely correct for it — see the seed's own comment in
+`packages/database/migrations/000-init.sql`.
+
 `packages/price-feed` refreshes `asset_prices` from CoinGecko. It is a process of
 its own — the node never makes an outbound price call:
 

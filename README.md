@@ -109,10 +109,22 @@ cost does not grow with the registry. Three tables back it:
 | `token_prices` | only operator overrides (`manual`) and the deterministic demo rows (`fallback`) for tokens with no asset behind them |
 
 Tokens map to assets **by name** — `WBTC`/`WSBTC`/`BTC` → `bitcoin`, `WETH`/`WSETH`/
-`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3` —
-because faucet-minted colours derive from the contract address and change on every
-clean redeploy. `known_tokens.asset_id` overrides the map; `PRICE_FEED_MAP`
-(`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
+`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3`,
+`SNIGHT` → `midnight-3` — because faucet-minted colours derive from the contract
+address and change on every clean redeploy. `known_tokens.asset_id` overrides the
+map; `PRICE_FEED_MAP` (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the
+defaults.
+
+`SNIGHT` is the [shielded-night](https://github.com/effectstream/shielded-night)
+wrapper — NIGHT held as a shielded (Zswap) token, locked 1:1, so it prices off
+`midnight-3` like NIGHT and is seeded with NIGHT's `decimals`. It is the one seeded
+token whose colour depends on the network, because it derives from the contract
+address: `000-init.sql` seeds **preview** (`793c29c9…f99c`) as the default and
+documents, right beside the row, the preprod colour (`8fac382b…6819`) and the fact
+that mainnet has no deployment yet. Deploying to another network means patching
+that row before the database is created — or, on a database that already exists
+(preprod included), one `UPDATE known_tokens …` or `POST /v1/known-tokens`, since
+`000-init.sql` only ever runs against an empty database.
 
 `decimals` here always means **base units per priced coin** — a token's asset
 price is divided by `10^decimals` to get the per-base-unit price this API

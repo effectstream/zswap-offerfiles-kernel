@@ -551,3 +551,48 @@ describe("GET /v1/quote — reference prices (SC-001)", () => {
     expect(persisted.rows).toHaveLength(0);
   });
 });
+
+// ── sNight, a seeded default token (00021) ─────────────────────────────────
+//
+// Nothing is registered here: the SNIGHT row comes out of 000-init.sql like
+// NIGHT/USDC/USDM, so what these read back over HTTP is exactly what a fresh
+// deployment serves. The seeded colour is *preview*; another network patches
+// the row (or POSTs it) — see the SNIGHT note in 000-init.sql.
+
+describe("sNight is a seeded known token", () => {
+  const COLOR_SNIGHT = "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c";
+  const COLOR_SNIGHT_PREPROD =
+    "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
+
+  test("GET /v1/known-tokens lists it with NIGHT's shape", async () => {
+    const { status, body } = await getJson("/v1/known-tokens");
+    expect(status).toBe(200);
+    const byName = new Map<string, any>(body.map((t: any) => [t.name, t]));
+    expect(byName.get("SNIGHT")).toMatchObject({
+      token_color: COLOR_SNIGHT,
+      kind: "shielded",
+      // Q3: NIGHT's decimals, so equal base units are at par under the gate.
+      decimals: byName.get("NIGHT").decimals,
+      asset_id: "midnight-3",
+    });
+    // Exactly one sNight row — `name` is UNIQUE, and the colour of a network
+    // this database was not built for must not be here.
+    expect(body.filter((t: any) => t.name === "SNIGHT")).toHaveLength(1);
+    expect(body.some((t: any) => t.token_color === COLOR_SNIGHT_PREPROD)).toBe(false);
+  });
+
+  test("GET /v1/prices prices it exactly as NIGHT, per base unit", async () => {
+    const { status, body } = await pricesFor(COLOR_SNIGHT, COLOR_NIGHT);
+    expect(status).toBe(200);
+    const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
+    const night = tokens.get("NIGHT");
+    expect(tokens.get("SNIGHT")).toMatchObject({
+      asset_id: "midnight-3",
+      decimals: night.decimals,
+      price_usd: night.price_usd,
+      source: "seed",
+    });
+    // One asset behind both legs — sNight adds no new price to fetch.
+    expect(body.assets.map((a: any) => a.asset_id)).toEqual(["midnight-3"]);
+  });
+});

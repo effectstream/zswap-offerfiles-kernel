@@ -606,9 +606,20 @@ curl http://host:9999/v1/known-tokens
 
 ```json
 [
-  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded" }
+  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded" },
+  { "id": 2, "token_color": "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c", "name": "SNIGHT", "kind": "shielded" }
 ]
 ```
+
+`NIGHT`, `SNIGHT`, `USDC` and `USDM` are seeded by the schema. `SNIGHT` — the
+[shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
+held as a shielded token — is the one seed whose colour depends on the network,
+because it derives from the contract address. The schema seeds **preview**
+(`793c29c9…f99c`, shown above); **preprod** is `8fac382b…6819`, and `mainnet` has
+no deployment yet. Another network patches that row in `000-init.sql` before its
+database is created, or registers the colour on an existing database with an
+`UPDATE` / `POST /v1/known-tokens`. It carries NIGHT's `decimals` and prices off
+the same asset, so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
 appearing in an offer says nothing about its name, and an offer's value layer
@@ -894,8 +905,10 @@ still writes one, deliberately, so an operator can inspect and override it.)
 the contract address), so tokens map to assets by **name**: `WBTC`/`WSBTC`/`BTC` →
 `bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`
 (Moneta's Cardano USDM, the asset the VIA Labs bridge carries to Midnight),
-`NIGHT` → `midnight-3`. `known_tokens.asset_id` overrides the map, and
-`PRICE_FEED_MAP` (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
+`NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3` (the shielded-night wrapper is
+locked 1:1 against NIGHT, so it is the same asset — no new price to fetch).
+`known_tokens.asset_id` overrides the map, and `PRICE_FEED_MAP`
+(`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
 **`decimals` is base units per priced coin, not display decimals.** `NIGHT` is
 seeded with `decimals: 6` — 1 NIGHT is 10⁶ Stars, its base unit

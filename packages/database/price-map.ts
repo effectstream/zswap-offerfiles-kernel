@@ -28,7 +28,18 @@
 /** One entry of a name/colour → asset map. */
 export interface PriceMapEntry {
   assetId: string;
-  /** Overrides known_tokens.decimals when present. */
+  /**
+   * Overrides known_tokens.decimals when present.
+   *
+   * Only consulted for entries `resolveAssetId()` reaches through its
+   * `overrides` parameter (the PRICE_FEED_MAP-parsed map). DEFAULT_NAME_ASSET_MAP
+   * below never sets this field, and setting it there would be dead: the
+   * fallback-by-name lookup only ever supplies `assetId` (for a token whose
+   * `known_tokens.asset_id` is NULL), never `decimals` — the base-units-per-
+   * coin figure for every seeded token (NIGHT, USDC, USDM) comes from its own
+   * `known_tokens.decimals` row in 000-init.sql, which is the one place that
+   * value must be correct.
+   */
   decimals?: number;
 }
 

@@ -121,10 +121,21 @@ CREATE TABLE known_tokens (
 -- from the deployed contract address and change on every clean redeploy, so
 -- they are registered at runtime and priced BY NAME through price-map.ts.
 -- These four are seeded, because their colours survive a redeploy:
---   NIGHT — the native token, colour 0x00…00 on every network.
+--   NIGHT — the native token, colour 0x00…00 on every network. **6 decimals**:
+--           1 NIGHT = 10^6 Stars (its base unit) — STARS_PER_NIGHT in
+--           midnight-ledger/ledger/src/structure.rs, confirmed in
+--           NIGHT-shielded-vs-unshielded-FINDINGS.md ("1 NIGHT = 10⁶ atomic
+--           units (Stars)"). This row was seeded at 0 before PR #54's own
+--           follow-up fix: since `decimals` here means "base units per PRICED
+--           coin" (not the display decimals of the colour itself), a 0 priced
+--           one Star at NIGHT's whole-coin price of ~$0.019 — every quote and
+--           sponsorship threshold touching NIGHT (and anything registered to
+--           mirror it, e.g. sNight) was off by 10^6.
 --   USDC  — a placeholder colour (64 x '1'). There is no USDC token on
 --           preprod; the row exists so the pair is quotable at a real
---           reference price (Q-5).
+--           reference price (Q-5). Kept at **6 decimals**, same as USDM
+--           below: real USDC is 6 decimals on every chain it exists on, so a
+--           future real USDC colour needs no decimals change, only a new row.
 --   USDM  — the VIA Labs bridge's Midnight token type on *preview*
 --           (bridge contract 471dfe55c866fdbc085c9011a51f0cd0e9c9bfca6bb985c35f7716b6e73e485c).
 --           Mainnet is a different type:
@@ -136,10 +147,11 @@ CREATE TABLE known_tokens (
 --           asset behind it is Moneta's Cardano USDM (`usdm-2`), the token
 --           the bridge carries — priced from the provider, not pegged (Q-10).
 --   SNIGHT — the shielded-night wrapper (effectstream/shielded-night): NIGHT
---           held as a shielded (Zswap) token, locked 1:1 — one base unit is
---           one Star — so it prices off NIGHT's asset (`midnight-3`) and is
---           seeded with NIGHT's `decimals`, which keeps a NIGHT <-> sNight
---           offer of equal base units at par under the sponsorship gate.
+--           held as a shielded (Zswap) token, locked 1:1, so one sNight base
+--           unit is one Star. It therefore prices off NIGHT's asset
+--           (`midnight-3`) with **NIGHT's 6 decimals** — the two rows must
+--           carry the same value or a NIGHT <-> sNight offer of equal base
+--           units stops being at par under the sponsorship gate.
 --
 --           !!! PATCH THIS ROW WHEN DEPLOYING TO ANOTHER NETWORK !!!
 --
@@ -166,11 +178,15 @@ CREATE TABLE known_tokens (
 --           asset-prices.test.ts re-derives the seeded colour AND the preprod
 --           one from the addresses above, so neither the row nor this comment
 --           can rot after a contract redeploy.
+--
+-- Faucet-minted dev/test tokens (WBTC, WETH, TESTTOKEN*, …) are NOT touched by
+-- this: they keep the table's DEFAULT of 0 (comment above) — the faucet mints
+-- 1000 base units = 1000 coins, so 0 is genuinely correct for them.
 INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES
-('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 0, 'midnight-3'),
+('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 6, 'midnight-3'),
 -- preview sNight — see the SNIGHT note above before deploying elsewhere.
-('793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c', 'SNIGHT','shielded',   0, 'midnight-3'),
-('1111111111111111111111111111111111111111111111111111111111111111', 'USDC',  'shielded',   0, 'usd-coin'),
+('793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c', 'SNIGHT','shielded',   6, 'midnight-3'),
+('1111111111111111111111111111111111111111111111111111111111111111', 'USDC',  'shielded',   6, 'usd-coin'),
 ('003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73', 'USDM',  'unshielded', 6, 'usdm-2');
 -- ('0000000000000000000000000000000000000000000000000000000000000001', 'SILK', 'shielded'),
 -- ('0000000000000000000000000000000000000000000000000000000000000002', 'DUSK', 'shielded')

@@ -910,6 +910,14 @@ locked 1:1 against NIGHT, so it is the same asset — no new price to fetch).
 `known_tokens.asset_id` overrides the map, and `PRICE_FEED_MAP`
 (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
+**`decimals` is base units per priced coin, not display decimals.** `NIGHT` is
+seeded with `decimals: 6` — 1 NIGHT is 10⁶ Stars, its base unit
+(`STARS_PER_NIGHT` in `midnight-ledger/ledger/src/structure.rs`) — so its
+per-base-unit price is the seeded `midnight-3` coin price divided by `10^6`.
+A colour registered through `POST /v1/known-tokens` without an explicit
+`decimals` still defaults to `0` (base unit == coin), which is correct for
+every faucet-minted dev/test token.
+
 **The `price-feed` service.** `packages/price-feed` is a separate process, not part
 of the node: the node never calls CoinGecko. It refreshes `asset_prices` once a day
 (`PRICE_FEED_INTERVAL_MS`), asking for up to `PRICE_FEED_BATCH_SIZE` ids (default

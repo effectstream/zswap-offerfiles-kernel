@@ -13,14 +13,22 @@ import { PriceLookup } from "./price-lookup.ts";
 //
 // The fixture (packages/validator/fixtures/valid-offer.bech32):
 //   gives 1_000_000 × 0000…0000   wants 5_000_000 × ffff…ffff
-// Price NIGHT at 0.01918181/unit (the seeded reference) and give_usd is
-// 19181.81; the wanted colour's price is then the only dial, and it moves the
-// offer across the threshold with numbers that can be checked by hand.
+// Price NIGHT at 0.01918181/COIN (the seeded midnight-3 reference). NIGHT is
+// 6 decimals (known_tokens.decimals — 1 NIGHT = 10^6 Stars), so the node
+// reports it PER BASE UNIT as 0.01918181 / 1e6, and give_usd for this
+// fixture's 1_000_000 base units (= exactly 1 NIGHT) is numerically the coin
+// price itself: 0.01918181, which the batcher's own `usd()` formatter
+// (celestia.ts, `toFixed(2)`) displays as 0.02 in its log/error messages. The
+// wanted colour's price is then the only dial, and it moves the offer across
+// the threshold with numbers that can be checked by hand.
 
 const GIVE_COLOR = "0".repeat(64);
 const WANT_COLOR = "f".repeat(64);
-const NIGHT_PRICE = 0.01918181;
-const GIVE_USD = 1_000_000 * NIGHT_PRICE; // 19181.81
+const NIGHT_COIN_PRICE_USD = 0.01918181; // the seeded midnight-3 reference, per COIN
+const NIGHT_DECIMALS = 6; // 1 NIGHT = 10^6 Stars (base units) — known_tokens.decimals
+const NIGHT_PRICE = NIGHT_COIN_PRICE_USD / 10 ** NIGHT_DECIMALS; // per BASE UNIT, what /v1/prices reports
+const GIVE_USD = 1_000_000 * NIGHT_PRICE; // 1_000_000 base units == 1 NIGHT, so this is 0.01918181
+const GIVE_USD_DISPLAY = "0.02"; // usd() in celestia.ts is `.toFixed(2)`
 
 const blob = readFileSync(
   new URL("../validator/fixtures/valid-offer.bech32", import.meta.url),
@@ -130,8 +138,8 @@ describe("the fee gate — an offer at reference is no longer sponsored", () => 
     // be able to see why, without re-deriving anything.
     expect(verdict.error).toContain("wants 0.0% below reference");
     expect(verdict.error).toContain("needs ≥ 2.5%");
-    expect(verdict.error).toContain("give_usd 19181.81");
-    expect(verdict.error).toContain("want_usd 19181.81");
+    expect(verdict.error).toContain(`give_usd ${GIVE_USD_DISPLAY}`);
+    expect(verdict.error).toContain(`want_usd ${GIVE_USD_DISPLAY}`);
   });
 
   test("2.5% below reference → sponsored", async () => {
@@ -215,7 +223,7 @@ describe("policy — enforce | warn | off", () => {
     expect((await adapter.validateOffer(inputFor(blob) as any)).valid).toBe(true);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("would refuse (policy=warn)");
-    expect(warnings[0]).toContain("give_usd 19181.81");
+    expect(warnings[0]).toContain(`give_usd ${GIVE_USD_DISPLAY}`);
   });
 
   test("off does not evaluate at all — no verdict, no log", async () => {

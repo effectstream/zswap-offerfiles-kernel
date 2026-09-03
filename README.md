@@ -126,6 +126,15 @@ that row before the database is created — or, on a database that already exist
 (preprod included), one `UPDATE known_tokens …` or `POST /v1/known-tokens`, since
 `000-init.sql` only ever runs against an empty database.
 
+`decimals` here always means **base units per priced coin** — a token's asset
+price is divided by `10^decimals` to get the per-base-unit price this API
+serves — never the colour's own display decimals. NIGHT is seeded with
+`decimals: 6`: 1 NIGHT = 10⁶ Stars (its base unit; `STARS_PER_NIGHT` in
+`midnight-ledger/ledger/src/structure.rs`). A faucet-minted dev/test token
+registered without an explicit `decimals` still defaults to `0` (base unit ==
+coin), which is genuinely correct for it — see the seed's own comment in
+`packages/database/migrations/000-init.sql`.
+
 `packages/price-feed` refreshes `asset_prices` from CoinGecko. It is a process of
 its own — the node never makes an outbound price call:
 

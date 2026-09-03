@@ -477,6 +477,128 @@ services:
 
   # ══ Midnight Intents relay (UNMODIFIED reference) ═══════════════════════════
 
+
+  # ── the offer poster (00007, profile: poster) ────────────────────────────────
+  # OPT-IN, and unlike `maker-offer` above it is not a seeding one-shot: it is a
+  # LOOP that every POST_INTERVAL_MS either re-offers a coin its journal says
+  # came back, or mints one fresh GIVE_TOKEN coin from the faucet circuit (fees
+  # from its OWN dust) and posts a single ZSwap offer whose only input is that
+  # exact coin. `docker compose up` does not start it; see deploy/README.md.
+  #
+  # ── why the *midnight-endpoints anchor is NOT merged here ───────────────────
+  # That anchor carries `MIDNIGHT_WALLET_SEED: ${MIDNIGHT_GENESIS_SEED:-…0001}`,
+  # and MIDNIGHT_WALLET_SEED is one of the SEVEN seeds `poster-config.ts` refuses
+  # to share a wallet with (two facades on one seed against one node force each
+  # other's connection down). Inheriting it would make the poster exit 78 the
+  # moment an operator pointed OFFER_POSTER_SEED at the genesis wallet — a
+  # failure with no visible cause in this file. Overriding it to "" would not
+  # help either: `entrypoint-common.sh`'s unset-if-empty list does not contain
+  # MIDNIGHT_WALLET_SEED, so the variable would still be PRESENT in the
+  # container. So the four endpoints the poster actually needs are spelled out,
+  # and the seed simply never arrives. Keep them in step with the anchor.
+  #
+  # The *celestia-endpoints anchor is left out for a simpler reason: the poster
+  # never touches Celestia. It posts to the kernel; the BATCHER pays the blob.
+  offer-poster:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-offer-poster.sh"]
+    profiles: ["poster"]
+    # A crash is the only way this process ends other than SIGTERM, and its
+    # state is durable (the journal volume), so restarting is always right.
+    # A misconfiguration restart-LOOPS on exit 78 — deliberately visible, and
+    # `docker compose logs offer-poster` says which variable in one line.
+    restart: unless-stopped
+    depends_on:
+      kernel:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      MIDNIGHT_NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
+      MIDNIGHT_NODE_HTTP: http://midnight-node:9944
+      MIDNIGHT_INDEXER_HTTP: http://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}
+      MIDNIGHT_INDEXER_WS: ws://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}/ws
+      MIDNIGHT_PROOF_SERVER_URL: http://proof-server:6300
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      ZSWAP_API: http://kernel:9999
+      # REQUIRED, and deliberately WITHOUT a default. A shared default seed
+      # would put two posters — or a poster and a maker — on one wallet on the
+      # first stack that copied this file. There is no `:?` guard on it because
+      # Compose interpolates EVERY service before it filters by profile
+      # (measured): a `:?` here would make plain `docker compose up` fail for
+      # everyone who never opted into this profile. The entrypoint fails fast
+      # instead, naming OFFER_POSTER_SEED, with exit 78.
+      POSTER_SEED: ${OFFER_POSTER_SEED:-}
+      # The alternative wallet input: a BIP-39 phrase, derived Lace-compatibly.
+      # Set exactly ONE of the two — both together is a startup error.
+      POSTER_MNEMONIC: ${OFFER_POSTER_MNEMONIC:-}
+      # Every knob below is blank-by-default ON PURPOSE: blank means "the code's
+      # default", which is the single place those numbers are written down
+      # (deploy/scripts/lib/poster-config.ts). The entrypoint unsets the blank
+      # ones so the container's environment never claims otherwise.
+      GIVE_TOKEN: ${OFFER_POSTER_GIVE_TOKEN:-}
+      GIVE_AMOUNT: ${OFFER_POSTER_GIVE_AMOUNT:-}
+      WANT_TOKEN: ${OFFER_POSTER_WANT_TOKEN:-}
+      # Blank = the want leg is sized from GET /v1/quote every tick, which is
+      # what keeps the offer sponsorable. Setting it FORCES an amount and
+      # downgrades the sponsorship check to a warning.
+      WANT_AMOUNT: ${OFFER_POSTER_WANT_AMOUNT:-}
+      POST_INTERVAL_MS: ${OFFER_POSTER_INTERVAL_MS:-}
+      OFFER_TTL_MINUTES: ${OFFER_POSTER_TTL_MINUTES:-}
+      COIN_VISIBLE_TIMEOUT_MS: ${OFFER_POSTER_COIN_VISIBLE_TIMEOUT_MS:-}
+      RECONCILE_INTERVAL_MS: ${OFFER_POSTER_RECONCILE_INTERVAL_MS:-}
+      POSTER_MAX_REOFFERS_PER_TICK: ${OFFER_POSTER_MAX_REOFFERS_PER_TICK:-}
+      SHUTDOWN_GRACE_MS: ${OFFER_POSTER_SHUTDOWN_GRACE_MS:-}
+      HEALTH_STALE_TICKS: ${OFFER_POSTER_HEALTH_STALE_TICKS:-}
+      # The floor of spendable DUST a tick requires before it will MINT (a
+      # re-offer costs none). P5 measures the real per-mint cost; until then the
+      # code's default of 1 means "any dust at all".
+      POSTER_MIN_DUST: ${OFFER_POSTER_MIN_DUST:-}
+      POSTER_SYNC_TIMEOUT_MS: ${OFFER_POSTER_SYNC_TIMEOUT_MS:-}
+      POSTER_DUST_WAIT_TIMEOUT_MS: ${OFFER_POSTER_DUST_WAIT_TIMEOUT_MS:-}
+      # POST /v1/offers retry ladder (ROOT_UNKNOWN / UTXO_NOT_LIVE only) and the
+      # liveness poll that follows an accepted post.
+      POSTER_POST_RETRIES: ${OFFER_POSTER_POST_RETRIES:-}
+      POSTER_POST_RETRY_MS: ${OFFER_POSTER_POST_RETRY_MS:-}
+      POSTER_LIVE_TRIES: ${OFFER_POSTER_LIVE_TRIES:-}
+      POSTER_LIVE_INTERVAL_MS: ${OFFER_POSTER_LIVE_INTERVAL_MS:-}
+      # Startup-only: derive the colours, read a quote, report, exit 0. Never
+      # mints, never posts. `restart: unless-stopped` will keep re-running it,
+      # so use `docker compose run --rm offer-poster` for a one-off dry run.
+      DRY_RUN: ${OFFER_POSTER_DRY_RUN:-}
+      # Refuses to start on a corrupt or foreign journal unless this is true —
+      # silently losing the coin record would defeat the journal's purpose.
+      POSTER_JOURNAL_RESET: ${OFFER_POSTER_JOURNAL_RESET:-}
+      # Fixed, not a knob: the file has to be on the named volume below, and
+      # the two would drift apart the first time someone changed one of them.
+      POSTER_JOURNAL_FILE: /var/lib/offer-poster/journal.json
+      # Fixed for the same reason as EFFECTSTREAM_API_PORT on the kernel: the
+      # healthcheck and the port publish below are literals, so the port the
+      # process listens on must be one too. Change the HOST side with
+      # HOST_OFFER_POSTER_HEALTH_PORT.
+      POSTER_HEALTH_PORT: "9977"
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+      - offer-poster-state:/var/lib/offer-poster
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_OFFER_POSTER_HEALTH_PORT:-19977}:9977"
+    healthcheck:
+      # bun images ship no curl; `bun -e fetch` is the probe, as on the kernel.
+      test:
+        - CMD-SHELL
+        - >-
+          bun -e 'const r = await fetch("http://127.0.0.1:9977/health");
+          process.exit(r.ok ? 0 : 1);'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # /health answers 200 while the poster is `starting` and while it is
+      # `degraded` (no dust yet) — 503 arrives only after HEALTH_STALE_TICKS
+      # consecutive FAILED ticks. So this window is not about the first 200: it
+      # is how long the SERVER may take to bind at all, and binding happens
+      # after wallet sync + dust registration + the dust wait + the contract
+      # join. Fifteen minutes covers a cold indexer sync with room to spare.
+      start_period: 15m
   relay:
     <<: *logging
     image: ${RELAY_IMAGE:-cow00005/relay}:${IMAGE_TAG:-dev}
@@ -864,6 +986,12 @@ services:
       - solver-config:/srv/solver-config:ro
 
 volumes:
+  # The poster's coin journal (profile `poster`). Chain-keyed like the rest and
+  # then some: the journal records the contract address it was written against
+  # and REFUSES to start on a mismatch, because a coin minted under another
+  # deployment does not exist here. `down.sh` passes --profile poster so this
+  # volume goes with the containers.
+  offer-poster-state:
   # Chain-keyed. These MUST be wiped together: a kernel ledger mirror, a solver
   # journal or an indexer database that survives a chain reset refers to
   # nullifiers, offers and contract addresses that no longer exist, and every

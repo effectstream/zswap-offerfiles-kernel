@@ -1,4 +1,4 @@
-# deploy/images/kernel/Dockerfile — ONE image, NINE single-process entrypoints.
+# deploy/images/kernel/Dockerfile — ONE image, ELEVEN single-process entrypoints.
 #
 # Build context: the repository ROOT of this working clone (never a git clone of
 # it: the branch this deployment belongs to is deliberately unpushed, so a
@@ -24,6 +24,7 @@
 #   entrypoint-solver-provision.sh  one-shot: fund + mint the solver BOTH tokens
 #   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
 #   entrypoint-register-minted-tokens.sh  one-shot: NAME the minted colours
+#   entrypoint-offer-poster.sh      loop: mint one coin, post one offer, repeat
 #
 # `solver-provision` and `maker-offer` are devnet SEEDING steps, and they are
 # services rather than README steps for one reason: without them every container
@@ -35,6 +36,10 @@
 # without touching `packages/`, because only Compose knows when the kernel is
 # healthy — and it is what makes the book and the monitor site read TESTTOKENA/B/U
 # instead of raw colour hex.
+#
+# entrypoint-offer-poster.sh is neither a one-shot nor part of the default
+# stack: it is the 00007 offer poster, opt-in behind the `poster` profile, and
+# the only entrypoint here that keeps a durable journal of its own.
 #
 # bun pin rationale: 1.3.11 is the bun the R1–R3 remediation phases were built
 # and tested on in this clone, and it is the version the sibling
@@ -137,6 +142,8 @@ COPY deploy/images/kernel/entrypoint-scripts.sh  /usr/local/bin/entrypoint-scrip
 COPY deploy/images/kernel/entrypoint-solver-provision.sh /usr/local/bin/entrypoint-solver-provision.sh
 COPY deploy/images/kernel/entrypoint-maker-offer.sh      /usr/local/bin/entrypoint-maker-offer.sh
 COPY deploy/images/kernel/entrypoint-register-minted-tokens.sh /usr/local/bin/entrypoint-register-minted-tokens.sh
+# The 00007 offer poster: a LOOP, opt-in behind the `poster` compose profile.
+COPY deploy/images/kernel/entrypoint-offer-poster.sh     /usr/local/bin/entrypoint-offer-poster.sh
 COPY deploy/images/kernel/wait-for.sh            /usr/local/bin/wait-for.sh
 RUN chmod +x /usr/local/bin/entrypoint-*.sh /usr/local/bin/wait-for.sh
 

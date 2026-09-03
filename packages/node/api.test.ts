@@ -306,10 +306,12 @@ describe("GET /v1/prices", () => {
     // The three seeded tokens, priced PER BASE UNIT.
     const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
     expect([...tokens.keys()].sort()).toEqual(["NIGHT", "USDC", "USDM"]);
+    // 6 decimals: 1 NIGHT = 10^6 Stars (base units), so the price served per
+    // base unit is the seeded midnight-3 coin price divided by 1e6.
     expect(tokens.get("NIGHT")).toMatchObject({
       asset_id: "midnight-3",
-      decimals: 0,
-      price_usd: "0.01918181",
+      decimals: 6,
+      price_usd: "0.00000001918181",
       source: "seed",
     });
     // 6 decimals: the seeded usdm-2 price divided by 1e6, and this is the

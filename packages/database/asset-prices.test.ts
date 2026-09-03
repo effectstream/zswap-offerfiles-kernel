@@ -123,27 +123,33 @@ test("the four redeploy-stable tokens are seeded, and only those", async () => {
   expect(tokens.map((t) => t.name)).toEqual(["NIGHT", "SNIGHT", "USDC", "USDM"]);
 
   const byName = new Map(tokens.map((t) => [t.name, t]));
+  // 6 decimals: 1 NIGHT = 10^6 Stars (base units) — STARS_PER_NIGHT in
+  // midnight-ledger/ledger/src/structure.rs. Was seeded at 0 (a bug: it
+  // priced one Star, the base unit, at NIGHT's whole-coin price).
   expect(byName.get("NIGHT")).toMatchObject({
     token_color: COLOR_NIGHT,
     kind: "unshielded",
-    decimals: 0,
+    decimals: 6,
     asset_id: "midnight-3",
   });
   // The shielded-night wrapper, seeded with the PREVIEW colour (000-init.sql
   // says how to patch it for another network). Same asset and same decimals as
-  // NIGHT, so equal base units are at par under the sponsorship gate — the
-  // decimals are asserted against NIGHT's row rather than against 0, so a
-  // future correction of NIGHT has to move both together (issues/00022).
+  // NIGHT — one sNight base unit is one Star — so equal base units are at par
+  // under the sponsorship gate. Asserted against NIGHT's ROW rather than
+  // against the literal 6, so the two can only ever move together.
   expect(byName.get("SNIGHT")).toMatchObject({
     token_color: COLOR_SNIGHT,
     kind: "shielded",
     decimals: byName.get("NIGHT")!.decimals,
     asset_id: "midnight-3",
   });
+  // 6 decimals: a placeholder colour (no USDC on preprod), kept at USDC's
+  // real shape — 6 decimals on every chain it exists on — same reasoning as
+  // USDM below.
   expect(byName.get("USDC")).toMatchObject({
     token_color: COLOR_USDC,
     kind: "shielded",
-    decimals: 0,
+    decimals: 6,
     asset_id: "usd-coin",
   });
   // The VIA Labs bridge's Midnight-preview token type: unshielded, 6 decimals.
@@ -164,6 +170,20 @@ test("USDM's per-base-unit price is the seeded usdm-2 price / 1e6", async () => 
   // 1.001 / 10^6 — exactly, with no float noise and no assumed peg.
   expect(tokenPriceFromAsset(assets.get(mapped.assetId)!.price_usd, mapped.decimals)).toBe(
     "0.000001001",
+  );
+});
+
+test("NIGHT's per-base-unit price is the seeded midnight-3 price / 1e6 (1 NIGHT = 10^6 Stars)", async () => {
+  const assets = await assetsByIdRaw();
+  const tokens = await getKnownTokensWithAssets.run(undefined, client);
+  const night = tokens.find((t) => t.name === "NIGHT")!;
+  const mapped = resolveAssetId(night)!;
+  expect(mapped).toEqual({ assetId: "midnight-3", decimals: 6 });
+  // 0.01918181 / 10^6 — exact decimal-string arithmetic, no float noise.
+  // Before this fix the row was `decimals: 0`, which priced one Star (the
+  // base unit) at NIGHT's whole-coin price — off by 10^6.
+  expect(tokenPriceFromAsset(assets.get(mapped.assetId)!.price_usd, mapped.decimals)).toBe(
+    "0.00000001918181",
   );
 });
 
@@ -231,10 +251,12 @@ test("the other networks commented in 000-init.sql carry their derived colours",
 
 test("SNIGHT prices as NIGHT through the NAME map even without an asset_id", () => {
   // The row above is seeded WITH midnight-3, but a hand-patched or POSTed
-  // sNight on another network may not be — the name map is the backstop.
-  expect(resolveAssetId({ name: "SNIGHT", decimals: 0, asset_id: null })).toEqual({
+  // sNight on another network may not be — the name map is the backstop. Only
+  // the asset comes from the map; the decimals stay the row's own, which is
+  // why the seeded row must carry NIGHT's 6 (asserted above).
+  expect(resolveAssetId({ name: "SNIGHT", decimals: 6, asset_id: null })).toEqual({
     assetId: "midnight-3",
-    decimals: 0,
+    decimals: 6,
   });
 });
 

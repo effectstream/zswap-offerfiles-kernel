@@ -120,7 +120,7 @@ CREATE TABLE known_tokens (
 -- Faucet-minted colours (WBTC, WETH, TESTTOKEN*) are NOT seeded: they derive
 -- from the deployed contract address and change on every clean redeploy, so
 -- they are registered at runtime and priced BY NAME through price-map.ts.
--- Only these three survive a redeploy unchanged:
+-- These four are seeded, because their colours survive a redeploy:
 --   NIGHT — the native token, colour 0x00…00 on every network.
 --   USDC  — a placeholder colour (64 x '1'). There is no USDC token on
 --           preprod; the row exists so the pair is quotable at a real
@@ -135,21 +135,41 @@ CREATE TABLE known_tokens (
 --           needs no change if the bridge ever reaches this network. The
 --           asset behind it is Moneta's Cardano USDM (`usdm-2`), the token
 --           the bridge carries — priced from the provider, not pegged (Q-10).
+--   SNIGHT — the shielded-night wrapper (effectstream/shielded-night): NIGHT
+--           held as a shielded (Zswap) token, locked 1:1 — one base unit is
+--           one Star — so it prices off NIGHT's asset (`midnight-3`) and is
+--           seeded with NIGHT's `decimals`, which keeps a NIGHT <-> sNight
+--           offer of equal base units at par under the sponsorship gate.
 --
--- sNight (SNIGHT, the shielded-night wrapper) is deliberately NOT here, for
--- two independent reasons:
---   * its colour is tokenType(pad(32,"shielded-night:wrapper"), self()), so it
---     changes with the contract ADDRESS, i.e. with the network — and
---     known_tokens.name is UNIQUE, so preview's and preprod's colours cannot
---     both be seeded under the name SNIGHT here;
---   * this file only ever runs against an empty database, and the runtime
---     applies migrationTable BY BLOCK HEIGHT (see migration-order.ts), so a
---     row added here would never reach a database that is already live.
--- Its per-network colours live in packages/database/network-tokens.ts and are
--- inserted idempotently at node start (packages/node/network-token-seed.ts),
--- with `decimals` copied from the NIGHT row above so the two are at par.
+--           !!! PATCH THIS ROW WHEN DEPLOYING TO ANOTHER NETWORK !!!
+--
+--           Unlike the three above, sNight's colour is
+--             tokenType(pad(32, "shielded-night:wrapper"), self())
+--           i.e. rawTokenType(pad32("shielded-night:wrapper"), <contract
+--           address>) with @midnight-ntwrk/ledger-v8 — so it derives from the
+--           contract ADDRESS and differs per network. The value seeded below
+--           is *preview*, the default:
+--             preview  address 80b89b9a4213c61da84f54b2ea02e2809f9c4dedbdafacd04b38d4667bee1396
+--                      colour  793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c
+--           Another network needs the colour below replaced (name is UNIQUE,
+--           so only one sNight row can exist per database):
+--             preprod  address e354e6725893397e6a2dfa44522a017fabb5d9c92efed50288711f5f865c8950
+--                      colour  8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819
+--             mainnet  not deployed — MAINNET_ADDRESS is empty in the
+--                      shielded-night repo's frontend/.env, so there is no
+--                      colour to seed yet.
+--           This file runs against an EMPTY database exactly once, so an
+--           ALREADY-LIVE database is not reached by editing it: patch that one
+--           by hand, with
+--             UPDATE known_tokens SET token_color = '<colour>' WHERE name = 'SNIGHT';
+--           or POST /v1/known-tokens.
+--           asset-prices.test.ts re-derives the seeded colour AND the preprod
+--           one from the addresses above, so neither the row nor this comment
+--           can rot after a contract redeploy.
 INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES
 ('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 0, 'midnight-3'),
+-- preview sNight — see the SNIGHT note above before deploying elsewhere.
+('793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c', 'SNIGHT','shielded',   0, 'midnight-3'),
 ('1111111111111111111111111111111111111111111111111111111111111111', 'USDC',  'shielded',   0, 'usd-coin'),
 ('003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73', 'USDM',  'unshielded', 6, 'usdm-2');
 -- ('0000000000000000000000000000000000000000000000000000000000000001', 'SILK', 'shielded'),

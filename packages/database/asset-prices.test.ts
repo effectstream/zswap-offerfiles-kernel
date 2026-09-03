@@ -15,6 +15,7 @@ process.env["PGLITE_DATA_DIR"] ??= "memory://";
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
+const ledger = await import("@midnight-ntwrk/ledger-v8");
 const {
   migrationTable,
   getAssetPrices,
@@ -37,7 +38,16 @@ let client: InstanceType<typeof pg.Client>;
 const COLOR_NIGHT = "0".repeat(64);
 const COLOR_USDC = "1".repeat(64);
 const COLOR_USDM = "003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73";
+const COLOR_SNIGHT = "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c";
 const COLOR_TEST = "a".repeat(64);
+
+// The shielded-night contract addresses, as committed in that repo's
+// `frontend/.env`. They are the INPUT to the colour derivation below, so they
+// are written here and nowhere else in the test.
+const SNIGHT_CONTRACT = {
+  preview: "80b89b9a4213c61da84f54b2ea02e2809f9c4dedbdafacd04b38d4667bee1396",
+  preprod: "e354e6725893397e6a2dfa44522a017fabb5d9c92efed50288711f5f865c8950",
+} as const;
 
 beforeAll(async () => {
   handle = await startPglite(PORT);
@@ -108,15 +118,26 @@ test("SC-001 basis: WBTC→WETH from the seeds alone is the BTC/ETH rate", async
   expect(rate).toBeLessThan(33);
 });
 
-test("the three redeploy-stable tokens are seeded, and only those", async () => {
+test("the four redeploy-stable tokens are seeded, and only those", async () => {
   const tokens = await getKnownTokensWithAssets.run(undefined, client);
-  expect(tokens.map((t) => t.name)).toEqual(["NIGHT", "USDC", "USDM"]);
+  expect(tokens.map((t) => t.name)).toEqual(["NIGHT", "SNIGHT", "USDC", "USDM"]);
 
   const byName = new Map(tokens.map((t) => [t.name, t]));
   expect(byName.get("NIGHT")).toMatchObject({
     token_color: COLOR_NIGHT,
     kind: "unshielded",
     decimals: 0,
+    asset_id: "midnight-3",
+  });
+  // The shielded-night wrapper, seeded with the PREVIEW colour (000-init.sql
+  // says how to patch it for another network). Same asset and same decimals as
+  // NIGHT, so equal base units are at par under the sponsorship gate — the
+  // decimals are asserted against NIGHT's row rather than against 0, so a
+  // future correction of NIGHT has to move both together (issues/00022).
+  expect(byName.get("SNIGHT")).toMatchObject({
+    token_color: COLOR_SNIGHT,
+    kind: "shielded",
+    decimals: byName.get("NIGHT")!.decimals,
     asset_id: "midnight-3",
   });
   expect(byName.get("USDC")).toMatchObject({
@@ -153,6 +174,68 @@ test("every seeded known token resolves to a seeded asset", async () => {
     expect(mapped).not.toBeNull();
     expect(assets.has(mapped!.assetId)).toBe(true);
   }
+});
+
+// ── sNight: the one seeded colour that moves with a contract (00021) ───────
+//
+// SNIGHT's colour is tokenType(pad(32, "shielded-night:wrapper"), self()), so
+// unlike the other three seeds it changes with the shielded-night contract
+// ADDRESS, i.e. with the network. 000-init.sql seeds *preview* and carries the
+// preprod address/colour in a comment for whoever patches the row. Both are
+// re-derived here from the addresses committed in the shielded-night repo, so
+// a redeploy — or a mistyped patch — fails here instead of registering a
+// colour nobody holds, and the comment cannot rot away from the row.
+
+/** The contract's `tokenType(pad(32, "shielded-night:wrapper"), self())`. */
+const deriveWrapperColor = (contractAddress: string): string => {
+  const domain = new Uint8Array(32);
+  domain.set(new TextEncoder().encode("shielded-night:wrapper"));
+  return String(
+    (ledger as unknown as {
+      rawTokenType: (domain: Uint8Array, contract: string) => string;
+    }).rawTokenType(domain, contractAddress),
+  ).toLowerCase();
+};
+
+test("the seeded SNIGHT colour is derived from the preview shielded-night address", async () => {
+  expect(deriveWrapperColor(SNIGHT_CONTRACT.preview)).toBe(COLOR_SNIGHT);
+
+  const row = (await getKnownTokensWithAssets.run(undefined, client)).find(
+    (t) => t.name === "SNIGHT",
+  )!;
+  expect(row.token_color).toBe(deriveWrapperColor(SNIGHT_CONTRACT.preview));
+});
+
+test("the other networks commented in 000-init.sql carry their derived colours", () => {
+  const sql = migrationTable.find((m) => m.name === "000-init.sql")!.sql;
+  // Both networks are documented as `<network>  address <hex>` / `colour <hex>`
+  // in the SNIGHT note; the pair must still derive from one another.
+  for (const network of ["preview", "preprod"] as const) {
+    const documented = new RegExp(
+      `${network}\\s+address\\s+([0-9a-f]{64})[^]*?colour\\s+([0-9a-f]{64})`,
+    ).exec(sql);
+    expect({ network, documented: documented !== null }).toEqual({
+      network,
+      documented: true,
+    });
+    const [, address, color] = documented!;
+    expect({ network, address }).toEqual({ network, address: SNIGHT_CONTRACT[network] });
+    expect({ network, color }).toEqual({
+      network,
+      color: deriveWrapperColor(address!),
+    });
+  }
+  // mainnet has no address yet, so it must NOT be documented with a colour.
+  expect(/mainnet\s+address\s+[0-9a-f]{64}/.test(sql)).toBe(false);
+});
+
+test("SNIGHT prices as NIGHT through the NAME map even without an asset_id", () => {
+  // The row above is seeded WITH midnight-3, but a hand-patched or POSTed
+  // sNight on another network may not be — the name map is the backstop.
+  expect(resolveAssetId({ name: "SNIGHT", decimals: 0, asset_id: null })).toEqual({
+    assetId: "midnight-3",
+    decimals: 0,
+  });
 });
 
 // ── the registry's new columns ─────────────────────────────────────────────

@@ -11,10 +11,10 @@
 // PRICE_FEED_MAP env var exist for the cases a name cannot express.
 //
 // SNIGHT is the same story with a fixed address: the shielded-night wrapper's
-// colour is derived from its contract address, so it differs per network. The
-// colours live in network-tokens.ts and are seeded into known_tokens at node
-// start; the NAME entry below is what prices the row if it is ever registered
-// without an asset_id.
+// colour is derived from its contract address, so it differs per network.
+// 000-init.sql seeds the PREVIEW colour and documents the patch other networks
+// need; the NAME entry below is what prices the row wherever it is registered
+// without an asset_id — a hand-patched colour on preprod included.
 //
 // Resolution order for one token (D6 of the master plan):
 //   1. known_tokens.asset_id      — the operator wrote it into the DB
@@ -61,7 +61,8 @@ export const SEEDED_ASSET_IDS: readonly string[] = [
  *
  * SNIGHT is the shielded-night wrapper, locked 1:1 against NIGHT (1 base unit
  * = 1 Star), so it shares NIGHT's asset — no new asset id, SEEDED_ASSET_IDS
- * unchanged. See network-tokens.ts for its per-network colours.
+ * unchanged. Its colour is per-network; see the SNIGHT note in
+ * migrations/000-init.sql.
  */
 export const DEFAULT_NAME_ASSET_MAP: ReadonlyMap<string, PriceMapEntry> = new Map<
   string,

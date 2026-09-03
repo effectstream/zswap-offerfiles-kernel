@@ -12,8 +12,7 @@ delete process.env["ENABLE_TOKEN_REGISTRY"]; // default-off is part of the contr
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
-const { migrationTable, SHIELDED_NIGHT_BY_NETWORK } = await import("@zswap-da/database");
-const { startNetworkTokenSeed } = await import("./network-token-seed.ts");
+const { migrationTable } = await import("@zswap-da/database");
 const fastify = (await import("fastify")).default;
 const { apiRouter } = await import("./api.ts");
 
@@ -551,67 +550,37 @@ describe("GET /v1/quote — reference prices (SC-001)", () => {
   });
 });
 
-// ── sNight, the per-network default token (00021) ──────────────────────────
+// ── sNight, a seeded default token (00021) ─────────────────────────────────
 //
-// MIDNIGHT_NETWORK_ID is unset here, so the router's own seed call was a
-// no-op (`undeployed` has no shielded-night contract) — which is itself the
-// dev-stack assertion. These tests drive the same startup helper with
-// `preprod` against the same real router and migrations, so what they read
-// back over HTTP is what a preprod deployment serves after its next restart.
+// Nothing is registered here: the SNIGHT row comes out of 000-init.sql like
+// NIGHT/USDC/USDM, so what these read back over HTTP is exactly what a fresh
+// deployment serves. The seeded colour is *preview*; another network patches
+// the row (or POSTs it) — see the SNIGHT note in 000-init.sql.
 
-describe("sNight is registered for the network the node runs on", () => {
-  const SNIGHT = SHIELDED_NIGHT_BY_NETWORK.get("preprod")!.color;
-  const lines: string[] = [];
-  const sink = {
-    log: (line: string) => lines.push(line),
-    warn: (line: string) => lines.push(`WARN ${line}`),
-  };
-
-  test("the startup seed writes the preprod colour once, then says so and stops", async () => {
-    const first = startNetworkTokenSeed(client, "preprod", sink);
-    await first.settled;
-    expect(lines).toEqual([`known_tokens: seeded SNIGHT ${SNIGHT} for preprod`]);
-
-    // Restart: no duplicate, no throw, and not a warning — this is the
-    // steady state of every start after the first.
-    const second = startNetworkTokenSeed(client, "preprod", sink);
-    await second.settled;
-    expect(lines[1]).toBe(
-      `known_tokens: SNIGHT not seeded for preprod — colour ${SNIGHT} is already registered as SNIGHT`,
-    );
-
-    // A network with nothing deployed says nothing at all.
-    const dev = startNetworkTokenSeed(client, "undeployed", sink);
-    await dev.settled;
-    expect(lines).toHaveLength(2);
-
-    const rows = await client.query(
-      "SELECT token_color FROM known_tokens WHERE name = 'SNIGHT'",
-    );
-    expect(rows.rows).toEqual([{ token_color: SNIGHT }]);
-  });
+describe("sNight is a seeded known token", () => {
+  const COLOR_SNIGHT = "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c";
+  const COLOR_SNIGHT_PREPROD =
+    "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
 
   test("GET /v1/known-tokens lists it with NIGHT's shape", async () => {
     const { status, body } = await getJson("/v1/known-tokens");
     expect(status).toBe(200);
     const byName = new Map<string, any>(body.map((t: any) => [t.name, t]));
     expect(byName.get("SNIGHT")).toMatchObject({
-      token_color: SNIGHT,
+      token_color: COLOR_SNIGHT,
       kind: "shielded",
       // Q3: NIGHT's decimals, so equal base units are at par under the gate.
       decimals: byName.get("NIGHT").decimals,
       asset_id: "midnight-3",
     });
-    // The other network's colour is not registered here.
-    expect(
-      body.some(
-        (t: any) => t.token_color === SHIELDED_NIGHT_BY_NETWORK.get("preview")!.color,
-      ),
-    ).toBe(false);
+    // Exactly one sNight row — `name` is UNIQUE, and the colour of a network
+    // this database was not built for must not be here.
+    expect(body.filter((t: any) => t.name === "SNIGHT")).toHaveLength(1);
+    expect(body.some((t: any) => t.token_color === COLOR_SNIGHT_PREPROD)).toBe(false);
   });
 
   test("GET /v1/prices prices it exactly as NIGHT, per base unit", async () => {
-    const { status, body } = await pricesFor(SNIGHT, COLOR_NIGHT);
+    const { status, body } = await pricesFor(COLOR_SNIGHT, COLOR_NIGHT);
     expect(status).toBe(200);
     const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
     const night = tokens.get("NIGHT");

@@ -62,7 +62,6 @@ import {
 import { registerExactFilesRoute } from "./offer-files-read.ts";
 import { registerOfferConsumptionRoute } from "./offer-consumption-read.ts";
 import { registerOfferUpdatesStream } from "./offer-updates-stream.ts";
-import { startNetworkTokenSeed } from "./network-token-seed.ts";
 import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
@@ -164,17 +163,6 @@ export const apiRouter: StartConfigApiRouter = async function (
   // BATCHER_SPONSOR_POLICY throws HERE — before the server is ready — instead
   // of on the first submission.
   console.log(`[API] ${describeSponsorshipPolicy()}`);
-
-  // Register the running network's sNight colour in known_tokens. The colours
-  // are per-network (they derive from the shielded-night contract address), so
-  // they cannot live in 000-init.sql — and that file could not reach an
-  // already-deployed database anyway. Idempotent, non-fatal, and a no-op on
-  // networks where the contract is not deployed (undeployed, mainnet). See
-  // network-token-seed.ts.
-  const networkTokenSeed = startNetworkTokenSeed(dbConn, MIDNIGHT_NETWORK_ID);
-  server.addHook("onClose", async () => {
-    networkTokenSeed.stop();
-  });
 
   // GET /keys/*, /zkir/* — ZK assets for the browser prover (the frontend now
   // lives in its own repo and fetches these from this API instead of staging

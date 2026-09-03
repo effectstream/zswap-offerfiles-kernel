@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConnectedAPI } from '@midnight-ntwrk/dapp-connector-api'
-import { MidnightBech32m, UnshieldedAddress } from '@midnightntwrk/wallet-sdk-address-format'
+import { MidnightBech32m, UnshieldedAddress } from '@midnight-ntwrk/wallet-sdk-address-format'
 import { api, run, type MidnightConfig } from '../api'
 import { connectBrowserContract, type ConnectedContract } from './browserContract'
 import { PROOF_SERVER_URL } from '../config'

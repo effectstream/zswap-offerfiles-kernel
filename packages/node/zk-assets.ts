@@ -37,7 +37,7 @@ function latestVersion(family: string): string | null {
   return versions.length ? String(versions[0]) : null;
 }
 
-export function resolveAsset(kind: "keys" | "zkir" | "compiler", rest: string): string | null {
+export function resolveAsset(kind: "keys" | "zkir", rest: string): string | null {
   // Primitive keys: midnight/<family>/<file> → cache <family>/<latest>/<file>.
   const primitive = rest.match(/^midnight\/([a-z]+)\/([A-Za-z0-9_.-]+)$/);
   if (primitive) {
@@ -45,18 +45,14 @@ export function resolveAsset(kind: "keys" | "zkir" | "compiler", rest: string): 
     const version = latestVersion(family!);
     return version ? join(cacheRoot, family!, version, file!) : null;
   }
-  // Contract circuit assets: <file> under managed/{keys,zkir,compiler}/.
+  // Contract circuit assets: <file> under managed/{keys,zkir}/.
   const base = resolve(MANAGED, kind);
   const full = resolve(base, rest);
   return full.startsWith(base + sep) ? full : null;
 }
 
 export function registerZkAssetRoutes(server: any): void {
-  // `compiler` carries contract-manifest.json — midnight-js 5's
-  // FetchZkConfigProvider verifies every fetched artifact against that
-  // integrity manifest by default, so the origin serving keys/zkir must
-  // serve it too or the browser prover dies before its first request.
-  for (const kind of ["keys", "zkir", "compiler"] as const) {
+  for (const kind of ["keys", "zkir"] as const) {
     server.get(
       `/${kind}/*`,
       // The provider fetches a burst of key files per proof — keep these

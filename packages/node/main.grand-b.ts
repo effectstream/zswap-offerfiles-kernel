@@ -12,9 +12,9 @@
 // MQTT_*_PORT) — the MQTT ports matter because they default to fixed values
 // that instance A already holds.
 
-import "@midnightntwrk/onchain-runtime-v4";
+import "@midnight-ntwrk/onchain-runtime-v3";
 
-import { ZswapChainState } from "@midnightntwrk/ledger-v9";
+import { ZswapChainState } from "@midnight-ntwrk/ledger-v8";
 
 // Same ZSwap tryApply guard as main.dev.ts — required for identical STF
 // behavior between the two instances.
@@ -60,23 +60,6 @@ import {
   CELESTIA_STEP_SIZE,
   midnightContract,
 } from "./env.ts";
-
-// Same env-first resolution as config.dev.ts (see the note there): the deploy
-// may be a separate one-shot, so the address has to be injectable. Kept
-// identical on purpose — grand-b-config-drift.test.ts asserts these two
-// configs do not diverge.
-const contractAddress =
-  process.env.MIDNIGHT_CONTRACT_ADDRESS ?? midnightContract?.contractAddress;
-
-if (!contractAddress) {
-  throw new Error(
-    `No Midnight contract address for network '${midnightNetworkConfig.id}'.\n` +
-      "Either:\n" +
-      "  1. Set MIDNIGHT_CONTRACT_ADDRESS, or\n" +
-      `  2. Provide packages/contracts-midnight/contract-offer-files.${midnightNetworkConfig.id}.json\n` +
-      "     (written by `bun run --filter @zswap-da/contracts-midnight midnight-contract:deploy`).",
-  );
-}
 
 const startTimeRaw = process.env["GRAND_NTP_START_TIME"];
 if (!startTimeRaw || !Number.isFinite(Number(startTimeRaw))) {
@@ -163,7 +146,7 @@ const config = new ConfigBuilder()
           name: "ZswapMidnightState",
           type: PrimitiveTypeMidnightGeneric,
           startBlockHeight: 1,
-          contractAddress,
+          contractAddress: midnightContract!.contractAddress,
           stateMachinePrefix: "midnight-zswap",
           contract: { ledger: OfferFilesContract.ledger },
           networkId: midnightNetworkConfig.id,

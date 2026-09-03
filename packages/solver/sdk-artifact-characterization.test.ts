@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Transaction } from "@midnightntwrk/ledger-v9";
+import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import {
   PendingTransactions,
   PendingTransactionsServiceImpl,

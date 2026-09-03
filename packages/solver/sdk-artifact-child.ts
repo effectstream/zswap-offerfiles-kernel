@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import { Transaction, ZswapLocalState } from "@midnightntwrk/ledger-v9";
+import { Transaction, ZswapLocalState } from "@midnight-ntwrk/ledger-v8";
 import {
   PendingTransactions,
   PendingTransactionsServiceImpl,
@@ -22,7 +22,7 @@ const input = JSON.parse(await readFile(path, "utf8")) as CharacterizationInput;
 const finalizedBytes = Uint8Array.fromHex(input.finalizedHex);
 const mirrorBytes = Uint8Array.fromHex(input.mirrorHex);
 
-// Both transaction variants use ledger-v9's public, marker-typed codec. The
+// Both transaction variants use ledger-v8's public, marker-typed codec. The
 // restored mirror handle is acted on by a fresh local state, proving that no
 // identity/private field from the originating facade is required to revert it.
 const finalized = finalizedTransactionPersistenceTrait.deserialize(finalizedBytes);

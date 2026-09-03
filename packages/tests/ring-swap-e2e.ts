@@ -16,7 +16,7 @@
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
+import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";

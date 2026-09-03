@@ -15,7 +15,7 @@ process.env["PGLITE_DATA_DIR"] ??= "memory://";
 
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
-const ledger = await import("@midnightntwrk/ledger-v9");
+const ledger = await import("@midnight-ntwrk/ledger-v8");
 const {
   migrationTable,
   getAssetPrices,

@@ -30,21 +30,22 @@
     "test:held-open": "bun test ./packages/database/held-open-transaction.pgtest.ts"
   },
   "dependencies": {
-    "@effectstream/celestia": "0.200.2",
-    "@effectstream/midnight-contracts": "0.200.2",
-    "@effectstream/mip-zswap-offer": "0.4.0-v9.0",
-    "@effectstream/orchestrator": "0.200.2",
+    "@effectstream/celestia": "0.103.1",
+    "@effectstream/midnight-contracts": "0.103.1",
+    "@effectstream/mip-zswap-offer": "0.3.0",
+    "@effectstream/orchestrator": "0.103.1",
     "@electric-sql/pglite": "^0.3.14",
-    "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6",
-    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
-    "@midnightntwrk/wallet-sdk-abstractions": "3.0.0-beta.0",
-    "@midnightntwrk/wallet-sdk-address-format": "4.0.0-beta.2",
-    "@midnightntwrk/wallet-sdk-capabilities": "4.0.0-beta.2",
-    "@midnightntwrk/wallet-sdk-dust-wallet": "5.0.0-beta.2",
-    "@midnightntwrk/wallet-sdk-facade": "5.0.0-beta.2",
-    "@midnightntwrk/wallet-sdk-hd": "3.1.0-beta.1",
-    "@midnightntwrk/wallet-sdk-shielded": "4.0.0-beta.2",
-    "@midnightntwrk/wallet-sdk-unshielded-wallet": "4.0.0-beta.2",
+    "@midnight-ntwrk/ledger-v8": "8.1.0",
+    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+    "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
+    "@midnightntwrk/wallet-sdk-abstractions": "2.1.0",
+    "@midnightntwrk/wallet-sdk-address-format": "3.1.2",
+    "@midnightntwrk/wallet-sdk-capabilities": "3.3.1",
+    "@midnightntwrk/wallet-sdk-dust-wallet": "4.2.0",
+    "@midnightntwrk/wallet-sdk-facade": "4.1.0",
+    "@midnightntwrk/wallet-sdk-hd": "3.0.3",
+    "@midnightntwrk/wallet-sdk-shielded": "3.0.2",
+    "@midnightntwrk/wallet-sdk-unshielded-wallet": "3.1.0",
     "@scure/bip39": "^2.2.0",
     "wait-on": "8.0.3"
   },
@@ -56,6 +57,6 @@
     "typescript": "~5.9.3"
   },
   "overrides": {
-    "@midnightntwrk/ledger-v9": "1.0.0-rc.3"
+    "@midnight-ntwrk/ledger-v8": "8.1.0"
   }
 }

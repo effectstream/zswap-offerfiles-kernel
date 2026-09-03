@@ -7,7 +7,7 @@
 // stand-ins of the same shape differ by a few serialized bytes and therefore by
 // ~1e11 SPECKs. Exact fee equality is not available and is not asserted.
 import { expect, test } from "bun:test";
-import { LedgerParameters, Transaction } from "@midnightntwrk/ledger-v9";
+import { LedgerParameters, Transaction } from "@midnight-ntwrk/ledger-v8";
 
 import {
   buildTakerHalfStandIn,

@@ -89,18 +89,9 @@ async function fetchMidnightTip(fresh = false): Promise<number | null> {
 
 async function fetchCelestiaTip(fresh = false): Promise<number | null> {
   const load = async () => {
-    // Same bearer the DA write path sends. Without it, an auth-enabled
-    // Celestia node 401s this probe, the tip reads as null forever, and
-    // /v1/health/sync reports "syncing" on a fully-caught-up kernel — which
-    // starves every consumer that gates on currentness (measured live
-    // 2026-08-26: the solver's readiness gate).
-    const token = process.env["CELESTIA_AUTH_TOKEN"] ?? "";
     const json = await fetchJsonWithDeadline(fetch, CELESTIA_RPC_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", method: "header.NetworkHead", params: [], id: 1 }),
     });
     const h = parseInt(json?.result?.header?.height, 10);

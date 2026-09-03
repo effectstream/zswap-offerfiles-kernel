@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Buffer } from "node:buffer";
-import { Transaction } from "@midnightntwrk/ledger-v9";
+import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
 import {

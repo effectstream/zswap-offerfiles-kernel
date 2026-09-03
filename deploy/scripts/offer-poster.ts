@@ -462,14 +462,10 @@ async function startup(cfg: PosterConfig): Promise<Started> {
 
   let dustBalance = 0n;
   try {
-    // `waitForDustFunds` (midnight-contracts 0.200.x) resolves a readiness
-    // record — spendable-coin count plus balance — not the bare balance the
-    // 0.103 line returned. Only the balance feeds the log and /health.
-    const dustFunds = await waitForDustFunds(walletResult.wallet, {
+    dustBalance = await waitForDustFunds(walletResult.wallet, {
       waitNonZero: true,
       timeoutMs: cfg.dustWaitTimeoutMs,
     });
-    dustBalance = dustFunds.balance;
   } catch (err) {
     warn(
       `no spendable DUST within POSTER_DUST_WAIT_TIMEOUT_MS=${cfg.dustWaitTimeoutMs}ms ` +

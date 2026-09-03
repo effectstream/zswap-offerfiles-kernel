@@ -113,7 +113,7 @@ async function defaultSubmitSelfSplit(
   try {
     const signed = await (walletResult.wallet as any).signRecipe(
       recipe,
-      (payload: Uint8Array) => walletResult.unshieldedKeystore.signDataAsync(payload),
+      (payload: Uint8Array) => walletResult.unshieldedKeystore.signData(payload),
     );
     finalized = await walletResult.wallet.finalizeRecipe(signed);
     await walletResult.wallet.submitTransaction(finalized);

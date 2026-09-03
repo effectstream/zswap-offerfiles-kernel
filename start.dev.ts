@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import path from "node:path";
 import type { OrchestratorConfig } from "@effectstream/orchestrator/config";
 import { DbNames, launchPglite } from "@effectstream/orchestrator/launch-pglite";
@@ -13,49 +12,45 @@ import {
 
 const root = import.meta.dirname!;
 
-// The compactc pin lives in infra/compact-version.txt and is run through
-// infra/compact.sh: a host `$COMPACTC` of that version if set, otherwise the
-// `compact-toolchain` container it builds on first use. The `compact` version
-// manager plays no part — it does not publish the 0.33 line (see
-// infra/compact-toolchain.Dockerfile) — so the check below verifies the route
-// the build will actually take, not a manager install.
-const COMPACT_VERSION = fs
-  .readFileSync(path.join(root, "infra/compact-version.txt"), "utf8")
-  .trim();
+const COMPACT_VERSION = "0.30.0";
 
 const compactCheckScript = `
 const { execSync } = require("child_process");
-const compactc = process.env.COMPACTC;
-if (compactc) {
-  let out = "";
-  try {
-    out = execSync(JSON.stringify(compactc) + " --version", { encoding: "utf8", stdio: "pipe" });
-  } catch {
-    console.error("ERROR: COMPACTC=" + compactc + " does not run (infra/compact.sh would exec it).");
-    process.exit(1);
-  }
-  if (!out.includes("${COMPACT_VERSION}")) {
-    console.error("ERROR: COMPACTC reports '" + out.trim() + "', expected compactc ${COMPACT_VERSION} (infra/compact-version.txt).");
-    process.exit(1);
-  }
-  console.log("compactc ${COMPACT_VERSION} available via COMPACTC=" + compactc);
-  process.exit(0);
-}
 try {
-  execSync("docker info", { stdio: "pipe", timeout: 30000 });
+  execSync("compact --version", { stdio: "pipe" });
 } catch {
   console.error([
     "",
-    "ERROR: neither COMPACTC nor a running Docker daemon is available.",
+    "ERROR: 'compact' CLI not found.",
     "",
-    "infra/compact.sh compiles offer-files.compact with compactc ${COMPACT_VERSION} either",
-    "through a host binary (export COMPACTC=/path/to/compactc) or inside the",
-    "compact-toolchain container it builds from infra/compact-toolchain.Dockerfile.",
+    "Install it with:",
+    "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh",
+    "  compact update ${COMPACT_VERSION}",
     "",
   ].join("\\n"));
   process.exit(1);
 }
-console.log("compactc ${COMPACT_VERSION} will run in the compact-toolchain container (Docker daemon reachable)");
+// "compact list" occasionally hangs forever (CLI quirk); the CLI itself
+// already responded to --version above, so treat a hung list as non-fatal.
+let list = "";
+try {
+  list = execSync("compact list", { encoding: "utf8", timeout: 30000 });
+} catch {
+  console.log("compact list timed out — compact CLI responds, continuing");
+  process.exit(0);
+}
+if (!list.includes("${COMPACT_VERSION}")) {
+  console.error([
+    "",
+    "ERROR: Compact version ${COMPACT_VERSION} is not installed.",
+    "",
+    "Install it with:",
+    "  compact update ${COMPACT_VERSION}",
+    "",
+  ].join("\\n"));
+  process.exit(1);
+}
+console.log("compact v${COMPACT_VERSION} is available");
 `.trim();
 
 const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
@@ -65,7 +60,7 @@ export default {
   processes: [
     {
       name: "compact-check",
-      description: `Check that compactc ${COMPACT_VERSION} is reachable (COMPACTC or Docker, via infra/compact.sh)`,
+      description: `Check that the Compact compiler (v${COMPACT_VERSION}) is installed`,
       args: ["-e", compactCheckScript],
       waitToExit: true,
       critical: true,

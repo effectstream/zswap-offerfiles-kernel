@@ -180,6 +180,19 @@
         "@scure/base": "^2.0.0",
       },
     },
+    "packages/price-feed": {
+      "name": "@zswap-da/price-feed",
+      "version": "0.1.0",
+      "dependencies": {
+        "@effectstream/utils": "0.103.1",
+        "@zswap-da/database": "workspace:*",
+        "pg": "^8.16.3",
+      },
+      "devDependencies": {
+        "@effectstream/db": "0.103.1",
+        "@types/pg": "^8.11.10",
+      },
+    },
     "packages/solver": {
       "name": "@zswap-da/solver",
       "version": "0.1.0",
@@ -1169,6 +1182,8 @@
     "@zswap-da/node": ["@zswap-da/node@workspace:packages/node"],
 
     "@zswap-da/offer-guard": ["@zswap-da/offer-guard@workspace:packages/offer-guard"],
+
+    "@zswap-da/price-feed": ["@zswap-da/price-feed@workspace:packages/price-feed"],
 
     "@zswap-da/solver": ["@zswap-da/solver@workspace:packages/solver"],
 

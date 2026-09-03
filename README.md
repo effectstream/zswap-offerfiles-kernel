@@ -81,10 +81,70 @@ dev stack does) to populate the cache.
 | Batcher entry | `packages/batcher/batcher.dev.ts` | `packages/batcher/batcher.mainnet.ts` |
 | Orchestrator | `start.dev.ts` | `start.mainnet.ts` |
 | COW solver | **separate process** — `bun run start:solver` (or `packages/solver/solver.dev.ts`) | **separate process** — `bun run start:solver` (or `packages/solver/solver.mainnet.ts`) |
+| Price feed | **separate process, optional** — `bun run --filter @zswap-da/price-feed start` (or `… once` for a single refresh) | same, plus the `price-feed` compose service (`--profile prices`) |
 
 **Neither orchestrator launches the solver.** `start.dev.ts` and `start.mainnet.ts`
 bring up chain, database, node and batcher only; see
 [Running the COW solver](#running-the-cow-solver).
+
+**The price feed is optional.** `start.dev.ts` registers it only when
+`COINGECKO_API_KEY` is set, and never as a system-dependency, because
+`packages/database/migrations/000-init.sql` **seeds** real reference prices
+(captured 2026-09-02): a stack that never runs it still quotes 1 WBTC ≈ 32 WETH
+rather than a colour-hash rate. See [Reference prices](#reference-prices).
+
+## Reference prices
+
+`GET /v1/prices?tokens=<color>[,<color>…]` serves the USD prices behind
+`GET /v1/quote` and behind the batcher's fee sponsorship. USD is the numeraire:
+every price is a USD price and no asset — stablecoins included — is assumed to be
+worth one dollar. `tokens` is **required** (1-50 colours) and there is no
+unfiltered form: callers ask about the colours in front of them, so the endpoint's
+cost does not grow with the registry. Three tables back it:
+
+| Table | Holds |
+|---|---|
+| `asset_prices` | USD **per coin** for a tradable asset, keyed by its CoinGecko id. Seeded in `000-init.sql` with values captured 2026-09-02 |
+| `known_tokens` | a colour's `decimals` (base units per coin) and optional `asset_id`. Prices are served **per base unit**, i.e. the asset price ÷ `10^decimals` |
+| `token_prices` | only operator overrides (`manual`) and the deterministic demo rows (`fallback`) for tokens with no asset behind them |
+
+Tokens map to assets **by name** — `WBTC`/`WSBTC`/`BTC` → `bitcoin`, `WETH`/`WSETH`/
+`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3` —
+because faucet-minted colours derive from the contract address and change on every
+clean redeploy. `known_tokens.asset_id` overrides the map; `PRICE_FEED_MAP`
+(`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
+
+`packages/price-feed` refreshes `asset_prices` from CoinGecko. It is a process of
+its own — the node never makes an outbound price call:
+
+```bash
+bun run --filter @zswap-da/price-feed once    # one refresh, exit 0 (all) / 2 (partial)
+bun run --filter @zswap-da/price-feed start   # loop, one cycle a day
+docker compose run --rm price-feed --once     # the same, in deploy/
+```
+
+One cycle asks for up to `PRICE_FEED_BATCH_SIZE` ids per request, with at least
+`PRICE_FEED_REQUEST_SPACING_MS` between requests, stopping at the first `429`.
+Today's five assets (`bitcoin`, `ethereum`, `usd-coin`, `midnight-3`, `usdm-2`)
+are **one request a day**; credits scale with `ceil(assets / 50)`, not with the
+number of tokens.
+
+**It is not part of `bun run dev`.** Development runs on the seeded prices — real
+BTC/ETH ratios with no key, no network and no extra process — so the feed is never
+registered in `start.dev.ts`. Run it deliberately with `--once`, or with the
+opt-in compose service in `deploy/`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `COINGECKO_API_KEY` | — | Required to fetch. Sent as the `x-cg-demo-api-key` header, never in a query string. Without it the service only WARNS: `--once` exits 64, loop mode warns on every tick and does nothing |
+| `COINGECKO_BASE_URL` | `https://api.coingecko.com/api/v3` | Point at a stub in tests |
+| `PRICE_FEED_INTERVAL_MS` | `86400000` | Loop period |
+| `PRICE_FEED_REQUEST_SPACING_MS` | `1000` | Minimum gap between two requests |
+| `PRICE_FEED_BATCH_SIZE` | `50` | Asset ids per `simple/price` request |
+| `PRICE_FEED_ASSETS` | the five seeded ids | Comma-separated CoinGecko ids |
+| `PRICE_FEED_MAP` | — | Node + feed: `NAME_OR_COLOR=<asset_id>[:decimals],…`. A malformed entry is a startup error, never a silent skip |
+| `SPONSOR_DISCOUNT_BPS` | `250` | How far below reference an offer must be priced to earn fee sponsorship. Published in `/v1/prices.sponsor_discount` |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PW` / `DB_NAME` | `127.0.0.1` / `5432` / `postgres` / `postgres` / `postgres` | Where the feed writes |
 
 ## Running the COW solver
 
@@ -421,6 +481,8 @@ zswap-offerfile-kernel/
 │   ├── batcher/                              # @zswap-da/batcher
 │   ├── solver/                               # @zswap-da/solver (book mirror, ladders, swap-job settlement)
 │   ├── solver-core/                          # @zswap-da/solver-core (shared clients, ladder derivation, contracts)
+│   ├── offer-guard/                          # @zswap-da/offer-guard (checks node + batcher must agree on)
+│   ├── price-feed/                           # @zswap-da/price-feed (daily CoinGecko refresh; optional process)
 │   ├── contracts-midnight/                   # @zswap-da/contracts-midnight (+ contract-offer-files subworkspace)
 │   ├── contracts-celestia/                   # @zswap-da/contracts-celestia (bridge + fund scripts)
 │   └── tests/                                # @zswap-da/tests
@@ -434,14 +496,16 @@ monorepo at
 
 | Package | Files |
 |---------|-------|
-| `node/` | `main.{dev,mainnet}.ts`, `config.{dev,mainnet}.ts`, `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `docs.ts` (`GET /docs` serves Vite playground dist), `zk-assets.ts` (`/keys/*`, `/zkir/*` static ZK assets), `zswap-logic.ts`, `batcher-client.ts`, `event-bus.ts` |
-| `database/` | `mod.ts` (re-exports), `migration-order.ts`, `migrations/000-init.sql`, `migrations/001-spent-sets.sql` (`spent_*` liveness sets), `migrations/002-liveness-sets.sql` (`created_unshielded` + windowed `known_roots`), `sql/queries.sql` (+ generated `queries.queries.ts`) |
+| `node/` | `main.{dev,mainnet}.ts`, `config.{dev,mainnet}.ts`, `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `prices.ts` (price resolution + `GET /v1/prices`), `docs.ts` (`GET /docs` serves Vite playground dist), `zk-assets.ts` (`/keys/*`, `/zkir/*` static ZK assets), `zswap-logic.ts`, `batcher-client.ts`, `event-bus.ts` |
+| `database/` | `mod.ts` (re-exports), `migration-order.ts`, `migrations/000-init.sql` (THE schema — one file applied from zero; there is no numbered chain, and the 001/002 files this table used to list are gone), `migrations/local-migration.sql` (local-only additions), `price-map.ts` (token NAME → reference asset, per-base-unit conversion), `sql/queries.sql` (+ generated `queries.queries.ts`), `sql/queries.app.ts` |
 | `validator/` | `validate.ts` (pipeline), `derive.ts`, `refstate.ts`, `types.ts`, `README.md`, `scripts/check-preview-indexer.ts` |
 | `batcher/` | `batcher.{dev,mainnet}.ts`, `config.ts`, `midnight-balancing.ts`, `celestia.ts` (`ZswapCelestiaAdapter.validateInput` — pre-fee offer gate) |
 | `contracts-midnight/` | `package.json` (scripts for `launchMidnight`), `deploy.ts`, `contract-offer-files/` (Compact source + compiled output) |
 | `contracts-celestia/` | `package.json` (`celestia-{node,bridge,fund}:*` scripts), `fund-bridge.ts` |
 | `solver/` | `solver.{dev,preview,mainnet}.ts` (per-network entrypoints), `env.ts`, `src/launch.ts` (the `start:solver` configuration contract), `src/run.ts` (`runSolver`), `src/book-sync.ts`, `src/ladder-source.ts`, `src/relay-client.ts`, `src/swap-job-executor.ts`, `src/stock.ts`, `src/operation-journal.ts` |
 | `solver-core/` | `api-client.ts` (kernel REST/SSE + exact files), `ladder-derivation.ts`, `admission-policy.ts` (one typed policy for publication and admission), `relay-ws-contract.ts`, `receipt-client.ts`, `batcher.ts`, `wallet.ts` |
+| `offer-guard/` | `mod.ts` (offer hash, guard ladder, dedup store), `sponsorship.ts` (`evaluateSponsorship()` — the ONE fee-sponsorship rule, shared by the quote, the node pre-check and the batcher) |
+| `price-feed/` | `price-feed.{dev,preview,mainnet}.ts`, `src/config.ts`, `src/coingecko.ts` (one asset per request, key as a header), `src/cycle.ts` (spacing, 429 stop, status row), `src/run.ts` (`--once` vs loop, retry ladder, exit codes) |
 | `tests/` | `run-tests.ts`, `start.test.ts` (test orchestrator), `helpers.ts`, `lib/db.ts`, `infra/{celestia,midnight}-ready.test.ts`, `stm/{zswap-flow,api,multi-token,unshielded-only,root-unknown}.test.ts` |
 
 ## Services & ports
@@ -458,6 +522,7 @@ monorepo at
 | Midnight indexer | 8088 |
 | Midnight proof server | 6300 |
 | COW solver | **none** — outbound only (kernel API + relay websocket); it listens on no port |
+| Price feed | **none** — outbound only (CoinGecko) plus the database; it listens on no port |
 
 ## Grammar / state-machine inputs
 

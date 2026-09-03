@@ -9,7 +9,13 @@
 
 // A poster clears the Celestia sponsorship when offering the taker a price at
 // least this far below market (a "good trade" that will actually get filled).
-export const SPONSOR_DISCOUNT = 0.025; // 2.5%
+//
+// The value now lives in the environment, as SPONSOR_DISCOUNT_BPS — see
+// sponsorDiscountBps() in env.ts, and evaluateSponsorship() in
+// @zswap-da/offer-guard for the rule itself. The constant that used to sit
+// here was read only by this file, while the batcher's stub carried the same
+// 2.5% as a comment; one number in one place is the point of moving it.
+export const DEFAULT_SPONSOR_DISCOUNT_BPS = 250;
 
 const NIGHT_COLOR = "0".repeat(64);
 
@@ -54,8 +60,7 @@ export interface Quote {
   to_usd: number | null;
 }
 
-const SPONSOR_NUMERATOR = 975n;
-const SPONSOR_DENOMINATOR = 1000n;
+const BPS_DENOMINATOR = 10_000n;
 
 /** Exact rational representation of the decimal spelling of a finite positive
  * JS price. This keeps base-unit multiplication in bigint; Number remains only
@@ -86,14 +91,22 @@ export function quoteWithPrices(
   pf: number,
   pt: number,
   toAmount?: bigint,
+  // Basis points, NOT a fraction: the suggested amount is exact bigint
+  // arithmetic, and 0.025 as a double is not 25/1000. An integer bps keeps
+  // the rational exact for any operator-chosen threshold.
+  sponsorDiscountBps: number = DEFAULT_SPONSOR_DISCOUNT_BPS,
 ): Quote {
+  if (!Number.isInteger(sponsorDiscountBps) || sponsorDiscountBps < 0 || sponsorDiscountBps >= 10_000) {
+    throw new Error(`sponsor discount must be an integer in [0, 10000) bps, got ${sponsorDiscountBps}`);
+  }
   const marketRate = pf / pt; // `to` units per 1 `from`
   const fromPrice = decimalRatio(pf);
   const toPrice = decimalRatio(pt);
+  const sponsorNumerator = BPS_DENOMINATOR - BigInt(sponsorDiscountBps);
   const suggestedNumerator =
-    fromAmount * fromPrice.numerator * toPrice.denominator * SPONSOR_NUMERATOR;
+    fromAmount * fromPrice.numerator * toPrice.denominator * sponsorNumerator;
   const suggestedDenominator =
-    fromPrice.denominator * toPrice.numerator * SPONSOR_DENOMINATOR;
+    fromPrice.denominator * toPrice.numerator * BPS_DENOMINATOR;
   const suggested = suggestedNumerator / suggestedDenominator;
   const eff = toAmount ?? suggested;
   const fromNum = Number(fromAmount);
@@ -128,6 +141,7 @@ export function quote(
   toToken: string,
   fromAmount: bigint,
   toAmount?: bigint,
+  sponsorDiscountBps: number = DEFAULT_SPONSOR_DISCOUNT_BPS,
 ): Quote {
   return quoteWithPrices(
     fromToken,
@@ -136,6 +150,7 @@ export function quote(
     priceOf(fromToken),
     priceOf(toToken),
     toAmount,
+    sponsorDiscountBps,
   );
 }
 

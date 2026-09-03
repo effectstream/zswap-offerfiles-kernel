@@ -30,11 +30,11 @@ PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null | cut -d= -f2- || t
 PROJECT="${PROJECT:-cow00005_e2e}"
 
 echo "== tearing down project ${PROJECT} =="
-docker compose --profile e2e down --volumes --remove-orphans --timeout 30 || true
+docker compose --profile e2e --profile prices down --volumes --remove-orphans --timeout 30 || true
 
 if [ "${REMOVE_IMAGES}" -eq 1 ]; then
   echo "== removing images built by this project =="
-  docker compose --profile e2e down --rmi local --volumes --remove-orphans || true
+  docker compose --profile e2e --profile prices down --rmi local --volumes --remove-orphans || true
 fi
 
 echo

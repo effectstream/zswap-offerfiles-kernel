@@ -4,9 +4,8 @@ import rateLimit from "@fastify/rate-limit";
 import {
   getKnownTokens,
   insertKnownToken,
+  getAssetPrices,
   getLatestEffectstreamBlock,
-  getTokenPrice,
-  upsertTokenPrice,
   checkTokenNameExists,
   getTokenByColor,
   getPairs,
@@ -30,6 +29,8 @@ import {
   apiUpdatesMaxConnections,
   isEventGatePollEnabled,
   isTokenRegistryEnabled,
+  sponsorDiscount,
+  sponsorDiscountBps,
   MIDNIGHT_NETWORK_ID,
   OFFER_MAX_BYTES,
   ROOT_WINDOW_SECONDS,
@@ -44,7 +45,13 @@ import {
   markBlockCommitted,
   type AppEvent,
 } from "./event-bus.ts";
-import { quoteWithPrices, priceOf } from "./market-mock.ts";
+import { quoteWithPrices } from "./market-mock.ts";
+import {
+  listPricesForTokens,
+  loadPricingContext,
+  parseTokensParam,
+  resolveTokenPrice,
+} from "./prices.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
 import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
@@ -465,18 +472,32 @@ export const apiRouter: StartConfigApiRouter = async function (
     return result;
   });
 
-  // GET /v1/quote — price quote for from→to backed by the token_prices DB table.
-  // On first request for a token the deterministic fallback price is inserted so
-  // subsequent calls are consistent and operators can override rows manually.
+  // GET /v1/prices?tokens=<color>[,<color>...] — the reference prices behind
+  // every quote and behind the batcher's sponsorship gate, plus how old they
+  // are and where they came from.
+  //
+  // `tokens` is REQUIRED and bounded at 50 (Q-11). There is no unfiltered
+  // form: the batcher asks per offer for that offer's leg colours and the UI
+  // asks for the pair on screen, so an endpoint whose cost grew with the size
+  // of the registry served nobody and would have become the slowest route here
+  // the first time a few thousand short-lived tokens were minted.
+  //
+  // Read-only: unlike the quote path it never writes a demo row.
+  server.get("/v1/prices", async (request: any, reply: any) => {
+    const parsed = parseTokensParam((request?.query ?? {})["tokens"]);
+    if (!Array.isArray(parsed)) {
+      return reply.code(400).send({ error: "VALIDATION", reason: parsed.reason });
+    }
+    return listPricesForTokens(dbConn, parsed);
+  });
+
+  // GET /v1/quote — price quote for from→to. Prices resolve through
+  // packages/prices.ts: a manual override, else the token's reference asset
+  // (÷ 10^decimals), else the deterministic demo price, which is inserted on
+  // first request so subsequent calls are consistent and operators can
+  // override the row by hand.
   // Params: from_token, to_token (hex colors), from_amount (base units),
   // optional to_amount (a user-set receive amount → discount/sponsored vs it).
-  async function resolvePrice(token: string): Promise<number> {
-    const rows = await getTokenPrice.run({ token_color: token }, dbConn);
-    if (rows.length > 0) return Number(rows[0].price_usd);
-    const fallback = priceOf(token);
-    await upsertTokenPrice.run({ token_color: token, price_usd: fallback }, dbConn);
-    return fallback;
-  }
 
   const TOKEN_COLOR_RE = /^[0-9a-f]{64}$/;
   const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,77})$/; // bounded above by u256
@@ -542,9 +563,29 @@ export const apiRouter: StartConfigApiRouter = async function (
           `No token-tracking solution yet; fix before any real pricing. Tokens: ${unknownTokens.join(", ")}`,
       );
     }
+    // An unregistered colour is quoted at $1 without touching the database —
+    // `demo-fallback`, the one source that is not a row anywhere.
+    const DEMO = { price_usd: "1", source: "demo-fallback" as const, updated_at: null };
+    const ctx = await loadPricingContext(dbConn);
     const priceFor = (color: string) =>
-      unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
-    const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
+      unknownTokens.includes(color)
+        ? Promise.resolve(DEMO)
+        : resolveTokenPrice(dbConn, color, ctx);
+    // Sequential: one pg client, and pg serialises concurrent queries on it
+    // anyway (with a deprecation warning). Two reads, not a round trip saved.
+    const fromPrice = await priceFor(fromToken);
+    const toPrice = await priceFor(toToken);
+    const pf = Number(fromPrice.price_usd);
+    const pt = Number(toPrice.price_usd);
+
+    // The OLDER of the two, because a quote is only as fresh as its stalest
+    // side. null when either side has no real price to be stale.
+    const pricesUpdatedAt =
+      fromPrice.updated_at === null || toPrice.updated_at === null
+        ? null
+        : fromPrice.updated_at < toPrice.updated_at
+          ? fromPrice.updated_at
+          : toPrice.updated_at;
 
     // Quotes come from the token-price table (or the demo fallback) only. The
     // backend deliberately holds NO solver state: solver-posted ladders used to
@@ -554,8 +595,15 @@ export const apiRouter: StartConfigApiRouter = async function (
     // relay and the relay does the interpolation, so this backend keeps a
     // single, client-agnostic price source.
     return {
-      ...quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount),
+      ...quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount, sponsorDiscountBps()),
       source: unknownTokens.length > 0 ? "demo-fallback" : "token-prices",
+      // Per-side provenance, so the UI can say "CoinGecko, 3 h ago" for one
+      // leg and "demo rate" for the other instead of collapsing both into the
+      // single top-level `source`.
+      sponsor_discount: sponsorDiscount(),
+      from_source: fromPrice.source,
+      to_source: toPrice.source,
+      prices_updated_at: pricesUpdatedAt,
     };
   });
 
@@ -599,6 +647,14 @@ export const apiRouter: StartConfigApiRouter = async function (
             color: { type: "string" },
             name: { type: "string" },
             kind: { type: "string", enum: ["shielded", "unshielded"] },
+            // Base units per coin. Omitted means 0 (base unit == coin), which
+            // is what the faucet mints; a bridged token that mints 10^6 units
+            // per coin states it, or its USD price would be off by 10^6.
+            decimals: { type: "integer", minimum: 0, maximum: 38 },
+            // Reference asset (a CoinGecko id). Omitted means "price it by
+            // NAME through price-map.ts", which is right for every token the
+            // default map already knows.
+            asset_id: { type: "string" },
           },
         },
       },
@@ -634,9 +690,29 @@ export const apiRouter: StartConfigApiRouter = async function (
         return reply.code(409).send({ error: `Token color already registered as "${colorCheck[0].name}"` });
       }
 
-      await insertKnownToken.run({ token_color: color, name, kind }, dbConn);
+      const decimals =
+        request.body.decimals === undefined ? null : Number(request.body.decimals);
+      const assetId =
+        request.body.asset_id === undefined
+          ? null
+          : String(request.body.asset_id).trim().toLowerCase() || null;
+      // A colour claiming an asset nobody seeded would fail the FK with a
+      // 500; answer it as the client error it is.
+      if (assetId !== null) {
+        const assets = await getAssetPrices.run(undefined, dbConn);
+        if (!assets.some((a) => a.asset_id === assetId)) {
+          return reply.code(400).send({
+            error: `Unknown asset_id "${assetId}" — known: ${assets.map((a) => a.asset_id).join(", ")}`,
+          });
+        }
+      }
+
+      await insertKnownToken.run(
+        { token_color: color, name, kind, decimals, asset_id: assetId },
+        dbConn,
+      );
       emitAppEvent({ type: "token_minted", name, color, kind });
-      return { success: true, color, name, kind };
+      return { success: true, color, name, kind, decimals: decimals ?? 0, asset_id: assetId };
     },
   );
 

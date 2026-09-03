@@ -151,6 +151,18 @@ export default {
       dependsOn: [...midnightDeps, midnightMintTestTokens, "sync"],
     },
 
+    // The price feed is deliberately NOT registered here (Q-11).
+    //
+    // Development runs on the reference prices seeded in 000-init.sql, which
+    // is the whole reason the seeds exist: a dev stack quotes real BTC/ETH
+    // ratios with no key, no network and no extra process. Running the feed
+    // here would spend a shared, metered CoinGecko budget every time somebody
+    // starts a stack, to replace correct numbers with slightly newer ones.
+    //
+    // To refresh prices deliberately: `bun run --filter @zswap-da/price-feed
+    // once` with COINGECKO_API_KEY set, or the opt-in compose service
+    // (`--profile prices` in deploy/).
+
     // The frontend lives in paima-engine/templates/zswap-da — run it separately
     // against this stack (vite on :10600, fetches API + ZK keys from :9999).
   ],

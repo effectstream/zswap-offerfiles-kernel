@@ -771,9 +771,121 @@ Validation consults the node's local state only — no live RPC calls are made. 
 > positive `version`, and `pairs` is interpreted as a complete replacement.
 > Solver-backed `/v1/quote` precedence is default-off until explicitly enabled.
 
+#### `GET /v1/prices?tokens=<color>[,<color>…]`
+
+The reference prices for the colours you name, where they came from, and how old
+they are. This is the source of truth behind `GET /v1/quote` and behind the
+batcher's fee sponsorship — the batcher looks colours up here rather than keeping
+its own prices, so the threshold the UI shows and the one the batcher enforces
+cannot drift apart.
+
+**`tokens` is required.** 1-50 64-hex colours, comma-separated. There is no
+unfiltered form: both callers only ever want the colours in front of them (a
+pair on screen, an offer's legs), and an endpoint whose cost grew with the size
+of the registry would become the slowest route here the first time a few
+thousand short-lived tokens were minted.
+
+| Input | Answer |
+|---|---|
+| missing, empty, or only commas | `400 { "error": "VALIDATION", "reason": "tokens is required: …" }` |
+| an entry that is not 64 hex characters | `400` naming the entry |
+| more than 50 entries | `400` saying how many arrived |
+| a colour this node does not price | `200`, and the colour is simply **absent** from `tokens` — not an error |
+
+Colours are matched case-insensitively and duplicates collapse, exactly as
+`from_token`/`to_token` are treated on `/v1/quote`; responses always spell them
+lower case.
+
+Every price is in **USD** — USD is the numeraire and no asset is assumed to be
+worth one dollar, stablecoins included: they are quoted from the provider like
+everything else, so a depeg is visible here.
+
+Prices are **per base unit**. Amounts everywhere in this API are integer base units
+and carry no decimals metadata, so a token's price is its asset's per-coin price
+divided by `10^known_tokens.decimals`. A dollar-ish stablecoin with 6 decimals is
+about `0.000001` here, and that is the number to multiply an amount by.
+
+```bash
+curl "http://host:9999/v1/prices?tokens=e758…a912,d133…3333"
+```
+
+```json
+{
+  "sponsor_discount": 0.025,
+  "feed": {
+    "provider": "coingecko",
+    "last_run_at": "2026-09-03T00:00:00.000Z",
+    "last_ok_at":  "2026-09-03T00:00:00.000Z",
+    "last_error":  null
+  },
+  "assets": [
+    { "asset_id": "bitcoin", "price_usd": "77387", "source": "feed",
+      "provider_updated_at": "2026-09-02T20:25:50.000Z", "updated_at": "2026-09-03T00:00:00.000Z" }
+  ],
+  "tokens": [
+    { "token_color": "e758...a912", "name": "WBTC", "kind": "shielded", "decimals": 0,
+      "asset_id": "bitcoin", "price_usd": "77387", "source": "feed",
+      "updated_at": "2026-09-03T00:00:00.000Z" },
+    { "token_color": "d133...3333", "name": "TESTTOKENA", "kind": "shielded", "decimals": 0,
+      "asset_id": null, "price_usd": "13.0238", "source": "fallback",
+      "updated_at": "2026-09-02T12:00:00.000Z" }
+  ]
+}
+```
+
+Only `bitcoin` is in `assets`: it is the asset that produced WBTC's price.
+TESTTOKENA's `fallback` price comes from its colour, not from an asset, so
+nothing is listed for it — and the other four seeded assets were not asked
+about.
+
+`price_usd` is a decimal **string** — the column is `NUMERIC` and the values are
+exact; parsing them as doubles is the caller's decision, not ours.
+
+| `source` | Meaning |
+|---|---|
+| `feed` | fetched from CoinGecko by the `price-feed` service |
+| `seed` | the value shipped in `000-init.sql` (captured 2026-09-02). A stack that never runs the feed still quotes real ratios |
+| `manual` | an operator's row in `token_prices`. Wins over everything; nothing rewrites it |
+| `fallback` | the deterministic demo price derived from the token's colour. **Not a market price** — label it as such in a UI, and the sponsorship gate treats it as *unpriced* |
+
+`tokens` lists the **requested** colours that resolve to a price, and `assets`
+only the assets those prices came from — every row in `assets` explains a row in
+`tokens`. A requested colour with no mapping and no quote yet is simply absent
+rather than being given a demo row: this endpoint never writes. (The quote path
+still writes one, deliberately, so an operator can inspect and override it.)
+
+`feed` is all-nulls when the service has never run against this database.
+
+**Mapping.** Faucet-minted colours change on every clean redeploy (they derive from
+the contract address), so tokens map to assets by **name**: `WBTC`/`WSBTC`/`BTC` →
+`bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`
+(Moneta's Cardano USDM, the asset the VIA Labs bridge carries to Midnight),
+`NIGHT` → `midnight-3`. `known_tokens.asset_id` overrides the map, and
+`PRICE_FEED_MAP` (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
+
+**The `price-feed` service.** `packages/price-feed` is a separate process, not part
+of the node: the node never calls CoinGecko. It refreshes `asset_prices` once a day
+(`PRICE_FEED_INTERVAL_MS`), asking for up to `PRICE_FEED_BATCH_SIZE` ids (default
+50) per request with at least `PRICE_FEED_REQUEST_SPACING_MS` between requests, so
+credits scale with `ceil(assets / 50)` and today's five assets are ONE call. A
+failed request is recorded against every id it carried and the next batch is still
+made; a `429` stops the cycle and lands in `feed.last_error`. A single bad id
+inside an otherwise good response fails only that id.
+
+`bun run --filter @zswap-da/price-feed once` (or `docker compose run --rm
+price-feed --once`) takes a single refresh now. It needs `COINGECKO_API_KEY`;
+without one it only warns — `--once` exits non-zero, loop mode warns on every
+tick and does nothing — and the seeded prices keep serving. **It is not part of a
+development stack**: `bun run dev` does not start it, because the seeds already
+give development real ratios (Q-11).
+
 #### `GET /v1/quote`
 
-Price quote for a token swap, backed by the `token_prices` table. On first request the deterministic fallback price is written; subsequent calls are consistent. Operators can override rows directly in the DB.
+Price quote for a token swap. Prices resolve in this order: an operator's `manual`
+row in `token_prices`, else the token's reference asset from `/v1/prices`
+(÷ `10^decimals`), else the deterministic demo price — which is written to
+`token_prices` on first request so subsequent calls are consistent and an operator
+can override the row by hand.
 
 Unregistered colors quote at a **$1 demo fallback** (two unknown tokens ⇒ 1:1) instead of erroring — loudly logged server-side, never persisted to `token_prices`. This is a stopgap until token identity is chain-derived (TokenMint registry); do not treat fallback quotes as market data. Malformed colors answer `400`.
 
@@ -801,7 +913,11 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
   "sponsored":           true,
   "from_usd":            1.46,
   "to_usd":              1.42,
-  "source":              "token-prices"
+  "source":              "token-prices",
+  "sponsor_discount":    0.025,
+  "from_source":         "seed",
+  "to_source":           "fallback",
+  "prices_updated_at":   "2026-09-02T20:25:50.000Z"
 }
 ```
 
@@ -814,7 +930,10 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 | `discount` | Fractional gap below `market_rate` (e.g. `0.025` = 2.5% under market) |
 | `sponsored` | `true` when the implied rate is at least the sponsorship discount below market (the batcher's fee-sponsorship policy hook) |
 | `from_usd`, `to_usd` | USD value of each leg at the reference price |
-| `source` | `token-prices` or `demo-fallback` |
+| `source` | `token-prices` or `demo-fallback` (unchanged: `demo-fallback` iff either colour is unregistered) |
+| `sponsor_discount` | The threshold `sponsored` was decided against, as a fraction (`SPONSOR_DISCOUNT_BPS / 10000`) |
+| `from_source`, `to_source` | Per-leg provenance: `feed`, `seed`, `fixed`, `manual`, `fallback`, or `demo-fallback`. A UI should label the last two as demo rates |
+| `prices_updated_at` | The **older** of the two legs' `updated_at` — a quote is only as fresh as its stalest side. `null` when either leg is `demo-fallback` |
 
 This backend holds no solver state, so nothing else can win the quote. Solver
 ladders are pushed to the Midnight Intents relay, which does its own
@@ -1214,7 +1333,15 @@ Rejected blobs are additionally **deleted** from `effectstream.primitive_account
 
 What survives is the *fact* of the rejection, aggregated in `offer_rejections` as one row per `(celestia_height, code)` and surfaced on `GET /v1/health/sync` as `recent_rejections`. Aggregation is what makes that table safe to keep: its row count is bounded by heights × reject codes, never by the number of blobs posted — a million junk blobs in one block produce a single row with `count: 1000000`.
 
-Step 5 of the ideal ladder — *reject offers below a minimum value* — is **not implemented**: it needs a price oracle. MIP-0006 suggests the natural floor is the offer's own publication cost. The derived legs are available at that point in the pipeline, so the hook slot exists.
+Step 5 of the ideal ladder — *reject offers below a minimum value* — now has the
+price oracle it was waiting for: `GET /v1/prices` (above), refreshed daily by the
+`price-feed` service, with the shared rule in `@zswap-da/offer-guard`'s
+`evaluateSponsorship()`. The gate itself — the batcher refusing to pay a Celestia
+fee for an offer priced above market minus the sponsorship discount, and the node's
+matching `422 NOT_SPONSORED` pre-check — is the second half of this work and is not
+in this release yet. MIP-0006 suggests the natural floor is the offer's own
+publication cost; the derived legs are available at that point in the pipeline, so
+the hook slot exists.
 
 ### Manual submission (curl)
 

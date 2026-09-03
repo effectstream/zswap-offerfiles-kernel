@@ -140,6 +140,13 @@ export const NODE_B_SYNC_TIMEOUT_MS = 45 * 60_000;
 // scorecard). Everything else in `public` must be byte-identical.
 export const DIFF_EXCLUDED_TABLES: Record<string, string> = {
   token_prices: "request-driven (first /v1/quote writes the row) — not chain-derived",
+  // 00005. asset_prices ships SEEDED and is therefore identical on two
+  // replicas of the same schema — but the price-feed service overwrites it
+  // from CoinGecko on its own schedule, so two nodes whose feeds ran at
+  // different moments legitimately hold different prices. Externally sourced,
+  // not chain-derived: the diff cannot say anything useful about it.
+  asset_prices: "externally sourced (CoinGecko, on the price-feed's schedule) — not chain-derived",
+  price_feed_status: "per-node record of when THIS node's price feed last ran",
 };
 // Columns excluded from the determinism diff, per HANDOFF §9.
 //

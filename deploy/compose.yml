@@ -578,6 +578,50 @@ services:
       # together with the chain volumes (see deploy/down.sh).
       - solver-journal:/var/lib/cow-solver
 
+  # ══ reference prices ════════════════════════════════════════════════════════
+
+  # The daily CoinGecko refresh of `asset_prices` (00005 / D1).
+  #
+  # OPT-IN (`profiles: ["prices"]`): the schema ships seeded reference prices,
+  # so every quote in this stack is already a real BTC/ETH ratio without it —
+  # and it is the one service that needs an internet-reachable third party and
+  # an API key. `docker compose up` therefore leaves it out; bring it up with
+  # `--profile prices`, or run a single cycle with
+  #   docker compose run --rm price-feed --once
+  # which forwards the flag through the entrypoint and exits 0/2 depending on
+  # whether every asset landed.
+  price-feed:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-price-feed.sh"]
+    profiles: ["prices"]
+    # unless-stopped, unlike the solver: this process is DESIGNED not to exit.
+    # Without a key it idles rather than failing, and a bad cycle is handled by
+    # its own bounded retry ladder, so an actual exit here means a crash and a
+    # restart is the right answer.
+    restart: unless-stopped
+    depends_on:
+      pglite:
+        condition: service_healthy
+      # Ordering only, and only for the SCHEMA: the kernel applies
+      # 000-init.sql, and asset_prices has to exist before the first upsert.
+      # `run.ts` checks for the tables and says so plainly if they are absent.
+      kernel:
+        condition: service_healthy
+    environment:
+      DB_HOST: pglite
+      DB_PORT: "5432"
+      # The ONLY secret this stack holds. Never in the image, never in a
+      # compose default, never on a command line — .env only, and the service
+      # sends it as the x-cg-demo-api-key header, never in a query string.
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+      COINGECKO_BASE_URL: ${COINGECKO_BASE_URL:-}
+      # 24 h between cycles; >= 1 s between requests; up to 50 ids per request,
+      # so today's five assets are ONE call a day against a 10 000/month budget.
+      PRICE_FEED_INTERVAL_MS: ${PRICE_FEED_INTERVAL_MS:-}
+      PRICE_FEED_REQUEST_SPACING_MS: ${PRICE_FEED_REQUEST_SPACING_MS:-}
+      PRICE_FEED_BATCH_SIZE: ${PRICE_FEED_BATCH_SIZE:-}
+      PRICE_FEED_ASSETS: ${PRICE_FEED_ASSETS:-}
+
   # ══ provisioning / E2E driver (E1 owns the driver itself) ═══════════════════
 
   scripts:

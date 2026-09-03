@@ -702,7 +702,84 @@ export const getOpenLegs = prepared<IGetOpenLegsParams, IGetOpenLegsResult>(
            OR (g.token_color = :quote! AND w.token_color = :base!))`,
 );
 
-// ── Token prices ───────────────────────────────────────────────────────────
+// ── Asset prices (the reference prices) ────────────────────────────────────
+//
+// See the asset_prices comment block in 000-init.sql for the model. These
+// queries are the ONLY writers of that table outside the seed, and the only
+// writer at all is packages/price-feed.
+
+export type IGetAssetPricesParams = void;
+export interface IGetAssetPricesResult {
+  asset_id: string;
+  price_usd: string;
+  source: string;
+  provider_updated_at: DateOrString | null;
+  updated_at: DateOrString;
+}
+export const getAssetPrices = prepared<IGetAssetPricesParams, IGetAssetPricesResult>(
+      `SELECT asset_id, price_usd, source, provider_updated_at, updated_at
+       FROM asset_prices
+       ORDER BY asset_id`,
+);
+
+export interface IUpsertAssetPriceFeedParams {
+  asset_id: string;
+  price_usd: string;
+  provider_updated_at: DateOrString | null;
+}
+export interface IUpsertAssetPriceFeedResult { asset_id: string }
+/**
+ * Write one fetched price. Every asset is fetchable — USD is the numeraire and
+ * no asset is pinned to it — so there is no row this refuses to overwrite. It
+ * still RETURNS the asset id it wrote, and the feed reports a zero-row result
+ * as a failure: that can now only mean the schema has drifted from this code.
+ */
+export const upsertAssetPriceFeed = prepared<IUpsertAssetPriceFeedParams, IUpsertAssetPriceFeedResult>(
+      `INSERT INTO asset_prices (asset_id, price_usd, source, provider_updated_at, updated_at)
+       VALUES (:asset_id!, :price_usd!::numeric, 'feed', :provider_updated_at, NOW())
+       ON CONFLICT (asset_id) DO UPDATE
+         SET price_usd = EXCLUDED.price_usd,
+             source = 'feed',
+             provider_updated_at = EXCLUDED.provider_updated_at,
+             updated_at = NOW()
+       RETURNING asset_id`,
+);
+
+export type IGetPriceFeedStatusParams = void;
+export interface IGetPriceFeedStatusResult {
+  provider: string;
+  last_run_at: DateOrString | null;
+  last_ok_at: DateOrString | null;
+  last_error: string | null;
+}
+export const getPriceFeedStatus = prepared<IGetPriceFeedStatusParams, IGetPriceFeedStatusResult>(
+      `SELECT provider, last_run_at, last_ok_at, last_error
+       FROM price_feed_status WHERE id = 1`,
+);
+
+export interface IUpsertPriceFeedStatusParams {
+  provider: string;
+  last_run_at: DateOrString;
+  last_ok_at: DateOrString | null;
+  last_error: string | null;
+}
+export type IUpsertPriceFeedStatusResult = void;
+/**
+ * last_ok_at is COALESCEd, not overwritten: a failed cycle must not erase when
+ * the feed last succeeded — that gap is exactly what an operator reads to
+ * decide whether the prices on screen are trustworthy.
+ */
+export const upsertPriceFeedStatus = prepared<IUpsertPriceFeedStatusParams, IUpsertPriceFeedStatusResult>(
+      `INSERT INTO price_feed_status (id, provider, last_run_at, last_ok_at, last_error)
+       VALUES (1, :provider!, :last_run_at!, :last_ok_at, :last_error)
+       ON CONFLICT (id) DO UPDATE
+         SET provider = EXCLUDED.provider,
+             last_run_at = EXCLUDED.last_run_at,
+             last_ok_at = COALESCE(EXCLUDED.last_ok_at, price_feed_status.last_ok_at),
+             last_error = EXCLUDED.last_error`,
+);
+
+// ── Token prices (manual overrides + deterministic demo rows) ──────────────
 
 export interface IGetTokenPriceParams { token_color: string }
 export interface IGetTokenPriceResult { price_usd: string }
@@ -710,11 +787,50 @@ export const getTokenPrice = prepared<IGetTokenPriceParams, IGetTokenPriceResult
       "SELECT price_usd FROM token_prices WHERE token_color = :token_color!",
 );
 
+export interface IGetTokenPriceRowParams { token_color: string }
+export interface IGetTokenPriceRowResult {
+  price_usd: string;
+  source: string;
+  updated_at: DateOrString;
+}
+/**
+ * One query serving both halves of the override path: a 'manual' row wins over
+ * every asset price, a 'fallback' row is the already-written demo price. The
+ * caller branches on `source`, so there is deliberately no separate
+ * manual-only query to keep in step with this one.
+ */
+export const getTokenPriceRow = prepared<IGetTokenPriceRowParams, IGetTokenPriceRowResult>(
+      "SELECT price_usd, source, updated_at FROM token_prices WHERE token_color = :token_color!",
+);
+
+export interface IGetTokenPriceRowsParams { token_colors: readonly string[] }
+export interface IGetTokenPriceRowsResult {
+  token_color: string;
+  price_usd: string;
+  source: string;
+  updated_at: DateOrString;
+}
+/**
+ * The override/demo rows for a BOUNDED set of colours. There is deliberately
+ * no unfiltered form: `GET /v1/prices` requires `?tokens=` (Q-11), and a query
+ * that could scan the whole table is how an endpoint quietly becomes O(chain).
+ */
+export const getTokenPriceRows = prepared<IGetTokenPriceRowsParams, IGetTokenPriceRowsResult>(
+      `SELECT token_color, price_usd, source, updated_at
+       FROM token_prices
+       WHERE token_color = ANY(:token_colors!)`,
+);
+
 export interface IUpsertTokenPriceParams { token_color: string; price_usd: number }
 export type IUpsertTokenPriceResult = void;
+/**
+ * The first-quote insert of a deterministic demo price. DO NOTHING, not DO
+ * UPDATE: once a colour has a row — a manual override in particular — the demo
+ * price must never come back over it.
+ */
 export const upsertTokenPrice = prepared<IUpsertTokenPriceParams, IUpsertTokenPriceResult>(
-      `INSERT INTO token_prices (token_color, price_usd)
-       VALUES (:token_color!, :price_usd!)
+      `INSERT INTO token_prices (token_color, price_usd, source)
+       VALUES (:token_color!, :price_usd!, 'fallback')
        ON CONFLICT (token_color) DO NOTHING`,
 );
 
@@ -730,6 +846,50 @@ export interface IGetTokenByColorParams { token_color: string }
 export interface IGetTokenByColorResult { name: string }
 export const getTokenByColor = prepared<IGetTokenByColorParams, IGetTokenByColorResult>(
       "SELECT name FROM known_tokens WHERE token_color = :token_color! LIMIT 1",
+);
+
+export type IGetKnownTokensWithAssetsParams = void;
+export interface IGetKnownTokensWithAssetsResult {
+  token_color: string;
+  name: string;
+  kind: string;
+  decimals: number;
+  asset_id: string | null;
+}
+/**
+ * Everything the price resolver needs about the registry, in one read. No join
+ * to asset_prices: a token reaches its asset either through this `asset_id` or
+ * through the NAME map in price-map.ts, and only the caller knows the second,
+ * so the asset table is loaded whole (five rows) and joined in TypeScript.
+ */
+export const getKnownTokensWithAssets = prepared<IGetKnownTokensWithAssetsParams, IGetKnownTokensWithAssetsResult>(
+      `SELECT token_color, name, kind, decimals, asset_id
+       FROM known_tokens
+       ORDER BY name`,
+);
+
+export interface IGetKnownTokensByColorsParams { token_colors: readonly string[] }
+export type IGetKnownTokensByColorsResult = IGetKnownTokensWithAssetsResult;
+/**
+ * The registry rows for a BOUNDED set of colours, which is what
+ * `GET /v1/prices?tokens=` needs. `getKnownTokensWithAssets` (the whole
+ * registry) survives only for the seed/schema tests; no request path uses it.
+ */
+export const getKnownTokensByColors = prepared<IGetKnownTokensByColorsParams, IGetKnownTokensByColorsResult>(
+      `SELECT token_color, name, kind, decimals, asset_id
+       FROM known_tokens
+       WHERE token_color = ANY(:token_colors!)
+       ORDER BY name`,
+);
+
+export interface IGetKnownTokenByColorParams { token_color: string }
+export type IGetKnownTokenByColorResult = IGetKnownTokensWithAssetsResult;
+/** The single-colour form, for the quote path — two of these beat two scans. */
+export const getKnownTokenByColor = prepared<IGetKnownTokenByColorParams, IGetKnownTokenByColorResult>(
+      `SELECT token_color, name, kind, decimals, asset_id
+       FROM known_tokens
+       WHERE token_color = :token_color!
+       LIMIT 1`,
 );
 
 // ── Pair stats ─────────────────────────────────────────────────────────────

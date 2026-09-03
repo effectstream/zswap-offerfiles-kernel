@@ -215,12 +215,45 @@ Every `POST_INTERVAL_MS` (default 60 s) one tick does exactly one of two things:
   `GIVE_AMOUNT` is base units and defaults to `1000000`, i.e. **one whole coin**
   at the 6 decimals every token in this stack carries.
 
-Either way the offer **gives one whole coin**: no change output, so every offer
+Either way the offer **spends its coin whole**: no change output, so every offer
 is a complete, independent swap rather than a slice of a shared balance. The
 want leg is not a knob by default — it is `suggested_to_amount` from
 `GET /v1/quote` for that coin's actual value, which lands the offer exactly on
 the sponsorship threshold so the batcher pays its Celestia fee (`payFees:false`,
 the taker balances).
+
+### A spread of sizes instead of one (`OFFER_POSTER_GIVE_MIN` / `_GIVE_MAX`)
+
+A book of N identical offers gives a taker no choice, and one faucet mint of the
+want token may cover some of them and not others. Set a **range in whole coins**
+and every *fresh mint* draws its own size:
+
+```bash
+OFFER_POSTER_GIVE_AMOUNT=            # blank it — a fixed size and a range are
+OFFER_POSTER_GIVE_MIN=0.1            # mutually exclusive (startup error, exit 78)
+OFFER_POSTER_GIVE_MAX=10
+OFFER_POSTER_SIZE_SEED=              # optional; set it to replay the same sizes
+```
+
+| | |
+|---|---|
+| Unit | **whole coins**, at most 6 decimal places (`0.1`, `1.5`, `10`) — not base units, unlike `GIVE_AMOUNT` |
+| Distribution | **log-uniform**: 0.1–1 is as likely as 1–10, so most offers are small with the occasional large one. A uniform draw would put ~90 % of the book above 1 coin |
+| Rounding | to the nearest base unit (6 decimals); both ends inclusive |
+| Scope | **fresh mints only**. A re-offer posts the coin it already has, at the value that coin was minted with |
+| Want leg | quoted per offer for that coin's own give, exactly as before, so sponsorship holds at every size |
+| Refusals | `GIVE_MIN` without `GIVE_MAX` (or the reverse), `min > max`, `min <= 0`, more than 6 decimal places, a non-number, or both a fixed amount and a range — each names the offending variable and exits 78 |
+| Unset | nothing changes: the poster mints `GIVE_AMOUNT` every tick, as it always has |
+
+`/health` and the `DRY_RUN` report gain `giveRange` and `lastGiveAmount` (base
+units) while a range is configured, `/metrics` gains
+`offer_poster_last_give_amount`, and the mint log line carries `give=` — so what
+the poster asked the faucet for is visible without reading the journal:
+
+```bash
+curl -s http://127.0.0.1:19977/health | jq '{giveRange, lastGiveAmount}'
+curl -s http://127.0.0.1:19999/v1/offers | jq '[.offers[].computed.gives[0].amount] | unique'
+```
 
 ```bash
 docker compose --profile poster up -d offer-poster

@@ -46,7 +46,8 @@ import {
   presetKind,
   resolveColour,
 } from "./faucet-mint.ts";
-import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../../../packages/solver-core/amount.ts";
+import { baseUnitsToCoins, coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../../../packages/solver-core/amount.ts";
+import { type GiveRange, MAX_DRAWABLE_BASE_UNITS } from "./poster-size.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,7 +88,16 @@ export interface PosterConfig {
    *  Minting REQUIRES a name — the faucet derives the colour from it. */
   readonly giveTokenName: string | undefined;
   readonly giveColour: string;
+  /** The FIXED per-mint size, in base units (`GIVE_AMOUNT`). When `giveRange`
+   *  is set this value is unused — every fresh mint draws its own size — and it
+   *  is kept only so the dump shows what a range-less run would have posted. */
   readonly giveAmount: bigint;
+  /** `GIVE_MIN`/`GIVE_MAX` in base units, when the operator asked for a spread
+   *  of sizes instead of one (00027 FR-001). Mutually exclusive with
+   *  `GIVE_AMOUNT`; `undefined` means today's fixed-size behaviour, unchanged. */
+  readonly giveRange: GiveRange | undefined;
+  /** `GIVE_SIZE_SEED` — makes the draw reproducible (FR-002). Not a secret. */
+  readonly giveSizeSeed: string | undefined;
   readonly wantToken: string;
   readonly wantTokenName: string | undefined;
   readonly wantColour: string;
@@ -193,6 +203,83 @@ function readBigint(env: EnvMap, key: string, fallback: bigint, opts: { min?: bi
     throw new ConfigError("MALFORMED", `${key} must be >= ${min}, got ${raw}`, key);
   }
   return value;
+}
+
+/**
+ * A WHOLE-COIN amount (`"0.1"`, `"10"`, `"1.5"`) to base units at the registry's
+ * 6 decimals.
+ *
+ * `coinsToBaseUnits` is exact-or-nothing by design (00024 Q9), so "more than 6
+ * fraction digits" arrives here as a throw and leaves as a `ConfigError` naming
+ * the variable — which is also what makes spec edge case 1 (a range narrower
+ * than the 6-decimal grid, e.g. `0.1000001`–`0.1000002`) impossible to express:
+ * a bound finer than one base unit is rejected before any range check runs, so
+ * every accepted range contains at least one representable value by
+ * construction.
+ */
+function readCoins(env: EnvMap, key: string): bigint | undefined {
+  const raw = readEnv(env, key);
+  if (raw === undefined) return undefined;
+  try {
+    return coinsToBaseUnits(raw, DEFAULT_TOKEN_DECIMALS);
+  } catch (err) {
+    throw new ConfigError(
+      "MALFORMED",
+      `${key} must be a whole-coin amount with at most ${DEFAULT_TOKEN_DECIMALS} decimal places ` +
+        `(e.g. 0.1, 1.5, 10), got ${JSON.stringify(raw)}: ` +
+        (err instanceof Error ? err.message : String(err)),
+      key,
+    );
+  }
+}
+
+/**
+ * `GIVE_MIN`/`GIVE_MAX` -> a validated {@link GiveRange}, or `undefined` when
+ * neither is set (FR-005: unset range == today's behaviour, byte for byte).
+ *
+ * Every refusal names the offending variable (AC-5). Half a range is refused
+ * too: an operator who set only `GIVE_MIN` meant something, and guessing the
+ * other end — today's fixed amount? the same value? — would post offers nobody
+ * asked for.
+ */
+export function parseGiveRange(env: EnvMap): GiveRange | undefined {
+  const minBase = readCoins(env, "GIVE_MIN");
+  const maxBase = readCoins(env, "GIVE_MAX");
+
+  if (minBase === undefined && maxBase === undefined) return undefined;
+  if (minBase === undefined) {
+    throw new ConfigError("MISSING", "GIVE_MAX is set but GIVE_MIN is not; a range needs both ends", "GIVE_MIN");
+  }
+  if (maxBase === undefined) {
+    throw new ConfigError("MISSING", "GIVE_MIN is set but GIVE_MAX is not; a range needs both ends", "GIVE_MAX");
+  }
+  if (minBase < 1n) {
+    // Not merely a taste: the draw is `min · (max/min)^u`, and `log(0)` is
+    // `-Infinity`. A zero-coin offer is also unpostable.
+    throw new ConfigError(
+      "MALFORMED",
+      `GIVE_MIN must be greater than zero, got ${baseUnitsToCoins(minBase, DEFAULT_TOKEN_DECIMALS)} coins`,
+      "GIVE_MIN",
+    );
+  }
+  if (maxBase < minBase) {
+    throw new ConfigError(
+      "MALFORMED",
+      `GIVE_MAX (${baseUnitsToCoins(maxBase, DEFAULT_TOKEN_DECIMALS)} coins) must be >= GIVE_MIN ` +
+        `(${baseUnitsToCoins(minBase, DEFAULT_TOKEN_DECIMALS)} coins)`,
+      "GIVE_MAX",
+    );
+  }
+  if (maxBase > MAX_DRAWABLE_BASE_UNITS) {
+    throw new ConfigError(
+      "MALFORMED",
+      `GIVE_MAX must be at most ${baseUnitsToCoins(MAX_DRAWABLE_BASE_UNITS, DEFAULT_TOKEN_DECIMALS)} ` +
+        `coins (${MAX_DRAWABLE_BASE_UNITS} base units): above that the log-uniform draw cannot round ` +
+        `back to the exact amount it drew. Use a fixed GIVE_AMOUNT for sizes that large`,
+      "GIVE_MAX",
+    );
+  }
+  return { minBase, maxBase };
 }
 
 /** `true`/`1`/`yes`/`on` (case-insensitive) are true; `false`/`0`/`no`/`off`
@@ -539,6 +626,19 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
   // recording so the startup log can say so.
   void presetKind(give.name);
 
+  // ── give size: one fixed amount, or a range to draw from (00027 FR-001) ──
+  const giveRange = parseGiveRange(env);
+  if (giveRange !== undefined && readEnv(env, "GIVE_AMOUNT") !== undefined) {
+    throw new ConfigError(
+      "CONFLICT",
+      "GIVE_AMOUNT (a fixed size) and GIVE_MIN/GIVE_MAX (a range to draw from) are both set; " +
+        "give exactly one. In deploy/.env that is OFFER_POSTER_GIVE_AMOUNT versus " +
+        "OFFER_POSTER_GIVE_MIN/OFFER_POSTER_GIVE_MAX — blank the one you do not want, because a " +
+        "blank value means \"the code's default\" and an empty string is not a size",
+      "GIVE_AMOUNT",
+    );
+  }
+
   const forcedWantAmountRaw = readEnv(env, "WANT_AMOUNT");
   const forcedWantAmount =
     forcedWantAmountRaw === undefined ? undefined : readBigint(env, "WANT_AMOUNT", 0n, { min: 0n });
@@ -561,6 +661,10 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
     giveAmount: readBigint(env, "GIVE_AMOUNT", coinsToBaseUnits(1n, DEFAULT_TOKEN_DECIMALS), {
       min: 1n,
     }),
+    // 00027: when this is set, `giveAmount` above is inert and every FRESH mint
+    // draws its own size log-uniformly between the two bounds.
+    giveRange,
+    giveSizeSeed: readEnv(env, "GIVE_SIZE_SEED"),
     wantToken: want.token,
     wantTokenName: want.name,
     wantColour: want.colour,

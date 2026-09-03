@@ -203,3 +203,37 @@ describe("the server", () => {
     }
   });
 });
+
+describe("give range on /health and /metrics (00027 FR-003)", () => {
+  const range = { minBase: 100_000n, maxBase: 10_000_000n };
+
+  test("absent when no range is configured — the fixed-size body is unchanged (SC-003)", () => {
+    const { body } = healthSnapshot(inputs());
+    expect(body).not.toHaveProperty("giveRange");
+    expect(body).not.toHaveProperty("lastGiveAmount");
+    expect(renderMetrics(inputs())).not.toContain("last_give_amount");
+  });
+
+  test("the range and the last drawn size are decimal strings, never bigints", () => {
+    const { body } = healthSnapshot(inputs({ giveRange: range, lastGiveAmount: 2_345_678n }));
+    expect(body["giveRange"]).toEqual({ minBase: "100000", maxBase: "10000000" });
+    expect(body["lastGiveAmount"]).toBe("2345678");
+    // The whole body must survive JSON.stringify — a stray bigint throws.
+    expect(() => JSON.stringify(body)).not.toThrow();
+  });
+
+  test("before the first draw the last size is null, not 0", () => {
+    const { body } = healthSnapshot(inputs({ giveRange: range, lastGiveAmount: null }));
+    expect(body["giveRange"]).toBeDefined();
+    expect(body["lastGiveAmount"]).toBeNull();
+  });
+
+  test("/metrics gauges the last drawn size unrounded, NaN before the first draw", () => {
+    expect(renderMetrics(inputs({ giveRange: range, lastGiveAmount: 9_999_999n }))).toContain(
+      "offer_poster_last_give_amount 9999999",
+    );
+    expect(renderMetrics(inputs({ giveRange: range, lastGiveAmount: null }))).toContain(
+      "offer_poster_last_give_amount NaN",
+    );
+  });
+});

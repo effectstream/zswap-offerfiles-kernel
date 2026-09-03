@@ -196,6 +196,8 @@ export interface TickConfig {
   giveColour: string;
   /** Faucet token NAME — minting needs the name, not the colour. */
   giveTokenName: string;
+  /** The fixed per-mint size. Ignored when `TickDeps.drawGiveAmount` is
+   *  supplied (00027: the operator configured a RANGE instead). */
   giveAmount: bigint;
   wantColour: string;
   forcedWantAmount?: bigint | undefined;
@@ -220,6 +222,19 @@ export interface TickDeps {
   api: TickApi;
   clock: TickClock;
   log: TickLog;
+  /**
+   * How big should THIS mint be, in base units (00027 FR-002)?
+   *
+   * Absent — the default — every mint is `cfg.giveAmount`, exactly as before.
+   * Present, it is called ONCE PER FRESH MINT and its answer is what the faucet
+   * is asked for. Injected rather than computed here for the same reason the
+   * clock is: this module must stay free of randomness so a tick is replayable,
+   * and `poster-size.ts` owns the distribution and the seed.
+   *
+   * RE-OFFERS NEVER CALL IT (AC-4). A released coin is re-offered at the value
+   * it already has; its size was drawn when it was minted and cannot change.
+   */
+  drawGiveAmount?: (() => bigint) | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -737,10 +752,14 @@ export async function mintCoin(deps: TickDeps, ctx: { tick: number }): Promise<M
   const base = { tick: ctx.tick, mode: "mint" as const };
   const mintNonce = minter.freshNonce();
   const startedAt = clock.now();
+  // 00027 FR-002: one draw per FRESH mint. The want leg is sized further down
+  // in `offerCoin` from the coin's OWN value, so it follows this number without
+  // any change there.
+  const giveAmount = deps.drawGiveAmount === undefined ? cfg.giveAmount : deps.drawGiveAmount();
 
   let minted: MintedCoinRef;
   try {
-    minted = await minter.mint(cfg.giveTokenName, cfg.giveAmount, mintNonce);
+    minted = await minter.mint(cfg.giveTokenName, giveAmount, mintNonce);
   } catch (err) {
     const message = errMessage(err);
     log({ ...base, phase: "mint", ms: clock.now() - startedAt, result: "error", mintNonce, detail: message });
@@ -763,6 +782,7 @@ export async function mintCoin(deps: TickDeps, ctx: { tick: number }): Promise<M
     ms: clock.now() - startedAt,
     nonce: shortHex(nonce),
     mintNonce,
+    give: giveAmount,
     value: minted.coin.value,
     tx: shortHex(minted.txHash),
   });

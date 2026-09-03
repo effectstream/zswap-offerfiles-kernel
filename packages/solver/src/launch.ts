@@ -40,12 +40,15 @@
  */
 import { getEnv } from "@effectstream/utils/runtime";
 
+import { SOLVER_STATUS_MIN_TOKEN_LENGTH } from "@zswap-da/solver-core/status-contract";
+
 import {
   DEFAULT_SOLVER_LADDER_CONFIG,
   DEV_SEED,
   loadSolverFeeSizingTakerInputs,
   loadSolverJournalEnv,
   parseBooleanEnv,
+  parseBoundedIntegerEnv,
   parseHttpBaseUrl,
   type SolverJournalEnv,
 } from "../env.ts";
@@ -81,8 +84,23 @@ export interface SolverLaunchConfig {
   /** 00006 FR-001. How many taker zswap inputs fee sizing models; the
    * reservation funds a real taker half of up to this many `+ 2` inputs. */
   feeSizingTakerInputs: number;
+  /**
+   * 00007 FR-001. The read-only status listener, or `null` when
+   * `SOLVER_STATUS_PORT` is unset — which is byte-for-byte today's behaviour:
+   * nothing binds, nothing is collected, and no code path changes.
+   */
+  status: SolverStatusLaunchConfig | null;
   /** Non-fatal observations the entrypoint prints. Never a reason to refuse. */
   warnings: readonly string[];
+}
+
+/** The status listener's whole configuration. Present only when the operator
+ *  asked for a listener by setting the port. */
+export interface SolverStatusLaunchConfig {
+  host: string;
+  port: number;
+  /** MANDATORY with the port (Q-S-3). The banner prints its length only. */
+  authToken: string;
 }
 
 export interface SolverLaunchOptions {
@@ -341,6 +359,86 @@ export function resolveSolverLaunchConfig(
     problems.push(asMessage(error));
   }
 
+  // ── read-only status listener (00007 FR-001) ───────────────────────────────
+  //
+  // OPT-IN BY THE PORT, and nothing else: `SOLVER_STATUS_PORT` unset means no
+  // listener, no collector and no behaviour change whatsoever (FR-018/SC-001).
+  // When it IS set, the bearer is MANDATORY (Q-S-3) — the snapshot carries the
+  // solver's entire internal state, so an open status listener must be
+  // impossible to configure rather than merely discouraged. A token supplied
+  // without a port is a half-configured deployment and earns a warning: it
+  // looks protected and serves nothing.
+  const rawStatusPort = read("SOLVER_STATUS_PORT");
+  let status: SolverStatusLaunchConfig | null = null;
+  if (rawStatusPort === undefined || rawStatusPort === "") {
+    if (read("SOLVER_STATUS_AUTH_TOKEN") !== undefined) {
+      warnings.push(
+        "SOLVER_STATUS_AUTH_TOKEN is set but SOLVER_STATUS_PORT is not — no status " +
+          "listener will start and the token is unused",
+      );
+    }
+    if (read("SOLVER_STATUS_HOST") !== undefined) {
+      warnings.push(
+        "SOLVER_STATUS_HOST is set but SOLVER_STATUS_PORT is not — no status listener will start",
+      );
+    }
+  } else {
+    let statusPort: number | null = null;
+    try {
+      statusPort = parseBoundedIntegerEnv("SOLVER_STATUS_PORT", rawStatusPort, 0, 1, 65_535);
+    } catch (error) {
+      problems.push(asMessage(error));
+    }
+
+    const rawStatusHost = read("SOLVER_STATUS_HOST");
+    // Loopback by default: the listener is reached by the monitor site over the
+    // deployment's private network, never from the internet.
+    let statusHost = "127.0.0.1";
+    if (rawStatusHost !== undefined && rawStatusHost !== "") {
+      if (!isCanonicalScalar(rawStatusHost)) {
+        problems.push(
+          "SOLVER_STATUS_HOST must be a non-empty host without surrounding whitespace or NUL",
+        );
+      } else {
+        statusHost = rawStatusHost;
+        // 0.0.0.0 is legitimate INSIDE a container network (the Compose stack
+        // sets exactly that so `solver-frontend` can reach it), so this is a
+        // warning and not a refusal — but the port must never be published to a
+        // public interface, and the operator is told so at every boot.
+        if (statusHost !== "127.0.0.1" && statusHost !== "localhost" && statusHost !== "::1") {
+          warnings.push(
+            `SOLVER_STATUS_HOST=${statusHost} is not loopback — the status snapshot carries the ` +
+              "solver's whole internal state; publish this port to a private network only",
+          );
+        }
+      }
+    }
+
+    const rawStatusToken = read("SOLVER_STATUS_AUTH_TOKEN");
+    let statusToken = "";
+    if (rawStatusToken === undefined || rawStatusToken === "") {
+      problems.push(
+        "SOLVER_STATUS_AUTH_TOKEN is required whenever SOLVER_STATUS_PORT is set: " +
+          "/status/* serves the solver's entire internal state and must never be open",
+      );
+    } else if (!isCanonicalScalar(rawStatusToken)) {
+      problems.push(
+        "SOLVER_STATUS_AUTH_TOKEN must not contain surrounding whitespace or NUL bytes",
+      );
+    } else if (rawStatusToken.length < SOLVER_STATUS_MIN_TOKEN_LENGTH) {
+      problems.push(
+        `SOLVER_STATUS_AUTH_TOKEN must be at least ${SOLVER_STATUS_MIN_TOKEN_LENGTH} characters ` +
+          `(the same rule the relay applies to its bearer); got ${rawStatusToken.length}`,
+      );
+    } else {
+      statusToken = rawStatusToken;
+    }
+
+    if (statusPort !== null && statusToken !== "") {
+      status = { host: statusHost, port: statusPort, authToken: statusToken };
+    }
+  }
+
   if (problems.length > 0 || networkId === null || journal === null ||
       feeSizingTakerInputs === null) {
     // networkId/journal/feeSizingTakerInputs being null always coincides with a
@@ -361,6 +459,7 @@ export function resolveSolverLaunchConfig(
     dryRun,
     ladderConfigPath,
     feeSizingTakerInputs,
+    status,
     warnings,
   };
 }
@@ -384,6 +483,11 @@ export function describeSolverLaunchConfig(config: SolverLaunchConfig): string {
       `(funds a taker half of up to ${config.feeSizingTakerInputs + 2}) ` +
       `— SOLVER_FEE_SIZING_TAKER_INPUTS`,
     `  seed           : set (never logged)`,
+    // 00007 FR-001. The bearer prints as a length, exactly like the relay's.
+    config.status === null
+      ? `  status listener: disabled (SOLVER_STATUS_PORT unset)`
+      : `  status listener: http://${config.status.host}:${config.status.port} ` +
+        `(read-only; /status/* bearer set, ${config.status.authToken.length} chars)`,
   ];
   for (const warning of config.warnings) lines.push(`  ! ${warning}`);
   return lines.join("\n");

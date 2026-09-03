@@ -93,6 +93,36 @@ export interface JournalOperation extends PreparedOperation {
   updatedAtMs: number;
 }
 
+/**
+ * A journal row as a READ-ONLY OBSERVER may see it (00007 Q-S-4 option B).
+ *
+ * Two fields of `JournalOperation` are deliberately absent rather than merely
+ * unused by the caller:
+ *
+ * - `walletArtifactBytes` — serialised transactions. 00007 FR-006 forbids them
+ *   leaving the process, and `listRecent` does not even SELECT the column, so
+ *   the bytes are never loaded into the heap in the first place; only
+ *   `walletArtifactByteLength`, computed by SQLite, comes back.
+ * - `claim.inputs` — the coin nullifiers Stock reserved. They identify coins
+ *   and answer no operator question, so only their count survives.
+ *
+ * The type therefore makes the redaction structural: a future collector cannot
+ * forward a field that does not exist here.
+ */
+export interface JournalOperationSummary
+  extends Omit<JournalOperation, "walletArtifactBytes" | "claim"> {
+  claim: {
+    inputCount: number;
+    /** Token id → canonical unsigned amount string. */
+    payouts: Record<string, string>;
+  };
+  walletArtifactByteLength: number | null;
+}
+
+/** Every lifecycle state, including the ones at count 0, so a consumer can
+ *  render a complete table without knowing the grammar. */
+export type JournalStateCounts = Record<JournalLifecycleState, number>;
+
 export interface SolverOperationJournalOptions {
   path: string;
   allowMemory?: boolean;
@@ -292,6 +322,12 @@ interface OperationRow {
   ledger_height: number | null;
 }
 
+/** `OperationRow` with the artifact blob replaced by its length — the shape
+ *  `SELECT_OPERATION_SUMMARY` produces. */
+type OperationSummaryRow =
+  & Omit<OperationRow, "wallet_artifact_bytes">
+  & { wallet_artifact_byte_length: number | null };
+
 interface DustReservationRow {
   operation_key: string;
   job_id: string;
@@ -321,6 +357,29 @@ function hydrateDust(row: DustReservationRow): DustReservation {
 
 const SELECT_OPERATION = `
   SELECT o.*,
+         r.relay_job_id, r.relay_state, r.relay_extrinsic_hash,
+         r.ledger_tx_hash, r.ledger_height
+    FROM journal_operations o
+    LEFT JOIN journal_receipts r ON r.operation_id = o.id
+`;
+
+/**
+ * The observer projection (00007 FR-003 / Q-S-4).
+ *
+ * Column-for-column explicit, NOT `o.*`, and that is the point: the artifact
+ * blob is replaced by `length(...)` inside SQLite, so a status read of a
+ * journal holding megabytes of proved transactions transfers none of them into
+ * the process heap. `o.*` plus a delete-after-the-fact would have loaded them.
+ */
+const SELECT_OPERATION_SUMMARY = `
+  SELECT o.id, o.operation_key, o.job_id, o.generation,
+         o.offer_hashes_json, o.claim_inputs_json, o.claim_payouts_json,
+         o.operation_kind, o.lifecycle_state,
+         o.ttl_expires_at_ms, o.deadline_at_ms, o.retention_until_ms,
+         o.wallet_artifact_kind,
+         length(o.wallet_artifact_bytes) AS wallet_artifact_byte_length,
+         o.error_code, o.error_detail, o.retry_count, o.next_retry_at_ms,
+         o.created_at_ms, o.updated_at_ms,
          r.relay_job_id, r.relay_state, r.relay_extrinsic_hash,
          r.ledger_tx_hash, r.ledger_height
     FROM journal_operations o
@@ -553,6 +612,47 @@ export class SolverOperationJournal {
   list(): JournalOperation[] {
     this.#assertOpen();
     return (this.#db.query(`${SELECT_OPERATION} ORDER BY o.id`).all() as OperationRow[]).map(hydrate);
+  }
+
+  /**
+   * The NEWEST `limit` rows, redacted for a read-only observer (00007 FR-003,
+   * Q-S-4 option B).
+   *
+   * Newest first because that is the only useful order for an operator asking
+   * "what just happened"; `list()` stays oldest-first because recovery replays
+   * in insertion order and must not change.
+   *
+   * Bounded at the SQL level, not by slicing `list()`: a busy solver's journal
+   * holds up to `maxRows` (10 000 by default) rows with artifacts attached, and
+   * a status endpoint that materialised all of them to keep 100 would be the
+   * expensive-status failure 00007 FR-005 exists to prevent.
+   */
+  listRecent(limit: number): JournalOperationSummary[] {
+    this.#assertOpen();
+    requireSafeInteger("listRecent limit", limit, 1);
+    return (this.#db.query(`${SELECT_OPERATION_SUMMARY} ORDER BY o.id DESC LIMIT ?`)
+      .all(limit) as OperationSummaryRow[]).map(hydrateSummary);
+  }
+
+  /** How many rows sit in each lifecycle state, over the WHOLE journal rather
+   *  than the tail `listRecent` returns. Every state is present, at 0 if empty,
+   *  so a consumer renders a complete table without knowing the grammar. */
+  countsByState(): JournalStateCounts {
+    this.#assertOpen();
+    const counts = Object.fromEntries(
+      LIFECYCLE_STATES.map((state) => [state, 0]),
+    ) as JournalStateCounts;
+    const rows = this.#db.query(`
+      SELECT lifecycle_state, count(*) AS total
+        FROM journal_operations GROUP BY lifecycle_state
+    `).all() as Array<{ lifecycle_state: string; total: number }>;
+    for (const row of rows) {
+      if (!(LIFECYCLE_STATES as readonly string[]).includes(row.lifecycle_state)) {
+        throw new Error("journal contains an unknown lifecycle state");
+      }
+      counts[row.lifecycle_state as JournalLifecycleState] = row.total;
+    }
+    return counts;
   }
 
   /** Atomically check and reserve the dynamic RF3 DUST budget. Active
@@ -1010,6 +1110,53 @@ function assertIdempotentTerminalPatch(current: JournalOperation, patch: Transit
       throw new JournalTransitionError(`duplicate terminal transition conflicts on receipt.${key}`);
     }
   }
+}
+
+/**
+ * Hydrate the redacted observer projection.
+ *
+ * It re-checks the kind/state grammar exactly as `hydrate` does — a row with an
+ * unknown state is a corrupt journal whichever reader finds it — but it does
+ * NOT run `requirePrepared`/`validateTransitionPatch`: both need the claim
+ * inputs and the artifact this projection deliberately does not carry, and
+ * `runSolver` already forces a full `list()` hydration of every row before the
+ * wallet is acquired. A status read is not the place to re-litigate that.
+ */
+function hydrateSummary(row: OperationSummaryRow): JournalOperationSummary {
+  if (!OPERATION_KINDS.includes(row.operation_kind) || !LIFECYCLE_STATES.includes(row.lifecycle_state)) {
+    throw new Error("journal contains an unknown operation kind or lifecycle state");
+  }
+  return {
+    id: row.id,
+    operationKey: row.operation_key,
+    jobId: row.job_id,
+    generation: row.generation,
+    offerHashes: parseCanonicalJson<string[]>(row.offer_hashes_json),
+    claim: {
+      inputCount: parseCanonicalJson<string[]>(row.claim_inputs_json).length,
+      payouts: parseCanonicalJson<Record<string, string>>(row.claim_payouts_json),
+    },
+    operationKind: row.operation_kind,
+    lifecycleState: row.lifecycle_state,
+    ttlExpiresAtMs: row.ttl_expires_at_ms,
+    deadlineAtMs: row.deadline_at_ms,
+    retentionUntilMs: row.retention_until_ms,
+    receipt: {
+      ...(row.relay_job_id === null ? {} : { relayJobId: row.relay_job_id }),
+      ...(row.relay_state === null ? {} : { relayState: row.relay_state }),
+      ...(row.relay_extrinsic_hash === null ? {} : { relayExtrinsicHash: row.relay_extrinsic_hash }),
+      ...(row.ledger_tx_hash === null ? {} : { ledgerTxHash: row.ledger_tx_hash }),
+      ...(row.ledger_height === null ? {} : { ledgerHeight: row.ledger_height }),
+    },
+    retryCount: row.retry_count,
+    createdAtMs: row.created_at_ms,
+    updatedAtMs: row.updated_at_ms,
+    walletArtifactByteLength: row.wallet_artifact_byte_length,
+    ...(row.wallet_artifact_kind === null ? {} : { walletArtifactKind: row.wallet_artifact_kind }),
+    ...(row.error_code === null ? {} : { errorCode: row.error_code }),
+    ...(row.error_detail === null ? {} : { errorDetail: row.error_detail }),
+    ...(row.next_retry_at_ms === null ? {} : { nextRetryAtMs: row.next_retry_at_ms }),
+  };
 }
 
 function hydrate(row: OperationRow): JournalOperation {

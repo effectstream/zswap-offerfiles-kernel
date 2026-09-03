@@ -9,6 +9,7 @@ import {
   initializeOwnedResource,
   runSolver,
 } from "./src/run.ts";
+import { SolverLaunchConfigError } from "./src/launch.ts";
 import type { SyncDependencies } from "./src/book-sync.ts";
 import { RELAY_WS_OPEN, type RelayWebSocketLike } from "./src/relay-client.ts";
 import { Stock } from "./src/stock.ts";
@@ -680,5 +681,166 @@ test("a solver with NO inventory publishes its whole-maker rung and still refuse
     expect(handle.stock.reserved(B)).toBe(0n);
   } finally {
     await handle.stop();
+  }
+});
+
+// ── 00007 FR-001 / FR-003 / FR-007: the status listener, wired by runSolver ──
+//
+// The unit suites cover the collector and the listener in isolation. What is
+// only provable HERE is the wiring: that `runSolver` binds before the wallet,
+// hands the collector the real seams, reports a dry-run process honestly, turns
+// a bind failure into a listed launch problem, closes the listener with the
+// solver — and, when no port is configured, does none of it.
+
+/** `Bun.serve` types `port` as optional; a bound TCP server always has one. */
+const boundPort = (server: { port?: number }): number => {
+  if (server.port === undefined) throw new Error("the test server reported no port");
+  return server.port;
+};
+
+/** A port nothing is listening on, obtained by binding and releasing one. */
+const freePort = (): number => {
+  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("") });
+  const port = boundPort(probe);
+  probe.stop(true);
+  return port;
+};
+
+const STATUS_TOKEN = `run-status-${"t".repeat(28)}`;
+const statusFetch = (port: number, path: string, token = STATUS_TOKEN): Promise<Response> =>
+  fetch(`http://127.0.0.1:${port}${path}`, { headers: { authorization: `Bearer ${token}` } });
+
+test("runSolver serves a dry-run snapshot over the status listener and closes it on stop", async () => {
+  const port = freePort();
+  const handle = await runSolver({
+    dryRun: true,
+    dryRunWalletMode: "skip-test-only",
+    syncDependencies: syncHarness([]),
+    resyncIntervalMs: 60_000,
+    backendHealthCheckIntervalMs: 30_000,
+    backendHealthMaxAgeMs: 60_000,
+    status: { host: "127.0.0.1", port, authToken: STATUS_TOKEN },
+    gitCommit: "cafe1234",
+    walletDependencies: {
+      buildWallet: async () => { throw new Error("must skip"); },
+    } as any,
+    log: () => {},
+  });
+  try {
+    await handle.ready;
+
+    // `/health` is open — a container healthcheck needs no secret.
+    const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json() as
+      Record<string, unknown>;
+    expect(health["status"]).toBe("ok");
+    expect(health["mode"]).toBe("dry-run");
+    expect(health["ready"]).toBe(true);
+
+    // `/status/*` does not.
+    expect((await fetch(`http://127.0.0.1:${port}/status/snapshot`)).status).toBe(401);
+    expect((await statusFetch(port, "/status/snapshot", "wrong")).status).toBe(401);
+
+    const response = await statusFetch(port, "/status/snapshot");
+    expect(response.status).toBe(200);
+    const snapshot = await response.json() as Record<string, any>;
+
+    // The real seams, not doubles: the process line, the mirror's own
+    // currentness, and the book the sync harness actually produced.
+    expect(snapshot["process"]["mode"]).toBe("dry-run");
+    expect(snapshot["process"]["gitCommit"]).toBe("cafe1234");
+    expect(snapshot["backend"]["currentness"]["kind"]).toBe("current");
+    expect(snapshot["book"]["size"]).toBe(1);
+    expect(snapshot["book"]["offers"][0]["offerHash"]).toBe(OFFER_HASH);
+    // Base units as a decimal STRING: `row` gives 20 B and wants 10 A, and no
+    // bigint may reach the wire.
+    expect(snapshot["book"]["offers"][0]["gives"][0]).toEqual({
+      token: B, amount: "20", kind: "SHIELDED",
+    });
+    expect(snapshot["book"]["offers"][0]["wants"][0]["amount"]).toBe("10");
+    // The nullifier COUNT, never the nullifier.
+    expect(snapshot["book"]["offers"][0]["inputNullifierCount"]).toBe(1);
+    expect(JSON.stringify(snapshot)).not.toContain(NULLIFIER);
+
+    // Dry-run: not-started is a STATE, not an alarm. The page says
+    // "not started (dry-run)" instead of painting the strip red.
+    expect(snapshot["relay"]["state"]).toBe("not-started");
+    expect(snapshot["ladder"]).toEqual({ state: "not-started", last: null });
+    expect(snapshot["executor"]["state"]).toBe("not-started");
+    expect(snapshot["journal"]["state"]).toBe("not-opened");
+
+    // FR-006: the relay bearer as a length, and no secret anywhere.
+    expect(typeof snapshot["process"]["relayAuthTokenLength"]).toBe("number");
+    expect(JSON.stringify(snapshot)).not.toContain(STATUS_TOKEN);
+
+    // The listener reports its own counters, including the two 401s above.
+    expect(snapshot["listener"]["port"]).toBe(port);
+    expect(snapshot["listener"]["unauthorizedRequests"]).toBe(2);
+  } finally {
+    await handle.stop();
+  }
+
+  // FR-007: the listener closes WITH the solver.
+  await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+});
+
+test("no SOLVER_STATUS_PORT means nothing binds at all (SC-001)", async () => {
+  const port = freePort();
+  const handle = await runSolver({
+    dryRun: true,
+    dryRunWalletMode: "skip-test-only",
+    syncDependencies: syncHarness([]),
+    resyncIntervalMs: 60_000,
+    backendHealthCheckIntervalMs: 30_000,
+    backendHealthMaxAgeMs: 60_000,
+    walletDependencies: { buildWallet: async () => { throw new Error("must skip"); } } as any,
+    log: () => {},
+  });
+  try {
+    await handle.ready;
+    // The default is no listener, no collector, no observer, no timer.
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+  } finally {
+    await handle.stop();
+  }
+});
+
+test("a status port already in use is a LISTED launch problem, before the wallet", async () => {
+  const occupied = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("busy") });
+  const occupiedPort = boundPort(occupied);
+  let walletBuilds = 0;
+  try {
+    await expect(runSolver({
+      dryRun: true,
+      dryRunWalletMode: "skip-test-only",
+      syncDependencies: syncHarness([]),
+      status: { host: "127.0.0.1", port: occupiedPort, authToken: STATUS_TOKEN },
+      walletDependencies: {
+        buildWallet: async () => { walletBuilds += 1; throw new Error("must skip"); },
+      } as any,
+      log: () => {},
+    })).rejects.toThrow(SolverLaunchConfigError);
+
+    // FR-007: reported in the same shape as a missing variable, and BEFORE any
+    // resource an operator would have to wait minutes for.
+    expect(walletBuilds).toBe(0);
+    try {
+      await runSolver({
+        dryRun: true,
+        dryRunWalletMode: "skip-test-only",
+        syncDependencies: syncHarness([]),
+        status: { host: "127.0.0.1", port: occupiedPort, authToken: STATUS_TOKEN },
+        walletDependencies: { buildWallet: async () => { throw new Error("x"); } } as any,
+        log: () => {},
+      });
+      throw new Error("expected the bind to be refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(SolverLaunchConfigError);
+      const problems = (error as SolverLaunchConfigError).problems;
+      expect(problems.length).toBe(1);
+      expect(problems[0]).toContain(`SOLVER_STATUS_PORT=${occupiedPort}`);
+      expect(problems[0]).toContain("could not be bound");
+    }
+  } finally {
+    occupied.stop(true);
   }
 });

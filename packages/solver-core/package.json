@@ -17,6 +17,7 @@
     "./offer-updates-contract": "./offer-updates-contract.ts",
     "./receipt-client": "./receipt-client.ts",
     "./relay-ws-contract": "./relay-ws-contract.ts",
+    "./status-contract": "./status-contract.ts",
     "./validation-contract": "./validation-contract.ts"
   },
   "scripts": {

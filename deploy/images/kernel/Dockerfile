@@ -1,4 +1,4 @@
-# deploy/images/kernel/Dockerfile — ONE image, NINE single-process entrypoints.
+# deploy/images/kernel/Dockerfile — ONE image, TEN single-process entrypoints.
 #
 # Build context: the repository ROOT of this working clone (never a git clone of
 # it: the branch this deployment belongs to is deliberately unpushed, so a
@@ -22,12 +22,18 @@
 #   entrypoint-scripts.sh   the E1 provisioning / assertion driver
 #   entrypoint-solver-provision.sh  one-shot: fund + mint the solver BOTH tokens
 #   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
+#   entrypoint-offer-poster.sh      loop: mint one coin, post one offer, repeat
 #
-# The last two are devnet SEEDING steps, and they are services rather than
-# README steps for one reason: without them every container reports healthy, the
-# solver connects to the relay, and it publishes an empty ladder forever with no
-# error logged anywhere (R2 made publication bounded by the solver's own
-# spendable inventory, and the ladder derives from the maker book).
+# The solver-provision and maker-offer one-shots are devnet SEEDING steps, and
+# they are services rather than README steps for one reason: without them every
+# container reports healthy, the solver connects to the relay, and it publishes
+# an empty ladder forever with no error logged anywhere (R2 made publication
+# bounded by the solver's own spendable inventory, and the ladder derives from
+# the maker book).
+#
+# entrypoint-offer-poster.sh is neither a one-shot nor part of the default
+# stack: it is the 00007 offer poster, opt-in behind the `poster` profile, and
+# the only entrypoint here that keeps a durable journal of its own.
 #
 # bun pin rationale: 1.3.11 is the bun the R1–R3 remediation phases were built
 # and tested on in this clone, and it is the version the sibling
@@ -123,6 +129,8 @@ COPY deploy/images/kernel/entrypoint-scripts.sh  /usr/local/bin/entrypoint-scrip
 # and quotes nothing — see each script's header.
 COPY deploy/images/kernel/entrypoint-solver-provision.sh /usr/local/bin/entrypoint-solver-provision.sh
 COPY deploy/images/kernel/entrypoint-maker-offer.sh      /usr/local/bin/entrypoint-maker-offer.sh
+# The 00007 offer poster: a LOOP, opt-in behind the `poster` compose profile.
+COPY deploy/images/kernel/entrypoint-offer-poster.sh     /usr/local/bin/entrypoint-offer-poster.sh
 COPY deploy/images/kernel/wait-for.sh            /usr/local/bin/wait-for.sh
 RUN chmod +x /usr/local/bin/entrypoint-*.sh /usr/local/bin/wait-for.sh
 

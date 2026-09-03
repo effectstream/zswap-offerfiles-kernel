@@ -37,6 +37,7 @@ Static gates only (no stack, safe on a shared host):
 | `relay` | `images/relay` (reference @ `061f4d3`, unmodified) | `node packages/relay/dist/relay-main.js` | 3000 / 9001 | `13000` / `19001` |
 | `solver` | kernel image | `bun run start.solver.ts` | — | — |
 | `price-feed` | kernel image | `bun run packages/price-feed/price-feed.dev.ts` (profile `prices`) | — | — |
+| `offer-poster` | kernel image | `bun run deploy/scripts/offer-poster.ts` (profile `poster`) | 9977 | `19977` |
 | `scripts` | kernel image | E2E driver (profile `e2e`) | — | — |
 
 ## Why there is no orchestrator here
@@ -155,6 +156,166 @@ id. A failed **request** is recorded against every id it carried — blaming one
 would be a guess — and the next batch is still made. A `429` stops the cycle where
 it stands, keeping what was already written. All of it is visible in
 `GET /v1/prices.feed.last_error`.
+
+## Offer poster
+
+`offer-poster` keeps the book supplied with **individually takeable** offers.
+Every `POST_INTERVAL_MS` (default 60 s) one tick does exactly one of two things:
+
+* **re-offer** — a coin the journal already owns has come back (its last offer
+  is `expired` or `cancelled` in the kernel *and* the nonce is visible again in
+  the wallet's `availableCoins`), so the tick posts a fresh offer for that exact
+  coin at today's quote; or
+* **mint** — no coin is free, so the tick calls the faucet circuit
+  `mint_shielded(domainSep(GIVE_TOKEN), GIVE_AMOUNT, freshNonce)` — paying the
+  mint fee from its **own DUST** — waits for the coin to appear, and offers it.
+
+Either way the offer **gives one whole coin**: no change output, so every offer
+is a complete, independent swap rather than a slice of a shared balance. The
+want leg is not a knob by default — it is `suggested_to_amount` from
+`GET /v1/quote` for that coin's actual value, which lands the offer exactly on
+the sponsorship threshold so the batcher pays its Celestia fee (`payFees:false`,
+the taker balances).
+
+```bash
+docker compose --profile poster up -d offer-poster
+docker compose logs -f offer-poster
+```
+
+It is **opt-in**: with the profile off it is absent from `docker compose ps`,
+absent from `docker compose config --services`, and nothing else in the stack
+changes. `./down.sh` names the profile, so the container and its
+`offer-poster-state` volume go with everything else.
+
+### The exact-coin guarantee, and how to check it
+
+The wallet SDK's default coin selector is smallest-first and cannot be told
+which coin to spend. The poster therefore builds its own facade with a **pinned
+selector** (`deploy/scripts/lib/pinned-wallet.ts`): while a nonce is armed, the
+selector returns that coin for the give colour or **nothing at all** — never a
+substitute. After `finalizeTransaction` the tick asserts the built transaction's
+input nullifiers equal `[the pinned coin's nullifier]` and that the fallible
+section has no inputs; if they differ the recipe is **reverted** and nothing is
+posted.
+
+To verify it from outside, compare the kernel's view against the poster's own
+record — one nullifier, the same on both sides:
+
+```bash
+# what the poster believes it did (read-only, no auth)
+curl -s http://127.0.0.1:19977/journal | jq '.coins | to_entries[-1]'
+
+# what the kernel says the offer actually spends
+curl -s http://127.0.0.1:19999/v1/offers/<offerId> | jq '.computed.inputNullifiers'
+```
+
+`computed.inputNullifiers` must be a **single** entry, and it must equal the
+`nullifier` of the coin that journal entry's newest `offers[]` element belongs
+to. `<offerId>` is the offer's sha256 content hash — the same string the journal
+records and the poster logs as `offerId=`.
+
+### The journal
+
+`POSTER_JOURNAL_FILE` (`/var/lib/offer-poster/journal.json`, on the
+`offer-poster-state` volume) is one entry per coin the poster has ever minted:
+the coin identity (`type`, `nonce`, `value`, `nullifier`), the mint transaction,
+and the history of every offer built from it with its quote snapshot and last
+known kernel status. It is written atomically (temp file + rename) on every
+state change, and **before** a mint is submitted — so a poster killed between
+minting and posting finds the orphan on restart and re-offers it instead of
+leaking a coin.
+
+Consequences worth knowing:
+
+* It is **keyed by the contract address**. A journal from another deployment is
+  refused at startup rather than merged — those coins do not exist on this
+  chain. So is a corrupt file, which is moved aside and never overwritten. Both
+  refusals are lifted by `OFFER_POSTER_JOURNAL_RESET=true`, deliberately once.
+* `cancelled` does **not** mean the coin came back. Settlement is atomic, so a
+  partial or split spend is also reported `cancelled`. Candidacy is therefore
+  gated on the wallet's `availableCoins`, which is the only proof of release;
+  the kernel status is a hint.
+* Coins the poster did not mint are never touched, even if they sit in the same
+  wallet in the same colour.
+* A short `OFFER_POSTER_TTL_MINUTES` means more re-offers and fewer mints: the
+  SDK reserves a coin for as long as its offer can still be taken.
+
+### Funding
+
+The poster needs **unshielded NIGHT**, and nothing else — it registers that
+NIGHT for DUST itself at startup and waits (bounded) for the dust to arrive. A
+poster with no NIGHT still starts and reports `degraded: insufficient_dust` on
+`/health`; it keeps servicing re-offers, which cost no dust, because restarting
+it would not produce NIGHT.
+
+* **`undeployed`** — transfer from the genesis wallet. The worked example in
+  this repo is `deploy/scripts/provision-solver-fees.ts`, which sends the solver
+  four UTXOs of `5_000_000_000_000` NIGHT each from `MIDNIGHT_GENESIS_SEED` and
+  then registers them; `packages/solver/scripts/bootstrap-dev.ts` is the funded
+  variant of the same path. A few **large** UTXOs, not many small ones: a dust
+  coin's capacity is tied to the size of the NIGHT UTXO backing it.
+* **`preprod`** — the Midnight preprod faucet, then wait for the dust to
+  register. Nothing here deploys preprod; see below.
+
+### One facade per seed
+
+`OFFER_POSTER_SEED` must be a **dedicated** seed. Two wallet facades on one seed
+against one Midnight node force each other's connection down, so the poster
+refuses to start (exit 78) if its seed matches `MIDNIGHT_GENESIS_SEED` /
+`MIDNIGHT_WALLET_SEED`, `BATCHER_WALLET_SEED`, `SOLVER_SEED`, `MAKER_SEED`,
+`MAKER_OFFER_SEED` or `TAKER_SEED`. For the same reason this service must never
+be scaled past one replica, and the compose block deliberately does **not**
+inherit the `*midnight-endpoints` anchor — that anchor carries
+`MIDNIGHT_WALLET_SEED`. Generate a seed with `openssl rand -hex 32`.
+
+### Dry run
+
+`DRY_RUN=true` does the whole of startup — build the wallet, sync, register
+NIGHT for dust, join the contract, derive both colours offline, register the
+token names, load the journal, read one quote — then prints a JSON report and
+exits 0. It never mints and never posts. Run it as a one-off rather than setting
+it in `.env`, because the service restarts unless stopped:
+
+```bash
+docker compose run --rm -e DRY_RUN=true offer-poster
+```
+
+### Endpoints
+
+On `POSTER_HEALTH_PORT` (9977 in the container, `HOST_OFFER_POSTER_HEALTH_PORT`
+= 19977 on the host, loopback):
+
+| Route | What it answers |
+|---|---|
+| `GET /health` | `200 {state, ticks, mints, reoffers, lastTickAt, lastOfferId, lastError, dustBalance, liveOffers, freeCoins, p95TickMs}`. **`503` only after `HEALTH_STALE_TICKS` consecutive FAILED ticks** — `starting` and `degraded` are both `200`, on purpose: a poster waiting for its operator to send NIGHT is not a poster a restart would fix. This is the container healthcheck, which is why its `start_period` is 15 m: the server binds only after wallet sync, dust registration and the contract join. |
+| `GET /metrics` | the same counters in Prometheus text format, including tick p50/p95 and the overrun count. |
+| `GET /journal` | the journal as JSON, read-only. |
+
+### Running it against preprod
+
+This repo does **not** deploy preprod, and the poster is the only piece of it
+that is preprod-ready. What is needed there is an `.env` pointing at the public
+endpoints and a funded, dedicated seed:
+
+```dotenv
+MIDNIGHT_NETWORK_ID=preprod
+MIDNIGHT_INDEXER_HTTP=https://indexer.preprod.midnight.network/api/v3/graphql
+MIDNIGHT_INDEXER_WS=wss://indexer.preprod.midnight.network/api/v3/graphql/ws
+MIDNIGHT_NODE_HTTP=https://rpc.preprod.midnight.network
+# The proof server stays LOCAL — proving is the one step that must not leave
+# the operator's machine, and it is the slowest (~30 s per transaction).
+MIDNIGHT_PROOF_SERVER_URL=http://proof-server:6300
+MIDNIGHT_CONTRACT_ADDRESS=6fc44c272d866574cefc14e25474fdfa144e6427f299a8222a8ad8a7b374bb7c
+ZSWAP_API=https://preprod.api-zswap.zkdojo.com
+OFFER_POSTER_SEED=<a dedicated seed, funded from the preprod faucet>
+```
+
+The contract address is what makes the colours right: `WBTC` derives offline to
+`e7580bfc…a912` and `WETH` to `fda14e2e…a0a5` under that address, and a
+`DRY_RUN` prints both, so a wrong address is visible before anything is minted.
+Actually **rolling this out** — adding the `poster` profile to whatever deploys
+preprod, and funding the wallet there — belongs to that deployment, not to this
+repository.
 
 ## Observing the relay
 

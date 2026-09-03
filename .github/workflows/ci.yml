@@ -39,6 +39,12 @@ jobs:
       # NOT `bun run test` — that is the e2e runner and needs live Celestia +
       # Midnight + Postgres infra (see e2e job below). The unit suites are
       # self-contained: PGlite (in-memory Postgres, wasm) + ledger wasm.
+      #
+      # `deploy/scripts/lib` is not a workspace member, so it is easy to forget:
+      # its suites cover the deployment scripts' own logic (the offer poster's
+      # config, journal, quote sizing, scheduler, health and pinned coin
+      # selection) and are self-contained in the same way — no PGlite, no
+      # network, no Compact output.
       - name: Run unit suites
         run: >
           bun test
@@ -50,6 +56,7 @@ jobs:
           packages/solver-core
           packages/solver
           packages/tests/grand-e2e
+          deploy/scripts/lib
 
   typecheck-playground:
     name: Typecheck docs playground (tsc)

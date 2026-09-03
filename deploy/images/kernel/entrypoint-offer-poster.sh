@@ -119,5 +119,5 @@ mkdir -p "${POSTER_JOURNAL_DIR}"
 cd "${REPO_ROOT}"
 log "starting the offer poster (deploy/scripts/offer-poster.ts)"
 log "  kernel=${ZSWAP_API} network=${MIDNIGHT_NETWORK_ID} journal=${POSTER_JOURNAL_FILE:-/var/lib/offer-poster/journal.json}"
-log "  give=${GIVE_TOKEN:-WBTC}/${GIVE_AMOUNT:-1000} want=${WANT_TOKEN:-WETH}/${WANT_AMOUNT:-<quoted>} interval=${POST_INTERVAL_MS:-60000}ms"
+log "  give=${GIVE_TOKEN:-WBTC}/${GIVE_AMOUNT:-1000000} want=${WANT_TOKEN:-WETH}/${WANT_AMOUNT:-<quoted>} interval=${POST_INTERVAL_MS:-60000}ms"
 exec bun run deploy/scripts/offer-poster.ts

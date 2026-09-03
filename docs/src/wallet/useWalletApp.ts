@@ -12,6 +12,7 @@ import { useContract } from './useContract'
 import {
   domainSepFromName,
   MINT_AMOUNT,
+  MINT_COINS,
   NIGHT_COLOR,
   PRESET_TOKENS,
   type MintableKind,
@@ -156,7 +157,7 @@ export function useWalletApp() {
         ? await contract.mintShielded(token.domainSep, MINT_AMOUNT, BigInt(Date.now()), token.name)
         : await contract.mintUnshielded(token.domainSep, MINT_AMOUNT, token.name)
       setColorById((prev) => ({ ...prev, [token.name]: res.color.toLowerCase() }))
-      setMintMsg(`Minted +${MINT_AMOUNT} ${token.name} · color ${res.color.slice(0, 12)}…`)
+      setMintMsg(`Minted +${MINT_COINS} ${token.name} (${MINT_AMOUNT} base units) · color ${res.color.slice(0, 12)}…`)
       await refreshKnown()
       // Give Lace a moment to index, then refresh.
       setTimeout(() => { refreshBalances() }, 2000)

@@ -13,8 +13,9 @@
 //   WALLET_SEED=<64-hex>          maker wallet seed
 //   GIVE_TOKEN=<64-hex>           token color to give
 //   WANT_TOKEN=<64-hex>           token color to want
-//   GIVE_AMOUNT=500000            amount in base units
-//   WANT_AMOUNT=750000
+//   GIVE_AMOUNT=500000            amount in BASE UNITS (= 0.5 coins at the
+//                                 6 decimals every token here carries)
+//   WANT_AMOUNT=750000            (= 0.75 coins)
 //   TTL_MINUTES=30
 
 import { readFileSync, writeFileSync } from "node:fs";

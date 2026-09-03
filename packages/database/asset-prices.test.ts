@@ -262,7 +262,7 @@ test("SNIGHT prices as NIGHT through the NAME map even without an asset_id", () 
 
 // ── the registry's new columns ─────────────────────────────────────────────
 
-test("a token registered without decimals/asset_id lands on 0 / NULL", async () => {
+test("a token registered without decimals/asset_id lands on 6 / NULL", async () => {
   await insertKnownToken.run(
     {
       token_color: COLOR_TEST,
@@ -276,7 +276,9 @@ test("a token registered without decimals/asset_id lands on 0 / NULL", async () 
   const row = (await getKnownTokensWithAssets.run(undefined, client)).find(
     (t) => t.name === "TESTTOKENA",
   )!;
-  expect(row.decimals).toBe(0);
+  // 00024 FR-001: an explicit NULL still lands on 6 (the COALESCE in
+  // InsertKnownToken), because every token this stack mints has 6 decimals.
+  expect(row.decimals).toBe(6);
   expect(row.asset_id).toBeNull();
   // …and nothing maps it, so it is unpriced.
   expect(resolveAssetId(row)).toBeNull();

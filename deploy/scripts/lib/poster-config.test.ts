@@ -21,6 +21,7 @@ import {
   resolveContractAddress,
   resolveSeed,
 } from "./poster-config.ts";
+import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../../../packages/solver-core/amount.ts";
 
 // Preprod's deployed offer-files contract, and the two colours it derives —
 // the same vector `faucet-mint.test.ts` pins, so a change in either derivation
@@ -286,7 +287,8 @@ describe("legs", () => {
 describe("knobs and defaults (FR-014)", () => {
   test("every default matches the spec", async () => {
     const cfg = await parse();
-    expect(cfg.giveAmount).toBe(1000n);
+    // One whole coin at the registry's 6 decimals (00024 Q5).
+    expect(cfg.giveAmount).toBe(1_000_000n);
     expect(cfg.forcedWantAmount).toBeUndefined();
     expect(cfg.postIntervalMs).toBe(60_000);
     expect(cfg.offerTtlMinutes).toBe(60);
@@ -304,6 +306,17 @@ describe("knobs and defaults (FR-014)", () => {
     expect(cfg.minDust).toBe(1n);
   });
 
+  test("the GIVE_AMOUNT default is exactly one whole coin (00024)", async () => {
+    // The env stays BASE UNITS — no interface change — but the default is the
+    // registry's 6 decimals applied to one coin, so a poster journal reads in
+    // round coins instead of in millionths.
+    const cfg = await parse();
+    expect(cfg.giveAmount).toBe(coinsToBaseUnits(1n, DEFAULT_TOKEN_DECIMALS));
+    expect(cfg.giveAmount).toBe(1_000_000n);
+    // A caller that wants the old face value still says so, in base units.
+    expect((await parse({ GIVE_AMOUNT: "1000" })).giveAmount).toBe(1000n);
+  });
+
   test("BLANK knobs fall back to the defaults, they do not override them", async () => {
     const cfg = await parse({
       GIVE_AMOUNT: "",
@@ -313,7 +326,7 @@ describe("knobs and defaults (FR-014)", () => {
       DRY_RUN: "",
       POSTER_JOURNAL_FILE: "",
     });
-    expect(cfg.giveAmount).toBe(1000n);
+    expect(cfg.giveAmount).toBe(1_000_000n);
     expect(cfg.postIntervalMs).toBe(60_000);
     expect(cfg.forcedWantAmount).toBeUndefined();
     expect(cfg.kernelBase).toBe("http://kernel:9999");

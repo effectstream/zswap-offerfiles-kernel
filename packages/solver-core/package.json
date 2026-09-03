@@ -6,6 +6,7 @@
   "exports": {
     ".": "./mod.ts",
     "./admission-policy": "./admission-policy.ts",
+    "./amount": "./amount.ts",
     "./api-client": "./api-client.ts",
     "./batcher": "./batcher.ts",
     "./exact-files-contract": "./exact-files-contract.ts",

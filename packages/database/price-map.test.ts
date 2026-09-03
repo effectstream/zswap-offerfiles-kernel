@@ -40,9 +40,22 @@ test("an unmapped name resolves to nothing (test tokens stay unpriced)", () => {
   expect(resolveAssetId({ name: "" })).toBeNull();
 });
 
-test("decimals default to 0 and come from the token row otherwise", () => {
-  expect(resolveAssetId({ name: "WBTC" })?.decimals).toBe(0);
+test("decimals default to 6 and come from the token row otherwise", () => {
+  // 00024 FR-001: the registry default. Reached only for a PARTIAL token — the
+  // column is NOT NULL, so a real row always states its own value.
+  expect(resolveAssetId({ name: "WBTC" })?.decimals).toBe(6);
   expect(resolveAssetId({ name: "USDM", decimals: 6 })?.decimals).toBe(6);
+  // A token that genuinely is 0 still says so and is believed.
+  expect(resolveAssetId({ name: "WBTC", decimals: 0 })?.decimals).toBe(0);
+});
+
+test("a name-priced faucet token prices at the asset price / 10^6", () => {
+  // WBTC is faucet-minted: no asset_id, priced BY NAME through
+  // DEFAULT_NAME_ASSET_MAP, and since 00024 registered with 6 decimals. One
+  // base unit is therefore a millionth of a coin.
+  const mapped = resolveAssetId({ name: "WBTC", decimals: 6, asset_id: null })!;
+  expect(mapped).toEqual({ assetId: "bitcoin", decimals: 6 });
+  expect(tokenPriceFromAsset("77387", mapped.decimals)).toBe("0.077387");
 });
 
 // ── precedence ─────────────────────────────────────────────────────────────
@@ -104,7 +117,8 @@ test("colours are keyed lower-case, names upper-case", () => {
 // ── per-base-unit conversion ───────────────────────────────────────────────
 
 test("tokenPriceFromAsset divides exactly, with no float noise and no toFixed", () => {
-  // 0 decimals: base unit == coin, the faucet's shape.
+  // 0 decimals: base unit == coin. Nothing this stack mints is 0 any more
+  // (00024), but the arithmetic must still be exact for a token that is.
   expect(tokenPriceFromAsset("77387", 0)).toBe("77387");
   expect(tokenPriceFromAsset("2393.28", 0)).toBe("2393.28");
   // 6 decimals: USDM's shape. The asset is near a dollar but not on it, and

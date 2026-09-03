@@ -91,7 +91,10 @@ export const TAKER_COIN = 3000n; // wants can reach ~2500
 export const GIVE_MIN = 500n;
 export const GIVE_SPAN = 1000n; // give ∈ [500, 1500]
 
-export const MINT_AMOUNT = 1_000_000_000n; // genesis mint per color
+// Genesis mint per colour. Unchanged by 00024 (Q5) — at the registry's 6
+// decimals this value now READS as 1 000 whole coins, which is exactly the
+// faucet allotment, so every fixture below keeps its meaning.
+export const MINT_AMOUNT = 1_000_000_000n;
 
 // Publish every Nth valid offer via direct blob.Submit instead of the API
 // (path-B positive coverage at scale; 1.4 does one explicitly too).

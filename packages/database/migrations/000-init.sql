@@ -98,10 +98,15 @@ CREATE TABLE price_feed_status (
 -- decimals / asset_id carry a DEFAULT and a NULL respectively, which the
 -- header's "no DEFAULT cushions" rule allows here because neither is a
 -- compatibility shim for an old writer:
---   decimals DEFAULT 0 is the real semantic default of this registry — the
---     faucet mints 1000 base units = 1000 coins, so 0 (base unit == coin) is
---     what every token registered through POST /v1/known-tokens without an
---     explicit decimals genuinely has.
+--   decimals DEFAULT 6 is the real semantic default of this registry (00024):
+--     EVERY token this stack mints or registers has 6 decimals, and every
+--     faucet hands out whole coins scaled by 10^6 (1 000 coins =
+--     1_000_000_000 base units). A token registered through
+--     POST /v1/known-tokens without an explicit decimals is one of those, so 6
+--     is what it genuinely has; a bridged token with a different scale states
+--     its own value. It is a real semantic default, not a cushion for an old
+--     writer — every registration path in this repository sends 6 explicitly,
+--     and the column would say the same thing if none of them did.
 --   asset_id NULL means "no asset behind this colour" (test tokens), which is
 --     a state the resolver handles explicitly, not a missing value.
 CREATE TABLE known_tokens (
@@ -112,7 +117,7 @@ CREATE TABLE known_tokens (
     -- Base units per coin, as a power of ten. The API serves prices PER BASE
     -- UNIT (amounts are integer base units everywhere and carry no metadata),
     -- so a token's price is asset_prices.price_usd / 10^decimals.
-    decimals INTEGER NOT NULL DEFAULT 0 CHECK (decimals BETWEEN 0 AND 38),
+    decimals INTEGER NOT NULL DEFAULT 6 CHECK (decimals BETWEEN 0 AND 38),
     -- When set, wins over the name map in packages/database/price-map.ts.
     asset_id TEXT REFERENCES asset_prices(asset_id)
 );
@@ -179,9 +184,11 @@ CREATE TABLE known_tokens (
 --           one from the addresses above, so neither the row nor this comment
 --           can rot after a contract redeploy.
 --
--- Faucet-minted dev/test tokens (WBTC, WETH, TESTTOKEN*, …) are NOT touched by
--- this: they keep the table's DEFAULT of 0 (comment above) — the faucet mints
--- 1000 base units = 1000 coins, so 0 is genuinely correct for them.
+-- Faucet-minted dev/test tokens (WBTC, WETH, TESTTOKEN*, …) are NOT seeded, but
+-- since 00024 they carry the same 6: every registration path sends
+-- decimals: 6 explicitly, and the table's DEFAULT above catches anything that
+-- does not. The faucet mints WHOLE COINS scaled by 10^6, so a 1 000-coin
+-- allotment is 1_000_000_000 base units.
 INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES
 ('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 6, 'midnight-3'),
 -- preview sNight — see the SNIGHT note above before deploying elsewhere.

@@ -42,6 +42,10 @@ const NIGHT = "0".repeat(64);
 /** Fixed separators shared with the startup mint — same sep, same color. */
 const SEP_A = 0xa1;
 const SEP_B = 0xb2;
+// 1 000 whole coins at the registry's 6 decimals (00024 Q5) — the value is
+// unchanged. The ladder rungs below are BASE UNITS and stay that way: the
+// solver has no decimals awareness by design, so its dev rungs quote
+// millionths of a coin. Quoting in coins is a separate project.
 const MINT_AMOUNT = 1_000_000_000n;
 
 /** A dust coin's capacity is tied to the size of the NIGHT UTXO backing it, so

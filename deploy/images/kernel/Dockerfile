@@ -1,4 +1,4 @@
-# deploy/images/kernel/Dockerfile — ONE image, TEN single-process entrypoints.
+# deploy/images/kernel/Dockerfile — ONE image, ELEVEN single-process entrypoints.
 #
 # Build context: the repository ROOT of this working clone (never a git clone of
 # it: the branch this deployment belongs to is deliberately unpushed, so a

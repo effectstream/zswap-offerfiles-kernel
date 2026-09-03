@@ -237,8 +237,19 @@ Consequences worth knowing:
   the kernel status is a hint.
 * Coins the poster did not mint are never touched, even if they sit in the same
   wallet in the same colour.
-* A short `OFFER_POSTER_TTL_MINUTES` means more re-offers and fewer mints: the
-  SDK reserves a coin for as long as its offer can still be taken.
+* `OFFER_POSTER_TTL_MINUTES` does **not** set how long a posted offer stays
+  takeable. It is the `ttl` passed to `initSwap` — the wallet's own local
+  deadline for that one build, governing only when an *unconfirmed* recipe is
+  abandoned and its coin released back to `availableCoins`. For a shielded
+  leg, once an offer is actually posted and live, the kernel tracks its
+  expiry independently: `min(ROOT_WINDOW_SECONDS, OFFER_TTL_SECONDS)`, both
+  process-wide kernel env vars (currently 1h on every network), and neither
+  reads anything a client sends per offer. A re-offer candidate therefore
+  needs BOTH windows to have passed — the wallet-side one (this knob) and the
+  kernel-side one (not configurable from this service). Shortening only this
+  knob will not by itself produce more re-offers; see Q8 in
+  `plans/00007-offer-poster-service-questions.md` for the full trace
+  (`packages/node/state-machine.ts`, `packages/node/env.ts`).
 
 ### Funding
 

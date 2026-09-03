@@ -8,7 +8,11 @@ import {
 } from "@zswap-da/solver-core/relay-ws-contract";
 
 import { Book, bookOfferFromApi } from "./src/book.ts";
-import { deriveLadderPush, type LadderCache } from "./src/ladder-source.ts";
+import {
+  deriveLadderPush,
+  type LadderCache,
+  type LadderPush,
+} from "./src/ladder-source.ts";
 import {
   JOB_EXECUTION_UNAVAILABLE,
   RELAY_WS_OPEN,
@@ -1315,5 +1319,166 @@ describe("relay client — the executability budget is read per push (FR-003)", 
     socket.onopen!();
     await flushMicrotasks();
     expect(wireRungs(socket.frames)).toHaveLength(3);
+  });
+});
+
+describe("relay client — the derived push is observable (00007 FR-004)", () => {
+  test("onPush receives the whole derivation, and lastPush retains it", async () => {
+    const cache = cacheOf(seed(CANONICAL_ROWS));
+    const seen: Array<{ push: LadderPush; cause: string }> = [];
+    const { socket, client } = harness(cache, {
+      onPush: (push, cause) => seen.push({ push, cause }),
+    });
+
+    socket.onopen!();
+    await flushMicrotasks();
+
+    // Provenance and exclusions are the reason this seam exists: the `push`
+    // event carries counts only, and before 00007 the LadderPush itself was
+    // dropped the moment it left `runPush`.
+    expect(seen.length).toBe(1);
+    expect(seen[0]!.cause).toBe("connect");
+    const expected = expectedPush(cache);
+    expect(seen[0]!.push.priceLevels).toEqual(expected.priceLevels);
+    expect(seen[0]!.push.derived.provenance).toEqual(expected.derived.provenance);
+    expect(seen[0]!.push.derived.provenance[0]!.rungs.length).toBe(3);
+    expect(seen[0]!.push.withheld).toBeNull();
+
+    const record = client.lastPush();
+    expect(record).not.toBeNull();
+    expect(record!.cause).toBe("connect");
+    // The record names the exact clock value the frames are reproducible from.
+    expect(record!.derivedAt).toBe(NOW);
+    expect(record!.push.priceLevels).toEqual(expected.priceLevels);
+
+    // A defensive copy: a status reader cannot mutate the client's own record.
+    record!.cause = "tampered";
+    expect(client.lastPush()!.cause).toBe("connect");
+
+    await client.push();
+    expect(client.lastPush()!.cause).toBe("manual");
+    expect(seen.map((entry) => entry.cause)).toEqual(["connect", "manual"]);
+  });
+
+  test("lastPush is null before the first derivation and after a failed one", async () => {
+    const cache = cacheOf(seed(CANONICAL_ROWS));
+    const { socket, client } = harness(cache);
+    // Nothing has been derived yet: the socket has not opened.
+    expect(client.lastPush()).toBeNull();
+
+    // A push whose frames fail ON THE WIRE still derived a ladder, and the
+    // record is what the solver DECIDED to publish — the wire outcome is the
+    // `push-failed` event's job, not this seam's.
+    socket.failSends = true;
+    socket.onopen!();
+    await flushMicrotasks();
+    expect(client.stats().pushFailures).toBe(1);
+    expect(client.stats().pushes).toBe(0);
+    expect(client.lastPush()!.push.priceLevels.levels.length).toBe(1);
+  });
+
+  test("R-37: a throwing onPush cannot fail the push, and never loses the record", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const cache = cacheOf(seed(CANONICAL_ROWS));
+      const { socket, client } = harness(cache, {
+        onPush: () => { throw new Error("status collector exploded"); },
+      });
+
+      socket.onopen!();
+      await flushMicrotasks();
+
+      // The frames still went out, the counters still moved, and the record was
+      // retained BEFORE the observer ran — a diagnostic consumer never
+      // participates in transport or observability authority.
+      expect(client.stats().pushes).toBe(1);
+      expect(client.stats().pushFailures).toBe(0);
+      expect(socket.types).toEqual(["solver-capabilities", "price-levels"]);
+      expect(client.lastPush()!.cause).toBe("connect");
+
+      await client.push();
+      expect(client.stats().pushes).toBe(2);
+      await client.stop();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  test("a not-current cache records the EMPTY pair with withheld=cache-not-current", async () => {
+    const cache = cacheOf(seed(CANONICAL_ROWS));
+    const { socket, client } = harness(cache);
+    socket.onopen!();
+    await flushMicrotasks();
+    expect(client.lastPush()!.push.withheld).toBeNull();
+
+    cache.current = false;
+    await client.push();
+
+    // The fail-closed withdrawal IS a push, and the record says so — which is
+    // what lets the page state that the empty ladder is a deliberate
+    // withdrawal rather than "no liquidity".
+    const record = client.lastPush()!;
+    expect(record.push.withheld).toBe("cache-not-current");
+    expect(record.push.priceLevels.levels).toEqual([]);
+    expect(record.push.capabilities.tokenIds).toEqual([]);
+    expect(record.push.derived.provenance).toEqual([]);
+  });
+
+  test("the R-41 explicit withdrawal replaces the record with the empty pair", async () => {
+    const cache = cacheOf(seed(CANONICAL_ROWS));
+    const { socket, client } = harness(cache);
+    socket.onopen!();
+    await flushMicrotasks();
+    expect(client.lastPush()!.push.priceLevels.levels.length).toBe(1);
+
+    await client.withdraw();
+
+    // Without this, a monitor would paint a solver that has explicitly
+    // retracted its quotes as still quoting them — the one moment the page
+    // must not get wrong.
+    const record = client.lastPush()!;
+    expect(record.cause).toBe("withdraw");
+    expect(record.push.withheld).toBe("withdrawn");
+    expect(record.push.priceLevels.levels).toEqual([]);
+    expect(record.push.capabilities.tokenIds).toEqual([]);
+  });
+
+  test("a withdrawal that misses its deadline is NOT recorded as withdrawn", async () => {
+    const cache = cacheOf(seed(CANONICAL_ROWS));
+    const { socket, clock, client } = harness(cache);
+    socket.onopen!();
+    await flushMicrotasks();
+    const before = client.lastPush()!;
+    expect(before.push.withheld).toBeNull();
+
+    socket.hold = true;
+    const withdrawing = client.withdraw();
+    await flushMicrotasks();
+    // 500 ms is this harness's withdrawTimeoutMs.
+    await clock.advance(500);
+    await withdrawing;
+
+    // The relay's view is UNKNOWN, and claiming "withdrawn" would be the same
+    // lie as claiming "still quoting".
+    expect(client.stats().withdrawn).toBe(false);
+    expect(client.lastPush()!.push.withheld).toBeNull();
+    socket.release();
+  });
+
+  test("stopping a client the relay already dropped still records the withdrawal", async () => {
+    const cache = cacheOf(seed(CANONICAL_ROWS));
+    const { socket, client } = harness(cache);
+    socket.onopen!();
+    await flushMicrotasks();
+    expect(client.lastPush()!.push.priceLevels.levels.length).toBe(1);
+
+    // No open socket: the relay has forgotten our ladder either way, so the
+    // OBSERVABLE state is withdrawn.
+    socket.readyState = 3;
+    await client.stop();
+    expect(client.lastPush()!.push.withheld).toBe("withdrawn");
   });
 });

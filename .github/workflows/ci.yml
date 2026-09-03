@@ -55,6 +55,7 @@ jobs:
           packages/batcher
           packages/solver-core
           packages/solver
+          packages/solver-frontend
           packages/tests/grand-e2e
           deploy/scripts/lib
 
@@ -115,7 +116,7 @@ jobs:
         run: bun run typecheck:backend
 
   solver-typecheck:
-    name: Solver typecheck (strict solver, solver-core, validator)
+    name: Solver typecheck (strict solver, solver-core, validator, solver-frontend)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -132,9 +133,11 @@ jobs:
           mkdir -p packages/contracts-midnight/contract-offer-files/src/managed/contract
           printf 'export declare const Contract: any;\nexport type Contract = any;\nexport declare const ledger: any;\nexport declare const pureCircuits: any;\n' \
             > packages/contracts-midnight/contract-offer-files/src/managed/contract/index.d.ts
-      # Production AND test sources of the solver packages, plus every
-      # first-party file that imports the solver's source (discovered, not
-      # listed). Zero diagnostics required — see scripts/solver-typecheck.ts.
+      # Production AND test sources of the solver packages, plus
+      # packages/solver-frontend (00007 FR-017 — listed, and compiled with its
+      # own options because its browser modules are .js) and every first-party
+      # file that imports the solver's source (discovered, not listed). Zero
+      # diagnostics required — see scripts/solver-typecheck.ts.
       - name: Strict solver TypeScript check
         run: bun run typecheck:solver
 

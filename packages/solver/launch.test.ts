@@ -90,6 +90,10 @@ describe("FR-005 solver launch configuration", () => {
       ladderConfigPath: "/etc/cow-solver/ladders.json",
       // 00006 FR-001: optional, but resolved and reported like everything else.
       feeSizingTakerInputs: 1,
+      // 00007 FR-001: no SOLVER_STATUS_PORT means no listener at all. This
+      // assertion is the SC-001 "unset = zero behaviour change" contract at the
+      // configuration layer.
+      status: null,
       warnings: [],
     });
   });
@@ -388,4 +392,153 @@ describe("FR-005 the real entrypoint fails fast", () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain("SOLVER_ENABLED=false");
   }, 60_000);
+});
+
+/**
+ * 00007 FR-001 — the read-only status listener's configuration boundary.
+ *
+ * The whole point of these is the Q-S-3 amendment: `/status/*` serves the
+ * solver's ENTIRE internal state, so a listener that comes up open must be
+ * impossible to configure, not merely discouraged. The port is the opt-in and
+ * the bearer is mandatory with it; everything else is grammar.
+ */
+describe("FR-001 status listener configuration (00007)", () => {
+  const STATUS_TOKEN = `s${"7".repeat(39)}`;
+  const withStatus = (extra: Record<string, string>): Record<string, string> => ({
+    ...complete(),
+    ...extra,
+  });
+
+  test("no SOLVER_STATUS_PORT means no listener and no other change", () => {
+    const config = resolveWith(complete());
+    expect(config.status).toBeNull();
+    // SC-001's configuration half: the unset case must not even warn.
+    expect(config.warnings).toEqual([]);
+    expect(describeSolverLaunchConfig(config))
+      .toContain("status listener: disabled (SOLVER_STATUS_PORT unset)");
+  });
+
+  test("a port plus a long enough bearer resolves, defaulting the host to loopback", () => {
+    const config = resolveWith(withStatus({
+      SOLVER_STATUS_PORT: "9100",
+      SOLVER_STATUS_AUTH_TOKEN: STATUS_TOKEN,
+    }));
+    expect(config.status).toEqual({ host: "127.0.0.1", port: 9100, authToken: STATUS_TOKEN });
+    // Loopback by default, and silently so: it is the safe choice.
+    expect(config.warnings).toEqual([]);
+  });
+
+  test("the bearer is MANDATORY whenever the port is set", () => {
+    const problems = problemsOf(withStatus({ SOLVER_STATUS_PORT: "9100" }));
+    namesOne(problems, "SOLVER_STATUS_AUTH_TOKEN");
+    expect(problems[0]).toContain("must never be open");
+  });
+
+  test("a bearer shorter than 32 characters is refused, and its length is named", () => {
+    const problems = problemsOf(withStatus({
+      SOLVER_STATUS_PORT: "9100",
+      SOLVER_STATUS_AUTH_TOKEN: "0123456789",
+    }));
+    namesOne(problems, "SOLVER_STATUS_AUTH_TOKEN");
+    expect(problems[0]).toContain("at least 32 characters");
+    expect(problems[0]).toContain("got 10");
+    // The refusal names the LENGTH and never the value.
+    expect(problems[0]).not.toContain("0123456789");
+  });
+
+  test("a bearer with surrounding whitespace is refused rather than trimmed", () => {
+    const problems = problemsOf(withStatus({
+      SOLVER_STATUS_PORT: "9100",
+      SOLVER_STATUS_AUTH_TOKEN: ` ${STATUS_TOKEN} `,
+    }));
+    namesOne(problems, "SOLVER_STATUS_AUTH_TOKEN");
+    expect(problems[0]).toContain("whitespace");
+  });
+
+  test("the port grammar is canonical base-10 in [1, 65535]", () => {
+    for (const port of ["0", "65536", "8080x", " 8080", "08080", "-1", "3.5", ""]) {
+      const env = withStatus({
+        SOLVER_STATUS_PORT: port,
+        SOLVER_STATUS_AUTH_TOKEN: STATUS_TOKEN,
+      });
+      if (port === "") {
+        // Empty is "unset", not "malformed" — but it leaves the token unused.
+        const config = resolveWith(env);
+        expect(config.status).toBeNull();
+        continue;
+      }
+      const problems = problemsOf(env);
+      namesOne(problems, "SOLVER_STATUS_PORT");
+    }
+    expect(resolveWith(withStatus({
+      SOLVER_STATUS_PORT: "65535",
+      SOLVER_STATUS_AUTH_TOKEN: STATUS_TOKEN,
+    })).status!.port).toBe(65_535);
+  });
+
+  test("a non-loopback host is allowed but WARNED about, because Compose needs it", () => {
+    // `deploy/compose.yml` sets 0.0.0.0 so `solver-frontend` can reach the
+    // listener inside the container network. That is legitimate; publishing the
+    // port to a public interface is not, and the operator is told at every boot.
+    const config = resolveWith(withStatus({
+      SOLVER_STATUS_PORT: "9100",
+      SOLVER_STATUS_HOST: "0.0.0.0",
+      SOLVER_STATUS_AUTH_TOKEN: STATUS_TOKEN,
+    }));
+    expect(config.status).toEqual({ host: "0.0.0.0", port: 9100, authToken: STATUS_TOKEN });
+    expect(config.warnings).toEqual([
+      expect.stringContaining("is not loopback"),
+    ]);
+  });
+
+  test("a malformed host is a refusal, not a silent fallback to loopback", () => {
+    const problems = problemsOf(withStatus({
+      SOLVER_STATUS_PORT: "9100",
+      SOLVER_STATUS_HOST: " 0.0.0.0",
+      SOLVER_STATUS_AUTH_TOKEN: STATUS_TOKEN,
+    }));
+    namesOne(problems, "SOLVER_STATUS_HOST");
+  });
+
+  test("a bearer or host without a port is a warning: it looks protected and serves nothing", () => {
+    const config = resolveWith(withStatus({
+      SOLVER_STATUS_AUTH_TOKEN: STATUS_TOKEN,
+      SOLVER_STATUS_HOST: "0.0.0.0",
+    }));
+    expect(config.status).toBeNull();
+    expect(config.warnings).toEqual([
+      expect.stringContaining("SOLVER_STATUS_AUTH_TOKEN is set but SOLVER_STATUS_PORT is not"),
+      expect.stringContaining("SOLVER_STATUS_HOST is set but SOLVER_STATUS_PORT is not"),
+    ]);
+  });
+
+  test("the banner prints the bearer's length and never the bearer (FR-006)", () => {
+    const banner = describeSolverLaunchConfig(resolveWith(withStatus({
+      SOLVER_STATUS_PORT: "9100",
+      SOLVER_STATUS_AUTH_TOKEN: STATUS_TOKEN,
+    })));
+    expect(banner).toContain("status listener: http://127.0.0.1:9100");
+    expect(banner).toContain("bearer set, 40 chars");
+    expect(banner).not.toContain(STATUS_TOKEN);
+    // And the seed and the relay bearer are still absent, as they always were.
+    expect(banner).not.toContain(REAL_SEED);
+    expect(banner).not.toContain(TOKEN);
+  });
+
+  test("status problems join the SAME aggregated list as every other boundary", () => {
+    // One restart shows the operator everything, including the status listener.
+    // `namesOne` is deliberately not used for the two status variables: the
+    // bearer's message names the PORT as well ("required whenever
+    // SOLVER_STATUS_PORT is set"), which is the wording that makes it
+    // actionable, so a substring count would report two.
+    const problems = problemsOf({ SOLVER_STATUS_PORT: "70000" });
+    namesOne(problems, "MIDNIGHT_NETWORK_ID");
+    namesOne(problems, "SOLVER_SEED");
+    // The seven pre-existing mandatory boundaries, plus a bad port, plus the
+    // bearer the port made mandatory.
+    expect(problems.length).toBe(9);
+    expect(problems.filter((problem) => problem.startsWith("SOLVER_STATUS_PORT")).length).toBe(1);
+    expect(problems.filter((problem) => problem.startsWith("SOLVER_STATUS_AUTH_TOKEN")).length)
+      .toBe(1);
+  });
 });

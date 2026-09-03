@@ -20,6 +20,7 @@ from doing nothing is the one failure mode it must not have.
 | `e2e.ts` | the `scripts` service (profile `e2e`) | the cross-stack proof — provisioning, four cases, global assertions |
 | `provision-solver-fees.ts` | the `solver-provision` one-shot when `SOLVER_PROVISION_MINT_TOKENS=false` | gives the solver **fee currency only**: NIGHT from genesis, dust registration, ladder config from the published colors, and a receipt of the wallet's measured balances. **Mints nothing.** The funded counterpart is `packages/solver/scripts/bootstrap-dev.ts`, unchanged |
 | `post-maker-offer.ts` | the `maker-offer` one-shot | a thin CLI over `lib/maker-offer.ts` |
+| `offer-poster.ts` | the `offer-poster` service (profile `poster`) | the only LONG-RUNNING script here. Every `POST_INTERVAL_MS` it posts one Offer File whose single input is a coin it can name — a released coin from its journal, or one it mints that tick. Decisions live in `lib/poster-{config,tick,scheduler,health}.ts` behind injected dependencies; this file wires the real wallet, contract, kernel client and journal to them. `DRY_RUN=true` does everything except mint and post, prints a JSON report and exits 0 |
 | `read-wallet.ts` | by hand, after `docker compose stop solver` | reads and asserts one wallet's balances — the solver-surplus gate. `EXPECT_SHIELDED_ONLY=true` additionally asserts the wallet holds nothing beyond the listed colors |
 | `probe-backend-currentness.ts` | by hand | reproduces the E1 §9.2 sync diagnosis |
 

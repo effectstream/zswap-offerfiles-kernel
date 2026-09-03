@@ -224,6 +224,13 @@
         "rxjs": "^7.8.2",
       },
     },
+    "packages/solver-frontend": {
+      "name": "@zswap-da/solver-frontend",
+      "version": "0.1.0",
+      "dependencies": {
+        "@zswap-da/solver-core": "workspace:*",
+      },
+    },
     "packages/tests": {
       "name": "@zswap-da/tests",
       "version": "0.1.0",
@@ -1188,6 +1195,8 @@
     "@zswap-da/solver": ["@zswap-da/solver@workspace:packages/solver"],
 
     "@zswap-da/solver-core": ["@zswap-da/solver-core@workspace:packages/solver-core"],
+
+    "@zswap-da/solver-frontend": ["@zswap-da/solver-frontend@workspace:packages/solver-frontend"],
 
     "@zswap-da/tests": ["@zswap-da/tests@workspace:packages/tests"],
 

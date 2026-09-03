@@ -13,6 +13,7 @@
     "pretest": "bun run scripts/patch-macos-celestia.ts",
     "start:mainnet": "bun run start.mainnet.ts",
     "start:solver": "bun run start.solver.ts",
+    "start:solver-frontend": "bun run start.solver-frontend.ts",
     "test": "bun run packages/tests/run-tests.ts",
     "test:grand": "bun run packages/tests/grand-e2e/run.ts",
     "seed:market": "bun run packages/tests/seed-market.ts",

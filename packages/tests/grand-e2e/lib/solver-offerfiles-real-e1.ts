@@ -262,7 +262,7 @@ export function realE1ComposeSource(input: RealE1ComposeInput): string {
     },
     {
       kind: "http",
-      url: "http://midnight-indexer:8088/api/v4/graphql",
+      url: "http://midnight-indexer:8088/api/v3/graphql",
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ query: "query { __typename }" }),
@@ -587,8 +587,8 @@ export function realE1AcceptanceComposeSource(input: RealE1AcceptanceComposeInpu
   const backendCommand = quoteYaml(`${copyContract} && exec bun run packages/node/main.dev.ts`);
   const midnightEnvironment = `
       MIDNIGHT_NETWORK_ID: undeployed
-      MIDNIGHT_INDEXER_HTTP: http://midnight-indexer-gateway:8088/api/v4/graphql
-      MIDNIGHT_INDEXER_WS: ws://midnight-indexer-gateway:8088/api/v4/graphql/ws
+      MIDNIGHT_INDEXER_HTTP: http://midnight-indexer-gateway:8088/api/v3/graphql
+      MIDNIGHT_INDEXER_WS: ws://midnight-indexer-gateway:8088/api/v3/graphql/ws
       MIDNIGHT_NODE_HTTP: http://midnight-node-gateway:9944
       MIDNIGHT_PROOF_SERVER_URL: http://midnight-proof-gateway:6300
       MIDNIGHT_STORAGE_PASSWORD: "\${MIDNIGHT_STORAGE_PASSWORD:?MIDNIGHT_STORAGE_PASSWORD must be set}"`;

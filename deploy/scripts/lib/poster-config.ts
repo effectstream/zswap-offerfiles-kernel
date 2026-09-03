@@ -479,15 +479,15 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
       env,
       "MIDNIGHT_INDEXER_HTTP",
       isUndeployed
-        ? "http://127.0.0.1:8088/api/v4/graphql"
-        : `https://indexer.${networkId}.midnight.network/api/v4/graphql`,
+        ? "http://127.0.0.1:8088/api/v3/graphql"
+        : `https://indexer.${networkId}.midnight.network/api/v3/graphql`,
     ),
     indexerWS: readString(
       env,
       "MIDNIGHT_INDEXER_WS",
       isUndeployed
-        ? "ws://127.0.0.1:8088/api/v4/graphql/ws"
-        : `wss://indexer.${networkId}.midnight.network/api/v4/graphql/ws`,
+        ? "ws://127.0.0.1:8088/api/v3/graphql/ws"
+        : `wss://indexer.${networkId}.midnight.network/api/v3/graphql/ws`,
     ),
     node: readString(
       env,

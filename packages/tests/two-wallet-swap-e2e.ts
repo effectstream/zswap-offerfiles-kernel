@@ -17,7 +17,7 @@
 //
 //   bun packages/tests/two-wallet-swap-e2e.ts
 
-import { Transaction } from "@midnightntwrk/ledger-v9";
+import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";

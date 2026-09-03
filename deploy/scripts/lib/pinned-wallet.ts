@@ -14,19 +14,15 @@
 //
 //     CustomShieldedWallet(config, new V1Builder().withDefaults().withCoinSelection(() => selector))
 //
-// `@effectstream/midnight-contracts@0.200.2`'s `buildWalletFacade`
-// (`src/get-wallet-info.ts:983-1040`) builds its shielded wallet through a
+// `@effectstream/midnight-contracts@0.103.1`'s `buildWalletFacade`
+// (`src/get-wallet-info.ts:909-937`) builds its shielded wallet through a
 // module-private `buildShieldedWallet` = `ShieldedWallet(config).startWithSeed(seed)`
 // and exposes no hook, so this module reproduces `buildWalletFacade` verbatim
 // with that one line swapped. Everything else — HD role derivation, the dust
 // wallet's batching and cost parameters, the unshielded keystore, the facade
 // wiring, the returned `WalletResult` — is a faithful copy of the upstream
-// function AT `@effectstream/midnight-contracts@0.200.2` (the ledger-v9 /
-// wallet-sdk v2 line: `createKeystore` takes a tagged secret, the facade's
-// sub-wallet factories receive their configuration, and the DUST address is
-// derived from the DUST public key instead of read off the wallet state). If
-// that package is upgraded, re-diff `src/get-wallet-info.ts:903-1040` against
-// this file.
+// function AT `@effectstream/midnight-contracts@0.103.1`. If that package is
+// upgraded, re-diff `src/get-wallet-info.ts:829-989` against this file.
 //
 // Selector contract (the safety property the whole service rests on)
 // ------------------------------------------------------------------
@@ -51,15 +47,14 @@
 
 import { Buffer } from "node:buffer";
 
-import { DustSecretKey, LedgerParameters, ZswapSecretKeys } from "@midnightntwrk/ledger-v9";
-import type { QualifiedShieldedCoinInfo } from "@midnightntwrk/ledger-v9";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import { DustSecretKey, LedgerParameters, ZswapSecretKeys } from "@midnight-ntwrk/ledger-v8";
+import type { QualifiedShieldedCoinInfo } from "@midnight-ntwrk/ledger-v8";
 import {
   InMemoryTransactionHistoryStorage,
   type NetworkId,
   TransactionHistoryStorage,
 } from "@midnightntwrk/wallet-sdk-abstractions";
-import { DustAddress } from "@midnightntwrk/wallet-sdk-address-format";
+import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import { type CoinSelection, chooseCoin } from "@midnightntwrk/wallet-sdk-capabilities";
 import { DustWallet } from "@midnightntwrk/wallet-sdk-dust-wallet";
 import { type DefaultConfiguration, WalletFacade } from "@midnightntwrk/wallet-sdk-facade";
@@ -79,9 +74,10 @@ import {
 // copying two magic numbers that could drift silently. P3 imports this barrel
 // anyway (registerNightForDust, waitForDustFunds, configureMidnightNodeProviders).
 import { CONSTANTS } from "@effectstream/midnight-contracts";
-// `suspendAuxWalletSyncForFees` is the same module instance the barrel
-// re-exports; the subpath keeps the intent obvious.
+// `getInitialDustState` and `suspendAuxWalletSyncForFees` are the same module
+// instance the barrel re-exports; the subpath keeps the intent obvious.
 import {
+  getInitialDustState,
   suspendAuxWalletSyncForFees,
   type WalletSyncMode,
 } from "@effectstream/midnight-contracts/wallet-info";
@@ -145,7 +141,7 @@ function normHex(value: string): string {
 }
 
 /** Colours (`RawTokenType`) and nonces (`Nonce`) are both 32-byte hex strings
- *  per `@midnightntwrk/ledger-v9`'s own type docs, and `maker-offer.ts` already
+ *  per `@midnight-ntwrk/ledger-v8`'s own type docs, and `maker-offer.ts` already
  *  validates colours with the same expression. Rejecting a malformed value at
  *  `pin()` turns a mystery `InsufficientFundsError` deep inside the balancer
  *  into an error naming the offending string. */
@@ -253,7 +249,7 @@ export const pinnedSelector: ShieldedCoinSelection = createPinnedSelector(() => 
 // Facade construction — a copy of `buildWalletFacade` with one line changed
 // ---------------------------------------------------------------------------
 
-/** `get-wallet-info.ts:69-89`. Not exported upstream, so reproduced here. */
+/** `get-wallet-info.ts:118-136`. Not exported upstream, so reproduced here. */
 function deriveSeedForRole(seed: string, role: (typeof Roles)[keyof typeof Roles]): Uint8Array {
   const seedBuffer = Buffer.from(seed, "hex");
   const hdWalletResult = HDWallet.fromSeed(seedBuffer);
@@ -264,13 +260,10 @@ function deriveSeedForRole(seed: string, role: (typeof Roles)[keyof typeof Roles
   if (derivationResult.type === "keyOutOfBounds") {
     throw new Error(`Key derivation out of bounds for role: ${role}`);
   }
-  const derivedKey = Buffer.from(derivationResult.key);
-  // Upstream clears the HD wallet's key material once the role key is copied out.
-  hdWalletResult.hdWallet.clear();
-  return derivedKey;
+  return Buffer.from(derivationResult.key);
 }
 
-/** `get-wallet-info.ts:880-900`. */
+/** `get-wallet-info.ts:806-826`. */
 function createWalletConfiguration(
   networkUrls: PinnedNetworkUrls,
   networkId: NetworkId.NetworkId,
@@ -284,7 +277,7 @@ function createWalletConfiguration(
     relayURL: new URL(networkUrls.node.replace("http", "ws")),
     networkId,
     txHistoryStorage: new InMemoryTransactionHistoryStorage(
-      TransactionHistoryStorage.TransactionHistoryEntryCommonSchema,
+      TransactionHistoryStorage.TransactionHistoryCommonSchema,
     ),
     costParameters: {
       additionalFeeOverhead: CONSTANTS.DUST_FEE_OVERHEAD,
@@ -298,7 +291,7 @@ function createWalletConfiguration(
 /**
  * THE ONE CHANGED LINE.
  *
- * Upstream (`get-wallet-info.ts:903-905`):
+ * Upstream (`get-wallet-info.ts:829-831`):
  *     ShieldedWallet(config).startWithSeed(seed)
  * which is `CustomShieldedWallet(config, new V1Builder().withDefaults())`
  * (`ShieldedWallet.js:63-65`). `withDefaults()` ends in
@@ -320,7 +313,7 @@ function buildPinnedShieldedWallet(
   ).startWithSeed(seed) as any;
 }
 
-/** `get-wallet-info.ts:919-939`: the dust wallet's sync batching, tuned for a
+/** `get-wallet-info.ts:845-865`: the dust wallet's sync batching, tuned for a
  *  headless backend. Upstream reads these through `@effectstream/utils`'
  *  `getEnv`; `@effectstream/utils` is not a root dependency, so read
  *  `process.env` directly (identical under bun) and keep the variable names. */
@@ -338,7 +331,7 @@ function resolveDustBatchUpdates(): { size: number; timeout: number; spacing: nu
   };
 }
 
-/** `get-wallet-info.ts:941-961`. */
+/** `get-wallet-info.ts:867-887`. */
 function buildDustWallet(
   config: DefaultConfiguration,
   seed: Uint8Array,
@@ -362,12 +355,12 @@ function buildDustWallet(
   return DustWallet(dustConfig as any).startWithSeed(seed, dustParameters);
 }
 
-/** `get-wallet-info.ts:963-973`. */
+/** `get-wallet-info.ts:889-899`. */
 function buildUnshieldedWallet(config: DefaultConfiguration, keystore: UnshieldedKeystore) {
   return UnshieldedWallet({
     ...config,
     txHistoryStorage: new InMemoryTransactionHistoryStorage(
-      TransactionHistoryStorage.TransactionHistoryEntryCommonSchema,
+      TransactionHistoryStorage.TransactionHistoryCommonSchema,
     ),
     // deno-lint-ignore no-explicit-any
   } as any).startWithPublicKey(PublicKey.fromKeyStore(keystore));
@@ -397,36 +390,27 @@ export async function buildPinnedWallet(
   syncMode: WalletSyncMode = "all",
   dustSerializedState?: string | null,
 ): Promise<PinnedWalletResult> {
-  // Upstream (`get-wallet-info.ts:991`) sets the process-wide midnight-js
-  // network id here, so address derivation and the contract providers agree.
-  setNetworkId(networkId);
   const shieldedSeed = deriveSeedForRole(seed, Roles.Zswap);
   const dustSeed = deriveSeedForRole(seed, Roles.Dust);
   const unshieldedSeed = deriveSeedForRole(seed, Roles.NightExternal);
 
   const config = createWalletConfiguration(networkUrls, networkId);
 
-  // wallet-sdk-unshielded-wallet 4.x takes a TAGGED secret (`schnorr` is the
-  // only kind the v2 SDK signs with); a bare seed is a type error now.
-  const unshieldedKeystore = createKeystore(
-    { kind: "schnorr", secret: unshieldedSeed },
-    networkId,
-  );
+  const unshieldedKeystore = createKeystore(unshieldedSeed, networkId);
+
+  const shieldedWallet = buildPinnedShieldedWallet(config, shieldedSeed, pinnedSelector);
+  const dustWallet = buildDustWallet(config, dustSeed, dustSerializedState);
+  const unshieldedWallet = buildUnshieldedWallet(config, unshieldedKeystore);
 
   const zswapSecretKeys = ZswapSecretKeys.fromSeed(shieldedSeed);
   const dustSecretKey = DustSecretKey.fromSeed(dustSeed);
 
-  // wallet-sdk-facade 5.x hands each sub-wallet factory the facade's own
-  // configuration, so the wallets are built inside the factories (upstream
-  // `get-wallet-info.ts:1004-1012`), not ahead of `init`.
   const wallet: WalletFacade = await WalletFacade.init({
-    configuration: config,
-    shielded: (walletConfig) =>
-      buildPinnedShieldedWallet(walletConfig, shieldedSeed, pinnedSelector),
-    unshielded: (walletConfig) =>
-      buildUnshieldedWallet(walletConfig, unshieldedKeystore),
-    dust: (walletConfig) =>
-      buildDustWallet(walletConfig, dustSeed, dustSerializedState),
+    // deno-lint-ignore no-explicit-any -- upstream casts identically.
+    configuration: config as any,
+    shielded: () => shieldedWallet,
+    unshielded: () => unshieldedWallet,
+    dust: () => dustWallet,
   });
 
   await wallet.start(zswapSecretKeys, dustSecretKey);
@@ -439,10 +423,19 @@ export async function buildPinnedWallet(
   }
 
   const unshieldedAddress = unshieldedKeystore.getBech32Address().asString();
-  // Upstream (`get-wallet-info.ts:1024-1028`): on the v9 line the DUST address
-  // is a pure function of the DUST public key, so nothing waits on the dust
-  // wallet's first state emission any more.
-  const dustAddress = DustAddress.encodePublicKey(networkId, dustSecretKey.publicKey);
+  // `getInitialDustState` wants `{ state: Rx.Observable<unknown> }`; `rxjs` is
+  // not a root dependency, so borrow the parameter type rather than naming it.
+  const dustState = (await getInitialDustState(
+    wallet.dust as unknown as Parameters<typeof getInitialDustState>[0],
+  )) as { address: unknown };
+  // Upstream (`get-wallet-info.ts:948-952`) passes this `unknown` straight into
+  // `MidnightBech32m.encode`, whose parameter is `HasCodec<unknown>` — tsc flags
+  // it there too (that file is outside every typecheck gate, so nobody sees it).
+  // Cast explicitly here so this file has zero diagnostics of its own.
+  const dustAddress = MidnightBech32m.encode(
+    networkId,
+    dustState.address as Parameters<typeof MidnightBech32m.encode>[1],
+  ).asString();
 
   return {
     wallet,

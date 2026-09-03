@@ -11,7 +11,7 @@
 //
 //   bun packages/tests/full-lifecycle-e2e.ts
 
-import { Transaction } from "@midnightntwrk/ledger-v9";
+import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";

@@ -44,8 +44,8 @@ import {
   Transaction,
   UnshieldedOffer,
   addressFromKey,
-} from "@midnightntwrk/ledger-v9";
-import type { UnprovenTransaction } from "@midnightntwrk/ledger-v9";
+} from "@midnight-ntwrk/ledger-v8";
+import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
 /** Deterministic, so a fixture's hash is stable across runs and machines. */
@@ -68,26 +68,13 @@ export interface Shape {
   tx: UnprovenTransaction;
 }
 
-/** A spend of a UTXO that does not exist — fine pre-crypto, see SCOPE.
- *  v9: `UtxoSpend.owner` is a tagged SignatureVerifyingKey, not a bare hex
- *  string — schnorr is v8's only (implicit) kind, so tagging keeps the
- *  fixtures' meaning. */
+/** A spend of a UTXO that does not exist — fine pre-crypto, see SCOPE. */
 function spend(owner: string, type: string, value: bigint, outputNo = 0) {
-  return {
-    value,
-    owner: { tag: "schnorr" as const, value: owner },
-    type,
-    intentHash: key(0xcc),
-    outputNo,
-  } as any;
+  return { value, owner, type, intentHash: key(0xcc), outputNo } as any;
 }
 
 function payout(ownerKey: string, type: string, value: bigint) {
-  return {
-    value,
-    owner: addressFromKey({ tag: "schnorr", value: ownerKey }),
-    type,
-  } as any;
+  return { value, owner: addressFromKey(ownerKey as any), type } as any;
 }
 
 /**

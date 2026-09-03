@@ -8,7 +8,7 @@
 // unspendable coins on a live stack.
 
 import { describe, expect, test } from "bun:test";
-import { ZswapSecretKeys } from "@midnightntwrk/ledger-v9";
+import { ZswapSecretKeys } from "@midnight-ntwrk/ledger-v8";
 
 import {
   __resetNonceCounter,

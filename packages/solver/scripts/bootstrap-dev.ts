@@ -85,7 +85,7 @@ if (solverNight < NIGHT_PER_UTXO) {
           { ttl: new Date(Date.now() + 30 * 60_000), payFees: true },
         );
         const signed = await (genesis.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-          genesis.unshieldedKeystore.signDataAsync(p),
+          genesis.unshieldedKeystore.signData(p),
         );
         await genesis.wallet.submitTransaction(await genesis.wallet.finalizeRecipe(signed));
         lastErr = undefined;

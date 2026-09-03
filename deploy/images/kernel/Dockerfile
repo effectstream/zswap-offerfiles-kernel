@@ -18,16 +18,23 @@
 #   entrypoint-kernel.sh    exec bun run packages/node/main.dev.ts      (:9999)
 #   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.dev.ts (:3334)
 #   entrypoint-solver.sh    exec bun run start.solver.ts
+#   entrypoint-solver-frontend.sh  exec bun run start.solver-frontend.ts (:8080)
 #   entrypoint-price-feed.sh  daily CoinGecko refresh of asset_prices
 #   entrypoint-scripts.sh   the E1 provisioning / assertion driver
 #   entrypoint-solver-provision.sh  one-shot: fund + mint the solver BOTH tokens
 #   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
+#   entrypoint-register-minted-tokens.sh  one-shot: NAME the minted colours
 #
-# The last two are devnet SEEDING steps, and they are services rather than
-# README steps for one reason: without them every container reports healthy, the
-# solver connects to the relay, and it publishes an empty ladder forever with no
-# error logged anywhere (R2 made publication bounded by the solver's own
-# spendable inventory, and the ladder derives from the maker book).
+# `solver-provision` and `maker-offer` are devnet SEEDING steps, and they are
+# services rather than README steps for one reason: without them every container
+# reports healthy, the solver connects to the relay, and it publishes an empty
+# ladder forever with no error logged anywhere (R2 made publication bounded by
+# the solver's own spendable inventory, and the ladder derives from the maker
+# book). `register-minted-tokens` is the cosmetic third: it is the only place
+# the mint script's broken name registration (issues/00008-…) can be repaired
+# without touching `packages/`, because only Compose knows when the kernel is
+# healthy — and it is what makes the book and the monitor site read TESTTOKENA/B/U
+# instead of raw colour hex.
 #
 # bun pin rationale: 1.3.11 is the bun the R1–R3 remediation phases were built
 # and tested on in this clone, and it is the version the sibling
@@ -83,8 +90,13 @@ COPY packages/contracts-midnight/contract-offer-files/package.json  packages/con
 COPY packages/database/package.json                                 packages/database/
 COPY packages/node/package.json                                     packages/node/
 COPY packages/offer-guard/package.json                              packages/offer-guard/
+# Added upstream by the token price service (PRs #54-#56) but never listed here,
+# which made `bun install --frozen-lockfile` refuse the committed lockfile and
+# the kernel image unbuildable from `main` (found at 00007-P-C).
+COPY packages/price-feed/package.json                               packages/price-feed/
 COPY packages/solver/package.json                                   packages/solver/
 COPY packages/solver-core/package.json                              packages/solver-core/
+COPY packages/solver-frontend/package.json                          packages/solver-frontend/
 COPY packages/tests/package.json                                    packages/tests/
 COPY packages/validator/package.json                                packages/validator/
 
@@ -117,12 +129,14 @@ COPY deploy/images/kernel/entrypoint-deploy.sh   /usr/local/bin/entrypoint-deplo
 COPY deploy/images/kernel/entrypoint-kernel.sh   /usr/local/bin/entrypoint-kernel.sh
 COPY deploy/images/kernel/entrypoint-batcher.sh  /usr/local/bin/entrypoint-batcher.sh
 COPY deploy/images/kernel/entrypoint-solver.sh   /usr/local/bin/entrypoint-solver.sh
+COPY deploy/images/kernel/entrypoint-solver-frontend.sh /usr/local/bin/entrypoint-solver-frontend.sh
 COPY deploy/images/kernel/entrypoint-price-feed.sh /usr/local/bin/entrypoint-price-feed.sh
 COPY deploy/images/kernel/entrypoint-scripts.sh  /usr/local/bin/entrypoint-scripts.sh
 # Devnet seeding one-shots. Without these the stack comes up entirely healthy
 # and quotes nothing — see each script's header.
 COPY deploy/images/kernel/entrypoint-solver-provision.sh /usr/local/bin/entrypoint-solver-provision.sh
 COPY deploy/images/kernel/entrypoint-maker-offer.sh      /usr/local/bin/entrypoint-maker-offer.sh
+COPY deploy/images/kernel/entrypoint-register-minted-tokens.sh /usr/local/bin/entrypoint-register-minted-tokens.sh
 COPY deploy/images/kernel/wait-for.sh            /usr/local/bin/wait-for.sh
 RUN chmod +x /usr/local/bin/entrypoint-*.sh /usr/local/bin/wait-for.sh
 

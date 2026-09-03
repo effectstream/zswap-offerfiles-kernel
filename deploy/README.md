@@ -35,7 +35,9 @@ Static gates only (no stack, safe on a shared host):
 | `kernel` | kernel image | `bun run packages/node/main.dev.ts` | 9999 | `19999` |
 | `batcher` | kernel image | `bun run packages/batcher/batcher.dev.ts` | 3334 | `13334` |
 | `relay` | `images/relay` (reference @ `061f4d3`, unmodified) | `node packages/relay/dist/relay-main.js` | 3000 / 9001 | `13000` / `19001` |
-| `solver` | kernel image | `bun run start.solver.ts` | — | — |
+| `solver` | kernel image | `bun run start.solver.ts` (+ status listener on 9100, bearer-gated, **not published**) | 9100 | — |
+| `solver-frontend` | kernel image | `bun run start.solver-frontend.ts` — the read-only monitor site | 8080 | `18080` |
+| `register-minted-tokens` | kernel image | one-shot: name the minted colours in `known_tokens` | — | — |
 | `price-feed` | kernel image | `bun run packages/price-feed/price-feed.dev.ts` (profile `prices`) | — | — |
 | `scripts` | kernel image | E2E driver (profile `e2e`) | — | — |
 
@@ -155,6 +157,47 @@ id. A failed **request** is recorded against every id it carried — blaming one
 would be a guess — and the next batch is still made. A `429` stops the cycle where
 it stands, keeping what was already written. All of it is visible in
 `GET /v1/prices.feed.last_error`.
+
+## Observing the solver
+
+The **monitor site** is the intended way: <http://127.0.0.1:18080> (`HOST_SOLVER_FRONTEND_PORT`,
+bound to `BIND_ADDR`). One screen answers "is the solver quoting, and if not, why": a
+status pill (QUOTING / WITHDRAWN / DISCONNECTED / STARTING / DRY-RUN / SOLVER UNREACHABLE),
+a six-stage health strip (kernel sync → book cache → inventory → journal & DUST → relay
+socket → published ladder), the published ladders with the maker offer that closes each
+rung, every book offer the solver did **not** publish with the solver's own reason, the
+kernel book beside the solver's mirror, inventory, the journal tail, DUST admission, and an
+event log. Every block carries a `?` that says what the number means and where it comes
+from. The site is read-only and outlives the solver: stop the `solver` container and the
+page says SOLVER UNREACHABLE with the time it was last seen, while the kernel and relay
+panels stay live. It also has **no authentication of its own** — keep it on the loopback
+port, or put the host's reverse proxy in front of it (response buffering off and a read
+timeout above five minutes for the SSE feed; see `packages/solver-frontend/README.md`).
+
+Under it, the solver runs a **bearer-gated status listener** on `:9100` — `GET /health`
+(open, no internal data), `GET /status/snapshot` and `GET /status/stream` (both require
+`Authorization: Bearer $SOLVER_STATUS_AUTH_TOKEN`). The snapshot is the solver's whole
+internal state, so the port is **deliberately not published** to the host; the site reads
+it across the Compose network with the same `.env` token. To read the raw JSON by hand,
+stay inside the network:
+
+```bash
+docker compose exec solver bun -e 'const r = await fetch("http://127.0.0.1:9100/status/snapshot",
+  { headers: { authorization: `Bearer ${process.env.SOLVER_STATUS_AUTH_TOKEN}` } });
+  console.log(r.status); console.log(await r.text());'
+```
+
+A request without the bearer is `401` and is counted in the snapshot. Publishing the port
+(the commented `ports:` block on the `solver` service, `HOST_SOLVER_STATUS_PORT`) is for a
+debugging session on a loopback `BIND_ADDR` only.
+
+**Token names.** The site labels colours from the kernel's `GET /v1/known-tokens` and falls
+back to short hex. On a fresh stack the faucet-minted test tokens have no names, because the
+mint script's own registration posts to a route the node does not serve
+(`issues/00008-mint-test-tokens-registers-stale-path.md`); the `register-minted-tokens`
+one-shot repairs that once the kernel is healthy, registering `TESTTOKENA/B/U` from
+`minted-tokens.json` — the spellings preprod uses. `REGISTER_MINTED_TOKENS_ENABLED=false`
+skips it.
 
 ## Observing the relay
 

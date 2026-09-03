@@ -18,6 +18,15 @@
  *   for settlement verification, and 00003 lists its proof-variant diagnostics
  *   under this same finding. Excluding a first-party dependency would repeat
  *   the backend gate's blind spot one directory over.
+ * - `packages/solver-frontend` (00007 FR-017) — the read-only monitor site. It
+ *   consumes `@zswap-da/solver-core/status-contract` but never
+ *   `@zswap-da/solver`, so the consumer scan below cannot discover it (that
+ *   pattern matches the solver package EXACTLY, on purpose). It is therefore
+ *   listed, and it is compiled as its OWN program with its OWN options: its
+ *   pure browser derivations live in `public/*.js` (no build step is allowed —
+ *   00007 FR-008), so its tests need `allowJs`, and forcing `allowJs` onto the
+ *   solver's program would change what the solver gate resolves. One extra
+ *   program, zero change to the existing one.
  * - every other first-party file that imports the production solver's source,
  *   DISCOVERED rather than listed. A hand-maintained list is the failure mode
  *   `P4-F02` already demonstrated; today the scan finds the grand-E2E solver
@@ -39,6 +48,12 @@ const projectRoot = resolve(import.meta.dir, "..");
 
 /** Packages whose own files are gated. Each owns a strict tsconfig. */
 const GATED_PACKAGES = ["packages/solver", "packages/solver-core", "packages/validator"] as const;
+
+/**
+ * Gated too, but compiled with its OWN compiler options rather than the
+ * solver's — see the header. Still strict/noEmit (asserted below).
+ */
+const GATED_OWN_OPTIONS_PACKAGES = ["packages/solver-frontend"] as const;
 
 /**
  * Where solver consumers are looked for (gated packages are skipped). The
@@ -114,11 +129,17 @@ function* firstPartySources(dir: string, recursive: boolean): Generator<string> 
   }
 }
 
-const gatedRoots = GATED_PACKAGES.map((packageDir) => resolve(projectRoot, packageDir) + sep);
+const gatedRoots = [...GATED_PACKAGES, ...GATED_OWN_OPTIONS_PACKAGES].map(
+  (packageDir) => resolve(projectRoot, packageDir) + sep,
+);
 const isInGatedPackage = (file: string): boolean =>
   gatedRoots.some((root) => resolve(file).startsWith(root));
 
 const configs = GATED_PACKAGES.map((packageDir) => ({ packageDir, parsed: parsePackageConfig(packageDir) }));
+const ownOptionConfigs = GATED_OWN_OPTIONS_PACKAGES.map((packageDir) => ({
+  packageDir,
+  parsed: parsePackageConfig(packageDir),
+}));
 
 const consumers: string[] = [];
 for (const { dir, recursive } of CONSUMER_SEARCH_ROOTS) {
@@ -137,7 +158,14 @@ const rootNames = [
 // gate's options, and the two other configs are asserted to be strict/noEmit
 // copies of them above.
 const program = ts.createProgram(rootNames, configs[0]!.parsed.options);
-const diagnostics = ts.getPreEmitDiagnostics(program);
+const diagnostics = [
+  ...ts.getPreEmitDiagnostics(program),
+  // One program per own-options package. Their diagnostics join the same
+  // filter and the same zero-tolerance exit below.
+  ...ownOptionConfigs.flatMap(({ parsed }) =>
+    ts.getPreEmitDiagnostics(ts.createProgram(parsed.fileNames.map((f) => resolve(f)), parsed.options)),
+  ),
+];
 const consumerSet = new Set(consumers);
 const gateDiagnostics = diagnostics.filter((diagnostic) => {
   if (!diagnostic.file) return true;
@@ -146,9 +174,11 @@ const gateDiagnostics = diagnostics.filter((diagnostic) => {
 });
 const dependencyDiagnostics = diagnostics.length - gateDiagnostics.length;
 
+const ownOptionRootCount = ownOptionConfigs.reduce((sum, { parsed }) => sum + parsed.fileNames.length, 0);
+
 console.log(
-  `[solver-typecheck] strict/noEmit roots: ${rootNames.length} ` +
-    `(${GATED_PACKAGES.join(", ")}` +
+  `[solver-typecheck] strict/noEmit roots: ${rootNames.length + ownOptionRootCount} ` +
+    `(${[...GATED_PACKAGES, ...GATED_OWN_OPTIONS_PACKAGES].join(", ")}` +
     `${consumers.length === 0
       ? ""
       : ` + ${consumers.length} solver-consuming file(s): ` +
@@ -161,4 +191,7 @@ if (gateDiagnostics.length > 0) {
   fail(`${gateDiagnostics.length} diagnostic(s) in the solver gate`);
 }
 
-console.log("[solver-typecheck] solver, solver-core, validator, solver consumers: 0 diagnostics");
+console.log(
+  `[solver-typecheck] ${GATED_PACKAGES.join(", ")}, ${GATED_OWN_OPTIONS_PACKAGES.join(", ")}, ` +
+    "solver consumers: 0 diagnostics",
+);

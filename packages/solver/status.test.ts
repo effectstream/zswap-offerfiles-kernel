@@ -442,6 +442,34 @@ describe("status collector — bounded collection (FR-005)", () => {
     expect(section.offers[0]!.firstSeenAt).toBeGreaterThan(section.offers[1]!.firstSeenAt!);
   });
 
+  test("consecutive identical events fold into one ring entry with a count", () => {
+    const { collector } = fixture();
+    // 500 once-a-second pushes: the shape a live solver actually produces.
+    for (let index = 0; index < 500; index += 1) {
+      collector.recordRelayEvent({
+        kind: "push",
+        severity: "info",
+        message: "pushed 1 pair(s)",
+        detail: { pairs: 1, rungs: 1, tick: index },
+      });
+    }
+    collector.recordRelayEvent({ kind: "disconnected", severity: "warn", message: "relay socket closed" });
+    collector.recordRelayEvent({ kind: "push", severity: "info", message: "pushed 1 pair(s)" });
+    const relay = ok(collector.snapshot().relay);
+    // Three rows, not 502: the meaningful event is not evicted by the chatter.
+    expect(relay.events.map((event) => event.kind)).toEqual(["push", "disconnected", "push"]);
+    expect(relay.events[0]!.count).toBe(500);
+    expect(relay.events[0]!.lastAt).toBeGreaterThanOrEqual(relay.events[0]!.at);
+    // The folded row carries the LATEST detail, and every occurrence is counted.
+    expect(relay.events[0]!.detail?.["tick"]).toBe(499);
+    expect(relay.eventsObserved).toBe(502);
+    // A single occurrence carries no count at all.
+    expect(relay.events[2]!.count).toBeUndefined();
+    // Only CONSECUTIVE repeats fold: the same message after another kind is a new row.
+    expect(relay.events[2]!.seq).toBe(3);
+    expect(relay.lastEventByKind["push"]!.seq).toBe(3);
+  });
+
   test("the relay event ring is capped, and the total observed is still reported", () => {
     const { collector } = fixture();
     for (let index = 0; index < STATUS_EVENT_RING_CAP + 40; index += 1) {

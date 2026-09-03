@@ -221,6 +221,16 @@ export interface StatusRelayEvent {
   message: string;
   /** The event's own `detail`, flattened to JSON-safe scalars. */
   detail?: Record<string, string | number | boolean | null>;
+  /**
+   * Consecutive repeats folded into this entry (same kind, severity and
+   * message), `at` being the FIRST occurrence and `lastAt` the latest. The
+   * push loop emits one `push` per second, so without folding the ring held
+   * ~3 minutes of identical rows and evicted every meaningful event within
+   * 200 s. Absent means the entry occurred once. `eventsObserved` still counts
+   * every occurrence.
+   */
+  count?: number;
+  lastAt?: EpochMs;
 }
 
 export interface StatusRelayStats {

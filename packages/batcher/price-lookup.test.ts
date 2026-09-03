@@ -25,9 +25,11 @@ const body = (overrides: Record<string, unknown> = {}) => ({
       token_color: "AA".repeat(32), // upper case on purpose — colours are compared lower-cased
       name: "WBTC",
       kind: "shielded",
-      decimals: 0,
+      // 6 decimals (00024) — so the token price the node serves is the
+      // asset's 77387 per COIN divided by 1e6, per BASE UNIT.
+      decimals: 6,
       asset_id: "bitcoin",
-      price_usd: "77387",
+      price_usd: "0.077387",
       source: "feed",
       updated_at: "x",
     },
@@ -35,7 +37,7 @@ const body = (overrides: Record<string, unknown> = {}) => ({
       token_color: TESTA,
       name: "TESTTOKENA",
       kind: "shielded",
-      decimals: 0,
+      decimals: 6,
       asset_id: null,
       price_usd: "13.02",
       source: "fallback",
@@ -97,7 +99,7 @@ describe("PriceLookup — one GET /v1/prices?tokens= per offer", () => {
     expect(result.unavailable).toEqual([]);
     // Colour keys are lower-cased so a differently-cased node answer still
     // matches the validator's legs.
-    expect(result.prices.get(WBTC)).toEqual({ price_usd: "77387", source: "feed" });
+    expect(result.prices.get(WBTC)).toEqual({ price_usd: "0.077387", source: "feed" });
     // A `fallback` row is CARRIED, not dropped: evaluateSponsorship reads it as
     // unpriced, and dropping it would be indistinguishable from "unknown token".
     expect(result.prices.get(TESTA)).toEqual({ price_usd: "13.02", source: "fallback" });
@@ -138,7 +140,7 @@ describe("PriceLookup — one GET /v1/prices?tokens= per offer", () => {
     const second = await lookup.lookup([WBTC, TESTA]);
     expect(urls).toHaveLength(1);
     expect(second.requested).toBe(false);
-    expect(second.prices.get(WBTC)).toEqual({ price_usd: "77387", source: "feed" });
+    expect(second.prices.get(WBTC)).toEqual({ price_usd: "0.077387", source: "feed" });
   });
 
   test("only the MISSING colours are asked for", async () => {
@@ -223,7 +225,7 @@ describe("PriceLookup — one GET /v1/prices?tokens= per offer", () => {
     expect(result.requested).toBe(true);
     // Stale but usable: the last thing the node said beats nothing at all.
     expect(result.unavailable).toEqual([]);
-    expect(result.prices.get(WBTC)).toEqual({ price_usd: "77387", source: "feed" });
+    expect(result.prices.get(WBTC)).toEqual({ price_usd: "0.077387", source: "feed" });
     expect(errors.at(-1)).toContain("price lookup failed");
   });
 
@@ -276,7 +278,7 @@ describe("PriceLookup — one GET /v1/prices?tokens= per offer", () => {
     const result = await lookup.lookup([WBTC]);
     // An empty map would read as "this token is unpriced" — the opposite of
     // what a 503 means. The cached answer stands instead.
-    expect(result.prices.get(WBTC)).toEqual({ price_usd: "77387", source: "feed" });
+    expect(result.prices.get(WBTC)).toEqual({ price_usd: "0.077387", source: "feed" });
     expect(errors.at(-1)).toContain("HTTP 503");
   });
 

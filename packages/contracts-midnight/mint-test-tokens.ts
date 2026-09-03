@@ -31,6 +31,7 @@ import {
 } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { OfferFilesContract, witnesses } from "@zswap-da/contract-offer-files";
+import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../solver-core/amount.ts";
 
 const TAG = "[mint-test-tokens]";
 const log = {
@@ -45,7 +46,9 @@ globalThis.WebSocket = WebSocket;
 const SHIELDED_SEP_A = new Uint8Array(32).fill(0xa1);
 const SHIELDED_SEP_B = new Uint8Array(32).fill(0xb2);
 const UNSHIELDED_SEP = new Uint8Array(32).fill(0xc3);
-const MINT_AMOUNT = 1_000_000_000n;
+// 1 000 whole coins at 6 decimals (00024 Q5): the value is unchanged, but it
+// now MEANS 1 000 coins rather than 1 000 000 000 of them.
+const MINT_AMOUNT = coinsToBaseUnits(1000n, DEFAULT_TOKEN_DECIMALS);
 
 const currentDir = resolve(dirname(fileURLToPath(import.meta.url)));
 
@@ -215,7 +218,10 @@ export async function mintTestTokens(): Promise<MintedTestTokens> {
         await fetch(`${API}/api/known-tokens`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ color, name, kind }),
+          // decimals is STATED (00024 FR-002): MINT_AMOUNT above is base
+          // units, i.e. 1 000 whole coins at 6 decimals, so the registry has
+          // to agree or every price for this colour is off by 10^6.
+          body: JSON.stringify({ color, name, kind, decimals: DEFAULT_TOKEN_DECIMALS }),
           signal: AbortSignal.timeout(2000),
         });
       } catch {

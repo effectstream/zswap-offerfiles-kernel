@@ -16,9 +16,19 @@
 //     and the journal are base-unit only. A coin-denominated value is ADDED
 //     beside the base units when the kernel registry gives the colour
 //     `decimals > 0`, and it is always marked as the derived value it is.
+//     Since 00024 every token the stack mints or registers has 6, so a row
+//     that states nothing is read as 6 rather than as "base units are coins".
 //   * **"Ago" is measured from the snapshot's `now`** (FR-013), which is the
 //     SERVER's clock. Two containers with skewed clocks would otherwise make
 //     "3 s ago" read as "-47 s ago".
+
+/**
+ * Base units per coin for every token this stack mints or registers (00024).
+ * Mirrors `known_tokens.decimals DEFAULT 6` and `DEFAULT_TOKEN_DECIMALS` in
+ * `packages/solver-core/amount.ts` — copied, not imported, because this file is
+ * loaded by the browser with no build step (FR-008).
+ */
+export const DEFAULT_TOKEN_DECIMALS = 6;
 
 // ── small formatters ─────────────────────────────────────────────────────────
 
@@ -142,7 +152,7 @@ export function tokenRegistry(snapshot) {
       registry.set(row.color, {
         name: row.name || null,
         kind: row.kind ?? null,
-        decimals: row.decimals ?? 0,
+        decimals: row.decimals ?? DEFAULT_TOKEN_DECIMALS,
         priceUsd: null,
         priceSource: null,
       });
@@ -154,13 +164,20 @@ export function tokenRegistry(snapshot) {
       const existing = registry.get(row.color) ?? {
         name: row.name || null,
         kind: null,
-        decimals: row.decimals ?? 0,
+        decimals: row.decimals ?? DEFAULT_TOKEN_DECIMALS,
         priceUsd: null,
         priceSource: null,
       };
       existing.priceUsd = row.priceUsd;
       existing.priceSource = row.source;
-      if (existing.decimals === 0 && row.decimals) existing.decimals = row.decimals;
+      // /v1/prices carries the registry's own `decimals`; when the known-tokens
+      // section stated none (an older node) the row here settles it. Both read
+      // the same table, so they cannot disagree — the guard only keeps a colour
+      // that states something OTHER than the default (a genuine 0, a bridged
+      // 18) from being flattened back to it.
+      if (existing.decimals === DEFAULT_TOKEN_DECIMALS && Number.isInteger(row.decimals)) {
+        existing.decimals = row.decimals;
+      }
       registry.set(row.color, existing);
     }
   }
@@ -179,7 +196,7 @@ export function tokenLabel(colour, registry) {
  *  registry says the colour has them (FR-013b). */
 export function amountView(amount, colour, registry) {
   const entry = registry?.get?.(String(colour ?? "").toLowerCase());
-  const decimals = entry?.decimals ?? 0;
+  const decimals = entry?.decimals ?? DEFAULT_TOKEN_DECIMALS;
   return {
     base: groupDigits(amount),
     coins: decimals > 0 ? coinValue(amount, decimals) : null,

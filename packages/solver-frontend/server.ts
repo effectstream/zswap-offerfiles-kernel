@@ -40,6 +40,7 @@
  */
 import { join } from "node:path";
 
+import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/solver-core/amount";
 import {
   isStatusSectionError,
   statusContractVersion,
@@ -847,9 +848,10 @@ export function createMonitor(config: FrontendConfig, deps: MonitorDeps = {}): M
         color: (asString(row["token_color"]) ?? "").toLowerCase(),
         name: asString(row["name"]) ?? "",
         kind: asString(row["kind"]),
-        // Older nodes (preprod today) have no `decimals` column at all; 0 means
-        // "base units are coins", which is exactly the safe reading.
-        decimals: Math.max(0, Math.trunc(asNumber(row["decimals"], 0))),
+        // Older nodes (preprod today) have no `decimals` column at all. Since
+        // 00024 every token this stack mints or registers has 6, so 6 is the
+        // reading that matches what the faucet actually minted.
+        decimals: Math.max(0, Math.trunc(asNumber(row["decimals"], DEFAULT_TOKEN_DECIMALS))),
       }))
       .filter((row) => row.color !== "");
 
@@ -873,7 +875,7 @@ export function createMonitor(config: FrontendConfig, deps: MonitorDeps = {}): M
       .map((row) => ({
         color: (asString(row["token_color"]) ?? "").toLowerCase(),
         name: asString(row["name"]),
-        decimals: Math.max(0, Math.trunc(asNumber(row["decimals"], 0))),
+        decimals: Math.max(0, Math.trunc(asNumber(row["decimals"], DEFAULT_TOKEN_DECIMALS))),
         assetId: asString(row["asset_id"]),
         priceUsd: String(row["price_usd"] ?? ""),
         source: asString(row["source"]) ?? "unknown",

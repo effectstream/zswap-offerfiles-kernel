@@ -606,8 +606,9 @@ curl http://host:9999/v1/known-tokens
 
 ```json
 [
-  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded" },
-  { "id": 2, "token_color": "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c", "name": "SNIGHT", "kind": "shielded" }
+  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded", "decimals": 6, "asset_id": "midnight-3" },
+  { "id": 2, "token_color": "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c", "name": "SNIGHT", "kind": "shielded", "decimals": 6, "asset_id": "midnight-3" },
+  { "id": 5, "token_color": "e7580bfcf04c05cbec44572d122f526ba35d5b6442fa6429e42e9b9fca22a912", "name": "WBTC", "kind": "shielded", "decimals": 6, "asset_id": null }
 ]
 ```
 
@@ -642,7 +643,7 @@ Register a human-readable name for a token color before any offers appear (e.g. 
 ```bash
 curl -X POST http://host:9999/v1/known-tokens \
   -H "Content-Type: application/json" \
-  -d '{"color":"70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569","name":"TESTTOKENA","kind":"shielded"}'
+  -d '{"color":"70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569","name":"TESTTOKENA","kind":"shielded","decimals":6}'
 ```
 
 **Body**
@@ -651,16 +652,22 @@ curl -X POST http://host:9999/v1/known-tokens \
 {
   "color": "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569",
   "name": "TESTTOKENA",
-  "kind": "shielded"
+  "kind": "shielded",
+  "decimals": 6
 }
 ```
 
-`name` must be unique (max 16 chars, stored uppercased). `kind` is `"shielded"` or `"unshielded"`.
+`name` must be unique (max 16 chars, stored uppercased). `kind` is `"shielded"` or
+`"unshielded"`. `decimals` is optional (integer, `[0, 38]`) and **defaults to 6** —
+every token this stack mints or registers has 6 decimals, and the faucets hand out
+whole coins scaled by `10^6`. Send it explicitly anyway; a bridged token on another
+scale must state its own value, or its USD price is off by `10^(6 − its decimals)`.
+`asset_id` is optional too: omitted means "price it by NAME".
 
 **Success `200`**
 
 ```json
-{ "success": true, "color": "70ce...", "name": "TESTTOKENA", "kind": "shielded" }
+{ "success": true, "color": "70ce...", "name": "TESTTOKENA", "kind": "shielded", "decimals": 6, "asset_id": null }
 ```
 
 **Conflict `409`** — name or color already registered:
@@ -868,10 +875,10 @@ curl "http://host:9999/v1/prices?tokens=e758…a912,d133…3333"
       "provider_updated_at": "2026-09-02T20:25:50.000Z", "updated_at": "2026-09-03T00:00:00.000Z" }
   ],
   "tokens": [
-    { "token_color": "e758...a912", "name": "WBTC", "kind": "shielded", "decimals": 0,
-      "asset_id": "bitcoin", "price_usd": "77387", "source": "feed",
+    { "token_color": "e758...a912", "name": "WBTC", "kind": "shielded", "decimals": 6,
+      "asset_id": "bitcoin", "price_usd": "0.077387", "source": "feed",
       "updated_at": "2026-09-03T00:00:00.000Z" },
-    { "token_color": "d133...3333", "name": "TESTTOKENA", "kind": "shielded", "decimals": 0,
+    { "token_color": "d133...3333", "name": "TESTTOKENA", "kind": "shielded", "decimals": 6,
       "asset_id": null, "price_usd": "13.0238", "source": "fallback",
       "updated_at": "2026-09-02T12:00:00.000Z" }
   ]
@@ -914,9 +921,11 @@ locked 1:1 against NIGHT, so it is the same asset — no new price to fetch).
 seeded with `decimals: 6` — 1 NIGHT is 10⁶ Stars, its base unit
 (`STARS_PER_NIGHT` in `midnight-ledger/ledger/src/structure.rs`) — so its
 per-base-unit price is the seeded `midnight-3` coin price divided by `10^6`.
-A colour registered through `POST /v1/known-tokens` without an explicit
-`decimals` still defaults to `0` (base unit == coin), which is correct for
-every faucet-minted dev/test token.
+**Every token this stack mints or registers has 6 decimals**, and the faucets
+hand out whole coins scaled by `10^6` (1 000 coins = `1000000000` base units),
+so a colour registered through `POST /v1/known-tokens` without an explicit
+`decimals` defaults to `6`. Registrants should send it anyway; a bridged token
+on another scale states its own value.
 
 **The `price-feed` service.** `packages/price-feed` is a separate process, not part
 of the node: the node never calls CoinGecko. It refreshes `asset_prices` once a day

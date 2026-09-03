@@ -5,6 +5,7 @@
 //                                          you'd copy into your own app
 // See also `api-examples/` at the repo root for runnable scripts per endpoint.
 import { API_BASE, BATCHER_URL } from './config'
+import { DEFAULT_TOKEN_DECIMALS } from '../../packages/solver-core/amount.ts'
 
 export type MidnightConfig = {
   contractAddress: string
@@ -19,6 +20,9 @@ export type KnownToken = {
   token_color: string
   name: string
   kind: string
+  /** Base units per coin — 6 for everything this stack mints (00024). */
+  decimals: number
+  asset_id: string | null
 }
 
 /** MIP-0006 TokenLeg. */
@@ -109,8 +113,10 @@ export const api = {
     req<{ offerId?: string; status: string }>('POST', `${API_BASE}/v1/offers/status`, { offer: blob }),
   submitOffer: (blob: string) => req('POST', `${API_BASE}/v1/offers`, { offer: blob }),
   knownTokens: () => req<KnownToken[]>('GET', `${API_BASE}/v1/known-tokens`),
-  registerToken: (color: string, name: string, kind: string) =>
-    req('POST', `${API_BASE}/v1/known-tokens`, { color, name, kind }),
+  /** `decimals` is stated, never left to the column default (00024 FR-002):
+   *  the faucet mints whole coins scaled by 10^decimals. */
+  registerToken: (color: string, name: string, kind: string, decimals: number = DEFAULT_TOKEN_DECIMALS) =>
+    req('POST', `${API_BASE}/v1/known-tokens`, { color, name, kind, decimals }),
   pairs: () => req('GET', `${API_BASE}/v1/pairs`),
   quote: (from_token: string, to_token: string, from_amount: string, to_amount?: string) =>
     req<Quote>('GET', `${API_BASE}/v1/quote?${qs({ from_token, to_token, from_amount, to_amount })}`),

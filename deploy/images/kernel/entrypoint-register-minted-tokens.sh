@@ -90,9 +90,13 @@ for (const { key, name, kind } of wanted) {
     response = await fetch(`${apiBase}/v1/known-tokens`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      // decimals is omitted deliberately: the faucet mints base units == coins,
-      // which is exactly what the API records when the field is absent.
-      body: JSON.stringify({ color, name, kind }),
+      // decimals is STATED, not left to the column default (00024 FR-002):
+      // the faucet mints whole coins scaled by 10^6, so the registry has to say
+      // 6 or every price and sponsorship verdict for this colour is off by
+      // 10^6. The literal mirrors DEFAULT_TOKEN_DECIMALS in
+      // packages/solver-core/amount.ts — this runs as a bare `bun -e` snippet
+      // inside the image, with no module to import it from.
+      body: JSON.stringify({ color, name, kind, decimals: 6 }),
       signal: AbortSignal.timeout(10_000),
     });
   } catch (error) {

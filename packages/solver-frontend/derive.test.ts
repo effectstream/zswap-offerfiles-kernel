@@ -119,6 +119,19 @@ describe("token registry (FR-013b)", () => {
     expect(rows[0].balance.coins).toBe("0.1");
     expect(inventoryRows(buildMonitorSnapshot(), withoutDecimals)[0].balance.coins).toBeNull();
   });
+
+  test("a colour whose row states no decimals reads as 6, not as base-units-are-coins", () => {
+    // 00024 FR-001/Q8: every token this stack mints or registers has 6, so a
+    // registry row that says nothing (an older node) is one of those. Reading
+    // it as 0 would print a faucet balance a million times too large.
+    const snapshot: any = buildMonitorSnapshot({ decimals: 6 });
+    snapshot.kernel.knownTokens = snapshot.kernel.knownTokens.map(
+      ({ decimals: _dropped, ...rest }: any) => rest,
+    );
+    const registry = tokenRegistry(snapshot);
+    expect(registry.get(TKA).decimals).toBe(6);
+    expect(inventoryRows(snapshot, registry)[0].balance.coins).toBe("0.1");
+  });
 });
 
 describe("the status pill (FR-012)", () => {

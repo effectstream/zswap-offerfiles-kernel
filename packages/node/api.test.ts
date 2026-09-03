@@ -195,8 +195,14 @@ describe("POST /v1/known-tokens — registry gate (item #20)", () => {
         payload,
       });
       expect(res.statusCode).toBe(200);
+      // 00024 FR-001: the payload states no `decimals`, which is what an OLD
+      // client (the preprod SPA before its port lands) sends. The response and
+      // the row must both say 6 — the registry's default — not 0.
+      expect(res.json()).toMatchObject({ success: true, name: "GATETEST", decimals: 6 });
       const listed = await getJson("/v1/known-tokens");
-      expect(listed.body.some((t: any) => t.name === "GATETEST")).toBe(true);
+      const written = listed.body.find((t: any) => t.name === "GATETEST");
+      expect(written).toBeDefined();
+      expect(written.decimals).toBe(6);
     } finally {
       delete process.env["ENABLE_TOKEN_REGISTRY"];
     }
@@ -266,7 +272,9 @@ const registerToken = (
   color: string,
   name: string,
   kind: "shielded" | "unshielded" = "shielded",
-  decimals = 0,
+  // 00024 FR-001: the registry default. A faucet-minted colour is registered
+  // with 6, so a fixture that says nothing must behave like one that does.
+  decimals = 6,
   assetId: string | null = null,
 ) =>
   client.query(
@@ -436,7 +444,10 @@ describe("GET /v1/quote — reference prices (SC-001)", () => {
     expect(body.to_source).toBe("seed");
     expect(body.sponsor_discount).toBe(0.025);
     expect(typeof body.prices_updated_at).toBe("string");
-    expect(body.from_usd).toBeCloseTo(1000 * 77387, 6);
+    // 6 decimals (00024): 1000 base units is a millionth of a coin each, so
+    // the give leg is worth 1000 × 77387 / 1e6 — the same quote, a millionth of
+    // the USD the 0-decimals registry used to claim.
+    expect(body.from_usd).toBeCloseTo((1000 * 77387) / 1e6, 6);
     // The auto-suggested amount is the sponsorship threshold, so it is sponsored.
     expect(body.sponsored).toBe(true);
     expect(body.discount).toBeGreaterThanOrEqual(0.025);

@@ -212,6 +212,8 @@ Every `POST_INTERVAL_MS` (default 60 s) one tick does exactly one of two things:
 * **mint** — no coin is free, so the tick calls the faucet circuit
   `mint_shielded(domainSep(GIVE_TOKEN), GIVE_AMOUNT, freshNonce)` — paying the
   mint fee from its **own DUST** — waits for the coin to appear, and offers it.
+  `GIVE_AMOUNT` is base units and defaults to `1000000`, i.e. **one whole coin**
+  at the 6 decimals every token in this stack carries.
 
 Either way the offer **gives one whole coin**: no change output, so every offer
 is a complete, independent swap rather than a slice of a shared balance. The

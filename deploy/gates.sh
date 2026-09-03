@@ -111,7 +111,7 @@ run_gate compose-config docker compose --profile e2e config
 # wired, and that neither was lost to a YAML indentation slip.
 run_gate compose-config-00007-services sh -c \
   'svcs="$(docker compose --profile e2e config --services)"; echo "$svcs"; \
-   echo "$svcs" | grep -qx solver-frontend'
+   echo "$svcs" | grep -qx solver-frontend && echo "$svcs" | grep -qx register-minted-tokens'
 
 # ── G2: every image builds ──────────────────────────────────────────────────
 # One gate per image so a failure names the image instead of "the build".

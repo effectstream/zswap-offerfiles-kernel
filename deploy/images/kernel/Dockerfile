@@ -23,6 +23,7 @@
 #   entrypoint-scripts.sh   the E1 provisioning / assertion driver
 #   entrypoint-solver-provision.sh  one-shot: fund + mint the solver BOTH tokens
 #   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
+#   entrypoint-register-minted-tokens.sh  one-shot: NAME the minted colours
 #
 # `solver-provision` and `maker-offer` are devnet SEEDING steps, and they are
 # services rather than README steps for one reason: without them every container
@@ -135,6 +136,7 @@ COPY deploy/images/kernel/entrypoint-scripts.sh  /usr/local/bin/entrypoint-scrip
 # and quotes nothing — see each script's header.
 COPY deploy/images/kernel/entrypoint-solver-provision.sh /usr/local/bin/entrypoint-solver-provision.sh
 COPY deploy/images/kernel/entrypoint-maker-offer.sh      /usr/local/bin/entrypoint-maker-offer.sh
+COPY deploy/images/kernel/entrypoint-register-minted-tokens.sh /usr/local/bin/entrypoint-register-minted-tokens.sh
 COPY deploy/images/kernel/wait-for.sh            /usr/local/bin/wait-for.sh
 RUN chmod +x /usr/local/bin/entrypoint-*.sh /usr/local/bin/wait-for.sh
 

@@ -449,6 +449,32 @@ services:
       - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - maker-offer-state:/var/lib/maker-offer
 
+  # Give the faucet-minted colours their NAMES (00007, issues/00008).
+  #
+  # `mint-test-tokens.ts` tries to register TestTokenA/B/U itself and cannot
+  # succeed here: it posts to a path the node never served and to its own
+  # loopback while the kernel does not exist yet (`kernel` waits on the deploy
+  # one-shot). Only Compose knows when the kernel is healthy, so this is where
+  # the registration actually lands. It reads `minted-tokens.json` from the
+  # shared volume and POSTs `/v1/known-tokens` with the spellings preprod uses
+  # (TESTTOKENA/B/U). Cosmetic and NON-FATAL: the stack trades without names,
+  # and the monitor site falls back to short hex.
+  register-minted-tokens:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-register-minted-tokens.sh"]
+    restart: "no"
+    depends_on:
+      kernel:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      ZSWAP_API: http://kernel:9999
+      REGISTER_MINTED_TOKENS_ENABLED: ${REGISTER_MINTED_TOKENS_ENABLED:-true}
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy:ro
+
   # ══ Midnight Intents relay (UNMODIFIED reference) ═══════════════════════════
 
   relay:

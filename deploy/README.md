@@ -37,6 +37,7 @@ Static gates only (no stack, safe on a shared host):
 | `relay` | `images/relay` (reference @ `061f4d3`, unmodified) | `node packages/relay/dist/relay-main.js` | 3000 / 9001 | `13000` / `19001` |
 | `solver` | kernel image | `bun run start.solver.ts` (+ status listener on 9100, bearer-gated, **not published**) | 9100 | — |
 | `solver-frontend` | kernel image | `bun run start.solver-frontend.ts` — the read-only monitor site | 8080 | `18080` |
+| `register-minted-tokens` | kernel image | one-shot: name the minted colours in `known_tokens` | — | — |
 | `price-feed` | kernel image | `bun run packages/price-feed/price-feed.dev.ts` (profile `prices`) | — | — |
 | `scripts` | kernel image | E2E driver (profile `e2e`) | — | — |
 
@@ -189,6 +190,14 @@ docker compose exec solver bun -e 'const r = await fetch("http://127.0.0.1:9100/
 A request without the bearer is `401` and is counted in the snapshot. Publishing the port
 (the commented `ports:` block on the `solver` service, `HOST_SOLVER_STATUS_PORT`) is for a
 debugging session on a loopback `BIND_ADDR` only.
+
+**Token names.** The site labels colours from the kernel's `GET /v1/known-tokens` and falls
+back to short hex. On a fresh stack the faucet-minted test tokens have no names, because the
+mint script's own registration posts to a route the node does not serve
+(`issues/00008-mint-test-tokens-registers-stale-path.md`); the `register-minted-tokens`
+one-shot repairs that once the kernel is healthy, registering `TESTTOKENA/B/U` from
+`minted-tokens.json` — the spellings preprod uses. `REGISTER_MINTED_TOKENS_ENABLED=false`
+skips it.
 
 ## Observing the relay
 

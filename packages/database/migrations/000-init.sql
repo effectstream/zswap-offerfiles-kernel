@@ -135,6 +135,19 @@ CREATE TABLE known_tokens (
 --           needs no change if the bridge ever reaches this network. The
 --           asset behind it is Moneta's Cardano USDM (`usdm-2`), the token
 --           the bridge carries — priced from the provider, not pegged (Q-10).
+--
+-- sNight (SNIGHT, the shielded-night wrapper) is deliberately NOT here, for
+-- two independent reasons:
+--   * its colour is tokenType(pad(32,"shielded-night:wrapper"), self()), so it
+--     changes with the contract ADDRESS, i.e. with the network — and
+--     known_tokens.name is UNIQUE, so preview's and preprod's colours cannot
+--     both be seeded under the name SNIGHT here;
+--   * this file only ever runs against an empty database, and the runtime
+--     applies migrationTable BY BLOCK HEIGHT (see migration-order.ts), so a
+--     row added here would never reach a database that is already live.
+-- Its per-network colours live in packages/database/network-tokens.ts and are
+-- inserted idempotently at node start (packages/node/network-token-seed.ts),
+-- with `decimals` copied from the NIGHT row above so the two are at par.
 INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES
 ('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 0, 'midnight-3'),
 ('1111111111111111111111111111111111111111111111111111111111111111', 'USDC',  'shielded',   0, 'usd-coin'),

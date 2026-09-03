@@ -109,10 +109,20 @@ cost does not grow with the registry. Three tables back it:
 | `token_prices` | only operator overrides (`manual`) and the deterministic demo rows (`fallback`) for tokens with no asset behind them |
 
 Tokens map to assets **by name** — `WBTC`/`WSBTC`/`BTC` → `bitcoin`, `WETH`/`WSETH`/
-`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3` —
-because faucet-minted colours derive from the contract address and change on every
-clean redeploy. `known_tokens.asset_id` overrides the map; `PRICE_FEED_MAP`
-(`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
+`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3`,
+`SNIGHT` → `midnight-3` — because faucet-minted colours derive from the contract
+address and change on every clean redeploy. `known_tokens.asset_id` overrides the
+map; `PRICE_FEED_MAP` (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the
+defaults.
+
+`SNIGHT` is the [shielded-night](https://github.com/effectstream/shielded-night)
+wrapper — NIGHT held as a shielded (Zswap) token, locked 1:1, so it prices off
+`midnight-3` like NIGHT and carries NIGHT's `decimals`. Its colour derives from the
+contract address and therefore differs per network, so it is **not** in
+`000-init.sql`: `packages/database/network-tokens.ts` holds one colour per network
+and the node registers the running network's row at start (`preview` and `preprod`
+today; nothing on `undeployed`/`mainnet`, where the contract is not deployed). A
+deployment picks it up at its next restart — no SQL, no manual `POST`.
 
 `packages/price-feed` refreshes `asset_prices` from CoinGecko. It is a process of
 its own — the node never makes an outbound price call:

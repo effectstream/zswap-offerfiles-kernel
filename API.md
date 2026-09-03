@@ -606,9 +606,18 @@ curl http://host:9999/v1/known-tokens
 
 ```json
 [
-  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded" }
+  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded" },
+  { "id": 4, "token_color": "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819", "name": "SNIGHT", "kind": "shielded" }
 ]
 ```
+
+`NIGHT`, `USDC` and `USDM` are seeded by the schema. `SNIGHT` — the
+[shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
+held as a shielded token — is registered by the node at start for the network it
+runs on, because its colour derives from the contract address: `8fac382b…6819` on
+**preprod** (shown above), `793c29c9…f99c` on **preview**, and nothing on
+`undeployed`/`mainnet`, where the contract is not deployed. It carries NIGHT's
+`decimals` and prices off the same asset, so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
 appearing in an offer says nothing about its name, and an offer's value layer
@@ -894,8 +903,10 @@ still writes one, deliberately, so an operator can inspect and override it.)
 the contract address), so tokens map to assets by **name**: `WBTC`/`WSBTC`/`BTC` →
 `bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`
 (Moneta's Cardano USDM, the asset the VIA Labs bridge carries to Midnight),
-`NIGHT` → `midnight-3`. `known_tokens.asset_id` overrides the map, and
-`PRICE_FEED_MAP` (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
+`NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3` (the shielded-night wrapper is
+locked 1:1 against NIGHT, so it is the same asset — no new price to fetch).
+`known_tokens.asset_id` overrides the map, and `PRICE_FEED_MAP`
+(`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
 **The `price-feed` service.** `packages/price-feed` is a separate process, not part
 of the node: the node never calls CoinGecko. It refreshes `asset_prices` once a day

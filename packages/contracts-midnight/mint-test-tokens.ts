@@ -31,6 +31,10 @@ import {
 } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { OfferFilesContract, witnesses } from "@zswap-da/contract-offer-files";
+import {
+  shieldedUserRecipient,
+  unshieldedUserRecipient,
+} from "@zswap-da/contract-offer-files/mint-recipient";
 import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../solver-core/amount.ts";
 
 const TAG = "[mint-test-tokens]";
@@ -183,7 +187,12 @@ export async function mintTestTokens(): Promise<MintedTestTokens> {
       ["shieldedB", SHIELDED_SEP_B],
     ] as const) {
       const t0 = Date.now();
-      const tx = await (deployed.callTx as any).mint_shielded(sep, MINT_AMOUNT, nonceBase + i++);
+      const tx = await (deployed.callTx as any).mint_shielded(
+        sep,
+        MINT_AMOUNT,
+        nonceBase + i++,
+        shieldedUserRecipient(walletResult.zswapSecretKeys.coinPublicKey),
+      );
       const coin = tx.private?.result;
       const colorRaw = coin?.color ?? coin?.type;
       if (colorRaw == null) {
@@ -200,7 +209,7 @@ export async function mintTestTokens(): Promise<MintedTestTokens> {
     const utx = await (deployed.callTx as any).mint_unshielded(
       UNSHIELDED_SEP,
       MINT_AMOUNT,
-      { bytes: recipientBytes },
+      unshieldedUserRecipient(toHex(recipientBytes)),
     );
     const ures = utx.private?.result;
     minted.unshielded = (ures instanceof Uint8Array ? toHex(ures) : String(ures ?? toHex(UNSHIELDED_SEP)).replace(/^0x/, "")).toLowerCase();

@@ -4,8 +4,9 @@ import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from '../../../packages/solv
 export const MINT_COINS = 1000n
 
 /**
- * The same allotment in the BASE UNITS the circuit takes: `mint_shielded` /
- * `mint_unshielded` are `Uint<64>` and know nothing about decimals, so the
+ * The same allotment in the BASE UNITS the circuits take: `mint_shielded` and
+ * `mint_unshielded` accept `Uint<64>` amounts plus explicit recipients and know
+ * nothing about decimals, so the
  * scaling happens here, once, for the playground faucet and for the deploy
  * scripts that import this file (`deploy/scripts/lib/faucet-mint.ts`).
  * 1 000 coins × 10^6 = 1_000_000_000 base units.

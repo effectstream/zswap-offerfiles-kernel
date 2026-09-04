@@ -19,6 +19,33 @@ bun install
 bun run dev   # PGLite + Compact compile + Midnight + Celestia + sync + batcher
 ```
 
+### Compact toolchain
+
+The active ledger-v9 contract boundary is compactc **0.34.0**, Compact language
+**0.26.0**, and `@midnight-ntwrk/compact-runtime` **0.19.0**. The compiler pin
+lives only in `infra/compact-version.txt`; both Linux release archives are
+authenticated through `infra/compact-checksums.sha256` before extraction by the
+host/CI toolchain image and the deployment kernel image.
+
+`bun run build:midnight` generates
+`packages/contracts-midnight/contract-offer-files/src/managed/`. That directory
+is intentionally gitignored, not committed: local builds, the real Compact CI
+job, and the kernel image regenerate and validate its metadata, three `.bzkir`
+files, and six proving/verifying keys. Run `bun run check:compact-runtime` to
+enforce the one-runtime lock invariant and `bun run check:compact-artifacts`
+after generation.
+
+**BREAKING consumer warning:** 0.34-generated `contract/index.js` requires exact
+compact-runtime 0.19.0 and fails at module load with `Version mismatch` under
+0.18.0-rc.1. The in-place mint API also now requires explicit typed recipients:
+shielded user/contract and unshielded contract/user. Both mint verifier keys
+changed, so every ledger-v9 OfferFiles instance must redeploy together with its
+callers. Contract-owned shielded output must be claimed by a receive circuit in
+the same transaction or ledger v9 rejects it; it is not stranded. See
+`LEDGER-V9-MIGRATION.md` for the measured nine-file table and exact downstream
+migration checklist. Kernel `main`/midnight-1-offers stays on the unchanged 1.x
+API.
+
 On dev startup the `midnight-mint-test-tokens` process mints test tokens via the
 offer-files contract (two shielded colors + one unshielded color to the genesis
 wallet), so e2e swaps have real multi-token inventory and the unshielded
@@ -603,7 +630,7 @@ monorepo at
 | `database/` | `mod.ts` (re-exports), `migration-order.ts`, `migrations/000-init.sql` (THE schema — one file applied from zero; there is no numbered chain, and the 001/002 files this table used to list are gone), `migrations/local-migration.sql` (local-only additions), `price-map.ts` (token NAME → reference asset, per-base-unit conversion), `sql/queries.sql` (+ generated `queries.queries.ts`), `sql/queries.app.ts` |
 | `validator/` | `validate.ts` (pipeline), `derive.ts`, `refstate.ts`, `types.ts`, `README.md`, `scripts/check-preview-indexer.ts` |
 | `batcher/` | `batcher.{dev,mainnet}.ts`, `config.ts`, `midnight-balancing.ts`, `celestia.ts` (`ZswapCelestiaAdapter.validateInput` — pre-fee offer gate) |
-| `contracts-midnight/` | `package.json` (scripts for `launchMidnight`), `deploy.ts`, `contract-offer-files/` (Compact source + compiled output) |
+| `contracts-midnight/` | `package.json` (scripts for `launchMidnight`), `deploy.ts`, `contract-offer-files/` (Compact source; gitignored generated output is built locally/CI/in-image) |
 | `contracts-celestia/` | `package.json` (`celestia-{node,bridge,fund}:*` scripts), `fund-bridge.ts` |
 | `solver/` | `solver.{dev,preview,mainnet}.ts` (per-network entrypoints), `env.ts`, `src/launch.ts` (the `start:solver` configuration contract), `src/run.ts` (`runSolver`), `src/book-sync.ts`, `src/ladder-source.ts`, `src/relay-client.ts`, `src/swap-job-executor.ts`, `src/stock.ts`, `src/operation-journal.ts` |
 | `solver-core/` | `api-client.ts` (kernel REST/SSE + exact files), `ladder-derivation.ts`, `admission-policy.ts` (one typed policy for publication and admission), `relay-ws-contract.ts`, `receipt-client.ts`, `batcher.ts`, `wallet.ts` |

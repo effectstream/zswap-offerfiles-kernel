@@ -485,13 +485,31 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   console.log(`${TAG} joining offer-files contract + minting 5 colors…`);
   const deployed = await joinOfferFiles(genesis);
   const nonce = BigInt(Date.now());
-  ledger.colors.TA = await mintShielded(deployed, TOKEN_SEPS.TA, MINT_AMOUNT, nonce);
-  ledger.colors.TB = await mintShielded(deployed, TOKEN_SEPS.TB, MINT_AMOUNT, nonce + 1n);
+  ledger.colors.TA = await mintShielded(
+    deployed,
+    TOKEN_SEPS.TA,
+    MINT_AMOUNT,
+    nonce,
+    genesis.zswapSecretKeys.coinPublicKey,
+  );
+  ledger.colors.TB = await mintShielded(
+    deployed,
+    TOKEN_SEPS.TB,
+    MINT_AMOUNT,
+    nonce + 1n,
+    genesis.zswapSecretKeys.coinPublicKey,
+  );
   ledger.colors.UA = await mintUnshielded(deployed, TOKEN_SEPS.UA, MINT_AMOUNT, genesis.unshieldedAddress);
   ledger.colors.UB = await mintUnshielded(deployed, TOKEN_SEPS.UB, MINT_AMOUNT, genesis.unshieldedAddress);
   // TC funds the §2.5 basket specialist only — a much smaller mint than the
   // trading colours, which the whole maker/taker fan-out draws on.
-  ledger.colors.TC = await mintShielded(deployed, TOKEN_SEPS.TC, MINT_AMOUNT, nonce + 2n);
+  ledger.colors.TC = await mintShielded(
+    deployed,
+    TOKEN_SEPS.TC,
+    MINT_AMOUNT,
+    nonce + 2n,
+    genesis.zswapSecretKeys.coinPublicKey,
+  );
   console.log(`${TAG} colors:`, JSON.stringify(ledger.colors));
 
   for (const key of ["TA", "TB", "TC"] as const) {

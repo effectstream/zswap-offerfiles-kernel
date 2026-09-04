@@ -85,11 +85,29 @@ export async function multiTokenTest(db: Client): Promise<void> {
     // Serial mints on ONE facade: each mint is a prove+submit, and reusing the
     // facade before it replays its own submission is the rc.4 error-170
     // (InvalidDustSpendProof) trap — gate between them (see waitForWalletSettlement).
-    const T0 = await mintShielded(deployed, SEP.T0, MINT_AMOUNT, nonce);
+    const T0 = await mintShielded(
+      deployed,
+      SEP.T0,
+      MINT_AMOUNT,
+      nonce,
+      genesis.zswapSecretKeys.coinPublicKey,
+    );
     await waitForWalletSettlement(genesis, { label: `${TAG} post-mint-T0` });
-    const T1 = await mintShielded(deployed, SEP.T1, MINT_AMOUNT, nonce + 1n);
+    const T1 = await mintShielded(
+      deployed,
+      SEP.T1,
+      MINT_AMOUNT,
+      nonce + 1n,
+      genesis.zswapSecretKeys.coinPublicKey,
+    );
     await waitForWalletSettlement(genesis, { label: `${TAG} post-mint-T1` });
-    const T2 = await mintShielded(deployed, SEP.T2, MINT_AMOUNT, nonce + 2n);
+    const T2 = await mintShielded(
+      deployed,
+      SEP.T2,
+      MINT_AMOUNT,
+      nonce + 2n,
+      genesis.zswapSecretKeys.coinPublicKey,
+    );
     await waitForWalletSettlement(genesis, { label: `${TAG} post-mint-T2` });
     await assert("T0,T1,T2 minted", async () => !!T0 && !!T1 && !!T2);
 

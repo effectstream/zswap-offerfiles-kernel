@@ -11,25 +11,31 @@ import CompactStandardLibrary;
 
 export ledger counter: Uint<128>;
 
+/// Mint to an explicit recipient. A contract recipient must claim the coin by
+/// running its receive circuit in the SAME transaction; otherwise ledger-v9
+/// rejects the transaction as malformed.
 export circuit mint_shielded(
   domain_sep: Bytes<32>,
   amount: Uint<64>,
   nonce: Uint<128>,
+  recipient: Either<ZswapCoinPublicKey, ContractAddress>
 ): ShieldedCoinInfo {
+  assert(amount > 0, "mint amount must be positive");
   return mintShieldedToken(
     disclose(domain_sep),
     disclose(amount),
     evolveNonce(disclose(nonce), disclose(domain_sep)),
-    left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey())
+    disclose(recipient)
   );
 }
 
 export circuit mint_unshielded(
   domainSep: Bytes<32>,
   amount: Uint<64>,
-  recipient: UserAddress
+  recipient: Either<ContractAddress, UserAddress>
 ): Bytes<32> {
-  return mintUnshieldedToken(disclose(domainSep), disclose(amount), right<ContractAddress, UserAddress>(disclose(recipient)));
+  assert(amount > 0, "mint amount must be positive");
+  return mintUnshieldedToken(disclose(domainSep), disclose(amount), disclose(recipient));
 }
 
 export circuit incrementNoun(): [] {

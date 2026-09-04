@@ -118,8 +118,20 @@ try {
   console.log("[2wallet] joining offer-files contract + minting Z/X (shielded) and A/B (unshielded)…");
   const deployed = await joinOfferFiles(genesis);
   const nonce = BigInt(Date.now());
-  const Z = await mintShielded(deployed, SEP.Z, MINT_AMOUNT, nonce + 0n);
-  const X = await mintShielded(deployed, SEP.X, MINT_AMOUNT, nonce + 1n);
+  const Z = await mintShielded(
+    deployed,
+    SEP.Z,
+    MINT_AMOUNT,
+    nonce + 0n,
+    genesis.zswapSecretKeys.coinPublicKey,
+  );
+  const X = await mintShielded(
+    deployed,
+    SEP.X,
+    MINT_AMOUNT,
+    nonce + 1n,
+    genesis.zswapSecretKeys.coinPublicKey,
+  );
   const A = await mintUnshielded(deployed, SEP.A, MINT_AMOUNT, maker.unshieldedAddress);
   const B = await mintUnshielded(deployed, SEP.B, MINT_AMOUNT, genesis.unshieldedAddress);
   console.log(

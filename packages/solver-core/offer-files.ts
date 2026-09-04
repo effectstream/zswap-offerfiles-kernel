@@ -4,8 +4,8 @@
 // unshielded recipients) without duplicating the contract wiring or disturbing
 // the fixed-separator startup mint.
 //
-//   mint_shielded(domain_sep, amount, nonce)  → mints to the CALLER (ownPublicKey)
-//   mint_unshielded(domain_sep, amount, recipient) → mints to ANY UserAddress
+//   mint_shielded(domain_sep, amount, nonce, recipient) → explicit user/contract
+//   mint_unshielded(domain_sep, amount, recipient)      → explicit user/contract
 
 import { dirname, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -13,10 +13,15 @@ import { fileURLToPath } from "node:url";
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { CompiledContract } from "@midnight-ntwrk/compact-js";
 import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
+import type { CoinPublicKey } from "@midnightntwrk/ledger-v9";
 import { configureMidnightNodeProviders } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
 import { OfferFilesContract, witnesses } from "@zswap-da/contract-offer-files";
+import {
+  shieldedUserRecipient,
+  unshieldedUserRecipient,
+} from "@zswap-da/contract-offer-files/mint-recipient";
 
 // packages/solver-core → packages/contracts-midnight. fileURLToPath, not
 // URL.pathname: pathname percent-encodes, breaking checkouts under a
@@ -42,12 +47,12 @@ const toHex = (u: Uint8Array): string =>
 const normalizeColor = (raw: unknown): string =>
   (raw instanceof Uint8Array ? toHex(raw) : String(raw).replace(/^0x/, "")).toLowerCase();
 
-function unshieldedToUserAddressBytes(unshieldedAddr: string): Uint8Array {
+function unshieldedToUserAddress(unshieldedAddr: string): string {
   if (!unshieldedAddr.startsWith("mn_addr_")) {
     throw new Error(`expected mn_addr_ bech32m unshielded address, got "${unshieldedAddr}"`);
   }
   const parsed = MidnightBech32m.parse(unshieldedAddr);
-  return Uint8Array.prototype.slice.call(parsed.data, 0, 32);
+  return toHex(Uint8Array.prototype.slice.call(parsed.data, 0, 32));
 }
 
 export async function getContractAddress(): Promise<string> {
@@ -96,7 +101,7 @@ export async function joinOfferFiles(
   });
 }
 
-/** Mint a shielded color to the CALLER (the wallet that joined `deployed`).
+/** Mint a shielded color to the explicitly named joining wallet coin key.
  *  `nonce` must be unique per (sep) per run — re-using it recreates an
  *  identical coin commitment which the node rejects as a duplicate. */
 export async function mintShielded(
@@ -104,9 +109,15 @@ export async function mintShielded(
   sepByte: number,
   amount: bigint,
   nonce: bigint,
+  coinPublicKey: CoinPublicKey,
 ): Promise<string> {
   const sep = new Uint8Array(32).fill(sepByte);
-  const tx = await deployed.callTx.mint_shielded(sep, amount, nonce);
+  const tx = await deployed.callTx.mint_shielded(
+    sep,
+    amount,
+    nonce,
+    shieldedUserRecipient(coinPublicKey),
+  );
   const coin = tx.private?.result;
   const colorRaw = coin?.color ?? coin?.type;
   if (colorRaw == null) {
@@ -126,8 +137,10 @@ export async function mintUnshielded(
   recipientUnshieldedAddr: string,
 ): Promise<string> {
   const sep = new Uint8Array(32).fill(sepByte);
-  const recipientBytes = unshieldedToUserAddressBytes(recipientUnshieldedAddr);
-  const tx = await deployed.callTx.mint_unshielded(sep, amount, { bytes: recipientBytes });
+  const recipient = unshieldedUserRecipient(
+    unshieldedToUserAddress(recipientUnshieldedAddr),
+  );
+  const tx = await deployed.callTx.mint_unshielded(sep, amount, recipient);
   const res = tx.private?.result;
   return normalizeColor(res ?? sep);
 }

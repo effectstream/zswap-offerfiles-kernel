@@ -287,6 +287,7 @@ function makeMinter(walletResult: PinnedWalletResult, deployed: unknown, contrac
         nonce,
         {
           contractAddress,
+          coinPublicKey: walletResult.zswapSecretKeys.coinPublicKey,
           // A THUNK, not the key: `.coinSecretKey` mints a new wasm wrapper on
           // every access and the secret belongs to the owning `ZswapSecretKeys`,
           // whose finalizer clears it once unreachable. A captured handle starts

@@ -610,7 +610,7 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
     );
   }
   if (give.name === undefined) {
-    // The faucet mints from a NAME (`mint_shielded(domainSepFromName(name), …)`),
+    // The faucet mints from a NAME (`mint_shielded(domainSepFromName(name), …, left(ownCoinKey))`),
     // so a raw colour on the give leg can never be minted. Re-offering a coin
     // that is already in the wallet would still work, but a poster that can only
     // re-offer is not what FR-003 describes — refuse rather than degrade.

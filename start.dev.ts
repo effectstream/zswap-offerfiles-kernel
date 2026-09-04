@@ -14,48 +14,31 @@ import {
 const root = import.meta.dirname!;
 
 // The compactc pin lives in infra/compact-version.txt and is run through
-// infra/compact.sh: a host `$COMPACTC` of that version if set, otherwise the
-// `compact-toolchain` container it builds on first use. The `compact` version
-// manager plays no part — it does not publish the 0.33 line (see
-// infra/compact-toolchain.Dockerfile) — so the check below verifies the route
-// the build will actually take, not a manager install.
+// infra/compact.sh: a host `$COMPACTC` of that exact version if set, otherwise
+// the checksum-pinned `compact-toolchain` image. The check invokes that runner
+// directly so a stale COMPACT_IMAGE or wrong host binary fails before compile.
 const COMPACT_VERSION = fs
   .readFileSync(path.join(root, "infra/compact-version.txt"), "utf8")
   .trim();
 
 const compactCheckScript = `
-const { execSync } = require("child_process");
-const compactc = process.env.COMPACTC;
-if (compactc) {
-  let out = "";
-  try {
-    out = execSync(JSON.stringify(compactc) + " --version", { encoding: "utf8", stdio: "pipe" });
-  } catch {
-    console.error("ERROR: COMPACTC=" + compactc + " does not run (infra/compact.sh would exec it).");
-    process.exit(1);
-  }
-  if (!out.includes("${COMPACT_VERSION}")) {
-    console.error("ERROR: COMPACTC reports '" + out.trim() + "', expected compactc ${COMPACT_VERSION} (infra/compact-version.txt).");
-    process.exit(1);
-  }
-  console.log("compactc ${COMPACT_VERSION} available via COMPACTC=" + compactc);
-  process.exit(0);
-}
+const { execFileSync } = require("child_process");
+let out = "";
 try {
-  execSync("docker info", { stdio: "pipe", timeout: 30000 });
-} catch {
-  console.error([
-    "",
-    "ERROR: neither COMPACTC nor a running Docker daemon is available.",
-    "",
-    "infra/compact.sh compiles offer-files.compact with compactc ${COMPACT_VERSION} either",
-    "through a host binary (export COMPACTC=/path/to/compactc) or inside the",
-    "compact-toolchain container it builds from infra/compact-toolchain.Dockerfile.",
-    "",
-  ].join("\\n"));
+  out = execFileSync(${JSON.stringify(path.join(root, "infra/compact.sh"))}, ["--version"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+    timeout: 120000,
+  }).trim();
+} catch (error) {
+  console.error("ERROR: checksum-pinned compactc ${COMPACT_VERSION} route is unavailable: " + error.message);
   process.exit(1);
 }
-console.log("compactc ${COMPACT_VERSION} will run in the compact-toolchain container (Docker daemon reachable)");
+if (out !== "${COMPACT_VERSION}") {
+  console.error("ERROR: infra/compact.sh reports '" + out + "', expected exact compactc ${COMPACT_VERSION}.");
+  process.exit(1);
+}
+console.log("compactc ${COMPACT_VERSION} available through verified infra/compact.sh route");
 `.trim();
 
 const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];

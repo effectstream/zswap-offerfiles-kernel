@@ -1563,12 +1563,14 @@ export async function provisionRealActors(
       config.tokenASeparator,
       config.mintAmount,
       config.mintNonce,
+      genesis.zswapSecretKeys.coinPublicKey,
     );
     const tokenB = await mintShielded(
       deployed,
       config.tokenBSeparator,
       config.mintAmount,
       config.mintNonce + 1n,
+      genesis.zswapSecretKeys.coinPublicKey,
     );
     if (tokenA === tokenB || !/^[0-9a-f]{64}$/.test(tokenA) || !/^[0-9a-f]{64}$/.test(tokenB)) {
       throw new Error("real mint returned invalid or identical A/B token colors");

@@ -5,20 +5,32 @@
 #
 # Two routes, in order of preference:
 #   1. $COMPACTC points at a host compactc binary of the pinned version -> use it.
-#   2. otherwise build (once, idempotently) and run compact-toolchain:$COMPACT_VERSION.
+#   2. otherwise build (once, idempotently) and run compact-toolchain:<pin>.
 #
-# The `compact` version manager is NOT a route: it does not publish the 0.33
-# line (see infra/compact-toolchain.Dockerfile for the details).
+# infra/compact-version.txt is the sole version authority. COMPACT_VERSION is
+# deliberately rejected so CI, host, and image builds cannot silently diverge.
 set -euo pipefail
 
 INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$INFRA_DIR/.." && pwd)"
 
 # Single source of truth for the compiler pin.
-COMPACT_VERSION="${COMPACT_VERSION:-$(tr -d ' \t\n' < "$INFRA_DIR/compact-version.txt")}"
+if [[ -n "${COMPACT_VERSION+x}" ]]; then
+  echo "ERROR: COMPACT_VERSION is not supported; edit infra/compact-version.txt to change the compiler pin." >&2
+  exit 1
+fi
+COMPACT_VERSION="$(tr -d ' \t\n' < "$INFRA_DIR/compact-version.txt")"
 IMAGE="${COMPACT_IMAGE:-compact-toolchain:${COMPACT_VERSION}}"
 
 if [[ -n "${COMPACTC:-}" ]]; then
+  actual_version="$("$COMPACTC" --version)" || {
+    echo "ERROR: COMPACTC=$COMPACTC does not run." >&2
+    exit 1
+  }
+  if [[ "$actual_version" != "$COMPACT_VERSION" ]]; then
+    echo "ERROR: COMPACTC=$COMPACTC reports '$actual_version'; expected exact version '$COMPACT_VERSION' from infra/compact-version.txt." >&2
+    exit 1
+  fi
   exec "$COMPACTC" "$@"
 fi
 
@@ -29,6 +41,15 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     -f "$INFRA_DIR/compact-toolchain.Dockerfile" \
     -t "$IMAGE" \
     "$INFRA_DIR" >&2
+fi
+
+actual_version="$(docker run --rm "$IMAGE" --version)" || {
+  echo "ERROR: COMPACT_IMAGE=$IMAGE could not be probed." >&2
+  exit 1
+}
+if [[ "$actual_version" != "$COMPACT_VERSION" ]]; then
+  echo "ERROR: COMPACT_IMAGE=$IMAGE reports '$actual_version'; expected exact version '$COMPACT_VERSION' from infra/compact-version.txt." >&2
+  exit 1
 fi
 
 # Mount the repo root (not the package dir) so relative include paths and

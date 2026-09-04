@@ -12,7 +12,7 @@
 //   GIVE_TOKEN, WANT_TOKEN 64-hex colors; default: read MINTED_TOKENS_FILE
 //   GIVE_AMOUNT, WANT_AMOUNT, TTL_MINUTES
 //   MINTED_TOKENS_FILE     default /srv/offerfiles-deploy/minted-tokens.json,
-//                          published by entrypoint-deploy.sh
+//                          published by entrypoint-mint-test-tokens.sh
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";

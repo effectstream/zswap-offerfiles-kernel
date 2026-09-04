@@ -32,6 +32,12 @@ import {
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { OfferFilesContract, witnesses } from "@zswap-da/contract-offer-files";
 import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../solver-core/amount.ts";
+import {
+  registerMintedTokenNames,
+  resolveMintApiBase,
+  type MintedTestTokens,
+} from "./register-known-tokens.ts";
+export type { MintedTestTokens } from "./register-known-tokens.ts";
 
 const TAG = "[mint-test-tokens]";
 const log = {
@@ -89,12 +95,6 @@ const sumBalances = (b: Map<string, bigint> | Record<string, bigint> | undefined
 
 const toHex = (u: Uint8Array): string =>
   Array.from(u, (x) => x.toString(16).padStart(2, "0")).join("");
-
-export interface MintedTestTokens {
-  shieldedA: string;
-  shieldedB: string;
-  unshielded: string;
-}
 
 export async function mintTestTokens(): Promise<MintedTestTokens> {
   setNetworkId(midnightNetworkConfig.id as any);
@@ -206,30 +206,15 @@ export async function mintTestTokens(): Promise<MintedTestTokens> {
     minted.unshielded = (ures instanceof Uint8Array ? toHex(ures) : String(ures ?? toHex(UNSHIELDED_SEP)).replace(/^0x/, "")).toLowerCase();
     log.info(`✅ mint_unshielded color=${minted.unshielded.slice(0, 16)}… tx=${utx.public?.txId ?? utx.public?.txHash ?? "?"} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
 
-    // Best-effort registration so the frontend shows friendly names; the node
-    // API may not be up yet during startup — tolerate.
-    const API = "http://127.0.0.1:9999";
-    for (const [name, color, kind] of [
-      ["TestTokenA", minted.shieldedA!, "shielded"],
-      ["TestTokenB", minted.shieldedB!, "shielded"],
-      ["TestTokenU", minted.unshielded!, "unshielded"],
-    ] as const) {
-      try {
-        await fetch(`${API}/api/known-tokens`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          // decimals is STATED (00024 FR-002): MINT_AMOUNT above is base
-          // units, i.e. 1 000 whole coins at 6 decimals, so the registry has
-          // to agree or every price for this colour is off by 10^6.
-          body: JSON.stringify({ color, name, kind, decimals: DEFAULT_TOKEN_DECIMALS }),
-          signal: AbortSignal.timeout(2000),
-        });
-      } catch {
-        log.warn(`known-tokens registration skipped for ${name} (node API not up)`);
-      }
-    }
-
     const result = minted as MintedTestTokens;
+    // Best-effort registration so the frontend shows friendly names. During
+    // startup the API may not be up yet; every helper outcome is observable
+    // but non-fatal, and the machine-readable MINTED record still follows.
+    await registerMintedTokenNames(result, {
+      apiBaseUrl: resolveMintApiBase(),
+      log,
+    });
+
     console.log(`${TAG} MINTED ${JSON.stringify(result)}`);
     return result;
   } finally {

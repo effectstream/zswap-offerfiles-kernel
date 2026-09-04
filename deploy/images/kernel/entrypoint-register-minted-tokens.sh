@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
 # entrypoint-register-minted-tokens.sh — give the faucet-minted colours a NAME.
 #
-# A one-shot, run after the kernel is healthy. It reads `minted-tokens.json`
-# from the shared `offerfiles-deploy` volume (published atomically by
-# entrypoint-deploy.sh) and registers the three colours with the kernel's
-# `POST /v1/known-tokens`, so every UI — the 00007 monitor site, the book
-# views, the name-keyed price map — shows TESTTOKENA/B/U instead of raw hex.
+# A compatibility/backstop one-shot, run after the post-kernel mint one-shot.
+# It reads `minted-tokens.json` from the shared `offerfiles-deploy` volume
+# (published atomically by entrypoint-mint-test-tokens.sh) and repeats the three
+# registrations against `POST /v1/known-tokens`. On a clean successful stack
+# every response is 409: the mint script already performed the primary work.
 #
-# WHY THIS EXISTS AS A SEPARATE STEP (issues/00008-mint-test-tokens-registers-stale-path.md):
-# `mint-test-tokens.ts` already tries to register the names itself, and cannot
-# succeed on this stack for two independent reasons — it posts to `/api/known-tokens`,
-# a path the node has never served (the route is `POST /v1/known-tokens`), and it
-# posts to `127.0.0.1:9999`, which inside the deploy one-shot is that container's
-# own loopback while the kernel does not even exist yet (`kernel` waits on
-# `offerfiles-deploy: service_completed_successfully`). Both failures are
-# swallowed by a try/catch that only logs, so nothing ever said the names were
-# missing. Fixing the script is a `packages/` change and belongs to that issue;
-# this is the deployment-side half, and it is where the ordering problem can
-# actually be solved — only Compose knows when the kernel is healthy.
+# WHY THIS REMAINS AS A SEPARATE STEP FOR THIS RELEASE:
+# older deployment paths used this script as the primary repair for a stale
+# mint-script route. Keeping it after the fixed mint one-shot makes upgrades
+# idempotent and makes the expected 409 behavior visible while operators move
+# to the new contract -> kernel -> mint/register sequence.
 #
 # SPELLINGS. TESTTOKENA / TESTTOKENB / TESTTOKENU, matching what the frontend
 # faucet registers on preprod (the mint script's mixed-case `TestTokenA` would
@@ -45,7 +39,7 @@ fi
 MINTED_FILE="${MINTED_TOKENS_FILE:-${CONTRACT_SHARE_DIR}/minted-tokens.json}"
 
 if [ ! -f "${MINTED_FILE}" ]; then
-  log "no ${MINTED_FILE} — nothing was minted on this stack, or the deploy one-shot could not extract the colours"
+  log "no ${MINTED_FILE} — nothing was minted on this stack, or the mint one-shot could not publish the colours"
   log "skipping registration (non-fatal); token colours will render as short hex"
   exit 0
 fi

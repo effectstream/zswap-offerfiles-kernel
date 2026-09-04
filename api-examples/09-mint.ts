@@ -3,8 +3,9 @@
 // What this does:
 //   1. Fetches /v1/midnight/config (contract address, indexer, proof server).
 //   2. Builds the maker wallet (WALLET_SEED) and connects to the deployed contract.
-//   3. Calls mint_shielded twice (two distinct token colors, stable domain separators)
-//      and mint_unshielded once.
+//   3. Calls mint_shielded twice with the wallet coin key (two distinct token
+//      colors, stable domain separators) and mint_unshielded once with its
+//      decoded unshielded user address.
 //   4. Registers each color with /v1/known-tokens for human-readable display.
 //   5. Writes the minted colors to /tmp/zswap-minted-tokens.json so 10-submit-offer
 //      and 11-settle-offer can consume them automatically.
@@ -24,13 +25,17 @@ import { writeFileSync } from "node:fs";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { CompiledContract } from "@midnight-ntwrk/compact-js";
-import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
+import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import {
   buildWalletFacade,
   registerNightForDust,
   configureMidnightNodeProviders,
 } from "@effectstream/midnight-contracts";
 import { OfferFilesContract, witnesses } from "@zswap-da/contract-offer-files";
+import {
+  shieldedUserRecipient,
+  unshieldedUserRecipient,
+} from "@zswap-da/contract-offer-files/mint-recipient";
 import { config, get, post, header } from "./config.ts";
 
 globalThis.WebSocket = WebSocket;
@@ -132,7 +137,12 @@ for (const [label, sep, idx] of [
   ["shieldedB", SEP_B, 1n],
 ] as const) {
   console.log(`Minting ${label} (proving…)`);
-  const tx = await (deployed.callTx as any).mint_shielded(sep, MINT_AMOUNT, nonceBase + idx);
+  const tx = await (deployed.callTx as any).mint_shielded(
+    sep,
+    MINT_AMOUNT,
+    nonceBase + idx,
+    shieldedUserRecipient(wr.zswapSecretKeys.coinPublicKey),
+  );
   const coin = tx.private?.result;
   const colorRaw = coin?.color ?? coin?.type;
   if (colorRaw == null) throw new Error(`mint_shielded ${label}: no color in result`);
@@ -144,7 +154,11 @@ for (const [label, sep, idx] of [
 console.log("Minting unshielded (proving…)");
 const parsed = MidnightBech32m.parse(wr.unshieldedAddress);
 const recipientBytes = Uint8Array.prototype.slice.call(parsed.data, 0, 32);
-const utx = await (deployed.callTx as any).mint_unshielded(SEP_U, MINT_AMOUNT, { bytes: recipientBytes });
+const utx = await (deployed.callTx as any).mint_unshielded(
+  SEP_U,
+  MINT_AMOUNT,
+  unshieldedUserRecipient(toHex(recipientBytes)),
+);
 const ures = utx.private?.result;
 minted.unshielded = (ures instanceof Uint8Array ? toHex(ures) : String(ures ?? toHex(SEP_U))).replace(/^0x/, "").toLowerCase();
 console.log(`  ✅ unshielded: ${minted.unshielded.slice(0, 16)}…\n`);

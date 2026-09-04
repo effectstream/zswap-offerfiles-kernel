@@ -8,9 +8,9 @@ import {
   type CoinPublicKey,
   type EncPublicKey,
   type FinalizedTransaction,
-  Transaction as LedgerV8Transaction,
+  Transaction as LedgerV9Transaction,
   type TransactionId,
-} from '@midnight-ntwrk/ledger-v8'
+} from '@midnightntwrk/ledger-v9'
 import {
   type MidnightProvider,
   type MidnightProviders,
@@ -33,6 +33,7 @@ type Found = FoundContract<OfferFilesContract.Contract>
 export type ConnectedContract = {
   contract: Found
   config: MidnightConfig
+  coinPublicKey: CoinPublicKey
 }
 
 async function submitToBatcher(serializedTxHex: string, address: string) {
@@ -67,7 +68,7 @@ function createWalletProvider(
     async balanceTx(tx: UnboundTransaction): Promise<FinalizedTransaction> {
       const serialized = toHex(tx.serialize())
       const { tx: balancedHex } = await connectedApi.balanceUnsealedTransaction(serialized, { payFees: false })
-      return LedgerV8Transaction.deserialize('signature', 'proof', 'binding', fromHex(balancedHex)) as FinalizedTransaction
+      return LedgerV9Transaction.deserialize('signature', 'proof', 'binding', fromHex(balancedHex)) as FinalizedTransaction
     },
     async submitTx(tx: FinalizedTransaction): Promise<TransactionId> {
       const serializedHex = toHex(tx.serialize())
@@ -80,7 +81,10 @@ function createWalletProvider(
   }
 }
 
-async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig): Promise<Providers> {
+async function buildProviders(
+  connectedApi: ConnectedAPI,
+  config: MidnightConfig,
+): Promise<{ providers: Providers; coinPublicKey: CoinPublicKey }> {
   const [shieldedAddresses] = await Promise.all([connectedApi.getShieldedAddresses()])
   const coinPublicKeyHex = parseCoinPublicKeyToHex(
     shieldedAddresses.shieldedCoinPublicKey,
@@ -105,11 +109,15 @@ async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig
     return res
   }) as typeof fetch
 
-  const zkConfigProvider = new FetchZkConfigProvider<OfferFilesCircuits>(API_BASE, safeFetch.bind(window))
+  // midnight-js 5: the custom fetch moved from a positional argument into an
+  // options object ({ fetchFunc }), which also carries the compactc integrity
+  // options — the v5 provider verifies artifacts against the compiler's
+  // integrity manifest by default, so the API must serve that manifest too.
+  const zkConfigProvider = new FetchZkConfigProvider<OfferFilesCircuits>(API_BASE, { fetchFunc: safeFetch.bind(window) })
   // VITE_PROOF_SERVER_URL wins over whatever /v1/midnight/config reports.
   const proofServerUri = PROOF_SERVER_URL || config.proofServerUri
 
-  return {
+  const providers = {
     privateStateProvider: levelPrivateStateProvider({
       privateStoragePasswordProvider: async () => 'ZSWAP_DA_DOCS_STORAGE_16+',
       accountId: coinPublicKeyHex,
@@ -120,6 +128,7 @@ async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig
     walletProvider,
     midnightProvider: walletProvider,
   } as Providers
+  return { providers, coinPublicKey: coinPublicKeyHex as CoinPublicKey }
 }
 
 export async function connectBrowserContract(
@@ -127,7 +136,7 @@ export async function connectBrowserContract(
   config: MidnightConfig,
 ): Promise<ConnectedContract> {
   setNetworkId(config.networkId as any)
-  const providers = await buildProviders(connectedApi, config)
+  const { providers, coinPublicKey } = await buildProviders(connectedApi, config)
   const compiledContract = CompiledContract.make(
     'contract-offer-files',
     OfferFilesContract.Contract as any,
@@ -141,5 +150,5 @@ export async function connectBrowserContract(
     privateStateId: PRIVATE_STATE_ID,
     initialPrivateState: {},
   })
-  return { contract: contract as Found, config }
+  return { contract: contract as Found, config, coinPublicKey }
 }

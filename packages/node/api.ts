@@ -23,6 +23,7 @@ import {
 } from "@zswap-da/database";
 
 import {
+  ALLOW_CONTRACT_MAKER_OFFERS,
   apiRateLimitAllowList,
   apiRateLimitMax,
   apiSseMaxConnections,
@@ -987,6 +988,7 @@ export const apiRouter: StartConfigApiRouter = async function (
       const crypto = verifyOfferCrypto(validation.tx!, {
         refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
         tblock: new Date(),
+        contractMakerRetry: ALLOW_CONTRACT_MAKER_OFFERS,
       });
       if (!crypto.ok) {
         return reply.code(400).send({ error: crypto.code, reason: crypto.reason });

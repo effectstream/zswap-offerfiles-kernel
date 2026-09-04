@@ -12,7 +12,7 @@
 //   bun packages/tests/unshielded-diagnose.ts
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { UnshieldedAddress } from "@midnight-ntwrk/wallet-sdk-address-format";
+import { UnshieldedAddress } from "@midnightntwrk/wallet-sdk-address-format";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { deriveLegs } from "@zswap-da/validator";
@@ -103,8 +103,20 @@ try {
 
   const deployed = await joinOfferFiles(genesis);
   const nonce = BigInt(Date.now());
-  const T0 = await mintShielded(deployed, SEP.T0, MINT, nonce);
-  const T1 = await mintShielded(deployed, SEP.T1, MINT, nonce + 1n);
+  const T0 = await mintShielded(
+    deployed,
+    SEP.T0,
+    MINT,
+    nonce,
+    genesis.zswapSecretKeys.coinPublicKey,
+  );
+  const T1 = await mintShielded(
+    deployed,
+    SEP.T1,
+    MINT,
+    nonce + 1n,
+    genesis.zswapSecretKeys.coinPublicKey,
+  );
   const U = await mintUnshielded(deployed, SEP.U, MINT, pC.unshieldedAddress);
   console.log(`${TAG} T0=${short(T0)} (shielded)  T1=${short(T1)} (shielded)  U=${short(U)} (unshielded→pC)`);
 
@@ -148,7 +160,7 @@ try {
     );
     const cSigned = await (pC.wallet as any).signUnprovenTransaction(
       c0.transaction,
-      (data: Uint8Array) => pC.unshieldedKeystore.signData(data),
+      (data: Uint8Array) => pC.unshieldedKeystore.signDataAsync(data),
     );
     introspect("C) cross-kind    give UNSHIELDED U / want shielded T0", cSigned);
   } catch (e) {

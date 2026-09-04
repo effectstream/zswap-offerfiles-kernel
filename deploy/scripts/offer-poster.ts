@@ -287,6 +287,7 @@ function makeMinter(walletResult: PinnedWalletResult, deployed: unknown, contrac
         nonce,
         {
           contractAddress,
+          coinPublicKey: walletResult.zswapSecretKeys.coinPublicKey,
           // A THUNK, not the key: `.coinSecretKey` mints a new wasm wrapper on
           // every access and the secret belongs to the owning `ZswapSecretKeys`,
           // whose finalizer clears it once unreachable. A captured handle starts
@@ -484,10 +485,14 @@ async function startup(cfg: PosterConfig): Promise<Started> {
 
   let dustBalance = 0n;
   try {
-    dustBalance = await waitForDustFunds(walletResult.wallet, {
+    // `waitForDustFunds` (midnight-contracts 0.200.x) resolves a readiness
+    // record — spendable-coin count plus balance — not the bare balance the
+    // 0.103 line returned. Only the balance feeds the log and /health.
+    const dustFunds = await waitForDustFunds(walletResult.wallet, {
       waitNonZero: true,
       timeoutMs: cfg.dustWaitTimeoutMs,
     });
+    dustBalance = dustFunds.balance;
   } catch (err) {
     warn(
       `no spendable DUST within POSTER_DUST_WAIT_TIMEOUT_MS=${cfg.dustWaitTimeoutMs}ms ` +

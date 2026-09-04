@@ -105,7 +105,7 @@ run. See §2.4 and §2.5 for the measurements.
 - **Multi-leg (T-D5).** The same merged transaction has 2 gives × 2 wants and
   would register as **four** trades at four different prices. CLOSED by PR-#7;
   the fixture is
-  also unblocked independently: `mintShielded(deployed, sepByte, …)`
+  also unblocked independently: `mintShielded(deployed, sepByte, …, coinPublicKey)`
   parameterizes the color by domain separator on the already-deployed contract,
   so a third shielded color is one `TOKEN_SEPS` entry plus a funding grant — no
   new contract needed.
@@ -463,7 +463,7 @@ wrongly exclude those.
 book, so a taker can only find it through `/v1/offers` with token filters —
 effectively OTC. That is the intent, not a side effect.
 
-The fixture is also no longer blocked. `mintShielded(deployed, sepByte, …)`
+The fixture is also no longer blocked. `mintShielded(deployed, sepByte, …, coinPublicKey)`
 parameterizes the color by domain separator on the ALREADY-DEPLOYED contract, so
 a third shielded color is one entry in `TOKEN_SEPS` plus a funding grant — no
 new contract and no contract change.

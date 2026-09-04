@@ -25,6 +25,32 @@ import {
   midnightContract,
 } from "./env.ts";
 
+/**
+ * The offer-files contract this node indexes.
+ *
+ * Two sources, env first — the same precedence `config.preview.ts` already
+ * uses, and the reason it exists here now: when the deploy is a SEPARATE
+ * one-shot container (demo-infra Phase 11), the address is produced before
+ * this process starts and has to be injectable. The file remains the default
+ * for a single-checkout dev run, where `midnight-contract:deploy` writes it.
+ *
+ * This replaces an unguarded `midnightContract!.contractAddress`. A missing
+ * artifact used to surface as a bare TypeError on a non-null assertion, which
+ * says nothing about what to do; the throw below names both ways to fix it.
+ */
+const contractAddress =
+  process.env.MIDNIGHT_CONTRACT_ADDRESS ?? midnightContract?.contractAddress;
+
+if (!contractAddress) {
+  throw new Error(
+    `No Midnight contract address for network '${midnightNetworkConfig.id}'.\n` +
+      "Either:\n" +
+      "  1. Set MIDNIGHT_CONTRACT_ADDRESS, or\n" +
+      `  2. Provide packages/contracts-midnight/contract-offer-files.${midnightNetworkConfig.id}.json\n` +
+      "     (written by `bun run --filter @zswap-da/contracts-midnight midnight-contract:deploy`).",
+  );
+}
+
 const mainSyncProtocolName = "mainNtp";
 let launchStartTime: number | undefined;
 
@@ -124,7 +150,7 @@ export const config = new ConfigBuilder()
         name: "ZswapMidnightState",
         type: PrimitiveTypeMidnightGeneric,
         startBlockHeight: 1,
-        contractAddress: midnightContract!.contractAddress,
+        contractAddress,
         stateMachinePrefix: "midnight-zswap",
         contract: { ledger: OfferFilesContract.ledger },
         networkId: midnightNetworkConfig.id,

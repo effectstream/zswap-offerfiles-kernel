@@ -22,8 +22,16 @@
 // package.json — `deploy/` is not a workspace member, so nothing else resolves
 // (see `maker-offer.ts`'s header and P0 note 3 of the plan).
 
-import { coinNullifier, decodeShieldedCoinInfo, rawTokenType } from "@midnight-ntwrk/ledger-v8";
-import type { CoinSecretKey, ShieldedCoinInfo } from "@midnight-ntwrk/ledger-v8";
+import { coinNullifier, decodeShieldedCoinInfo, rawTokenType } from "@midnightntwrk/ledger-v9";
+import type {
+  CoinPublicKey,
+  CoinSecretKey,
+  ShieldedCoinInfo,
+} from "@midnightntwrk/ledger-v9";
+import {
+  shieldedUserRecipient,
+  type ShieldedMintRecipient,
+} from "../../../packages/contracts-midnight/contract-offer-files/src/mint-recipient.ts";
 
 // The faucet derivation itself, imported rather than copied. `mintable.ts` is
 // TextEncoder, Math.imul and the mint allotment, and its only import is the
@@ -158,7 +166,7 @@ export function assertShieldedPreset(nameOrHex: string): MintableKind {
 // ── colour derivation ────────────────────────────────────────────────────────
 
 /**
- * The colour `mint_shielded(domainSepFromName(name), …)` produces on the
+ * The colour `mint_shielded(domainSepFromName(name), …, left(ownCoinKey))` produces on the
  * contract at `contractAddress`. Pure; no network, no wallet.
  */
 export function expectedColour(name: string, contractAddress: string): string {
@@ -238,6 +246,7 @@ export interface FaucetContract {
       domainSep: Uint8Array,
       amount: bigint,
       nonce: bigint,
+      recipient: ShieldedMintRecipient,
     ): Promise<MintShieldedTx>;
   };
 }
@@ -245,6 +254,8 @@ export interface FaucetContract {
 export interface MintContext {
   /** The offer-files contract the wallet joined — the colour derives from it. */
   contractAddress: string;
+  /** The joining wallet's explicit shielded recipient. */
+  coinPublicKey: CoinPublicKey;
   /**
    * `walletResult.zswapSecretKeys.coinSecretKey`, or better a thunk that reads
    * it. Never logged.
@@ -326,7 +337,12 @@ export async function mintFaucetToken(
   const wanted = expectedColour(name, contractAddress);
   const sep = domainSepFromName(String(name).trim());
 
-  const tx = await deployed.callTx.mint_shielded(sep, amount, nonce);
+  const tx = await deployed.callTx.mint_shielded(
+    sep,
+    amount,
+    nonce,
+    shieldedUserRecipient(ctx.coinPublicKey),
+  );
 
   const result = tx?.private?.result;
   if (result === undefined || result === null) {

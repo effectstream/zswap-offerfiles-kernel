@@ -18,8 +18,8 @@
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
-import { MidnightBech32m, UnshieldedAddress } from "@midnight-ntwrk/wallet-sdk-address-format";
+import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
+import { MidnightBech32m, UnshieldedAddress } from "@midnightntwrk/wallet-sdk-address-format";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -121,7 +121,13 @@ try {
   console.log(`${TAG} minting T0 (shielded) + U (unshielded → P1)…`);
   const deployed = await joinOfferFiles(genesis);
   const nonce = BigInt(Date.now());
-  const T0 = await mintShielded(deployed, SEP.T0, MINT_AMOUNT, nonce);
+  const T0 = await mintShielded(
+    deployed,
+    SEP.T0,
+    MINT_AMOUNT,
+    nonce,
+    genesis.zswapSecretKeys.coinPublicKey,
+  );
   const U = await mintUnshielded(deployed, SEP.U, MINT_AMOUNT, p1.unshieldedAddress);
   console.log(`${TAG} T0=${T0.slice(0, 12)}… (shielded)  U=${U.slice(0, 12)}… (unshielded → P1)`);
 
@@ -157,7 +163,7 @@ try {
     );
     const signed = await (p1.wallet as any).signUnprovenTransaction(
       r1.transaction,
-      (data: Uint8Array) => p1.unshieldedKeystore.signData(data),
+      (data: Uint8Array) => p1.unshieldedKeystore.signDataAsync(data),
     );
     offer1 = await p1.wallet.finalizeTransaction(signed);
     check("P1 unshielded-give offer built + signed", true);

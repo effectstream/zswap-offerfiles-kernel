@@ -1057,7 +1057,7 @@ async function submitTransferOnce(
   try {
     const signed = layer === "unshielded"
       ? await (from.wallet as any).signRecipe(recipe, (payload: Uint8Array) =>
-          from.unshieldedKeystore.signData(payload),
+          from.unshieldedKeystore.signDataAsync(payload),
         )
       : recipe;
     finalized = await from.wallet.finalizeRecipe(signed as never);
@@ -1563,12 +1563,14 @@ export async function provisionRealActors(
       config.tokenASeparator,
       config.mintAmount,
       config.mintNonce,
+      genesis.zswapSecretKeys.coinPublicKey,
     );
     const tokenB = await mintShielded(
       deployed,
       config.tokenBSeparator,
       config.mintAmount,
       config.mintNonce + 1n,
+      genesis.zswapSecretKeys.coinPublicKey,
     );
     if (tokenA === tokenB || !/^[0-9a-f]{64}$/.test(tokenA) || !/^[0-9a-f]{64}$/.test(tokenB)) {
       throw new Error("real mint returned invalid or identical A/B token colors");

@@ -1,12 +1,12 @@
 // NOTE & TODO:
-// Importing "@midnight-ntwrk/onchain-runtime" here is a workaround.
+// Importing "@midnightntwrk/onchain-runtime-v4" here is a workaround.
 // Loading this package in a dependency makes the onchain-runtime wasm
 // fail in runtime when trying to parse the state.
 // This side-effect import ensures the wasm bundle is registered.
-import "@midnight-ntwrk/onchain-runtime-v3";
+import "@midnightntwrk/onchain-runtime-v4";
 
 // NOTE: This is a fix for Midnight ZSwap.
-import { ZswapChainState } from "@midnight-ntwrk/ledger-v8";
+import { ZswapChainState } from "@midnightntwrk/ledger-v9";
 
 const origTryApply = ZswapChainState.prototype.tryApply;
 ZswapChainState.prototype.tryApply = function (...args) {

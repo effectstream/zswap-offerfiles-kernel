@@ -6,13 +6,15 @@
   "exports": {
     ".": "./src/index.ts",
     "./witnesses": "./src/witnesses.ts",
+    "./mint-recipient": "./src/mint-recipient.ts",
     "./contract": "./src/managed/contract/index.js"
   },
   "scripts": {
-    "compact": "compact compile +0.30.0 src/offer-files.compact src/managed/"
+    "compact": "../../../infra/compact.sh src/offer-files.compact src/managed/"
   },
   "dependencies": {
-    "@midnight-ntwrk/compact-runtime": "0.15.0",
-    "@midnight-ntwrk/compact-js": "2.5.0"
+    "@midnight-ntwrk/compact-runtime": "0.19.0",
+    "@midnight-ntwrk/compact-js": "2.5.5-rc.7",
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3"
   }
 }

@@ -8,7 +8,10 @@
 // unspendable coins on a live stack.
 
 import { describe, expect, test } from "bun:test";
-import { ZswapSecretKeys } from "@midnight-ntwrk/ledger-v8";
+import {
+  encodeCoinPublicKey,
+  ZswapSecretKeys,
+} from "@midnightntwrk/ledger-v9";
 
 import {
   __resetNonceCounter,
@@ -28,6 +31,7 @@ import {
   verifyTokenName,
 } from "./faucet-mint.ts";
 import type { FaucetContract, KnownTokenRow, MintShieldedTx } from "./faucet-mint.ts";
+import type { ShieldedMintRecipient } from "../../../packages/contracts-midnight/contract-offer-files/src/mint-recipient.ts";
 import { KernelApi } from "./kernel-api.ts";
 import { MINT_AMOUNT, MINT_COINS } from "../../../docs/src/wallet/mintable.ts";
 import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../../../packages/solver-core/amount.ts";
@@ -184,13 +188,30 @@ describe("freshNonce", () => {
 function fakeContract(
   colour: string,
   opts: { value?: bigint; nonce?: string; txHash?: string; txId?: string; omitResult?: boolean } = {},
-): FaucetContract & { calls: Array<{ sep: string; amount: bigint; nonce: bigint }> } {
-  const calls: Array<{ sep: string; amount: bigint; nonce: bigint }> = [];
+): FaucetContract & {
+  calls: Array<{
+    sep: string;
+    amount: bigint;
+    nonce: bigint;
+    recipient: ShieldedMintRecipient;
+  }>;
+} {
+  const calls: Array<{
+    sep: string;
+    amount: bigint;
+    nonce: bigint;
+    recipient: ShieldedMintRecipient;
+  }> = [];
   return {
     calls,
     callTx: {
-      async mint_shielded(sep: Uint8Array, amount: bigint, nonce: bigint): Promise<MintShieldedTx> {
-        calls.push({ sep: toHex(sep), amount, nonce });
+      async mint_shielded(
+        sep: Uint8Array,
+        amount: bigint,
+        nonce: bigint,
+        recipient: ShieldedMintRecipient,
+      ): Promise<MintShieldedTx> {
+        calls.push({ sep: toHex(sep), amount, nonce, recipient });
         if (opts.omitResult) return { private: {}, public: { txHash: opts.txHash } };
         return {
           private: {
@@ -208,7 +229,11 @@ function fakeContract(
 }
 
 describe("mintFaucetToken", () => {
-  const ctx = { contractAddress: PREPROD_CONTRACT, coinSecretKey: COIN_SECRET_KEY };
+  const ctx = {
+    contractAddress: PREPROD_CONTRACT,
+    coinPublicKey: ZSWAP_KEYS.coinPublicKey,
+    coinSecretKey: COIN_SECRET_KEY,
+  };
 
   test("accepts the coin when the minted colour is the derived one", async () => {
     // The canned colour is built with the SAME rawTokenType path the assertion
@@ -233,6 +258,13 @@ describe("mintFaucetToken", () => {
     expect(deployed.calls[0]!.sep).toBe(toHex(domainSepFromName("WBTC")));
     expect(deployed.calls[0]!.amount).toBe(1000n);
     expect(deployed.calls[0]!.nonce).toBe(42n);
+    expect(deployed.calls[0]!.recipient.is_left).toBe(true);
+    expect(deployed.calls[0]!.recipient.left.bytes).toHaveLength(32);
+    expect(deployed.calls[0]!.recipient.left.bytes).toEqual(
+      encodeCoinPublicKey(ZSWAP_KEYS.coinPublicKey),
+    );
+    expect(deployed.calls[0]!.recipient.right.bytes).toEqual(new Uint8Array(32));
+    expect(deployed.calls[0]!.recipient.right.bytes).toHaveLength(32);
   });
 
   test("the coin nonce is the CHAIN nonce, not the bigint passed in", async () => {
@@ -278,6 +310,7 @@ describe("mintFaucetToken", () => {
     const viaThunk = await mintFaucetToken(fakeContract(PREPROD_WBTC), "WBTC", 7n, 1n, ctx);
     const viaBare = await mintFaucetToken(fakeContract(PREPROD_WBTC), "WBTC", 7n, 1n, {
       contractAddress: PREPROD_CONTRACT,
+      coinPublicKey: ZSWAP_KEYS.coinPublicKey,
       coinSecretKey: ZSWAP_KEYS.coinSecretKey,
     });
     expect(viaBare.nullifier).toBe(viaThunk.nullifier);

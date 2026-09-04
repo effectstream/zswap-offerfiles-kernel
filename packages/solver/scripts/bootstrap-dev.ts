@@ -89,7 +89,7 @@ if (solverNight < NIGHT_PER_UTXO) {
           { ttl: new Date(Date.now() + 30 * 60_000), payFees: true },
         );
         const signed = await (genesis.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-          genesis.unshieldedKeystore.signData(p),
+          genesis.unshieldedKeystore.signDataAsync(p),
         );
         await genesis.wallet.submitTransaction(await genesis.wallet.finalizeRecipe(signed));
         lastErr = undefined;
@@ -118,8 +118,20 @@ log("registered NIGHT for dust");
 
 const deployed = await joinOfferFiles(solver);
 const nonceBase = BigInt(Date.now());
-const tokenA = await mintShielded(deployed, SEP_A, MINT_AMOUNT, nonceBase);
-const tokenB = await mintShielded(deployed, SEP_B, MINT_AMOUNT, nonceBase + 1n);
+const tokenA = await mintShielded(
+  deployed,
+  SEP_A,
+  MINT_AMOUNT,
+  nonceBase,
+  solver.zswapSecretKeys.coinPublicKey,
+);
+const tokenB = await mintShielded(
+  deployed,
+  SEP_B,
+  MINT_AMOUNT,
+  nonceBase + 1n,
+  solver.zswapSecretKeys.coinPublicKey,
+);
 log(`minted TESTA=${tokenA.slice(0, 10)}… TESTB=${tokenB.slice(0, 10)}…`);
 
 await waitForShielded(solver, tokenA, 1n, 36);

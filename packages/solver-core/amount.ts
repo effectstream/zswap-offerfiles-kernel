@@ -2,7 +2,7 @@
  * Whole coins ⇄ base units (00024 FR-004).
  *
  * WHY THIS EXISTS. Amounts on chain and on the wire are integer BASE UNITS —
- * `mint_shielded`/`mint_unshielded` take `Uint<64>`, `/v1/quote` takes and
+ * `mint_shielded`/`mint_unshielded` take explicit recipients and `Uint<64>` amounts; `/v1/quote` takes and
  * returns integer strings, and every ledger amount is a bigint. What a human
  * says is a WHOLE COIN: "1.5 WBTC", not "1500000". The bridge between the two
  * is `known_tokens.decimals`, which since 00024 is `6` for every token this

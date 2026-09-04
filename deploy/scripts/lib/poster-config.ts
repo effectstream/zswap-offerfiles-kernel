@@ -567,15 +567,15 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
       env,
       "MIDNIGHT_INDEXER_HTTP",
       isUndeployed
-        ? "http://127.0.0.1:8088/api/v3/graphql"
-        : `https://indexer.${networkId}.midnight.network/api/v3/graphql`,
+        ? "http://127.0.0.1:8088/api/v4/graphql"
+        : `https://indexer.${networkId}.midnight.network/api/v4/graphql`,
     ),
     indexerWS: readString(
       env,
       "MIDNIGHT_INDEXER_WS",
       isUndeployed
-        ? "ws://127.0.0.1:8088/api/v3/graphql/ws"
-        : `wss://indexer.${networkId}.midnight.network/api/v3/graphql/ws`,
+        ? "ws://127.0.0.1:8088/api/v4/graphql/ws"
+        : `wss://indexer.${networkId}.midnight.network/api/v4/graphql/ws`,
     ),
     node: readString(
       env,
@@ -610,7 +610,7 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
     );
   }
   if (give.name === undefined) {
-    // The faucet mints from a NAME (`mint_shielded(domainSepFromName(name), …)`),
+    // The faucet mints from a NAME (`mint_shielded(domainSepFromName(name), …, left(ownCoinKey))`),
     // so a raw colour on the give leg can never be minted. Re-offering a coin
     // that is already in the wallet would still work, but a poster that can only
     // re-offer is not what FR-003 describes — refuse rather than degrade.

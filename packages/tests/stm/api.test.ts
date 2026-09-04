@@ -81,8 +81,20 @@ export async function apiTest(db: Client): Promise<void> {
     console.log(`${TAG} minting T0,T1 + funding makers…`);
     const deployed = await joinOfferFiles(genesis);
     const nonce = BigInt(Date.now());
-    const T0 = await mintShielded(deployed, SEP.T0, MINT_AMOUNT, nonce);
-    const T1 = await mintShielded(deployed, SEP.T1, MINT_AMOUNT, nonce + 1n);
+    const T0 = await mintShielded(
+      deployed,
+      SEP.T0,
+      MINT_AMOUNT,
+      nonce,
+      genesis.zswapSecretKeys.coinPublicKey,
+    );
+    const T1 = await mintShielded(
+      deployed,
+      SEP.T1,
+      MINT_AMOUNT,
+      nonce + 1n,
+      genesis.zswapSecretKeys.coinPublicKey,
+    );
     for (const [c, l] of [[T0, "T0"], [T1, "T1"]] as const) {
       if ((await waitForShielded(genesis, c, FUND, 24)) < FUND)
         throw new Error(`genesis missing ${l}`);
@@ -146,6 +158,17 @@ export async function apiTest(db: Client): Promise<void> {
     );
     await assert("API returned my 2 offers", async () => apiOffers.length === 2);
 
+    // Resolve the DB row ids NOW, while the offers are still live in
+    // offer_file — after settlement they move to offer_file_history and a
+    // by-hash lookup in offer_file returns nothing (measured: the archive
+    // assertions timed out on exactly that).
+    const ids = (
+      await db.query<{ id: number }>(
+        `SELECT id FROM offer_file WHERE offer_hash = ANY($1::text[])`,
+        [apiOffers.map((o: any) => o.offerId)],
+      )
+    ).rows.map((r) => r.id);
+
     const giveColors = new Set(apiOffers.flatMap((o) => o.computed.gives.map((g) => g.token)));
     const wantColors = new Set(apiOffers.flatMap((o) => o.computed.wants.map((w) => w.token)));
     await assert(
@@ -205,7 +228,6 @@ export async function apiTest(db: Client): Promise<void> {
       async () => spentOk,
     );
 
-    const ids = apiOffers.map((o) => o.id);
     const archivedOk = await waitFor(
       "both offers archived",
       async () => offersGone(db, ids),
@@ -247,10 +269,18 @@ export async function apiTest(db: Client): Promise<void> {
     console.log(`${TAG} NEGATIVE: re-submitting the already-settled P0 offer…`);
     const beforeBad2 = await count(db, "offer_file");
     const badRes2 = await submitOffer(blob0);
+    // A BYTE-IDENTICAL re-submit hits the submit gate's dedup rule FIRST — it
+    // probes offer_file AND offer_file_history by hash (deliberately, see the
+    // api.ts comment: cheapest check against the cheapest attack), so an
+    // archived offer answers 409 DUPLICATE_OFFER before the nullifier
+    // liveness rule can answer 400 NULLIFIER_SPENT. Both are correct
+    // fee-free rejections of a spent offer; NULLIFIER_SPENT is reserved for a
+    // DIFFERENT offer spending the same coins.
     await assert(
-      "spent-offer re-submit rejected (NULLIFIER_SPENT)",
+      "spent-offer re-submit rejected (DUPLICATE_OFFER or NULLIFIER_SPENT)",
       async () =>
-        badRes2.status === 400 && badRes2.body?.error === "NULLIFIER_SPENT",
+        (badRes2.status === 409 && badRes2.body?.error === "DUPLICATE_OFFER") ||
+        (badRes2.status === 400 && badRes2.body?.error === "NULLIFIER_SPENT"),
     );
     await sleep(8000);
     await assert(

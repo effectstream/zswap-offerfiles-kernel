@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import type { OrchestratorConfig } from "@effectstream/orchestrator/config";
 import { DbNames, launchPglite } from "@effectstream/orchestrator/launch-pglite";
@@ -12,45 +13,32 @@ import {
 
 const root = import.meta.dirname!;
 
-const COMPACT_VERSION = "0.30.0";
+// The compactc pin lives in infra/compact-version.txt and is run through
+// infra/compact.sh: a host `$COMPACTC` of that exact version if set, otherwise
+// the checksum-pinned `compact-toolchain` image. The check invokes that runner
+// directly so a stale COMPACT_IMAGE or wrong host binary fails before compile.
+const COMPACT_VERSION = fs
+  .readFileSync(path.join(root, "infra/compact-version.txt"), "utf8")
+  .trim();
 
 const compactCheckScript = `
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
+let out = "";
 try {
-  execSync("compact --version", { stdio: "pipe" });
-} catch {
-  console.error([
-    "",
-    "ERROR: 'compact' CLI not found.",
-    "",
-    "Install it with:",
-    "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh",
-    "  compact update ${COMPACT_VERSION}",
-    "",
-  ].join("\\n"));
+  out = execFileSync(${JSON.stringify(path.join(root, "infra/compact.sh"))}, ["--version"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+    timeout: 120000,
+  }).trim();
+} catch (error) {
+  console.error("ERROR: checksum-pinned compactc ${COMPACT_VERSION} route is unavailable: " + error.message);
   process.exit(1);
 }
-// "compact list" occasionally hangs forever (CLI quirk); the CLI itself
-// already responded to --version above, so treat a hung list as non-fatal.
-let list = "";
-try {
-  list = execSync("compact list", { encoding: "utf8", timeout: 30000 });
-} catch {
-  console.log("compact list timed out — compact CLI responds, continuing");
-  process.exit(0);
-}
-if (!list.includes("${COMPACT_VERSION}")) {
-  console.error([
-    "",
-    "ERROR: Compact version ${COMPACT_VERSION} is not installed.",
-    "",
-    "Install it with:",
-    "  compact update ${COMPACT_VERSION}",
-    "",
-  ].join("\\n"));
+if (out !== "${COMPACT_VERSION}") {
+  console.error("ERROR: infra/compact.sh reports '" + out + "', expected exact compactc ${COMPACT_VERSION}.");
   process.exit(1);
 }
-console.log("compact v${COMPACT_VERSION} is available");
+console.log("compactc ${COMPACT_VERSION} available through verified infra/compact.sh route");
 `.trim();
 
 const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
@@ -61,7 +49,7 @@ export default {
   processes: [
     {
       name: "compact-check",
-      description: `Check that the Compact compiler (v${COMPACT_VERSION}) is installed`,
+      description: `Check that compactc ${COMPACT_VERSION} is reachable (COMPACTC or Docker, via infra/compact.sh)`,
       args: ["-e", compactCheckScript],
       waitToExit: true,
       critical: true,

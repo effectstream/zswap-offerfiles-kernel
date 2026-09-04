@@ -55,6 +55,7 @@ console.log("compact v${COMPACT_VERSION} is available");
 
 const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
 const midnightMintTestTokens = "midnight-mint-test-tokens";
+const syncApiHealth = "sync-api-health";
 
 export default {
   processes: [
@@ -91,9 +92,10 @@ export default {
       description: "Mint dev test tokens (2 shielded + 1 unshielded) via the offer-files contract",
       cwd: path.join(root, "packages/contracts-midnight"),
       args: ["run", "mint-test-tokens.ts"],
+      env: { ZSWAP_API: "http://127.0.0.1:9999" },
       waitToExit: true,
       // NOT critical: a mint hiccup must not tear the dev stack down.
-      dependsOn: [MidnightNames.CONTRACT_DEPLOY],
+      dependsOn: [MidnightNames.CONTRACT_DEPLOY, syncApiHealth],
     },
 
     ...launchCelestia(
@@ -110,7 +112,11 @@ export default {
       type: "system-dependency",
       // Local clients (the solver's book mirror, e2e scripts) burst past the
       // shared per-IP budget during a page-through plus settlement polls.
-      env: { PGLITE: "true", API_RATE_LIMIT_ALLOWLIST: "127.0.0.1,::1" },
+      env: {
+        PGLITE: "true",
+        API_RATE_LIMIT_ALLOWLIST: "127.0.0.1,::1",
+        ENABLE_TOKEN_REGISTRY: "true",
+      },
       dependsOn: [
         DbNames.PGLITE_WAIT,
         CelestiaNames.FUND,
@@ -118,6 +124,14 @@ export default {
       ],
     },
 
+    {
+      name: syncApiHealth,
+      description: "Wait for the ZSwap-DA kernel API health endpoint",
+      args: ["x", "wait-on", "--timeout", "600000", "http-get://127.0.0.1:9999/v1/health"],
+      waitToExit: true,
+      critical: true,
+      dependsOn: ["sync"],
+    },
 
     {
       name: "batcher",
@@ -148,7 +162,7 @@ export default {
       // adds a third wallet's subscriptions on top of the mint wallet's and can
       // exhaust the packaged indexer's wallet DB pool mid-bootstrap. Upstream
       // gated only the batcher because upstream has no solver.
-      dependsOn: [...midnightDeps, midnightMintTestTokens, "sync"],
+      dependsOn: [...midnightDeps, midnightMintTestTokens, syncApiHealth, "sync"],
     },
 
     // The price feed is deliberately NOT registered here (Q-11).

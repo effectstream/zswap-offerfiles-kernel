@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { ENV } from "@effectstream/utils/node-env";
+import { optionalString } from "./env.ts";
 
 // The two policy types and their parsing live in @zswap-da/offer-guard, which
 // the node also reads: both processes are configured by the SAME variable
@@ -128,7 +129,7 @@ export function loadSponsorshipConfig(): SponsorshipConfig {
     return value;
   };
 
-  const nodeApiUrl = ENV.getString("BATCHER_NODE_API_URL", "http://127.0.0.1:9999").trim();
+  const nodeApiUrl = optionalString("BATCHER_NODE_API_URL", "http://127.0.0.1:9999");
   // Checked early: the failure would otherwise be one `fetch` rejection every
   // refresh, forever. The protocol check is not pedantry — `new URL` happily
   // accepts "kernel:9999" (scheme "kernel:"), which is exactly the typo a
@@ -176,7 +177,7 @@ export function loadSponsorshipConfig(): SponsorshipConfig {
 }
 
 export function loadBatcherConfig(): BatcherConfig {
-  const network = ENV.getString("CELESTIA_NETWORK", "devnet") as
+  const network = optionalString("CELESTIA_NETWORK", "devnet") as
     | "devnet"
     | "mainnet"
     | "mocha";
@@ -184,7 +185,7 @@ export function loadBatcherConfig(): BatcherConfig {
   return {
     port: ENV.getNumber("BATCHER_PORT", 3334),
     pollingIntervalMs: ENV.getNumber("BATCHER_POLLING_INTERVAL_MS", 250),
-    storageDir: ENV.getString("BATCHER_STORAGE_DIR", DEFAULT_STORAGE_DIR),
+    storageDir: optionalString("BATCHER_STORAGE_DIR", DEFAULT_STORAGE_DIR),
     walletSeed: ENV.getString("BATCHER_WALLET_SEED") || BATCHER_SEED,
     maxSlotsPerWallet: ENV.getNumber(
       "BATCHER_MAX_SLOTS_PER_WALLET",
@@ -207,8 +208,8 @@ export function loadBatcherConfig(): BatcherConfig {
       proofServer: midnightNetworkConfig.proofServer,
     },
     celestia: {
-      rpcUrl: ENV.getString("CELESTIA_RPC_URL", "http://127.0.0.1:26658"),
-      namespace: ENV.getString("CELESTIA_NAMESPACE", MIP6_NAMESPACE_ID_SUFFIX_HEX),
+      rpcUrl: optionalString("CELESTIA_RPC_URL", "http://127.0.0.1:26658"),
+      namespace: optionalString("CELESTIA_NAMESPACE", MIP6_NAMESPACE_ID_SUFFIX_HEX),
       authToken: ENV.getString("CELESTIA_AUTH_TOKEN", "") || undefined,
       network,
       fee: ENV.getNumber("CELESTIA_FEE", 2000),

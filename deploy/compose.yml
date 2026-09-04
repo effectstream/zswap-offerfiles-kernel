@@ -238,8 +238,8 @@ services:
       retries: 40
       start_period: 15s
 
-  # One-shot. Deploys the Compact contract exactly once per volume and publishes
-  # its address; everything downstream waits on service_completed_successfully.
+  # Contract-only one-shot. It deploys exactly once per volume and atomically
+  # publishes the address. The kernel starts next; minting needs its healthy API.
   offerfiles-deploy:
     <<: [*kernel-image, *logging]
     entrypoint: ["/usr/local/bin/entrypoint-deploy.sh"]
@@ -315,6 +315,27 @@ services:
       retries: 60
       start_period: 60s
 
+  # Post-kernel one-shot: mint the three dev tokens, register their names through
+  # the live /v1 API, and atomically publish minted-tokens.json. It retains the
+  # old non-fatal mint behavior, but every wallet consumer waits for it to exit
+  # so no second facade overlaps the genesis mint wallet.
+  mint-test-tokens:
+    <<: [*kernel-image, *logging]
+    entrypoint: ["/usr/local/bin/entrypoint-mint-test-tokens.sh"]
+    restart: "no"
+    depends_on:
+      kernel:
+        condition: service_healthy
+      offerfiles-deploy:
+        condition: service_completed_successfully
+    environment:
+      <<: *midnight-endpoints
+      MIDNIGHT_STORAGE_PASSWORD: ${MIDNIGHT_STORAGE_PASSWORD:-YourPasswordMy1!}
+      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
+      ZSWAP_API: http://kernel:9999
+    volumes:
+      - offerfiles-deploy:/srv/offerfiles-deploy
+
   batcher:
     <<: [*kernel-image, *logging]
     entrypoint: ["/usr/local/bin/entrypoint-batcher.sh"]
@@ -323,6 +344,10 @@ services:
       celestia:
         condition: service_healthy
       offerfiles-deploy:
+        condition: service_completed_successfully
+      mint-test-tokens:
+        condition: service_completed_successfully
+      register-minted-tokens:
         condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
@@ -389,6 +414,10 @@ services:
         condition: service_healthy
       offerfiles-deploy:
         condition: service_completed_successfully
+      mint-test-tokens:
+        condition: service_completed_successfully
+      register-minted-tokens:
+        condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
       CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
@@ -428,6 +457,10 @@ services:
         condition: service_healthy
       offerfiles-deploy:
         condition: service_completed_successfully
+      mint-test-tokens:
+        condition: service_completed_successfully
+      register-minted-tokens:
+        condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
       CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
@@ -437,8 +470,8 @@ services:
       # wallet, so it is the one that can actually give a test token away.
       MAKER_SEED: ${MAKER_OFFER_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
       # Unset ⇒ read from minted-tokens.json, published on the shared volume by
-      # the deploy one-shot. Colors derive from the deployed contract address,
-      # so they differ on every fresh stack and cannot be written down here.
+      # the post-kernel mint one-shot. Colors derive from the deployed contract
+      # address, so they differ on every fresh stack and cannot be written here.
       GIVE_TOKEN: ${MAKER_OFFER_GIVE_TOKEN:-}
       WANT_TOKEN: ${MAKER_OFFER_WANT_TOKEN:-}
       GIVE_AMOUNT: ${MAKER_OFFER_GIVE_AMOUNT:-500000}
@@ -449,16 +482,10 @@ services:
       - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - maker-offer-state:/var/lib/maker-offer
 
-  # Give the faucet-minted colours their NAMES (00007, issues/00008).
-  #
-  # `mint-test-tokens.ts` tries to register TestTokenA/B/U itself and cannot
-  # succeed here: it posts to a path the node never served and to its own
-  # loopback while the kernel does not exist yet (`kernel` waits on the deploy
-  # one-shot). Only Compose knows when the kernel is healthy, so this is where
-  # the registration actually lands. It reads `minted-tokens.json` from the
-  # shared volume and POSTs `/v1/known-tokens` with the spellings preprod uses
-  # (TESTTOKENA/B/U). Cosmetic and NON-FATAL: the stack trades without names,
-  # and the monitor site falls back to short hex.
+  # Compatibility/backstop registration for this release. The preceding mint
+  # one-shot already posts all three names through /v1/known-tokens; on a clean
+  # stack this service must therefore observe three 409 "already registered"
+  # outcomes. It remains non-fatal for operators with the registry disabled.
   register-minted-tokens:
     <<: [*kernel-image, *logging]
     entrypoint: ["/usr/local/bin/entrypoint-register-minted-tokens.sh"]
@@ -467,6 +494,8 @@ services:
       kernel:
         condition: service_healthy
       offerfiles-deploy:
+        condition: service_completed_successfully
+      mint-test-tokens:
         condition: service_completed_successfully
     environment:
       CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
@@ -512,6 +541,10 @@ services:
       kernel:
         condition: service_healthy
       offerfiles-deploy:
+        condition: service_completed_successfully
+      mint-test-tokens:
+        condition: service_completed_successfully
+      register-minted-tokens:
         condition: service_completed_successfully
     environment:
       MIDNIGHT_NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
@@ -691,6 +724,10 @@ services:
         condition: service_healthy
       offerfiles-deploy:
         condition: service_completed_successfully
+      mint-test-tokens:
+        condition: service_completed_successfully
+      register-minted-tokens:
+        condition: service_completed_successfully
       # NOT just ordering: solver-provision drives a wallet on SOLVER_SEED, and
       # two facades on one seed against one node force each other's connection
       # down. It also writes the ladder config this service reads.
@@ -834,12 +871,15 @@ services:
     # once, and the loop reprints the same list rather than burying it.
     restart: unless-stopped
     depends_on:
-      # The kernel, and nothing else. The book, sync and token-name panels come
-      # from it, and a monitor that starts before its only always-on source is
-      # up would open on a screen of errors. `solver` is deliberately absent —
-      # see the note above.
+      # The kernel is the only long-running prerequisite. The two token
+      # one-shots serialize startup so the first token-name panel is complete;
+      # `solver` is deliberately absent — see the note above.
       kernel:
         condition: service_healthy
+      mint-test-tokens:
+        condition: service_completed_successfully
+      register-minted-tokens:
+        condition: service_completed_successfully
     environment:
       # 0.0.0.0 inside the container so the published port below reaches it.
       # The site's own env resolver warns about a non-loopback host (it has no
@@ -913,6 +953,10 @@ services:
       # `run.ts` checks for the tables and says so plainly if they are absent.
       kernel:
         condition: service_healthy
+      mint-test-tokens:
+        condition: service_completed_successfully
+      register-minted-tokens:
+        condition: service_completed_successfully
     environment:
       DB_HOST: pglite
       DB_PORT: "5432"
@@ -942,6 +986,10 @@ services:
         condition: service_healthy
       batcher:
         condition: service_healthy
+      mint-test-tokens:
+        condition: service_completed_successfully
+      register-minted-tokens:
+        condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
       CONTRACT_SHARE_DIR: /srv/offerfiles-deploy

@@ -11,7 +11,7 @@ Local/dev networks only. Every seed in `.env.example` is a public dev seed.
 ```bash
 cd deploy
 ./bootstrap.sh                 # writes .env (gitignored) with generated secrets
-docker compose up -d           # chain -> deploy one-shot -> kernel/batcher -> relay -> solver
+docker compose up -d           # chain -> contract -> kernel -> mint/register -> compatibility -> consumers
 docker compose ps
 ./down.sh                      # FULL teardown: containers + networks + volumes
 ```
@@ -31,13 +31,14 @@ Static gates only (no stack, safe on a shared host):
 | `indexer` | `images/indexer` (binaries 0.3.120, `v4.3.3`) | `indexer-standalone` | 8088 | `18088` |
 | `celestia` | `images/celestia` (`celestia-appd v6.4.10` + `celestia-node v0.28.4`) | supervisor: consensus + bridge | 26657 / 26658 | `16657` / `16658` |
 | `pglite` | kernel image | `@effectstream/db` pg-gateway server | 5432 | `15432` |
-| `offerfiles-deploy` | kernel image | one-shot: deploy contract, then mint | — | — |
+| `offerfiles-deploy` | kernel image | one-shot: deploy and publish contract | — | — |
 | `kernel` | kernel image | `bun run packages/node/main.dev.ts` | 9999 | `19999` |
+| `mint-test-tokens` | kernel image | one-shot: mint three dev tokens, register names, publish receipt | — | — |
 | `batcher` | kernel image | `bun run packages/batcher/batcher.dev.ts` | 3334 | `13334` |
 | `relay` | `images/relay` (reference @ `061f4d3`, unmodified) | `node packages/relay/dist/relay-main.js` | 3000 / 9001 | `13000` / `19001` |
 | `solver` | kernel image | `bun run start.solver.ts` (+ status listener on 9100, bearer-gated, **not published**) | 9100 | — |
 | `solver-frontend` | kernel image | `bun run start.solver-frontend.ts` — the read-only monitor site | 8080 | `18080` |
-| `register-minted-tokens` | kernel image | one-shot: name the minted colours in `known_tokens` | — | — |
+| `register-minted-tokens` | kernel image | compatibility one-shot: confirm the three names already exist | — | — |
 | `price-feed` | kernel image | `bun run packages/price-feed/price-feed.dev.ts` (profile `prices`) | — | — |
 | `offer-poster` | kernel image | `bun run deploy/scripts/offer-poster.ts` (profile `poster`) | 9977 | `19977` |
 | `scripts` | kernel image | E2E driver (profile `e2e`) | — | — |
@@ -55,7 +56,8 @@ kernel image ships one entrypoint per component
 
 The one thing the orchestrator does that still has to happen somewhere is
 sequencing. That is split between Compose (`depends_on` + healthchecks,
-including `service_completed_successfully` on the deploy one-shot) and the
+including `service_completed_successfully` across the deploy, mint, and
+compatibility one-shots) and the
 entrypoints' own readiness waits (`images/kernel/wait-for.sh`) for the
 conditions Compose cannot express — most importantly **midnight-node having
 produced block #1**, which is not the same as its RPC answering.
@@ -193,12 +195,12 @@ A request without the bearer is `401` and is counted in the snapshot. Publishing
 debugging session on a loopback `BIND_ADDR` only.
 
 **Token names.** The site labels colours from the kernel's `GET /v1/known-tokens` and falls
-back to short hex. On a fresh stack the faucet-minted test tokens have no names, because the
-mint script's own registration posts to a route the node does not serve
-(`issues/00008-mint-test-tokens-registers-stale-path.md`); the `register-minted-tokens`
-one-shot repairs that once the kernel is healthy, registering `TESTTOKENA/B/U` from
-`minted-tokens.json` — the spellings preprod uses. `REGISTER_MINTED_TOKENS_ENABLED=false`
-skips it.
+back to short hex. Startup is explicitly linear: contract publication → healthy kernel →
+`mint-test-tokens`, which mints and registers `TESTTOKENA/B/U` through
+`POST /v1/known-tokens` and publishes `minted-tokens.json` →
+`register-minted-tokens`, retained for this release as a compatibility/backstop check. On a
+clean stack that final one-shot reports three `409` already-registered outcomes.
+`REGISTER_MINTED_TOKENS_ENABLED=false` skips only the compatibility check.
 
 ## Offer poster
 

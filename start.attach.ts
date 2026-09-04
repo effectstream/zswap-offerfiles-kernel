@@ -37,6 +37,13 @@ const CHAIN_WAIT_TARGETS = [
 
 const CONTRACT_DEPLOY = "midnight-contract";
 const CHAIN_WAIT = "chain-wait";
+const SYNC_API_HEALTH = "sync-api-health";
+const LOCAL_ZSWAP_API = "http://127.0.0.1:9999";
+const ZSWAP_API = process.env["ZSWAP_API"]?.trim() || LOCAL_ZSWAP_API;
+const ZSWAP_HEALTH_WAIT = `${ZSWAP_API.replace(/\/+$/, "")}/v1/health`.replace(
+  /^(https?):\/\//,
+  "$1-get://",
+);
 
 export default {
   processes: [
@@ -68,9 +75,10 @@ export default {
       description: "Mint dev test tokens (2 shielded + 1 unshielded)",
       cwd: path.join(root, "packages/contracts-midnight"),
       args: ["run", "mint-test-tokens.ts"],
+      env: { ZSWAP_API },
       waitToExit: true,
       // NOT critical: a mint hiccup must not tear the stack down.
-      dependsOn: [CONTRACT_DEPLOY],
+      dependsOn: [CONTRACT_DEPLOY, SYNC_API_HEALTH],
     },
 
     {
@@ -79,7 +87,17 @@ export default {
       args: ["run", "packages/node/main.dev.ts"],
       waitToExit: false,
       type: "system-dependency",
+      env: { ENABLE_TOKEN_REGISTRY: "true" },
       dependsOn: [DbNames.PGLITE_WAIT, CHAIN_WAIT, CONTRACT_DEPLOY],
+    },
+
+    {
+      name: SYNC_API_HEALTH,
+      description: `Wait for the ZSwap-DA kernel API at ${ZSWAP_API}`,
+      args: ["x", "wait-on", "--timeout", "600000", ZSWAP_HEALTH_WAIT],
+      waitToExit: true,
+      critical: true,
+      dependsOn: ["sync"],
     },
 
     {
@@ -88,7 +106,7 @@ export default {
       args: ["run", "packages/batcher/batcher.dev.ts"],
       waitToExit: false,
       type: "system-dependency",
-      dependsOn: [CHAIN_WAIT, CONTRACT_DEPLOY],
+      dependsOn: [CHAIN_WAIT, CONTRACT_DEPLOY, "midnight-mint-test-tokens"],
     },
 
     {
@@ -98,7 +116,7 @@ export default {
       waitToExit: false,
       // Not a system-dependency: the stack is usable without a solver, and a
       // solver fault must never tear it down.
-      dependsOn: [CONTRACT_DEPLOY, "sync"],
+      dependsOn: [CONTRACT_DEPLOY, "midnight-mint-test-tokens", SYNC_API_HEALTH, "sync"],
     },
   ],
 } satisfies OrchestratorConfig;

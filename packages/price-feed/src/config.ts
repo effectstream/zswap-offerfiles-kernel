@@ -1,5 +1,6 @@
 import { ENV } from "@effectstream/utils/node-env";
 import { SEEDED_ASSET_IDS } from "@zswap-da/database";
+import { optionalNumber, optionalString } from "./env.ts";
 
 import { COINGECKO_BASE_URL } from "./coingecko.ts";
 
@@ -46,18 +47,18 @@ export function loadPriceFeedConfig(): PriceFeedConfig {
 
   return {
     apiKey: key === "" ? null : key,
-    baseUrl: ENV.getString("COINGECKO_BASE_URL", COINGECKO_BASE_URL),
-    intervalMs: ENV.getNumber("PRICE_FEED_INTERVAL_MS", DEFAULT_INTERVAL_MS),
-    spacingMs: ENV.getNumber("PRICE_FEED_REQUEST_SPACING_MS", DEFAULT_SPACING_MS),
-    batchSize: ENV.getNumber("PRICE_FEED_BATCH_SIZE", DEFAULT_BATCH_SIZE),
-    requestTimeoutMs: ENV.getNumber("PRICE_FEED_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT_MS),
+    baseUrl: optionalString("COINGECKO_BASE_URL", COINGECKO_BASE_URL),
+    intervalMs: optionalNumber("PRICE_FEED_INTERVAL_MS", DEFAULT_INTERVAL_MS),
+    spacingMs: optionalNumber("PRICE_FEED_REQUEST_SPACING_MS", DEFAULT_SPACING_MS),
+    batchSize: optionalNumber("PRICE_FEED_BATCH_SIZE", DEFAULT_BATCH_SIZE),
+    requestTimeoutMs: optionalNumber("PRICE_FEED_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT_MS),
     assetIds: assets.length > 0 ? assets : [...SEEDED_ASSET_IDS],
     db: {
-      host: ENV.getString("DB_HOST", "127.0.0.1"),
+      host: optionalString("DB_HOST", "127.0.0.1"),
       port: ENV.getNumber("DB_PORT", 5432),
-      user: ENV.getString("DB_USER", "postgres"),
+      user: optionalString("DB_USER", "postgres"),
       password: ENV.getString("DB_PW", "postgres"),
-      database: ENV.getString("DB_NAME", "postgres"),
+      database: optionalString("DB_NAME", "postgres"),
     },
   };
 }

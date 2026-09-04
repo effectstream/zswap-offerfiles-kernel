@@ -53,8 +53,8 @@ export interface MintedTokens {
 /** The token colors this stack actually minted.
  *
  *  Colors derive from the DEPLOYED contract address, so they differ for every
- *  fresh stack and cannot be hard-coded anywhere; the deploy one-shot publishes
- *  them next to the contract address on the shared volume. */
+ *  fresh stack and cannot be hard-coded anywhere; the post-kernel mint
+ *  one-shot publishes them next to the contract address on the shared volume. */
 export function resolveMintedTokens(opts: {
   file: string;
   give?: string;
@@ -69,7 +69,7 @@ export function resolveMintedTokens(opts: {
     } catch (err) {
       throw new Error(
         `no give/want token given and ${opts.file} is unreadable (${String(err)}). ` +
-          `That file is written by the offerfiles-deploy one-shot; if the mint step failed, ` +
+          `That file is written by the post-kernel mint one-shot; if the mint step failed, ` +
           `its log says why.`,
       );
     }

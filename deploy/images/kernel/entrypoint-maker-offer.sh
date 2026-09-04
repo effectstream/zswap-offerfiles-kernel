@@ -9,8 +9,8 @@
 #
 # So that a plain `docker compose up` produces the stack the deployment claims
 # to produce — a solver quoting a real pair at the relay — this one-shot posts a
-# single genuine offer. It is a DEVNET seeding step, exactly like the mint the
-# deploy one-shot performs; set MAKER_OFFER_ENABLED=false to skip it.
+# single genuine offer. It is a DEVNET seeding step, exactly like the
+# post-kernel mint one-shot; set MAKER_OFFER_ENABLED=false to skip it.
 #
 # It posts a REAL proven offer, not a database row: `bun run seed:market` writes
 # rows whose blob is a placeholder and which its own header calls NOT

@@ -111,12 +111,13 @@ echo "gates output: ${OUT}"
 run_gate compose-config sh -c \
   'docker compose --profile e2e config | sed -E "s/^([[:space:]]*[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API_KEY)[A-Z0-9_]*:[[:space:]]*).*/\\1<redacted>/"'
 
-# G1b — the 00007 services are part of the rendered model. `config --services`
-# is the cheapest proof that the monitor site and the token-name one-shot are
-# wired, and that neither was lost to a YAML indentation slip.
+# G1b — the 00007 services and the post-kernel mint one-shot are part of the
+# rendered model. Exact startup edges are checked from rendered JSON after the
+# kernel image exists (G2b below).
 run_gate compose-config-00007-services sh -c \
   'svcs="$(docker compose --profile e2e config --services)"; echo "$svcs"; \
-   echo "$svcs" | grep -qx solver-frontend && echo "$svcs" | grep -qx register-minted-tokens'
+   echo "$svcs" | grep -qx solver-frontend && echo "$svcs" | grep -qx mint-test-tokens && \
+   echo "$svcs" | grep -qx register-minted-tokens'
 
 # ── G2: every image builds ──────────────────────────────────────────────────
 # One gate per image so a failure names the image instead of "the build".
@@ -126,6 +127,16 @@ run_gate build-indexer       docker compose build indexer
 run_gate build-celestia      docker compose build celestia
 run_gate build-relay         docker compose build relay
 run_gate build-kernel        docker compose build kernel
+
+# G2b — parse the actual all-profile Compose JSON, assert the exact linear
+# deploy -> healthy kernel -> mint -> compatibility -> consumer conditions,
+# and walk every service dependency to reject cycles and unknown targets.
+check_compose_topology() {
+  docker compose --profile e2e --profile poster --profile prices config --format json |
+    docker compose run --rm --no-deps -T --entrypoint bun solver \
+      deploy/scripts/lib/check-compose-topology.ts -
+}
+run_gate compose-startup-topology check_compose_topology
 
 # ── G3: solver fail-fast negative controls, IN CONTAINER ────────────────────
 # These drive the REPO's launch contract (`bun run start.solver.ts` ->
@@ -244,6 +255,13 @@ run_gate solver-disabled-exits-zero \
 run_gate entrypoints-parse \
   docker compose run --rm --no-deps --entrypoint sh solver -c \
     'set -e; for f in /usr/local/bin/entrypoint-*.sh /usr/local/bin/wait-for.sh; do echo "checking $f"; bash -n "$f"; done; echo "all entrypoints parse"'
+
+# G5b — the receipt, not the legacy marker, is the restart authority. Exercise
+# both asymmetric crash states against the real entrypoint with networking
+# disabled and a bounded dead-API timeout.
+run_gate mint-receipt-restart-states \
+  docker compose run --rm --no-deps --entrypoint bash solver \
+    deploy/images/kernel/entrypoint-mint-test-tokens.test.sh
 
 # ── G6: the pglite server module resolves inside the image ──────────────────
 # `@effectstream/db` is not a root dependency and the bun store holds two copies

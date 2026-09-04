@@ -9,8 +9,8 @@
 //      coin's capacity is tied to the size of the NIGHT UTXO backing it);
 //   2. registers NIGHT for dust;
 //   3. writes the ladder config with THIS stack's real token colors, read from
-//      the deploy one-shot's `minted-tokens.json` rather than derived by
-//      minting;
+//      the post-kernel mint one-shot's `minted-tokens.json` rather than
+//      derived by minting;
 //   4. writes a machine-readable RECEIPT of the solver wallet's balances as
 //      measured right here, with the facade, at the moment provisioning ended.
 //

@@ -14,6 +14,7 @@ const root = path.resolve(import.meta.dirname!, "../..");
 
 const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
 const midnightMintTestTokens = "midnight-mint-test-tokens";
+const syncApiHealth = "sync-api-health";
 
 export default {
   processes: [
@@ -41,9 +42,10 @@ export default {
       description: "Mint test tokens (2 shielded + 1 unshielded) via the offer-files contract",
       cwd: path.join(root, "packages/contracts-midnight"),
       args: ["run", "mint-test-tokens.ts"],
+      env: { ZSWAP_API: "http://127.0.0.1:9999" },
       waitToExit: true,
       // NOT critical: a mint hiccup must not tear the test stack down.
-      dependsOn: [MidnightNames.CONTRACT_DEPLOY],
+      dependsOn: [MidnightNames.CONTRACT_DEPLOY, syncApiHealth],
     },
 
     ...launchCelestia(
@@ -58,12 +60,25 @@ export default {
       args: ["run", "packages/node/main.dev.ts"],
       waitToExit: false,
       type: "system-dependency",
-      env: { PGLITE: "true", ENABLE_DEV_AND_DEBUG_ENDPOINTS: "true" },
+      env: {
+        PGLITE: "true",
+        ENABLE_DEV_AND_DEBUG_ENDPOINTS: "true",
+        ENABLE_TOKEN_REGISTRY: "true",
+      },
       dependsOn: [
         DbNames.PGLITE_WAIT,
         CelestiaNames.FUND,
         ...midnightDeps,
       ],
+    },
+
+    {
+      name: syncApiHealth,
+      description: "Wait for the ZSwap-DA kernel API health endpoint (test)",
+      args: ["x", "wait-on", "--timeout", "600000", "http-get://127.0.0.1:9999/v1/health"],
+      waitToExit: true,
+      critical: true,
+      dependsOn: ["sync"],
     },
 
     {

@@ -43,15 +43,11 @@ set -euo pipefail
 #     and `parsePositiveBigint` rejects "". Three empty strings therefore count
 #     as "all set" and fail. Unsetting them here is what makes DUST admission
 #     genuinely optional in the deployment.
-#   * PRICE_FEED_MAP — `parsePriceMapEnv` throws on a malformed entry; "" is
-#     not malformed, but listing it here keeps "unset" and "blank" identical
-#     for the one variable an operator is most likely to leave empty.
-#   * COINGECKO_BASE_URL / PRICE_FEED_* — `ENV.getString(x, default)` would
-#     take "" as the value, and an empty base URL turns every request into a
-#     relative path against nothing. COINGECKO_API_KEY is in the list for a
-#     different reason: "" and unset must both mean "no key", so the service
-#     idles (loop) or exits 64 (--once) rather than sending an empty header
-#     and reading CoinGecko's 401 as an outage.
+# Price-feed configuration is deliberately absent from this list. Its config
+# loader owns blank-as-unset semantics for strings and numbers, including
+# whitespace-only values, so direct package and non-Compose launches behave the
+# same as this entrypoint. `PRICE_FEED_MAP` and `PRICE_FEED_ASSETS` likewise
+# already treat blank input as an empty override/default list.
 for _optional_env in \
   CELESTIA_NAMESPACE \
   CELESTIA_AUTH_TOKEN \
@@ -62,14 +58,7 @@ for _optional_env in \
   SOLVER_FEE_SIZING_TAKER_INPUTS \
   SOLVER_DUST_MAX_PER_JOB \
   SOLVER_DUST_MAX_PER_WINDOW \
-  SOLVER_DUST_WINDOW_MS \
-  COINGECKO_API_KEY \
-  COINGECKO_BASE_URL \
-  PRICE_FEED_INTERVAL_MS \
-  PRICE_FEED_REQUEST_SPACING_MS \
-  PRICE_FEED_BATCH_SIZE \
-  PRICE_FEED_ASSETS \
-  PRICE_FEED_MAP
+  SOLVER_DUST_WINDOW_MS
 do
   if [ -z "${!_optional_env:-}" ]; then unset "${_optional_env}"; fi
 done

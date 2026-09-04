@@ -190,7 +190,7 @@ opt-in compose service in `deploy/`.
 | Variable | Default | Meaning |
 |---|---|---|
 | `COINGECKO_API_KEY` | — | Required to fetch. Sent as the `x-cg-demo-api-key` header, never in a query string. Without it the service only WARNS: `--once` exits 64, loop mode warns on every tick and does nothing |
-| `COINGECKO_BASE_URL` | `https://api.coingecko.com/api/v3` | Point at a stub in tests |
+| `COINGECKO_BASE_URL` | `https://api.coingecko.com/api/v3` | Point at a stub in tests; blank and whitespace-only select the default |
 | `PRICE_FEED_INTERVAL_MS` | `86400000` | Loop period |
 | `PRICE_FEED_REQUEST_SPACING_MS` | `1000` | Minimum gap between two requests |
 | `PRICE_FEED_BATCH_SIZE` | `50` | Asset ids per `simple/price` request |

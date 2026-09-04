@@ -15,8 +15,9 @@
 # the container's PID 1 is the real workload and Compose signals reach it.
 #
 #   entrypoint-pglite.sh    the Postgres-wire server the kernel talks to
-#   entrypoint-deploy.sh    one-shot: deploy the Compact contract, then mint
+#   entrypoint-deploy.sh    one-shot: deploy and publish the Compact contract
 #   entrypoint-kernel.sh    exec bun run packages/node/main.dev.ts      (:9999)
+#   entrypoint-mint-test-tokens.sh  one-shot: post-kernel mint/register/publish
 #   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.dev.ts (:3334)
 #   entrypoint-solver.sh    exec bun run start.solver.ts
 #   entrypoint-solver-frontend.sh  exec bun run start.solver-frontend.ts (:8080)
@@ -24,7 +25,7 @@
 #   entrypoint-scripts.sh   the E1 provisioning / assertion driver
 #   entrypoint-solver-provision.sh  one-shot: fund + mint the solver BOTH tokens
 #   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
-#   entrypoint-register-minted-tokens.sh  one-shot: NAME the minted colours
+#   entrypoint-register-minted-tokens.sh  compatibility check for minted names
 #   entrypoint-offer-poster.sh      loop: mint one coin, post one offer, repeat
 #
 # `solver-provision` and `maker-offer` are devnet SEEDING steps, and they are
@@ -32,11 +33,10 @@
 # reports healthy, the solver connects to the relay, and it publishes an empty
 # ladder forever with no error logged anywhere (R2 made publication bounded by
 # the solver's own spendable inventory, and the ladder derives from the maker
-# book). `register-minted-tokens` is the cosmetic third: it is the only place
-# the mint script's broken name registration (issues/00008-…) can be repaired
-# without touching `packages/`, because only Compose knows when the kernel is
-# healthy — and it is what makes the book and the monitor site read TESTTOKENA/B/U
-# instead of raw colour hex.
+# book). `mint-test-tokens` is the cosmetic third: after kernel health it mints
+# and registers TESTTOKENA/B/U through the live API. The following
+# `register-minted-tokens` one-shot remains for this release as an observable
+# compatibility/backstop check; on a clean stack all three posts return 409.
 #
 # entrypoint-offer-poster.sh is neither a one-shot nor part of the default
 # stack: it is the 00007 offer poster, opt-in behind the `poster` profile, and
@@ -122,8 +122,9 @@ COPY packages/validator/package.json                                packages/val
 RUN bun install --frozen-lockfile
 
 # Compile the Compact contract. `src/managed/` is gitignored, so it exists only
-# because of this step; the deploy one-shot, the kernel's `readMidnightContract`
-# and the mint script all read `contract-offer-files/src/managed/{compiler,
+# because of this step; the deploy and mint one-shots, the kernel's
+# `readMidnightContract`, and the mint script all read
+# `contract-offer-files/src/managed/{compiler,
 # contract,keys,zkir}` at runtime.
 #
 # Its inputs are copied on their own, ahead of the rest of the source, because
@@ -150,6 +151,7 @@ COPY deploy/images/kernel/entrypoint-common.sh   /usr/local/bin/entrypoint-commo
 COPY deploy/images/kernel/entrypoint-pglite.sh   /usr/local/bin/entrypoint-pglite.sh
 COPY deploy/images/kernel/entrypoint-deploy.sh   /usr/local/bin/entrypoint-deploy.sh
 COPY deploy/images/kernel/entrypoint-kernel.sh   /usr/local/bin/entrypoint-kernel.sh
+COPY deploy/images/kernel/entrypoint-mint-test-tokens.sh /usr/local/bin/entrypoint-mint-test-tokens.sh
 COPY deploy/images/kernel/entrypoint-batcher.sh  /usr/local/bin/entrypoint-batcher.sh
 COPY deploy/images/kernel/entrypoint-solver.sh   /usr/local/bin/entrypoint-solver.sh
 COPY deploy/images/kernel/entrypoint-solver-frontend.sh /usr/local/bin/entrypoint-solver-frontend.sh

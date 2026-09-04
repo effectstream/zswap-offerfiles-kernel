@@ -49,8 +49,8 @@ reservation and was accepted first try. It records those figures to
    no longer spends its tokenIn, and the publication cap that forced is gone.
    tokenOut still buys *interior* (interpolated) sizes: with none, the solver
    publishes each pair's first rung and no more. `mint-test-tokens` (run by the
-   `offerfiles-deploy` one-shot) credits the **genesis** wallet only, so moving
-   any tokens the cases need is this driver's job. 00006-V1 reran exactly this
+   post-kernel `mint-test-tokens` one-shot) credits the **genesis** wallet only,
+   so moving any tokens the cases need is this driver's job. 00006-V1 reran exactly this
    flow with solver token provisioning DISABLED (`SOLVER_PROVISION_MINT_TOKENS=
    false`) as its real-boundary proof — see "The capital-free (SC-004)
    configuration" above.

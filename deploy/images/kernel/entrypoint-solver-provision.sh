@@ -36,8 +36,8 @@
 # SOLVER_PROVISION_MINT_TOKENS=false (00006 SC-004 — the capital-free solver):
 #   `deploy/scripts/provision-solver-fees.ts`. Same NIGHT funding, same dust
 #   registration, same ladder config — and NO MINT OF ANY TOKEN. It reads the
-#   colors out of the deploy one-shot's `minted-tokens.json` instead of deriving
-#   them by minting, and writes a receipt of the solver wallet's measured
+#   colors out of the post-kernel mint one-shot's `minted-tokens.json` instead
+#   of deriving them by minting, and writes a receipt of the solver wallet's measured
 #   balances that the E2E driver asserts on.
 #
 # These two are NOT the same as SOLVER_PROVISION_ENABLED=false, which skips fee
@@ -118,7 +118,7 @@ if bun run "${PROVISIONER}"; then
   exit 0
 fi
 
-# Fail loudly. This is NOT the deploy one-shot's non-fatal mint: a solver that
+# Fail loudly. This is NOT the primary mint one-shot's non-fatal path: a solver that
 # cannot pay DUST settles nothing, and in the funded mode a solver without
 # inventory used to come up healthy and quote nothing — the one outcome this
 # service exists to prevent.

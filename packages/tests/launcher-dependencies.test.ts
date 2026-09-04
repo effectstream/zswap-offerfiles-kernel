@@ -36,6 +36,7 @@ function expectLinearStartup(
   const mint = processByName(config, "midnight-mint-test-tokens");
 
   expect(sync.env?.["ENABLE_TOKEN_REGISTRY"]).toBe("true");
+  expect(sync.dependsOn).toContain(contractDeploy);
   expect(health.dependsOn).toEqual(["sync"]);
   expect(health.waitToExit).toBe(true);
   expect(health.critical).toBe(true);

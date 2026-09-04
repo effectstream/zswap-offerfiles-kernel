@@ -15,10 +15,12 @@ export interface RegisterMintedTokenNamesOptions {
   apiBaseUrl: string;
   fetchImpl?: typeof fetch;
   log: KnownTokenRegistrationLog;
+  createTimeoutSignal?: (timeoutMs: number) => AbortSignal;
   timeoutMs?: number;
 }
 
 export const LOCAL_ZSWAP_API = "http://127.0.0.1:9999";
+export const DEFAULT_REGISTRATION_TIMEOUT_MS = 2_000;
 
 /** Resolve the registration API without importing or initializing the contract. */
 export function resolveMintApiBase(
@@ -47,7 +49,9 @@ export async function registerMintedTokenNames(
   options: RegisterMintedTokenNamesOptions,
 ): Promise<void> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const timeoutMs = options.timeoutMs ?? 2_000;
+  const createTimeoutSignal =
+    options.createTimeoutSignal ?? ((timeoutMs: number) => AbortSignal.timeout(timeoutMs));
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REGISTRATION_TIMEOUT_MS;
   const url = `${options.apiBaseUrl.replace(/\/+$/, "")}/v1/known-tokens`;
 
   for (const registration of REGISTRATIONS) {
@@ -62,7 +66,7 @@ export async function registerMintedTokenNames(
           kind,
           decimals: DEFAULT_TOKEN_DECIMALS,
         }),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: createTimeoutSignal(timeoutMs),
       });
 
       if (response.ok) {

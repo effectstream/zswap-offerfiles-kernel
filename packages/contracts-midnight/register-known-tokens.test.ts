@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DEFAULT_TOKEN_DECIMALS } from "../solver-core/amount.ts";
 
 import {
+  DEFAULT_REGISTRATION_TIMEOUT_MS,
   LOCAL_ZSWAP_API,
   registerMintedTokenNames,
   resolveMintApiBase,
@@ -53,12 +54,18 @@ describe("registerMintedTokenNames", () => {
   test("posts the exact v1 URL and all three name/kind/colour payloads with a timeout", async () => {
     const statuses = [201, 204, 299];
     const h = harness((_call, index) => new Response(null, { status: statuses[index] }));
+    const timeoutDurations: number[] = [];
+    const timeoutSignals = Array.from({ length: 3 }, () => new AbortController().signal);
 
     await registerMintedTokenNames(MINTED, {
       apiBaseUrl: "http://kernel:9999/",
       fetchImpl: h.fetchImpl,
       log: h.log,
       timeoutMs: 1234,
+      createTimeoutSignal: (timeoutMs) => {
+        timeoutDurations.push(timeoutMs);
+        return timeoutSignals[timeoutDurations.length - 1]!;
+      },
     });
 
     expect(h.calls).toHaveLength(3);
@@ -78,7 +85,8 @@ describe("registerMintedTokenNames", () => {
       { color: MINTED.shieldedB, name: "TestTokenB", kind: "shielded", decimals: DEFAULT_TOKEN_DECIMALS },
       { color: MINTED.unshielded, name: "TestTokenU", kind: "unshielded", decimals: DEFAULT_TOKEN_DECIMALS },
     ]);
-    expect(h.calls.every((call) => call.init.signal instanceof AbortSignal)).toBe(true);
+    expect(timeoutDurations).toEqual([1234, 1234, 1234]);
+    expect(h.calls.map((call) => call.init.signal)).toEqual(timeoutSignals);
     expect(h.info).toEqual([
       "known-token registered for TestTokenA",
       "known-token registered for TestTokenB",
@@ -87,8 +95,29 @@ describe("registerMintedTokenNames", () => {
     expect(h.warnings).toEqual([]);
   });
 
-  test("409, disabled-registry 404, and an unexpected status are observable and non-fatal", async () => {
-    const statuses = [409, 404, 503];
+  test("uses the default timeout duration for every registration", async () => {
+    const h = harness(() => new Response(null, { status: 204 }));
+    const timeoutDurations: number[] = [];
+
+    await registerMintedTokenNames(MINTED, {
+      apiBaseUrl: "http://127.0.0.1:9999",
+      fetchImpl: h.fetchImpl,
+      log: h.log,
+      createTimeoutSignal: (timeoutMs) => {
+        timeoutDurations.push(timeoutMs);
+        return new AbortController().signal;
+      },
+    });
+
+    expect(timeoutDurations).toEqual([
+      DEFAULT_REGISTRATION_TIMEOUT_MS,
+      DEFAULT_REGISTRATION_TIMEOUT_MS,
+      DEFAULT_REGISTRATION_TIMEOUT_MS,
+    ]);
+  });
+
+  test("an unexpected status, 409, and disabled-registry 404 are observable and non-fatal", async () => {
+    const statuses = [503, 409, 404];
     const h = harness((_call, index) => new Response(null, { status: statuses[index] }));
 
     await registerMintedTokenNames(MINTED, {
@@ -98,10 +127,10 @@ describe("registerMintedTokenNames", () => {
     });
 
     expect(h.calls).toHaveLength(3);
-    expect(h.info).toEqual(["known-token already registered for TestTokenA"]);
+    expect(h.info).toEqual(["known-token already registered for TestTokenB"]);
     expect(h.warnings).toEqual([
-      "known-token registry disabled; skipped TestTokenB",
-      "known-token registration for TestTokenU returned HTTP 503; continuing",
+      "known-token registration for TestTokenA returned HTTP 503; continuing",
+      "known-token registry disabled; skipped TestTokenU",
     ]);
   });
 

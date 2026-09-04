@@ -81,8 +81,20 @@ export async function apiTest(db: Client): Promise<void> {
     console.log(`${TAG} minting T0,T1 + funding makers…`);
     const deployed = await joinOfferFiles(genesis);
     const nonce = BigInt(Date.now());
-    const T0 = await mintShielded(deployed, SEP.T0, MINT_AMOUNT, nonce);
-    const T1 = await mintShielded(deployed, SEP.T1, MINT_AMOUNT, nonce + 1n);
+    const T0 = await mintShielded(
+      deployed,
+      SEP.T0,
+      MINT_AMOUNT,
+      nonce,
+      genesis.zswapSecretKeys.coinPublicKey,
+    );
+    const T1 = await mintShielded(
+      deployed,
+      SEP.T1,
+      MINT_AMOUNT,
+      nonce + 1n,
+      genesis.zswapSecretKeys.coinPublicKey,
+    );
     for (const [c, l] of [[T0, "T0"], [T1, "T1"]] as const) {
       if ((await waitForShielded(genesis, c, FUND, 24)) < FUND)
         throw new Error(`genesis missing ${l}`);

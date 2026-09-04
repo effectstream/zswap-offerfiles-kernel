@@ -115,7 +115,15 @@ try {
   const nonce = BigInt(Date.now());
   const tokens: string[] = [];
   for (let i = 0; i < N; i++) {
-    tokens.push(await mintShielded(deployed, SEP_BASE + i, MINT_AMOUNT, nonce + BigInt(i)));
+    tokens.push(
+      await mintShielded(
+        deployed,
+        SEP_BASE + i,
+        MINT_AMOUNT,
+        nonce + BigInt(i),
+        genesis.zswapSecretKeys.coinPublicKey,
+      ),
+    );
   }
   console.log(`${TAG} tokens: ${tokens.map((t, i) => `T${i}=${t.slice(0, 10)}…`).join(" ")}`);
   check(`${N} shielded tokens minted`, tokens.every(Boolean));

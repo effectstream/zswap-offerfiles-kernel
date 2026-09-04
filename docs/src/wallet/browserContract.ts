@@ -33,6 +33,7 @@ type Found = FoundContract<OfferFilesContract.Contract>
 export type ConnectedContract = {
   contract: Found
   config: MidnightConfig
+  coinPublicKey: CoinPublicKey
 }
 
 async function submitToBatcher(serializedTxHex: string, address: string) {
@@ -80,7 +81,10 @@ function createWalletProvider(
   }
 }
 
-async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig): Promise<Providers> {
+async function buildProviders(
+  connectedApi: ConnectedAPI,
+  config: MidnightConfig,
+): Promise<{ providers: Providers; coinPublicKey: CoinPublicKey }> {
   const [shieldedAddresses] = await Promise.all([connectedApi.getShieldedAddresses()])
   const coinPublicKeyHex = parseCoinPublicKeyToHex(
     shieldedAddresses.shieldedCoinPublicKey,
@@ -113,7 +117,7 @@ async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig
   // VITE_PROOF_SERVER_URL wins over whatever /v1/midnight/config reports.
   const proofServerUri = PROOF_SERVER_URL || config.proofServerUri
 
-  return {
+  const providers = {
     privateStateProvider: levelPrivateStateProvider({
       privateStoragePasswordProvider: async () => 'ZSWAP_DA_DOCS_STORAGE_16+',
       accountId: coinPublicKeyHex,
@@ -124,6 +128,7 @@ async function buildProviders(connectedApi: ConnectedAPI, config: MidnightConfig
     walletProvider,
     midnightProvider: walletProvider,
   } as Providers
+  return { providers, coinPublicKey: coinPublicKeyHex as CoinPublicKey }
 }
 
 export async function connectBrowserContract(
@@ -131,7 +136,7 @@ export async function connectBrowserContract(
   config: MidnightConfig,
 ): Promise<ConnectedContract> {
   setNetworkId(config.networkId as any)
-  const providers = await buildProviders(connectedApi, config)
+  const { providers, coinPublicKey } = await buildProviders(connectedApi, config)
   const compiledContract = CompiledContract.make(
     'contract-offer-files',
     OfferFilesContract.Contract as any,
@@ -145,5 +150,5 @@ export async function connectBrowserContract(
     privateStateId: PRIVATE_STATE_ID,
     initialPrivateState: {},
   })
-  return { contract: contract as Found, config }
+  return { contract: contract as Found, config, coinPublicKey }
 }

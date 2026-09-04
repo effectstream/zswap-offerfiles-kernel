@@ -6,6 +6,10 @@ import { connectBrowserContract, type ConnectedContract } from './browserContrac
 import { PROOF_SERVER_URL } from '../config'
 import { preflightLaceIndexer } from './wallet'
 import { toHex } from '../hex'
+import {
+  shieldedUserRecipient,
+  unshieldedUserRecipient,
+} from '@zswap-da/contract-offer-files/mint-recipient'
 
 export type MintResult = { color: string; txHash: string }
 
@@ -72,8 +76,13 @@ export function useContract(connectedApi: ConnectedAPI | null) {
     nonce: bigint,
     name: string,
   ): Promise<MintResult> => {
-    const { contract } = await ensure()
-    const txData: any = await (contract as any).callTx.mint_shielded(domainSep, amount, nonce)
+    const { contract, coinPublicKey } = await ensure()
+    const txData: any = await (contract as any).callTx.mint_shielded(
+      domainSep,
+      amount,
+      nonce,
+      shieldedUserRecipient(coinPublicKey),
+    )
     const colorBytes = txData.private?.result?.color as Uint8Array | undefined
     if (!colorBytes) throw new Error('mint_shielded: missing color')
     const color = toHex(colorBytes)
@@ -96,7 +105,7 @@ export function useContract(connectedApi: ConnectedAPI | null) {
     const txData: any = await (contract as any).callTx.mint_unshielded(
       domainSep,
       amount,
-      { bytes: recipientBytes },
+      unshieldedUserRecipient(toHex(recipientBytes)),
     )
     const colorBytes = txData.private?.result as Uint8Array | undefined
     if (!colorBytes) throw new Error('mint_unshielded: missing color')

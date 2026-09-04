@@ -101,7 +101,7 @@ export interface MintedCoinRef {
 export interface TickMinter {
   /** A nonce never used before in this process (`faucet-mint.freshNonce`). */
   freshNonce(): bigint;
-  /** `mint_shielded(domainSepFromName(name), amount, nonce)`; resolves once the
+  /** `mint_shielded(domainSepFromName(name), amount, nonce, left(ownCoinKey))`; resolves once the
    *  transaction is on chain, with the coin the contract created. */
   mint(name: string, amount: bigint, nonce: bigint): Promise<MintedCoinRef>;
 }
@@ -735,8 +735,8 @@ export interface MintOutcome {
  * ON THE ORDER OF THE JOURNAL WRITES — this differs from FR-003's letter, and
  * it has to. FR-003 says "journal the nonce BEFORE submit", but the identity a
  * coin has is `evolveNonce(mintNonce, domainSep)`, computed INSIDE the circuit
- * (`offer-files.compact:22`); `evolveNonce` is not exported by `ledger-v8`, by
- * `onchain-runtime-v3` or by `compact-runtime` (checked at these versions), and
+ * (`offer-files.compact`); `evolveNonce` is not exported by the active ledger,
+ * onchain runtime, or compact runtime (checked at these versions), and
  * the generated circuit module is a Compact build artefact `deploy/` cannot
  * import. So the chain nonce simply does not exist until `mint_shielded`
  * returns, and there is nothing to write down before it does.

@@ -48,7 +48,13 @@ export async function rootUnknownTest(db: Client): Promise<void> {
     console.log(`${TAG} minting give token + building offer…`);
     const deployed = await joinOfferFiles(genesis);
     const nonce = BigInt(Date.now());
-    const G = await mintShielded(deployed, SEP.GIVE, MINT, nonce);
+    const G = await mintShielded(
+      deployed,
+      SEP.GIVE,
+      MINT,
+      nonce,
+      genesis.zswapSecretKeys.coinPublicKey,
+    );
     if ((await waitForShielded(genesis, G, GIVE, 24)) < GIVE)
       throw new Error("genesis missing give token");
 
@@ -106,7 +112,13 @@ export async function rootUnknownTest(db: Client): Promise<void> {
     );
 
     console.log(`${TAG} advancing the coin tree past the offer's root…`);
-    await mintShielded(deployed, SEP.ADVANCE, MINT, nonce + 1n);
+    await mintShielded(
+      deployed,
+      SEP.ADVANCE,
+      MINT,
+      nonce + 1n,
+      genesis.zswapSecretKeys.coinPublicKey,
+    );
     const advanced = await waitFor(
       "tree advanced past offer root",
       async () =>

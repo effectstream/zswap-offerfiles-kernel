@@ -73,12 +73,37 @@ and every asset is sha256-verified at build time:
 | proof-server | `9.0.0-rc.5` (plain build) | `@effectstream/npm-midnight-proof-server@0.200.2` (matches the `@midnightntwrk/ledger-v9: 1.0.0-rc.3` override). Release 0.3.120 has no linux-arm64 binary, so this one runs the official multi-arch image the same package falls back to, pinned by digest |
 | indexer-standalone | `v4.4.0-rc.3` | `@effectstream/npm-midnight-indexer@0.200.2` pins the 4.4.0 line (rc.1); rc.3 is the one published for both linux arches and fixes rc.1's SQLite starvation — see `images/indexer/Dockerfile` |
 | celestia-appd / celestia-node | `v6.4.10` / `v0.28.4` | `@effectstream/celestia@0.200.2` |
-| compactc | `0.33.0-rc.2` | `infra/compact-version.txt`, run through `infra/compact.sh` (the `compact` version manager does not publish the 0.33 line) |
+| compactc / language | `0.34.0` / `0.26.0` | sole compiler pin in `infra/compact-version.txt`; selected aarch64/x86_64 archive is authenticated through `infra/compact-checksums.sha256` before unzip |
+| compact-runtime | `0.19.0` | exact root/workspace pins plus root override; `bun run check:compact-runtime` requires one resolved locator |
 | bun | `1.3.11` | the runtime this clone is developed and tested on; 1.3.14 breaks `midnight-contract:deploy` via graphql-tag |
 
 `0.3.120` is a rolling mirror release, not an immutable tag. The sha256 pins are
 what make that safe: a re-uploaded asset fails the build instead of silently
 changing the chain.
+
+The kernel image regenerates the gitignored
+`packages/contracts-midnight/contract-offer-files/src/managed/` tree and checks
+compiler/language/runtime metadata, `contract/index.js`, three `.bzkir` files,
+and six keys. These generated files are not source-controlled. Every consumer
+of this image's generated contract must resolve compact-runtime **0.19.0**;
+0.18.0-rc.1 fails immediately with `Version mismatch`. The full archive URLs,
+SHA-256 values, artifact table, and downstream checklist are in
+`LEDGER-V9-MIGRATION.md`.
+
+> **BREAKING ledger-v9 deployment boundary:** `mint_shielded` and
+> `mint_unshielded` now require explicit typed recipients and reject zero.
+> Their verifier keys changed, so every ledger-v9 OfferFiles instance must
+> redeploy and all mint callers must move in the same rollout. For a contract
+> recipient, compose its receive circuit in the same transaction; otherwise
+> ledger-v9 rc.3 reports `a contract-owned coin output was left unclaimed` in
+> its WASM diagnostic and the live node rejects with
+> `1010: Invalid Transaction: Custom error: 218`. Kernel `main` and the
+> midnight-1-offers 1.x deployment remain unchanged.
+
+The two mint circuits also require explicit typed recipients. Shielded user
+mints pass the joining wallet's coin public key; unshielded user mints pass its
+decoded ledger user address. A contract recipient must compose its receive call
+in the same transaction or ledger-v9 rejects the transaction as malformed.
 
 ### Celestia runs `linux/amd64`
 
@@ -210,7 +235,7 @@ Every `POST_INTERVAL_MS` (default 60 s) one tick does exactly one of two things:
   the wallet's `availableCoins`), so the tick posts a fresh offer for that exact
   coin at today's quote; or
 * **mint** — no coin is free, so the tick calls the faucet circuit
-  `mint_shielded(domainSep(GIVE_TOKEN), GIVE_AMOUNT, freshNonce)` — paying the
+  `mint_shielded(domainSep(GIVE_TOKEN), GIVE_AMOUNT, freshNonce, left(ownCoinKey))` — paying the
   mint fee from its **own DUST** — waits for the coin to appear, and offers it.
   `GIVE_AMOUNT` is base units and defaults to `1000000`, i.e. **one whole coin**
   at the 6 decimals every token in this stack carries.

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # deploy/images/kernel/Dockerfile — ONE image, ELEVEN single-process entrypoints.
 #
 # Build context: the repository ROOT of this working clone (never a git clone of
@@ -50,15 +51,15 @@
 FROM oven/bun:1.3.11 AS build
 
 # `compactc` is a system toolchain, not an npm dependency. The pin has ONE
-# source of truth, `infra/compact-version.txt` (0.33.0-rc.2), and one runner,
+# source of truth, `infra/compact-version.txt`, and one runner,
 # `infra/compact.sh`, which `bun run build:midnight` goes through. On a host
 # that script builds and runs the `compact-toolchain` container; inside this
 # build there is no Docker, so the SAME release asset that
 # `infra/compact-toolchain.Dockerfile` fetches is installed here and handed to
-# the script as `$COMPACTC`. The `compact` version manager is deliberately not
-# used: it does not publish the 0.33 line (see infra/compact-toolchain.Dockerfile).
+# the script as `$COMPACTC`.
 ARG TARGETARCH
 COPY infra/compact-version.txt /opt/compact-version.txt
+COPY infra/compact-checksums.sha256 /opt/compact-checksums.sha256
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl unzip \
@@ -70,21 +71,28 @@ RUN apt-get update \
 # in place through a two-line shim rather than symlinked onto PATH.
 RUN set -eux; \
     COMPACT_VERSION="$(tr -d ' \t\n' < /opt/compact-version.txt)"; \
-    case "${TARGETARCH:-arm64}" in \
+    test -n "${TARGETARCH:-}" || { echo "TARGETARCH is required" >&2; exit 1; }; \
+    case "$TARGETARCH" in \
       arm64) triple="aarch64-unknown-linux-musl" ;; \
       amd64) triple="x86_64-unknown-linux-musl" ;; \
       *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    url="https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v${COMPACT_VERSION}/compactc_v${COMPACT_VERSION}_${triple}.zip"; \
-    curl --proto '=https' --tlsv1.2 -fLsS -o /tmp/compactc.zip "$url"; \
+    asset="compactc_v${COMPACT_VERSION}_${triple}.zip"; \
+    url="https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v${COMPACT_VERSION}/${asset}"; \
+    curl --proto '=https' --tlsv1.2 -fLsS -o "/tmp/${asset}" "$url"; \
+    expected="$(awk -v asset="$asset" '$2 == asset { print $1 }' /opt/compact-checksums.sha256)"; \
+    test -n "$expected" || { echo "no SHA-256 recorded for $asset" >&2; exit 1; }; \
+    printf '%s  %s\n' "$expected" "/tmp/${asset}" | sha256sum -c -; \
     mkdir -p /opt/compactc; \
-    unzip -q /tmp/compactc.zip -d /opt/compactc; \
-    rm /tmp/compactc.zip; \
+    unzip -q "/tmp/${asset}" -d /opt/compactc; \
+    rm "/tmp/${asset}"; \
     chmod +x /opt/compactc/*; \
     test -x /opt/compactc/zkir || { echo "compactc asset lacks the default zkir backend" >&2; exit 1; }; \
     printf '#!/bin/sh\nexec /opt/compactc/compactc "$@"\n' > /usr/local/bin/compactc; \
     chmod +x /usr/local/bin/compactc; \
-    compactc --version
+    test "$(compactc --version)" = "$COMPACT_VERSION"; \
+    test "$(compactc --language-version)" = "0.26.0"; \
+    test "$(compactc --runtime-version)" = "0.19.0"
 ENV COMPACTC=/usr/local/bin/compactc
 
 WORKDIR /app
@@ -128,7 +136,8 @@ RUN bun install --frozen-lockfile
 # `compact` script calls; without it the step cannot even start.
 COPY infra ./infra
 COPY packages/contracts-midnight ./packages/contracts-midnight
-RUN bun run build:midnight \
+RUN --mount=type=cache,id=k00028-compact-srs,target=/root/.cache \
+    bun run build:midnight \
  && test -d packages/contracts-midnight/contract-offer-files/src/managed
 
 # The rest of the source. `.dockerignore` (see Dockerfile.dockerignore next to

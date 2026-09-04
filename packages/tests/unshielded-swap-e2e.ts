@@ -121,7 +121,13 @@ try {
   console.log(`${TAG} minting T0 (shielded) + U (unshielded → P1)…`);
   const deployed = await joinOfferFiles(genesis);
   const nonce = BigInt(Date.now());
-  const T0 = await mintShielded(deployed, SEP.T0, MINT_AMOUNT, nonce);
+  const T0 = await mintShielded(
+    deployed,
+    SEP.T0,
+    MINT_AMOUNT,
+    nonce,
+    genesis.zswapSecretKeys.coinPublicKey,
+  );
   const U = await mintUnshielded(deployed, SEP.U, MINT_AMOUNT, p1.unshieldedAddress);
   console.log(`${TAG} T0=${T0.slice(0, 12)}… (shielded)  U=${U.slice(0, 12)}… (unshielded → P1)`);
 

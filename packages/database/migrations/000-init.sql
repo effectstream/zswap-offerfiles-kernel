@@ -98,15 +98,9 @@ CREATE TABLE price_feed_status (
 -- decimals / asset_id carry a DEFAULT and a NULL respectively, which the
 -- header's "no DEFAULT cushions" rule allows here because neither is a
 -- compatibility shim for an old writer:
---   decimals DEFAULT 6 is the real semantic default of this registry (00024):
---     EVERY token this stack mints or registers has 6 decimals, and every
---     faucet hands out whole coins scaled by 10^6 (1 000 coins =
---     1_000_000_000 base units). A token registered through
---     POST /v1/known-tokens without an explicit decimals is one of those, so 6
---     is what it genuinely has; a bridged token with a different scale states
---     its own value. It is a real semantic default, not a cushion for an old
---     writer — every registration path in this repository sends 6 explicitly,
---     and the column would say the same thing if none of them did.
+--   decimals DEFAULT 6 is the semantic default for legacy/local registration.
+--     Canonical registry imports always state their published value (BTC 8,
+--     ETH 18, stablecoins 6); a caller with any other scale must do the same.
 --   asset_id NULL means "no asset behind this colour" (test tokens), which is
 --     a state the resolver handles explicitly, not a missing value.
 CREATE TABLE known_tokens (
@@ -120,6 +114,19 @@ CREATE TABLE known_tokens (
     decimals INTEGER NOT NULL DEFAULT 6 CHECK (decimals BETWEEN 0 AND 38),
     -- When set, wins over the name map in packages/database/price-map.ts.
     asset_id TEXT REFERENCES asset_prices(asset_id)
+);
+
+-- Ownership marker for the six names managed by the external canonical
+-- registry importer. A name by itself is not provenance: the local demo API
+-- can register any uppercase name, including TWBTC. The importer records the
+-- exact color it last committed and refuses to overwrite a same-name row that
+-- neither matches this marker nor the incoming canonical record.
+CREATE TABLE canonical_token_registry_state (
+    name              TEXT PRIMARY KEY,
+    token_color       TEXT UNIQUE NOT NULL,
+    network           TEXT NOT NULL CHECK (network IN ('preview', 'preprod', 'stagenet')),
+    registry_revision TEXT NOT NULL,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Faucet-minted colours (WBTC, WETH, TESTTOKEN*) are NOT seeded: they derive
@@ -158,18 +165,16 @@ CREATE TABLE known_tokens (
 --           carry the same value or a NIGHT <-> sNight offer of equal base
 --           units stops being at par under the sponsorship gate.
 --
---           !!! PATCH THIS ROW WHEN DEPLOYING TO ANOTHER NETWORK !!!
+--           Preprod is the canonical default. Patch this row only when an
+--           operator deliberately selects another network for this database.
 --
 --           Unlike the three above, sNight's colour is
 --             tokenType(pad(32, "shielded-night:wrapper"), self())
 --           i.e. rawTokenType(pad32("shielded-night:wrapper"), <contract
 --           address>) with @midnight-ntwrk/ledger-v8 — so it derives from the
---           contract ADDRESS and differs per network. The value seeded below
---           is *preview*, the default:
+--           contract ADDRESS and differs per network:
 --             preview  address 80b89b9a4213c61da84f54b2ea02e2809f9c4dedbdafacd04b38d4667bee1396
 --                      colour  793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c
---           Another network needs the colour below replaced (name is UNIQUE,
---           so only one sNight row can exist per database):
 --             preprod  address e354e6725893397e6a2dfa44522a017fabb5d9c92efed50288711f5f865c8950
 --                      colour  8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819
 --             mainnet  not deployed — MAINNET_ADDRESS is empty in the
@@ -184,15 +189,13 @@ CREATE TABLE known_tokens (
 --           one from the addresses above, so neither the row nor this comment
 --           can rot after a contract redeploy.
 --
--- Faucet-minted dev/test tokens (WBTC, WETH, TESTTOKEN*, …) are NOT seeded, but
--- since 00024 they carry the same 6: every registration path sends
--- decimals: 6 explicitly, and the table's DEFAULT above catches anything that
--- does not. The faucet mints WHOLE COINS scaled by 10^6, so a 1 000-coin
--- allotment is 1_000_000_000 base units.
+-- Explicit local test helpers can still mint WBTC/WETH/TESTTOKEN* values with
+-- 6 decimals. Those helpers are not the canonical external issuer and are not
+-- run by start.dev.ts.
 INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES
 ('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 6, 'midnight-3'),
--- preview sNight — see the SNIGHT note above before deploying elsewhere.
-('793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c', 'SNIGHT','shielded',   6, 'midnight-3'),
+-- preprod sNight — see the SNIGHT note above before selecting another network.
+('8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819', 'SNIGHT','shielded',   6, 'midnight-3'),
 ('1111111111111111111111111111111111111111111111111111111111111111', 'USDC',  'shielded',   6, 'usd-coin'),
 ('003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73', 'USDM',  'unshielded', 6, 'usdm-2');
 -- ('0000000000000000000000000000000000000000000000000000000000000001', 'SILK', 'shielded'),

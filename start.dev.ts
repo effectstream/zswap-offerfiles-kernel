@@ -42,8 +42,8 @@ console.log("compactc ${COMPACT_VERSION} available through verified infra/compac
 `.trim();
 
 const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
-const midnightMintTestTokens = "midnight-mint-test-tokens";
 const syncApiHealth = "sync-api-health";
+const tokenRegistryImport = "canonical-token-registry";
 
 export default {
   processes: [
@@ -74,17 +74,6 @@ export default {
         dependsOn: ["compact-build"],
       },
     ),
-
-    {
-      name: midnightMintTestTokens,
-      description: "Mint dev test tokens (2 shielded + 1 unshielded) via the offer-files contract",
-      cwd: path.join(root, "packages/contracts-midnight"),
-      args: ["run", "mint-test-tokens.ts"],
-      env: { ZSWAP_API: "http://127.0.0.1:9999" },
-      waitToExit: true,
-      // NOT critical: a mint hiccup must not tear the dev stack down.
-      dependsOn: [MidnightNames.CONTRACT_DEPLOY, syncApiHealth],
-    },
 
     ...launchCelestia(
       "@zswap-da/contracts-celestia",
@@ -122,6 +111,17 @@ export default {
     },
 
     {
+      name: tokenRegistryImport,
+      description: "Optionally import the selected mint-test-tokens registry",
+      args: ["run", "packages/database/import-token-registry.ts"],
+      waitToExit: true,
+      // The external faucet is optional. The script bounds fetch/DB waits,
+      // reports a skip and exits successfully on every unavailable path.
+      critical: false,
+      dependsOn: [syncApiHealth],
+    },
+
+    {
       name: "batcher",
       description: "ZSwap-DA balancing batcher (Celestia + Midnight, port 3334)",
       args: ["run", "packages/batcher/batcher.dev.ts"],
@@ -129,11 +129,7 @@ export default {
       type: "system-dependency",
       link: "http://localhost:3334",
       stopProcessAtPort: [3334],
-      // The dev bootstrap temporarily keeps the batcher's unshielded wallet
-      // online while it verifies/splits NIGHT. Do not overlap those extra
-      // indexer subscriptions with the mint wallet: the packaged indexer's
-      // wallet DB pool can exhaust and kill the indexer mid-bootstrap.
-      dependsOn: [...midnightDeps, midnightMintTestTokens],
+      dependsOn: [...midnightDeps, syncApiHealth],
     },
 
     {
@@ -144,13 +140,7 @@ export default {
       // Deliberately not a system-dependency: the stack is fully usable without
       // a solver, and a solver fault must never tear the stack down.
       //
-      // Waits on the mint bootstrap for the same reason the batcher does
-      // (52f104b): buildWallet() opens a wallet facade against the indexer and
-      // waitForSync() subscribes to its state stream, so an unsequenced solver
-      // adds a third wallet's subscriptions on top of the mint wallet's and can
-      // exhaust the packaged indexer's wallet DB pool mid-bootstrap. Upstream
-      // gated only the batcher because upstream has no solver.
-      dependsOn: [...midnightDeps, midnightMintTestTokens, syncApiHealth, "sync"],
+      dependsOn: [...midnightDeps, syncApiHealth, "sync"],
     },
 
     // The price feed is deliberately NOT registered here (Q-11).

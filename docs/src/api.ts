@@ -19,8 +19,8 @@ export type KnownToken = {
   id: number
   token_color: string
   name: string
-  kind: string
-  /** Base units per coin — 6 for everything this stack mints (00024). */
+  kind: 'shielded' | 'unshielded'
+  /** Base units per coin. Canonical tokens use 8, 18 or 6. */
   decimals: number
   asset_id: string | null
 }
@@ -113,8 +113,8 @@ export const api = {
     req<{ offerId?: string; status: string }>('POST', `${API_BASE}/v1/offers/status`, { offer: blob }),
   submitOffer: (blob: string) => req('POST', `${API_BASE}/v1/offers`, { offer: blob }),
   knownTokens: () => req<KnownToken[]>('GET', `${API_BASE}/v1/known-tokens`),
-  /** `decimals` is stated, never left to the column default (00024 FR-002):
-   *  the faucet mints whole coins scaled by 10^decimals. */
+  /** Legacy/local registration helper. Canonical imports write the DB directly
+   *  in one transaction and always preserve published decimals. */
   registerToken: (color: string, name: string, kind: string, decimals: number = DEFAULT_TOKEN_DECIMALS) =>
     req('POST', `${API_BASE}/v1/known-tokens`, { color, name, kind, decimals }),
   pairs: () => req('GET', `${API_BASE}/v1/pairs`),

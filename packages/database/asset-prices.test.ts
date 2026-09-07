@@ -38,7 +38,7 @@ let client: InstanceType<typeof pg.Client>;
 const COLOR_NIGHT = "0".repeat(64);
 const COLOR_USDC = "1".repeat(64);
 const COLOR_USDM = "003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73";
-const COLOR_SNIGHT = "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c";
+const COLOR_SNIGHT = "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
 const COLOR_TEST = "a".repeat(64);
 
 // The shielded-night contract addresses, as committed in that repo's
@@ -132,7 +132,7 @@ test("the four redeploy-stable tokens are seeded, and only those", async () => {
     decimals: 6,
     asset_id: "midnight-3",
   });
-  // The shielded-night wrapper, seeded with the PREVIEW colour (000-init.sql
+  // The shielded-night wrapper, seeded with the PREPROD colour (000-init.sql
   // says how to patch it for another network). Same asset and same decimals as
   // NIGHT — one sNight base unit is one Star — so equal base units are at par
   // under the sponsorship gate. Asserted against NIGHT's ROW rather than
@@ -200,8 +200,8 @@ test("every seeded known token resolves to a seeded asset", async () => {
 //
 // SNIGHT's colour is tokenType(pad(32, "shielded-night:wrapper"), self()), so
 // unlike the other three seeds it changes with the shielded-night contract
-// ADDRESS, i.e. with the network. 000-init.sql seeds *preview* and carries the
-// preprod address/colour in a comment for whoever patches the row. Both are
+// ADDRESS, i.e. with the network. 000-init.sql seeds *preprod* and carries the
+// preview address/colour in the same note. Both are
 // re-derived here from the addresses committed in the shielded-night repo, so
 // a redeploy — or a mistyped patch — fails here instead of registering a
 // colour nobody holds, and the comment cannot rot away from the row.
@@ -217,13 +217,13 @@ const deriveWrapperColor = (contractAddress: string): string => {
   ).toLowerCase();
 };
 
-test("the seeded SNIGHT colour is derived from the preview shielded-night address", async () => {
-  expect(deriveWrapperColor(SNIGHT_CONTRACT.preview)).toBe(COLOR_SNIGHT);
+test("the seeded SNIGHT colour is derived from the preprod shielded-night address", async () => {
+  expect(deriveWrapperColor(SNIGHT_CONTRACT.preprod)).toBe(COLOR_SNIGHT);
 
   const row = (await getKnownTokensWithAssets.run(undefined, client)).find(
     (t) => t.name === "SNIGHT",
   )!;
-  expect(row.token_color).toBe(deriveWrapperColor(SNIGHT_CONTRACT.preview));
+  expect(row.token_color).toBe(deriveWrapperColor(SNIGHT_CONTRACT.preprod));
 });
 
 test("the other networks commented in 000-init.sql carry their derived colours", () => {

@@ -10,8 +10,8 @@ or `bun run docs:build` and open
 [`http://localhost:9999/docs`](http://localhost:9999/docs). Debug offer upload
 (`POST /v1/offers`), browse the open book, poll status, stream SSE,
 settle via the batcher's `midnight-balancer` target, and connect a wallet to
-inspect balances / mint test tokens (`VITE_PROOF_SERVER_URL`, default
-`http://localhost:6300`).
+inspect balances or open the external faucet (`VITE_FAUCET_URL`, default
+`https://mint-test-tokens.pages.dev/`; default network `preprod`).
 
 **Repository validation scope.** There are two strict, no-emit TypeScript gates,
 and `bun run typecheck` runs both.
@@ -607,7 +607,7 @@ curl http://host:9999/v1/known-tokens
 ```json
 [
   { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded", "decimals": 6, "asset_id": "midnight-3" },
-  { "id": 2, "token_color": "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c", "name": "SNIGHT", "kind": "shielded", "decimals": 6, "asset_id": "midnight-3" },
+  { "id": 2, "token_color": "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819", "name": "SNIGHT", "kind": "shielded", "decimals": 6, "asset_id": "midnight-3" },
   { "id": 5, "token_color": "e7580bfcf04c05cbec44572d122f526ba35d5b6442fa6429e42e9b9fca22a912", "name": "WBTC", "kind": "shielded", "decimals": 6, "asset_id": null }
 ]
 ```
@@ -615,11 +615,10 @@ curl http://host:9999/v1/known-tokens
 `NIGHT`, `SNIGHT`, `USDC` and `USDM` are seeded by the schema. `SNIGHT` — the
 [shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
 held as a shielded token — is the one seed whose colour depends on the network,
-because it derives from the contract address. The schema seeds **preview**
-(`793c29c9…f99c`, shown above); **preprod** is `8fac382b…6819`, and `mainnet` has
+because it derives from the contract address. The schema seeds **Preprod**
+(`8fac382b…6819`, shown above); Preview is `793c29c9…f99c`, and `mainnet` has
 no deployment yet. Another network patches that row in `000-init.sql` before its
-database is created, or registers the colour on an existing database with an
-`UPDATE` / `POST /v1/known-tokens`. It carries NIGHT's `decimals` and prices off
+database is created, or updates an existing database deliberately. It carries NIGHT's `decimals` and prices off
 the same asset, so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
@@ -638,7 +637,7 @@ token-metadata standard lands.
 > Requires `ENABLE_TOKEN_REGISTRY=true`; otherwise returns `404 NOT_ENABLED`. Enable it for local dev and e2e only.
 > Registering a name here does not make it canonical. Any operator can write any name against any color. Wait for the official token-metadata standard before building user-facing trust on top of this endpoint.
 
-Register a human-readable name for a token color before any offers appear (e.g. immediately after a browser-wallet mint).
+Register a human-readable name for a local/test token color before any offers appear.
 
 ```bash
 curl -X POST http://host:9999/v1/known-tokens \
@@ -658,10 +657,10 @@ curl -X POST http://host:9999/v1/known-tokens \
 ```
 
 `name` must be unique (max 16 chars, stored uppercased). `kind` is `"shielded"` or
-`"unshielded"`. `decimals` is optional (integer, `[0, 38]`) and **defaults to 6** —
-every token this stack mints or registers has 6 decimals, and the faucets hand out
-whole coins scaled by `10^6`. Send it explicitly anyway; a bridged token on another
-scale must state its own value, or its USD price is off by `10^(6 − its decimals)`.
+`"unshielded"`. `decimals` is optional (integer, `[0, 38]`) and **defaults to 6**
+for legacy/local registrations. Canonical imports state 8 for BTC variants, 18
+for ETH and 6 for stablecoins. Any other scale must be explicit, or its USD
+price is off by `10^(6 − its decimals)`.
 `asset_id` is optional too: omitted means "price it by NAME".
 
 **Success `200`**
@@ -921,11 +920,10 @@ locked 1:1 against NIGHT, so it is the same asset — no new price to fetch).
 seeded with `decimals: 6` — 1 NIGHT is 10⁶ Stars, its base unit
 (`STARS_PER_NIGHT` in `midnight-ledger/ledger/src/structure.rs`) — so its
 per-base-unit price is the seeded `midnight-3` coin price divided by `10^6`.
-**Every token this stack mints or registers has 6 decimals**, and the faucets
-hand out whole coins scaled by `10^6` (1 000 coins = `1000000000` base units),
-so a colour registered through `POST /v1/known-tokens` without an explicit
-`decimals` defaults to `6`. Registrants should send it anyway; a bridged token
-on another scale states its own value.
+Canonical registry tokens preserve their published decimals: BTC variants are
+8, ETH is 18, and stablecoins are 6. A legacy/local colour registered through
+`POST /v1/known-tokens` without an explicit `decimals` still defaults to `6`.
+Registrants should send it anyway.
 
 **The `price-feed` service.** `packages/price-feed` is a separate process, not part
 of the node: the node never calls CoinGecko. It refreshes `asset_prices` once a day

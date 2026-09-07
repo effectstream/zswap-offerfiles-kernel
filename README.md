@@ -19,10 +19,21 @@ bun install
 bun run dev   # PGLite + Compact compile + Midnight + Celestia + sync + batcher
 ```
 
-On dev startup the `midnight-mint-test-tokens` process mints test tokens via the
-offer-files contract (two shielded colors + one unshielded color to the genesis
-wallet), so e2e swaps have real multi-token inventory and the unshielded
-liveness sets receive on-chain events.
+After the database initializes, `start.dev.ts` runs the optional
+`canonical-token-registry` one-shot. It fetches the selected network's six
+canonical token records and applies them in one database transaction. Preprod
+is the default; an explicit `TOKEN_REGISTRY_NETWORK` or `MIDNIGHT_NETWORK_ID`
+selects Preview, Stagenet or local `undeployed` (which skips the public import). A timeout,
+HTTP/metadata error or database rejection logs a skip and the rest of the stack
+continues with the database's existing rows.
+
+The one-shot runs only in orchestration, after migrations. It does not add a
+server import endpoint or refresh job. A successful run upserts only the six
+canonical names; unrelated tokens, offer history and manual prices retain their
+existing colors. Editing `000-init.sql` affects only a fresh database, while the
+one-shot can update the operator-selected live database. The old
+`packages/contracts-midnight/mint-test-tokens.ts` command remains an explicit
+local test helper and does not mint the canonical issuer's token IDs.
 
 - API: http://localhost:9999
 - API playground: `bun run docs:dev` → http://localhost:10601/docs/ (or build + http://localhost:9999/docs)
@@ -66,9 +77,10 @@ The frontend fetches the API, the batcher, and all ZK assets from this backend:
 `packages/contracts-midnight/contract-offer-files/src/managed`) and the zswap +
 dust primitive keys (from the Midnight ZK-params cache,
 `~/.cache/midnight/zk-params`, override with `MIDNIGHT_ZK_PARAMS_DIR`). Without
-the primitive keys the browser mint fails with
+the primitive keys browser offer construction fails with
 `GET /keys/midnight/zswap/output.prover 404` — run the proof server once (the
-dev stack does) to populate the cache.
+dev stack does) to populate the cache. Test tokens are obtained from
+[`mint-test-tokens`](https://mint-test-tokens.pages.dev/?network=preprod).
 
 ## Environments
 
@@ -112,19 +124,18 @@ Tokens map to assets **by name** — `WBTC`/`WSBTC`/`BTC` → `bitcoin`, `WETH`/
 `ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3`,
 `SNIGHT` → `midnight-3` — because faucet-minted colours derive from the contract
 address and change on every clean redeploy. `known_tokens.asset_id` overrides the
-map; `PRICE_FEED_MAP` (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the
-defaults.
+map; canonical `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and `UTWBTC`
+records carry explicit asset IDs. `PRICE_FEED_MAP`
+(`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
 `SNIGHT` is the [shielded-night](https://github.com/effectstream/shielded-night)
 wrapper — NIGHT held as a shielded (Zswap) token, locked 1:1, so it prices off
 `midnight-3` like NIGHT and is seeded with NIGHT's `decimals`. It is the one seeded
 token whose colour depends on the network, because it derives from the contract
-address: `000-init.sql` seeds **preview** (`793c29c9…f99c`) as the default and
-documents, right beside the row, the preprod colour (`8fac382b…6819`) and the fact
-that mainnet has no deployment yet. Deploying to another network means patching
-that row before the database is created — or, on a database that already exists
-(preprod included), one `UPDATE known_tokens …` or `POST /v1/known-tokens`, since
-`000-init.sql` only ever runs against an empty database.
+address: `000-init.sql` seeds **Preprod** (`8fac382b…6819`) as the default and
+documents Preview beside it. Deploying to another network means patching that
+row before the database is created — or updating an already-live database
+deliberately, since `000-init.sql` only ever runs against an empty database.
 
 `decimals` here always means **base units per priced coin** — a token's asset
 price is divided by `10^decimals` to get the per-base-unit price this API
@@ -132,10 +143,9 @@ serves — never the colour's own display decimals. NIGHT is seeded with
 `decimals: 6`: 1 NIGHT = 10⁶ Stars (its base unit; `STARS_PER_NIGHT` in
 `midnight-ledger/ledger/src/structure.rs`).
 
-**Every token this stack mints or registers has 6 decimals** (00024). The
-faucets hand out WHOLE COINS scaled by `10^6` — one press is 1 000 coins, i.e.
-`1000000000` base units — every registration path sends `decimals: 6`
-explicitly, and the column defaults to `6` for a client too old to send it.
+The external canonical records state their real scales: BTC variants use 8,
+ETH uses 18, and stablecoins use 6 decimals. Legacy/local registrations still
+default to 6 when a caller omits the field; canonical import always supplies it.
 `coinsToBaseUnits` / `baseUnitsToCoins` in `packages/solver-core/amount.ts` are
 the one place the conversion lives; amounts on the wire and on chain stay
 integer base units.
@@ -170,7 +180,10 @@ opt-in compose service in `deploy/`.
 | `PRICE_FEED_ASSETS` | the five seeded ids | Comma-separated CoinGecko ids |
 | `PRICE_FEED_MAP` | — | Node + feed: `NAME_OR_COLOR=<asset_id>[:decimals],…`. A malformed entry is a startup error, never a silent skip |
 | `SPONSOR_DISCOUNT_BPS` | `250` | How far below reference an offer must be priced to earn fee sponsorship. Published in `/v1/prices.sponsor_discount` |
-| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PW` / `DB_NAME` | `127.0.0.1` / `5432` / `postgres` / `postgres` / `postgres` | Where the feed writes |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PW` / `DB_NAME` | `127.0.0.1` / `5432` / `postgres` / `postgres` / `postgres` | Database used by the feed and optional token-registry import |
+| `TOKEN_REGISTRY_BASE_URL` | `https://mint-test-tokens.pages.dev/` | Base URL for the optional orchestrator-owned metadata import |
+| `TOKEN_REGISTRY_NETWORK` | explicit `MIDNIGHT_NETWORK_ID`, otherwise `preprod` | Registry selected after initialization: `preprod`, `preview`, `stagenet`, or local `undeployed` (skip) |
+| `TOKEN_REGISTRY_TIMEOUT_MS` | `5000` | Fetch, DB connection and DB statement bound; maximum 30000 ms |
 
 ### Fee sponsorship
 
@@ -641,11 +654,14 @@ monorepo at
 
 ## API
 
-**Interactive playground (try upload / settle / wallet mint live):**
+**Interactive playground (try upload / settle / wallet balances live):**
 `bun run docs:dev` → [http://localhost:10601/docs/](http://localhost:10601/docs/)
 (Vite + React). After `bun run docs:build`, the node also serves it at
 [http://localhost:9999/docs](http://localhost:9999/docs). Proof server URL comes
 from `VITE_PROOF_SERVER_URL` (local default `http://localhost:6300`).
+The Wallet panel links to the external faucet. `VITE_FAUCET_URL` overrides its
+base and `VITE_FAUCET_NETWORK` overrides the selected network; otherwise an
+explicit `VITE_MIDNIGHT_NETWORK_ID` is preserved and Preprod is the default.
 **Full request/response reference with curl examples: [API.md](API.md).**
 The table below is a quick index; API.md documents every field, error code, the
 batcher endpoints, and direct Celestia access.

@@ -5,6 +5,7 @@ import { buildMakerOfferBlob } from '../wallet/makerOffer'
 import { preflightLaceIndexer } from '../wallet/wallet'
 import type { WalletApp } from '../wallet/useWalletApp'
 import { BusyButton, MipNpmLink } from './shared'
+import { baseUnitsToCoins } from '../../../packages/solver-core/amount'
 
 export function UploadPanel({
   blob,
@@ -16,20 +17,20 @@ export function UploadPanel({
   wallet: WalletApp
 }) {
   const dbg = useDebugger()
-  const [giveId, setGiveId] = useState('WBTC')
-  const [wantId, setWantId] = useState('WETH')
+  const [giveId, setGiveId] = useState('TWBTC')
+  const [wantId, setWantId] = useState('TWETH')
   const [giveAmt, setGiveAmt] = useState('100')
   const [wantAmt, setWantAmt] = useState('100')
   const [building, setBuilding] = useState(false)
   const [buildErr, setBuildErr] = useState<string | null>(null)
   const [buildOk, setBuildOk] = useState<string | null>(null)
 
-  const giveTok = wallet.mintable.find((t) => t.name === giveId)!
-  const wantTok = wallet.mintable.find((t) => t.name === wantId)!
+  const giveTok = wallet.registeredTokens.find((t) => t.name === giveId)
+  const wantTok = wallet.registeredTokens.find((t) => t.name === wantId)
   const giveBal = wallet.balanceFor(giveTok)
   const wantBal = wallet.balanceFor(wantTok)
-  const giveColor = wallet.colorById[giveId]
-  const wantColor = wallet.colorById[wantId]
+  const giveColor = giveTok?.token_color
+  const wantColor = wantTok?.token_color
 
   const [submitting, setSubmitting] = useState(false)
   const [submitMsg, setSubmitMsg] = useState<string | null>(null)
@@ -41,6 +42,16 @@ export function UploadPanel({
     const half = bal / 2n
     setGiveAmt(String(half > 0n ? half : bal))
   }, [giveId, giveBal])
+
+  // A fresh database may have only NIGHT/SNIGHT until the optional canonical
+  // registry import succeeds. Keep both selectors on rows the API actually
+  // returned instead of inventing a local faucet preset/color.
+  useEffect(() => {
+    const tokens = wallet.registeredTokens
+    if (tokens.length === 0) return
+    if (!tokens.some((token) => token.name === giveId)) setGiveId(tokens[0]!.name)
+    if (!tokens.some((token) => token.name === wantId)) setWantId((tokens[1] ?? tokens[0])!.name)
+  }, [wallet.registeredTokens, giveId, wantId])
 
   /** ROOT_UNKNOWN is sometimes transient (node lag). If it persists, Lace is usually
    *  on a different Midnight than this node — retries won't help. */
@@ -127,12 +138,12 @@ export function UploadPanel({
       setBuildErr('Connect a wallet first (Wallet tab).')
       return
     }
-    if (!wallet.canMint || !wallet.connected.connectedApi) {
+    if (!wallet.canBuildOffers || !wallet.connected.connectedApi) {
       setBuildErr('Building offers requires Lace (browser wallet), not the local seed wallet.')
       return
     }
-    if (!giveColor || !wantColor) {
-      setBuildErr('Token color unknown — mint each test token once (or wait for known-tokens) so we know its color.')
+    if (!giveTok || !wantTok || !giveColor || !wantColor) {
+      setBuildErr('Select two tokens registered by this node. The optional canonical registry import may have been skipped.')
       return
     }
     if (giveId === wantId) {
@@ -165,7 +176,7 @@ export function UploadPanel({
           `Lace indexer mismatch — makeIntent will prove against a foreign merkle root (ROOT_UNKNOWN).\n` +
           `Lace: ${laceIndexerUri}\n` +
           `node: ${cfg.indexerUri}\n` +
-          `Point Lace undeployed at the node indexer, reconnect, remint, then rebuild.`,
+          `Point Lace at the node indexer, reconnect, refresh balances, then rebuild.`,
         )
         return
       }
@@ -187,19 +198,20 @@ export function UploadPanel({
   return (
     <div className="panel">
       <h2>Upload offer</h2>
-      <p className="lead">Build a maker offer from your mintable test-token balances, then submit the <code>swapoffer1…</code> blob.</p>
+      <p className="lead">Build a maker offer from registered token balances, then submit the <code>swapoffer1…</code> blob.</p>
       <MipNpmLink note="MIP-0005 bech32m encoding + MIP-0006 two-sided give/want legs — see" />
 
       <div className="card">
         <h3>Build from wallet balances</h3>
         <p>
           Uses Lace <code>makeIntent</code> with <code>payFees: false</code> (same path as the example frontend).
-          Tokens listed are whatever this network already knows about, plus faucet presets.
+          Tokens listed come from <code>/v1/known-tokens</code>, including canonical tokens
+          imported after initialization when the external registry is available.
         </p>
 
         {wallet.status !== 'connected' ? (
           <div className="callout warn">Connect a wallet on the Wallet tab first.</div>
-        ) : !wallet.canMint ? (
+        ) : !wallet.canBuildOffers ? (
           <div className="callout warn">Offer building needs Lace. Local seed wallet can only show balances.</div>
         ) : (
           <>
@@ -207,9 +219,9 @@ export function UploadPanel({
               <div className="field">
                 <label>Give (you spend)</label>
                 <select value={giveId} onChange={(e) => setGiveId(e.target.value)}>
-                  {wallet.mintable.map((t) => (
+                  {wallet.registeredTokens.map((t) => (
                     <option key={t.name} value={t.name}>
-                      {t.name} ({t.kind}) · bal {wallet.balanceFor(t)}
+                      {t.name} ({t.kind}) · bal {baseUnitsToCoins(BigInt(wallet.balanceFor(t)), t.decimals)}
                     </option>
                   ))}
                 </select>
@@ -227,9 +239,9 @@ export function UploadPanel({
               <div className="field">
                 <label>Want (you receive)</label>
                 <select value={wantId} onChange={(e) => setWantId(e.target.value)}>
-                  {wallet.mintable.map((t) => (
+                  {wallet.registeredTokens.map((t) => (
                     <option key={t.name} value={t.name}>
-                      {t.name} ({t.kind}) · bal {wallet.balanceFor(t)}
+                      {t.name} ({t.kind}) · bal {baseUnitsToCoins(BigInt(wallet.balanceFor(t)), t.decimals)}
                     </option>
                   ))}
                 </select>

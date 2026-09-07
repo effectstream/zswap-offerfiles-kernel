@@ -567,13 +567,13 @@ describe("GET /v1/quote — reference prices (SC-001)", () => {
 //
 // Nothing is registered here: the SNIGHT row comes out of 000-init.sql like
 // NIGHT/USDC/USDM, so what these read back over HTTP is exactly what a fresh
-// deployment serves. The seeded colour is *preview*; another network patches
-// the row (or POSTs it) — see the SNIGHT note in 000-init.sql.
+// deployment serves. The seeded colour is *preprod*; another network patches
+// the row deliberately — see the SNIGHT note in 000-init.sql.
 
 describe("sNight is a seeded known token", () => {
-  const COLOR_SNIGHT = "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c";
-  const COLOR_SNIGHT_PREPROD =
-    "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
+  const COLOR_SNIGHT = "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
+  const COLOR_SNIGHT_PREVIEW =
+    "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c";
 
   test("GET /v1/known-tokens lists it with NIGHT's shape", async () => {
     const { status, body } = await getJson("/v1/known-tokens");
@@ -589,7 +589,7 @@ describe("sNight is a seeded known token", () => {
     // Exactly one sNight row — `name` is UNIQUE, and the colour of a network
     // this database was not built for must not be here.
     expect(body.filter((t: any) => t.name === "SNIGHT")).toHaveLength(1);
-    expect(body.some((t: any) => t.token_color === COLOR_SNIGHT_PREPROD)).toBe(false);
+    expect(body.some((t: any) => t.token_color === COLOR_SNIGHT_PREVIEW)).toBe(false);
   });
 
   test("GET /v1/prices prices it exactly as NIGHT, per base unit", async () => {

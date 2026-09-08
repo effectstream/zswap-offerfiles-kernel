@@ -9,8 +9,8 @@
 #
 # So that a plain `docker compose up` produces the stack the deployment claims
 # to produce — a solver quoting a real pair at the relay — this one-shot posts a
-# single genuine offer. It is a DEVNET seeding step, exactly like the
-# post-kernel mint one-shot; set MAKER_OFFER_ENABLED=false to skip it.
+# single genuine offer from externally prefunded inventory. Set
+# MAKER_OFFER_ENABLED=false to skip it.
 #
 # It posts a REAL proven offer, not a database row: `bun run seed:market` writes
 # rows whose blob is a placeholder and which its own header calls NOT
@@ -26,10 +26,12 @@ MARKER_DIR="${MAKER_OFFER_MARKER_DIR:-/var/lib/maker-offer}"
 MARKER="${MARKER_DIR}/.posted"
 mkdir -p "${MARKER_DIR}"
 
-if [ "${MAKER_OFFER_ENABLED:-true}" != "true" ]; then
+if [ "${MAKER_OFFER_ENABLED:-false}" != "true" ]; then
   log "MAKER_OFFER_ENABLED=${MAKER_OFFER_ENABLED:-} — not seeding the order book"
   exit 0
 fi
+
+require_env MAKER_SEED GIVE_TOKEN WANT_TOKEN
 
 # Idempotent for the same reason as the other one-shots: a restart should not
 # re-prove and re-post an offer (~30 s of proving) or silently deepen the book
@@ -39,8 +41,6 @@ if [ -f "${MARKER}" ]; then
   log "$(cat "${MARKER}")"
   exit 0
 fi
-
-adopt_contract_address
 
 wait_http "${ZSWAP_API}/v1/health" "kernel API" "${KERNEL_WAIT_TIMEOUT_S:-600}"
 
@@ -53,5 +53,6 @@ if bun run deploy/scripts/post-maker-offer.ts; then
 fi
 
 log "ERROR: could not post the maker offer — the solver will publish an EMPTY"
-log "ERROR: ladder (nothing to quote). See the log above for the cause."
+log "ERROR: ladder. Fund MAKER_SEED with GIVE_TOKEN through the external issuer,"
+log "ERROR: verify both explicit token IDs, and retry."
 exit 1

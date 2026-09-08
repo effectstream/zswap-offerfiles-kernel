@@ -21,15 +21,14 @@ export interface IInsertKnownTokenQuery {
   result: IInsertKnownTokenResult;
 }
 
-const insertKnownTokenIR: any = {"usedParamSet":{"token_color":true,"name":true,"kind":true,"decimals":true,"asset_id":true},"params":[{"name":"token_color","required":true,"transform":{"type":"scalar"},"locs":[{"a":457,"b":469}]},{"name":"name","required":true,"transform":{"type":"scalar"},"locs":[{"a":472,"b":477}]},{"name":"kind","required":true,"transform":{"type":"scalar"},"locs":[{"a":480,"b":485}]},{"name":"decimals","required":false,"transform":{"type":"scalar"},"locs":[{"a":497,"b":505}]},{"name":"asset_id","required":false,"transform":{"type":"scalar"},"locs":[{"a":521,"b":529}]}],"statement":"-- decimals/asset_id are optional: an OLD mint path in the browser knows\n-- neither, and the defaults (6 base-unit-per-coin, no asset -> priced by NAME\n-- through price-map.ts) are right for every faucet token since 00024 — every\n-- token this stack mints or registers has 6 decimals. COALESCE rather than a\n-- column default so an explicit NULL from a caller still lands on 6.\nINSERT INTO known_tokens (token_color, name, kind, decimals, asset_id)\nVALUES (:token_color!, :name!, :kind!, COALESCE(:decimals::integer, 6), :asset_id)\nON CONFLICT (token_color) DO NOTHING"};
+const insertKnownTokenIR: any = {"usedParamSet":{"token_color":true,"name":true,"kind":true,"decimals":true,"asset_id":true},"params":[{"name":"token_color","required":true,"transform":{"type":"scalar"},"locs":[{"a":372,"b":384}]},{"name":"name","required":true,"transform":{"type":"scalar"},"locs":[{"a":387,"b":392}]},{"name":"kind","required":true,"transform":{"type":"scalar"},"locs":[{"a":395,"b":400}]},{"name":"decimals","required":false,"transform":{"type":"scalar"},"locs":[{"a":412,"b":420}]},{"name":"asset_id","required":false,"transform":{"type":"scalar"},"locs":[{"a":436,"b":444}]}],"statement":"-- decimals/asset_id are optional for old clients. The defaults (6\n-- base-unit-per-coin, no asset -> priced by NAME through price-map.ts) retain\n-- compatibility for manually registered legacy rows. COALESCE rather than a\n-- column default so an explicit NULL from a caller still lands on 6.\nINSERT INTO known_tokens (token_color, name, kind, decimals, asset_id)\nVALUES (:token_color!, :name!, :kind!, COALESCE(:decimals::integer, 6), :asset_id)\nON CONFLICT (token_color) DO NOTHING"};
 
 /**
  * Query generated from SQL:
  * ```
- * -- decimals/asset_id are optional: an OLD mint path in the browser knows
- * -- neither, and the defaults (6 base-unit-per-coin, no asset -> priced by NAME
- * -- through price-map.ts) are right for every faucet token since 00024 — every
- * -- token this stack mints or registers has 6 decimals. COALESCE rather than a
+ * -- decimals/asset_id are optional for old clients. The defaults (6
+ * -- base-unit-per-coin, no asset -> priced by NAME through price-map.ts) retain
+ * -- compatibility for manually registered legacy rows. COALESCE rather than a
  * -- column default so an explicit NULL from a caller still lands on 6.
  * INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id)
  * VALUES (:token_color!, :name!, :kind!, COALESCE(:decimals::integer, 6), :asset_id)

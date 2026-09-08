@@ -19,15 +19,7 @@ const realActorModuleUrl = new URL(
 ).href;
 
 async function runRealActorModuleSeam(body: string): Promise<void> {
-  // The actor module's real Compact import requires generated managed
-  // artifacts. Keep the one test-only module mock in a child so it cannot
-  // contaminate another Bun test file in this workspace.
   const source = `
-    import { mock } from "bun:test";
-    mock.module("@zswap-da/solver-core/offer-files", () => ({
-      joinOfferFiles() { throw new Error("not used"); },
-      mintShielded() { throw new Error("not used"); },
-    }));
     const actors = await import(${JSON.stringify(realActorModuleUrl)});
     ${body}
   `;
@@ -598,6 +590,8 @@ describe("real fixture lifecycle seams", () => {
           E1_USER_SEED: "11".repeat(32),
           E1_SOLVER_SEED: "22".repeat(32),
           E1_GENESIS_SEED: "33".repeat(32),
+          E1_TOKEN_A: "aa".repeat(32),
+          E1_TOKEN_B: "bb".repeat(32),
           E1_ACTOR_RESULT_PATH: join(directory, "actor.json"),
           E1_ACTOR_RUNTIME_PATH: join(directory, "runtime.json"),
           E1_ACTOR_LADDER_PATH: join(directory, "ladder.json"),
@@ -606,6 +600,13 @@ describe("real fixture lifecycle seams", () => {
         if (actors.readRealActorConfig(env).preSpentPath !== path) {
           throw new Error("pre-spent config path was not retained");
         }
+        let tokenPrerequisiteRejected = false;
+        try {
+          actors.readRealActorConfig({ ...env, E1_TOKEN_A: undefined });
+        } catch (error) {
+          tokenPrerequisiteRejected = /E1_TOKEN_A.*externally issued/.test(String(error));
+        }
+        if (!tokenPrerequisiteRejected) throw new Error("missing external token prerequisite was accepted");
         let collisionRejected = false;
         try {
           actors.readRealActorConfig({ ...env, E1_ACTOR_RESULT_PATH: path });

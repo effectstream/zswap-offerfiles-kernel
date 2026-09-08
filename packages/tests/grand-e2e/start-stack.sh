@@ -2,7 +2,7 @@
 # Start a fresh stack and block until bootstrap has genuinely finished.
 #
 # `/v1/health` goes ok long before the stack is usable: the one-shot bootstrap
-# jobs (contract deploy, mint-test-tokens, celestia-fund-bridge) are still
+# chain readiness jobs are still
 # running, and the orchestrator tears the WHOLE stack down if any of them exits
 # non-zero. Waiting on health alone means starting work against a stack that is
 # about to disappear underneath it.

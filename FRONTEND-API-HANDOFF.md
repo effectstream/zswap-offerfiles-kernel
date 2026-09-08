@@ -245,9 +245,9 @@ their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
   (`decimals` and `asset_id` are new: base units per PRICED coin — never the
   colour's own display decimals — and the reference asset a price comes from.
   `POST /v1/known-tokens` accepts both, optionally, and defaults `decimals` to
-  **`6`**: every token this stack mints or registers has 6 decimals, and the
-  faucets hand out whole coins scaled by `10^6` (1 000 coins = `1000000000` base
-  units). `NIGHT` is seeded with the same 6 — 1 NIGHT is 10⁶ Stars, its base
+  **`6`** for legacy/local registrations. Canonical registry records state
+  their published scales (BTC variants 8, ETH 18, stablecoins 6). `NIGHT` is
+  seeded with 6 — 1 NIGHT is 10⁶ Stars, its base
   unit. **A UI must divide by `10^decimals` before showing an amount**, and
   multiply the number a user types before putting it on the wire; a node too old
   to send the field is one of these tokens, so read a missing `decimals` as 6.)

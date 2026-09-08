@@ -1,11 +1,10 @@
 // Ladder configuration: what the solver posts, and what it values residuals at.
 //
-// Token colors are deployment-specific (they derive from the deployed
-// offer-files contract), so pairs may name an alias from the file's own
+// Token colors are network-specific, so pairs may name an alias from the file's own
 // `tokens` map instead of a raw 64-hex color. Aliases resolve from that map
 // only — never from the node's known-tokens registry, which is an unverified
-// demo table any operator can write. `scripts/bootstrap-dev.ts` regenerates the
-// `tokens` map after minting.
+// demo table any operator can write. `scripts/bootstrap-dev.ts` verifies an
+// externally prefunded solver wallet before regenerating the `tokens` map.
 
 import { readFile } from "node:fs/promises";
 
@@ -96,7 +95,7 @@ export async function loadLadderConfig(path: string): Promise<LoadedLadders> {
     raw = await readFile(path, "utf-8");
   } catch (err) {
     throw new Error(
-      `ladder config not readable at ${path} — run scripts/bootstrap-dev.ts to generate one ` +
+      `ladder config not readable at ${path} — prefund the solver and run scripts/bootstrap-dev.ts ` +
         `(${err instanceof Error ? err.message : String(err)})`,
     );
   }

@@ -5,14 +5,12 @@ import {
 } from "@effectstream/config";
 import {
   PrimitiveTypeCelestiaGeneric,
-  PrimitiveTypeMidnightGeneric,
   PrimitiveTypeMidnightNullifierAndCommitment,
   PrimitiveTypeMidnightUnshieldedSpend,
   PrimitiveTypeMidnightUnshieldedCreate,
   PrimitiveTypeMidnightZswapRoot,
 } from "@effectstream/sm/builtin";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
-import { OfferFilesContract } from "@zswap-da/contract-offer-files";
 
 import {
   BLOCK_TIME_MS,
@@ -24,7 +22,6 @@ import {
   CELESTIA_START_HEIGHT,
   CELESTIA_STEP_SIZE,
   MIDNIGHT_DELAY_MS,
-  midnightContract,
   NTP_START_TIME,
   NTP_STEP_SIZE,
 } from "./env.ts";
@@ -32,19 +29,6 @@ import {
 const CELESTIA_START_BLOCK = CELESTIA_START_HEIGHT != null ? Number(CELESTIA_START_HEIGHT) : 1;
 if (!Number.isFinite(CELESTIA_START_BLOCK)) {
   throw new Error("CELESTIA_START_HEIGHT must be numeric");
-}
-
-const contractAddress =
-  process.env.MIDNIGHT_CONTRACT_ADDRESS ?? midnightContract?.contractAddress;
-
-if (!contractAddress) {
-  throw new Error(
-    "No Midnight contract address found for the preview network.\n" +
-    "Either:\n" +
-    "  1. Set MIDNIGHT_CONTRACT_ADDRESS env var, or\n" +
-    "  2. Create packages/contracts-midnight/contract-offer-files.preview.json\n" +
-    "     by running deploy.ts with MIDNIGHT_NETWORK_ID=preview.",
-  );
 }
 
 const MIDNIGHT_START_BLOCK = Number(process.env.MIDNIGHT_START_BLOCK ?? "1");
@@ -133,18 +117,6 @@ export const config = new ConfigBuilder()
           startBlockHeight: CELESTIA_START_BLOCK,
           namespace: CELESTIA_NAMESPACE,
           stateMachinePrefix: "celestia-zswap",
-        }),
-      )
-      .addPrimitive(
-        (syncProtocols) => (syncProtocols as any).parallelMidnight,
-        () => ({
-          name: "ZswapMidnightState",
-          type: PrimitiveTypeMidnightGeneric,
-          startBlockHeight: MIDNIGHT_START_BLOCK,
-          contractAddress: contractAddress!,
-          stateMachinePrefix: "midnight-zswap",
-          contract: { ledger: OfferFilesContract.ledger },
-          networkId: midnightNetworkConfig.id,
         }),
       )
       .addPrimitive(

@@ -243,7 +243,7 @@ describe("policy — enforce | warn | off", () => {
 
 describe("unpriced tokens (SC-003 — the test site must keep working)", () => {
   // Only the give leg is priced. The wanted colour is answered for and has no
-  // price, which is what every faucet-minted test token looks like.
+  // price, which is how an externally issued token without price metadata looks.
   const unpricedLookup = () =>
     lookupOf({ [GIVE_COLOR]: { price_usd: String(NIGHT_PRICE), source: "seed" } });
 

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useDebugger } from '../Debugger'
 import { api } from '../api'
-import { NIGHT_COLOR } from '../wallet/mintable'
+import { NIGHT_COLOR } from '../wallet/token-colors'
 import { MipNpmLink } from './shared'
 
 export function ReadPanel() {

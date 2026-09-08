@@ -1,8 +1,8 @@
 // The offer poster's durable coin → offers record (spec FR-008, FR-009, US2).
 //
 // One JSON file on the poster's own volume, keyed by the coin NONCE, holding
-// every coin the poster minted and every offer it built from that coin. It is
-// what turns "killed between mint and post" from a leaked coin into a deferred
+// every prefunded coin the poster adopted and every offer it built from that coin. It is
+// what turns "killed between inventory selection and post" into a deferred
 // re-offer, and what makes "which ZSwap was built from which coin" answerable
 // after the fact.
 //
@@ -11,13 +11,12 @@
 //   1. **Nothing is silently lost.** A file that does not parse, or that parses
 //      into something that is not this schema, is MOVED ASIDE (never
 //      overwritten) and the open is REFUSED unless the operator explicitly asks
-//      for a reset. Same for a journal that belongs to a different contract
-//      deployment: its coins do not exist on this chain, so adopting it would
+//      for a reset. Same for a journal that belongs to a different network
+//      network: its coins do not exist on this chain, so adopting it would
 //      make every candidate a lie.
-//   2. **Every mutation is on disk before the call returns.** The mint intent is
-//      journaled BEFORE the mint is submitted; if the process dies between the
-//      two, the nonce is still on disk. A buffered write would defeat the whole
-//      point, so every op writes synchronously (temp file + fsync + rename), and
+//   2. **Every mutation is on disk before the call returns.** An inventory coin
+//      is journaled before its offer is built. Every op writes synchronously
+//      (temp file + fsync + rename), and
 //      a crash mid-write leaves either the old file or the new one, never half.
 //   3. **`bigint` never reaches JSON.** Coin values and want amounts are u64/u256
 //      base units; they are stored as canonical decimal STRINGS and validated as
@@ -49,11 +48,11 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
-export const JOURNAL_VERSION = 1 as const;
+export const JOURNAL_VERSION = 2 as const;
 
-/** Lifecycle of a coin the poster minted. `lost` is operator-visible only: the
+/** Lifecycle of a prefunded coin. `lost` is operator-visible only: the
  *  poster never re-offers it and never deletes it. */
-export const COIN_STATES = ["minted", "offered", "spent", "lost"] as const;
+export const COIN_STATES = ["available", "offered", "spent", "lost"] as const;
 export type CoinState = (typeof COIN_STATES)[number];
 
 /** What the journal may record for an offer. Five of these come from the kernel
@@ -123,9 +122,7 @@ export interface JournalCoin {
   value: string;
   /** `coinNullifier(coin, coinSecretKey)`, once known. */
   nullifier?: string;
-  /** Mint transaction hash, once submitted. */
-  mintTx?: string;
-  mintedAt: string;
+  acquiredAt: string;
   state: CoinState;
   /** Only set alongside `state: "lost"`. */
   lostReason?: string;
@@ -134,7 +131,7 @@ export interface JournalCoin {
 
 export interface JournalData {
   version: typeof JOURNAL_VERSION;
-  contractAddress: string;
+  networkId: string;
   giveColour: string;
   createdAt: string;
   updatedAt: string;
@@ -156,8 +153,8 @@ export interface OfferRecord {
 export type JournalErrorCode =
   /** The file exists but is not parseable, or not this schema. Moved aside. */
   | "CORRUPT"
-  /** The file is a valid journal for a DIFFERENT contract deployment. */
-  | "CONTRACT_MISMATCH"
+  /** The file is a valid journal for a DIFFERENT network. */
+  | "NETWORK_MISMATCH"
   /** The file is a valid journal for a different give colour. */
   | "GIVE_COLOUR_MISMATCH"
   | "UNKNOWN_COIN"
@@ -226,7 +223,7 @@ const CANONICAL_UINT = /^(?:0|[1-9][0-9]*)$/;
 const nowIso = (): string => new Date().toISOString();
 
 /** Nonces are `Nonce = string` hex from the ledger; lowercase them everywhere so
- *  a case difference between the mint result and `availableCoins` can never
+ *  a case difference between inventory input and `availableCoins` can never
  *  silently hide a coin. */
 function normaliseNonce(nonce: string): string {
   if (typeof nonce !== "string" || nonce.trim() === "") {
@@ -303,7 +300,7 @@ function writeAtomic(file: string, contents: string): void {
 // ── load-time validation ────────────────────────────────────────────────────
 //
 // Structure is checked BEFORE identity, deliberately: a journal that is valid
-// but belongs to another deployment must produce CONTRACT_MISMATCH (file left
+// but belongs to another network must produce NETWORK_MISMATCH (file left
 // intact), not CORRUPT (file moved aside).
 
 function validationFailure(data: unknown): string | null {
@@ -311,7 +308,7 @@ function validationFailure(data: unknown): string | null {
   if (data["version"] !== JOURNAL_VERSION) {
     return `unsupported version ${JSON.stringify(data["version"])} (expected ${JOURNAL_VERSION})`;
   }
-  for (const key of ["contractAddress", "giveColour", "createdAt", "updatedAt"]) {
+  for (const key of ["networkId", "giveColour", "createdAt", "updatedAt"]) {
     if (typeof data[key] !== "string" || data[key] === "") return `"${key}" must be a non-empty string`;
   }
   const coins = data["coins"];
@@ -324,11 +321,11 @@ function validationFailure(data: unknown): string | null {
     if (typeof raw["value"] !== "string" || !CANONICAL_UINT.test(raw["value"])) {
       return `${where}: "value" must be a canonical decimal string`;
     }
-    if (typeof raw["mintedAt"] !== "string") return `${where}: "mintedAt" must be a string`;
+    if (typeof raw["acquiredAt"] !== "string") return `${where}: "acquiredAt" must be a string`;
     if (!(COIN_STATES as readonly string[]).includes(raw["state"] as string)) {
       return `${where}: unknown state ${JSON.stringify(raw["state"])}`;
     }
-    for (const key of ["nullifier", "mintTx", "lostReason"]) {
+    for (const key of ["nullifier", "lostReason"]) {
       if (raw[key] !== undefined && typeof raw[key] !== "string") return `${where}: "${key}" must be a string`;
     }
     const offers = raw["offers"];
@@ -356,7 +353,7 @@ function validationFailure(data: unknown): string | null {
 
 export interface JournalSummary {
   version: number;
-  contractAddress: string;
+  networkId: string;
   giveColour: string;
   createdAt: string;
   updatedAt: string;
@@ -374,9 +371,9 @@ export interface JournalSummary {
 export interface OpenJournalOptions {
   /** Absolute path to the journal file (`POSTER_JOURNAL_FILE`). */
   file: string;
-  /** The deployed offer-files contract address the coins belong to. */
-  contractAddress: string;
-  /** The give-leg token colour the poster mints. */
+  /** Midnight network the coins belong to. */
+  networkId: string;
+  /** The explicit give-leg token ID. */
   giveColour: string;
   /** `POSTER_JOURNAL_RESET=true`: move an unusable or foreign journal aside and
    *  start a fresh one instead of refusing to start. */
@@ -411,8 +408,8 @@ export class Journal {
     return new Journal(file, data);
   }
 
-  get contractAddress(): string {
-    return this.#data.contractAddress;
+  get networkId(): string {
+    return this.#data.networkId;
   }
 
   get giveColour(): string {
@@ -441,10 +438,13 @@ export class Journal {
 
   // ── mutations (each persists before returning) ────────────────────────────
 
-  /** Journal a coin BEFORE its mint is submitted (FR-003). If the process dies
-   *  between this call and the mint landing, the nonce survives and
-   *  reconciliation can find the orphan. */
-  recordMintIntent(nonce: string, type: string, value: bigint | string): CoinRecord {
+  /** Adopt a spendable prefunded coin before building an offer from it. */
+  recordInventory(
+    nonce: string,
+    type: string,
+    value: bigint | string,
+    nullifier: string,
+  ): CoinRecord {
     const key = normaliseNonce(nonce);
     if (this.#data.coins[key] !== undefined) {
       throw new JournalError("DUPLICATE_COIN", `coin ${key} is already journaled`);
@@ -455,22 +455,12 @@ export class Journal {
     const coin: JournalCoin = {
       type: type.toLowerCase(),
       value: amountToString(value, "coin value"),
-      mintedAt: nowIso(),
-      state: "minted",
+      nullifier: nullifier.toLowerCase(),
+      acquiredAt: nowIso(),
+      state: "available",
       offers: [],
     };
     this.#data.coins[key] = coin;
-    this.#persist();
-    return { nonce: key, ...structuredClone(coin) };
-  }
-
-  /** Attach the mint's outcome: transaction hash and the coin's nullifier. The
-   *  state stays `minted` — the coin is not offered yet. */
-  recordMinted(nonce: string, result: { txHash?: string; nullifier?: string }): CoinRecord {
-    const key = normaliseNonce(nonce);
-    const coin = this.#requireCoin(key);
-    if (result.txHash !== undefined) coin.mintTx = result.txHash;
-    if (result.nullifier !== undefined) coin.nullifier = result.nullifier.toLowerCase();
     this.#persist();
     return { nonce: key, ...structuredClone(coin) };
   }
@@ -501,7 +491,7 @@ export class Journal {
     coin.offers.push(offer);
     // A rejected post never became an offer, so it must not claim the coin: the
     // coin is still exactly as free as it was, and the next tick should re-offer
-    // it rather than mint. `candidates()` would allow it either way (rejected is
+    // it rather than select another coin. `candidates()` would allow it either way (rejected is
     // releasable), but leaving the state honest keeps `summary()` readable.
     if (offer.status !== "rejected") coin.state = "offered";
     this.#persist();
@@ -549,9 +539,9 @@ export class Journal {
 
   // ── reads ─────────────────────────────────────────────────────────────────
 
-  /** Coins that can be re-offered right now (FR-009, FR-010), oldest mint first.
+  /** Coins that can be re-offered right now (FR-009, FR-010), oldest acquisition first.
    *
-   *  A coin qualifies when its state is `minted` or `offered`, its latest offer
+   *  A coin qualifies when its state is `available` or `offered`, its latest offer
    *  is absent or `expired | cancelled | rejected`, AND its nonce is in
    *  `availableNonces` — the wallet's `availableCoins`, which is the only proof
    *  the SDK has released it. `live` and `unknown` never qualify: a `live` offer
@@ -563,18 +553,18 @@ export class Journal {
     }
     const out: CoinRecord[] = [];
     for (const [nonce, coin] of Object.entries(this.#data.coins)) {
-      if (coin.state !== "minted" && coin.state !== "offered") continue;
+    if (coin.state !== "available" && coin.state !== "offered") continue;
       if (!available.has(nonce)) continue;
       const latest = coin.offers[coin.offers.length - 1];
       if (latest !== undefined && !RELEASABLE_STATUSES.includes(latest.status)) continue;
       out.push({ nonce, ...structuredClone(coin) });
     }
-    // Oldest mint first, so a coin does not starve behind newer ones. `mintedAt`
+    // Oldest acquisition first, so a coin does not starve behind newer ones. `acquiredAt`
     // is an ISO string, which sorts lexicographically in time order; the nonce
     // breaks ties so the order is total and stable.
     out.sort((a, b) =>
-      a.mintedAt === b.mintedAt ? (a.nonce < b.nonce ? -1 : a.nonce > b.nonce ? 1 : 0)
-      : a.mintedAt < b.mintedAt ? -1
+      a.acquiredAt === b.acquiredAt ? (a.nonce < b.nonce ? -1 : a.nonce > b.nonce ? 1 : 0)
+      : a.acquiredAt < b.acquiredAt ? -1
       : 1,
     );
     return out;
@@ -595,7 +585,7 @@ export class Journal {
 
   /** Counts for `/health` and `/journal`. */
   summary(): JournalSummary {
-    const coinCounts = { total: 0, minted: 0, offered: 0, spent: 0, lost: 0 };
+    const coinCounts = { total: 0, available: 0, offered: 0, spent: 0, lost: 0 };
     const offerCounts = {
       total: 0, live: 0, consumed: 0, expired: 0, cancelled: 0, rejected: 0, unknown: 0,
     };
@@ -606,7 +596,7 @@ export class Journal {
       coinCounts[coin.state] += 1;
       const latest = coin.offers[coin.offers.length - 1];
       if (
-        (coin.state === "minted" || coin.state === "offered") &&
+        (coin.state === "available" || coin.state === "offered") &&
         (latest === undefined || RELEASABLE_STATUSES.includes(latest.status))
       ) {
         releasableCoins += 1;
@@ -627,7 +617,7 @@ export class Journal {
     }
     return {
       version: this.#data.version,
-      contractAddress: this.#data.contractAddress,
+      networkId: this.#data.networkId,
       giveColour: this.#data.giveColour,
       createdAt: this.#data.createdAt,
       updatedAt: this.#data.updatedAt,
@@ -660,11 +650,11 @@ export class Journal {
   }
 }
 
-function freshData(contractAddress: string, giveColour: string): JournalData {
+function freshData(networkId: string, giveColour: string): JournalData {
   const at = nowIso();
   return {
     version: JOURNAL_VERSION,
-    contractAddress,
+    networkId,
     giveColour,
     createdAt: at,
     updatedAt: at,
@@ -677,7 +667,7 @@ function freshData(contractAddress: string, giveColour: string): JournalData {
  *  - missing file        → a fresh journal, written to disk immediately
  *  - unparseable/invalid → moved to `<file>.corrupt-<stamp>`, then `CORRUPT`
  *                          unless `reset`, in which case a fresh journal
- *  - other contract      → `CONTRACT_MISMATCH` with the file left untouched,
+ *  - other network       → `NETWORK_MISMATCH` with the file left untouched,
  *                          unless `reset`, which moves it to
  *                          `<file>.superseded-<stamp>` and starts fresh
  *  - other give colour   → `GIVE_COLOUR_MISMATCH`, same treatment
@@ -689,10 +679,10 @@ export function openJournal(opts: OpenJournalOptions): Journal {
   if (typeof file !== "string" || file === "") {
     throw new JournalError("INVALID_ARGUMENT", "journal file path is required");
   }
-  const contractAddress = String(opts.contractAddress ?? "").trim().toLowerCase();
+  const networkId = String(opts.networkId ?? "").trim().toLowerCase();
   const giveColour = String(opts.giveColour ?? "").trim().toLowerCase();
-  if (contractAddress === "") {
-    throw new JournalError("INVALID_ARGUMENT", "contractAddress is required");
+  if (networkId === "") {
+    throw new JournalError("INVALID_ARGUMENT", "networkId is required");
   }
   if (giveColour === "") {
     throw new JournalError("INVALID_ARGUMENT", "giveColour is required");
@@ -701,7 +691,7 @@ export function openJournal(opts: OpenJournalOptions): Journal {
   mkdirSync(dirname(file), { recursive: true });
 
   if (!existsSync(file)) {
-    const journal = Journal._create(file, freshData(contractAddress, giveColour));
+    const journal = Journal._create(file, freshData(networkId, giveColour));
     journal.flush();
     return journal;
   }
@@ -725,17 +715,17 @@ export function openJournal(opts: OpenJournalOptions): Journal {
         { movedAside, file },
       );
     }
-    const journal = Journal._create(file, freshData(contractAddress, giveColour));
+    const journal = Journal._create(file, freshData(networkId, giveColour));
     journal.flush();
     return journal;
   }
 
   const data = parsed as JournalData;
   const mismatch =
-    data.contractAddress.toLowerCase() !== contractAddress
+    data.networkId.toLowerCase() !== networkId
       ? ({
-          code: "CONTRACT_MISMATCH" as const,
-          detail: `journal belongs to contract ${data.contractAddress}, this poster is on ${contractAddress}`,
+          code: "NETWORK_MISMATCH" as const,
+          detail: `journal belongs to network ${data.networkId}, this poster is on ${networkId}`,
         })
       : data.giveColour.toLowerCase() !== giveColour
         ? ({
@@ -747,23 +737,22 @@ export function openJournal(opts: OpenJournalOptions): Journal {
   if (mismatch !== null) {
     if (!reset) {
       // NOT moved aside: the file is a perfectly good journal, just not for this
-      // deployment. Moving it would punish an operator who pointed the poster at
-      // the wrong contract address by mangling the record of the right one.
+      // network. Moving it would punish an operator for a configuration typo.
       throw new JournalError(
         mismatch.code,
-        `${mismatch.detail}. Coins from another deployment do not exist here; ` +
+        `${mismatch.detail}. Coins from another network do not exist here; ` +
           "point POSTER_JOURNAL_FILE elsewhere or set POSTER_JOURNAL_RESET=true.",
         { file },
       );
     }
     moveAside(file, "superseded");
-    const journal = Journal._create(file, freshData(contractAddress, giveColour));
+    const journal = Journal._create(file, freshData(networkId, giveColour));
     journal.flush();
     return journal;
   }
 
   // Adopt the identity spellings the caller gave (both are already lowercased).
-  data.contractAddress = contractAddress;
+  data.networkId = networkId;
   data.giveColour = giveColour;
   return Journal._create(file, data);
 }

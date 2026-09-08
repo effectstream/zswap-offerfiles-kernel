@@ -111,13 +111,13 @@ echo "gates output: ${OUT}"
 run_gate compose-config sh -c \
   'docker compose --profile e2e config | sed -E "s/^([[:space:]]*[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API_KEY)[A-Z0-9_]*:[[:space:]]*).*/\\1<redacted>/"'
 
-# G1b — the 00007 services and the post-kernel mint one-shot are part of the
-# rendered model. Exact startup edges are checked from rendered JSON after the
-# kernel image exists (G2b below).
+# G1b — retained offer services are present and local deploy/mint/register
+# services are absent. Exact startup edges are checked after the image exists.
 run_gate compose-config-00007-services sh -c \
   'svcs="$(docker compose --profile e2e config --services)"; echo "$svcs"; \
-   echo "$svcs" | grep -qx solver-frontend && echo "$svcs" | grep -qx mint-test-tokens && \
-   echo "$svcs" | grep -qx register-minted-tokens'
+   echo "$svcs" | grep -qx solver-frontend && echo "$svcs" | grep -qx solver-provision && \
+   echo "$svcs" | grep -qx maker-offer && \
+   ! echo "$svcs" | grep -Eq "^(offerfiles-deploy|mint-test-tokens|register-minted-tokens)$"'
 
 # ── G2: every image builds ──────────────────────────────────────────────────
 # One gate per image so a failure names the image instead of "the build".
@@ -128,9 +128,8 @@ run_gate build-celestia      docker compose build celestia
 run_gate build-relay         docker compose build relay
 run_gate build-kernel        docker compose build kernel
 
-# G2b — parse the actual all-profile Compose JSON, assert the exact linear
-# deploy -> healthy kernel -> mint -> compatibility -> consumer conditions,
-# and walk every service dependency to reject cycles and unknown targets.
+# G2b — parse the actual all-profile Compose JSON, assert retained chain/offer
+# readiness edges, reject removed local funding services, cycles and unknowns.
 check_compose_topology() {
   docker compose --profile e2e --profile poster --profile prices config --format json |
     docker compose run --rm --no-deps -T --entrypoint bun solver \
@@ -256,13 +255,6 @@ run_gate entrypoints-parse \
   docker compose run --rm --no-deps --entrypoint sh solver -c \
     'set -e; for f in /usr/local/bin/entrypoint-*.sh /usr/local/bin/wait-for.sh; do echo "checking $f"; bash -n "$f"; done; echo "all entrypoints parse"'
 
-# G5b — the receipt, not the legacy marker, is the restart authority. Exercise
-# both asymmetric crash states against the real entrypoint with networking
-# disabled and a bounded dead-API timeout.
-run_gate mint-receipt-restart-states \
-  docker compose run --rm --no-deps --entrypoint bash solver \
-    deploy/images/kernel/entrypoint-mint-test-tokens.test.sh
-
 # ── G6: the pglite server module resolves inside the image ──────────────────
 # `@effectstream/db` is not a root dependency and the bun store holds two copies
 # of it behind different content hashes, so this resolve is the one thing in the
@@ -272,15 +264,7 @@ run_gate pglite-resolver \
   docker compose run --rm --no-deps --entrypoint sh solver -c \
     'p=$(bun --cwd /app/packages/database -e "process.stdout.write(import.meta.resolve(\"@effectstream/db/start-pglite\").replace(\"file://\",\"\"))"); echo "resolved: $p"; test -f "$p"'
 
-# ── G7: the compiled Compact artifacts are in the image ─────────────────────
-# `src/managed/` is gitignored, so it exists only because the image built it.
-# Without the proving keys the deploy one-shot, the kernel's contract read and
-# the mint script all fail at runtime, far from the cause.
-run_gate compact-artifacts \
-  docker compose run --rm --no-deps --entrypoint sh solver -c \
-    'd=/app/packages/contracts-midnight/contract-offer-files/src/managed; set -e; for sub in compiler contract keys zkir; do test -d "$d/$sub" || { echo "missing $d/$sub"; exit 1; }; done; test -f "$d/compiler/contract-info.json"; ls "$d/keys"; echo "compact artifacts present"'
-
-# ── G8: (00007) the monitor site's static assets are in the image ───────────
+# ── G7: (00007) the monitor site's static assets are in the image ───────────
 # `public/` is plain files, not a package export, so nothing at install time
 # would notice if the build context ignored them; the site would 404 its own
 # page at runtime.

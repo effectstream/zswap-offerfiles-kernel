@@ -2,8 +2,8 @@
 # entrypoint-offer-poster.sh — the long-running offer poster (00007 / FR-012).
 #
 # Every POST_INTERVAL_MS the poster either re-offers a coin its journal says came
-# back, or mints GIVE_AMOUNT of GIVE_TOKEN from the faucet circuit and posts one
-# ZSwap offer whose ONLY input is that exact coin. See deploy/README.md.
+# back, or adopts a matching spendable coin already held by its dedicated wallet
+# and posts one ZSwap offer whose ONLY input is that exact coin.
 #
 # ── Why there is no marker file ──────────────────────────────────────────────
 # entrypoint-maker-offer.sh and entrypoint-solver-provision.sh write a marker
@@ -12,9 +12,9 @@
 # This service is the opposite — a LOOP whose whole job is to keep posting, so a
 # marker would make a restart a permanent no-op. Idempotence lives one level
 # down instead, in the JOURNAL (POSTER_JOURNAL_FILE, on its own volume): it is
-# written before the mint is submitted and after every state change, so a
+# written before an adopted coin is offered and after every state change, so a
 # restart re-adopts the coins this poster already owns and re-offers the ones
-# that came back rather than minting a fresh set. Deleting that volume is what
+# that came back rather than duplicating inventory. Deleting that volume is what
 # "start over" means here; deleting a marker is not.
 #
 # ── One facade per seed, ever ────────────────────────────────────────────────
@@ -35,18 +35,18 @@ set -euo pipefail
 
 . /usr/local/bin/entrypoint-common.sh
 
-# The two the container cannot sensibly default. The WALLET is deliberately not
+# Values the container cannot sensibly default. The WALLET is deliberately not
 # checked here: POSTER_SEED xor POSTER_MNEMONIC is an exclusive choice with a
 # collision rule attached, and poster-config.ts reports all of it in one place
 # with the same exit code this function uses.
-require_env ZSWAP_API MIDNIGHT_NETWORK_ID
+require_env ZSWAP_API MIDNIGHT_NETWORK_ID GIVE_TOKEN WANT_TOKEN
 
 # The wallet, checked here and not by require_env, because it is an XOR and
 # because the two sides have DIFFERENT NAMES on the two sides of compose: the
 # process reads POSTER_SEED / POSTER_MNEMONIC, the operator sets
 # OFFER_POSTER_SEED / OFFER_POSTER_MNEMONIC in deploy/.env. poster-config.ts
 # reports the first pair (it cannot know the second), so this line bridges them
-# — and it fails BEFORE the ten-minute contract wait and the kernel wait below,
+# — and it fails BEFORE the kernel wait below,
 # which is the whole point of doing it in the shell.
 #
 # Compose's own `${VAR:?message}` guard would have been the obvious place for
@@ -77,12 +77,10 @@ for _poster_env in \
   GIVE_AMOUNT \
   GIVE_MIN \
   GIVE_MAX \
-  GIVE_SIZE_SEED \
   WANT_TOKEN \
   WANT_AMOUNT \
   POST_INTERVAL_MS \
   OFFER_TTL_MINUTES \
-  COIN_VISIBLE_TIMEOUT_MS \
   RECONCILE_INTERVAL_MS \
   POSTER_MAX_REOFFERS_PER_TICK \
   SHUTDOWN_GRACE_MS \
@@ -91,9 +89,7 @@ for _poster_env in \
   DRY_RUN \
   POSTER_JOURNAL_FILE \
   POSTER_JOURNAL_RESET \
-  POSTER_MIN_DUST \
   POSTER_SYNC_TIMEOUT_MS \
-  POSTER_DUST_WAIT_TIMEOUT_MS \
   POSTER_POST_RETRIES \
   POSTER_POST_RETRY_MS \
   POSTER_LIVE_TRIES \
@@ -102,14 +98,6 @@ do
   if [ -z "${!_poster_env:-}" ]; then unset "${_poster_env}"; fi
 done
 unset _poster_env
-
-# The contract address, from the shared offerfiles-deploy volume. The poster
-# resolves it itself in the same priority order (MIDNIGHT_CONTRACT_ADDRESS →
-# ${CONTRACT_SHARE_DIR}/contract-offer-files.<network>.json → the copy in
-# packages/contracts-midnight), so this call is what makes the first branch
-# true — and the journal is KEYED by that address: a mismatch refuses to start
-# rather than mixing coins from two deployments.
-adopt_contract_address
 
 wait_http "${ZSWAP_API}/v1/health" "kernel API" "${KERNEL_WAIT_TIMEOUT_S:-600}"
 
@@ -123,11 +111,9 @@ cd "${REPO_ROOT}"
 log "starting the offer poster (deploy/scripts/offer-poster.ts)"
 log "  kernel=${ZSWAP_API} network=${MIDNIGHT_NETWORK_ID} journal=${POSTER_JOURNAL_FILE:-/var/lib/offer-poster/journal.json}"
 if [ -n "${GIVE_MIN:-}" ] || [ -n "${GIVE_MAX:-}" ]; then
-  # A range: the size is drawn per fresh mint, so there is no single number to
-  # print here. The poster's own banner prints the resolved base units.
-  log "  give=${GIVE_TOKEN:-WBTC}/${GIVE_MIN:-<unset>}..${GIVE_MAX:-<unset>} coins (log-uniform per mint, seed=${GIVE_SIZE_SEED:-<random>})"
+  log "  give=${GIVE_TOKEN}/${GIVE_MIN:-<unset>}..${GIVE_MAX:-<unset>} base units (select matching prefunded coin)"
 else
-  log "  give=${GIVE_TOKEN:-WBTC}/${GIVE_AMOUNT:-1000000}"
+  log "  give=${GIVE_TOKEN}/${GIVE_AMOUNT:-1} base units (select matching prefunded coin)"
 fi
-log "  want=${WANT_TOKEN:-WETH}/${WANT_AMOUNT:-<quoted>} interval=${POST_INTERVAL_MS:-60000}ms"
+log "  want=${WANT_TOKEN}/${WANT_AMOUNT:-<quoted>} interval=${POST_INTERVAL_MS:-60000}ms"
 exec bun run deploy/scripts/offer-poster.ts

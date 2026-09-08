@@ -53,9 +53,9 @@ export const CANCEL_DOUBLE_SEED = seed("c1");
 export const TAKER_SEEDS: string[] = ["b0", "b1", "b2", "b3", "b4", "b5"].map(seed);
 
 // ── Tokens ───────────────────────────────────────────────────────────────────
-// Three shielded + two unshielded colors minted by genesis at suite start.
-// Domain separators are disjoint from the startup mint (0x70/0x63) and the
-// other e2e suites (0xa0/0xa1/0xd0/0xd1).
+// Three shielded + two unshielded colors supplied by the suite environment.
+// The genesis seed must already hold sufficient same-chain inventory before
+// this suite starts; setup only distributes that inventory to test actors.
 //
 // TC exists ONLY for the §2.5 basket fixture, and a third shielded colour is
 // genuinely required for it: a basket needs two colours on one side, and
@@ -65,8 +65,8 @@ export const TAKER_SEEDS: string[] = ["b0", "b1", "b2", "b3", "b4", "b5"].map(se
 //
 // No maker or taker is funded in TC — only the basket specialist is (see
 // setupActors) — so the funding plan's per-offer arithmetic is untouched.
-export const TOKEN_SEPS = { TA: 0xe0, TB: 0xe1, UA: 0xe2, UB: 0xe3, TC: 0xe4 } as const;
-export type TokenKey = keyof typeof TOKEN_SEPS;
+export const TOKEN_KEYS = ["TA", "TB", "UA", "UB", "TC"] as const;
+export type TokenKey = (typeof TOKEN_KEYS)[number];
 
 // Fixed reference prices per (give → want) direction, used to derive want
 // amounts. Purely a test-side convention; ±5% deterministic wiggle by index.
@@ -91,10 +91,8 @@ export const TAKER_COIN = 3000n; // wants can reach ~2500
 export const GIVE_MIN = 500n;
 export const GIVE_SPAN = 1000n; // give ∈ [500, 1500]
 
-// Genesis mint per colour. Unchanged by 00024 (Q5) — at the registry's 6
-// decimals this value now READS as 1 000 whole coins, which is exactly the
-// faucet allotment, so every fixture below keeps its meaning.
-export const MINT_AMOUNT = 1_000_000_000n;
+// Minimum externally prefunded genesis inventory per test colour.
+export const REQUIRED_GENESIS_INVENTORY = 1_000_000_000n;
 
 // Publish every Nth valid offer via direct blob.Submit instead of the API
 // (path-B positive coverage at scale; 1.4 does one explicitly too).

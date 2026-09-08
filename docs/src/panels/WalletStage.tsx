@@ -1,13 +1,13 @@
-import { MINT_AMOUNT, MINT_COINS, NIGHT_COLOR } from '../wallet/mintable'
+import { NIGHT_COLOR } from '../wallet/token-colors'
 import { baseUnitsToCoins } from '../../../packages/solver-core/amount.ts'
-import { PROOF_SERVER_URL } from '../config'
+import { FAUCET_NETWORK, FAUCET_URL } from '../config'
 import type { WalletApp } from '../wallet/useWalletApp'
 
 /** Base units → whole coins for display. The wallet hands back base-unit
  *  strings; anything else (an empty bag, a value from a stale shape) is shown
  *  verbatim rather than crashing the panel. */
-function coinsOf(baseUnits: string): string {
-  return /^[0-9]+$/.test(baseUnits) ? baseUnitsToCoins(BigInt(baseUnits)) : baseUnits
+function coinsOf(baseUnits: string, decimals: number): string {
+  return /^[0-9]+$/.test(baseUnits) ? baseUnitsToCoins(BigInt(baseUnits), decimals) : baseUnits
 }
 
 function short(a: string | null | undefined, n = 18) {
@@ -22,10 +22,21 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
     <div className="panel">
       <h2>Wallet</h2>
       <p className="lead">
-        Connect a Midnight wallet, inspect balances, and mint the fixed test tokens
-        (same domain separators as <code>mint-test-tokens</code>). Proof server:{' '}
-        <code>{wallet.proofServer ?? PROOF_SERVER_URL}</code> via <code>VITE_PROOF_SERVER_URL</code>.
+        Connect a Midnight wallet, inspect registered-token balances, and build offers.
       </p>
+
+      <div className="card">
+        <h3>Get test tokens</h3>
+        <p>
+          Use the canonical external faucet for <strong>{FAUCET_NETWORK}</strong>. It opens
+          without a wallet connection; connect your wallet on the mint site.
+        </p>
+        <div className="actions">
+          <a className="btn primary" href={FAUCET_URL} target="_blank" rel="noreferrer">
+            Open external faucet
+          </a>
+        </div>
+      </div>
 
       <div className="card">
         <h3>Connect</h3>
@@ -53,15 +64,12 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
             <button className="btn danger" type="button" onClick={wallet.disconnect}>Disconnect</button>
           </div>
         )}
-        {!wallet.canMint && wallet.status === 'connected' && (
+        {!wallet.canBuildOffers && wallet.status === 'connected' && (
           <div className="callout warn">
-            Local seed wallet can show balances. Minting needs Lace (browser ConnectedAPI).
+            Local seed wallet can show balances. Building offers needs Lace (browser ConnectedAPI).
           </div>
         )}
-        {(wallet.error || wallet.contractError) && (
-          <div className="callout err">{wallet.error || wallet.contractError}</div>
-        )}
-        {wallet.mintMsg && <div className="callout ok">{wallet.mintMsg}</div>}
+        {wallet.error && <div className="callout err">{wallet.error}</div>}
       </div>
 
       {wallet.status === 'connected' && wallet.wstate && (
@@ -102,7 +110,7 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
                     Lace is not pointed at this stack&apos;s indexer. In Lace → Midnight
                     undeployed settings, set indexer to{' '}
                     <code>{wallet.nodeMidnight?.indexerUri ?? 'http://127.0.0.1:8088/api/v3/graphql'}</code>
-                    {' '}(and matching WS), reconnect, remint, then rebuild offers.
+                    {' '}(and matching WS), reconnect, refresh balances, then rebuild offers.
                     <code>networkId=undeployed</code> alone is not enough.
                   </div>
                 )}
@@ -150,34 +158,22 @@ export function WalletStage({ wallet }: { wallet: WalletApp }) {
           </div>
 
           <div className="card">
-            <h3>Mintable tokens</h3>
+            <h3>Registered tokens</h3>
             <p>
-              Preset shortcuts plus whatever <code>/v1/known-tokens</code> already has for this
-              network. Every token here has 6 decimals, so each mint adds{' '}
-              <code>+{String(MINT_COINS)}</code> whole coins —{' '}
-              <code>{String(MINT_AMOUNT)}</code> base units, which is what the circuit is called
-              with.
+              Loaded from <code>/v1/known-tokens</code>. Amounts use each token&apos;s registered
+              decimals, including canonical 8-decimal BTC and 18-decimal ETH tokens.
             </p>
-            {wallet.mintable.map((t) => {
+            {wallet.registeredTokens.map((t) => {
               const bal = wallet.balanceFor(t)
-              const color = wallet.colorById[t.name]
               return (
                 <div className="wallet-row" key={t.name}>
                   <div>
                     <div className="name">{t.name} <span className="meta-line">({t.kind})</span></div>
                     <div className="meta-line">
-                      balance {coinsOf(bal)} ({bal} base units)
-                      {color ? ` · ${short(color, 20)}` : ' · color unknown until first mint / known-tokens'}
+                      balance {coinsOf(bal, t.decimals)} ({bal} base units) · {short(t.token_color, 20)}
+                      {' '}· {t.decimals} decimals
                     </div>
                   </div>
-                  <button
-                    className="btn primary"
-                    type="button"
-                    disabled={!wallet.canMint || wallet.mintingId === t.name || wallet.contractLoading}
-                    onClick={() => wallet.mint(t)}
-                  >
-                    {wallet.mintingId === t.name ? 'Minting…' : `Mint +${String(MINT_COINS)}`}
-                  </button>
                 </div>
               )
             })}

@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # midnight-node entrypoint — dev preset, single process, PID 1.
 #
-# The flag set is copied verbatim from this repo's own
-# `packages/contracts-midnight/package.json` `midnight-node:start` (what
-# `bun run dev` runs), so the Compose chain and the dev-stack chain are
-# configured identically. Exactly one flag is added:
+# The flag set matches the repository's local Midnight development preset, so
+# the Compose chain and direct development chain are configured identically.
+# Exactly one persistence flag is added:
 #
 #   --base-path   the dev preset otherwise keeps chain data under a temporary
 #                 directory, so nothing would survive a container restart while

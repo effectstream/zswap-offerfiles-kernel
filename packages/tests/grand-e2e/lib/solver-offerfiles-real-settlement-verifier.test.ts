@@ -88,7 +88,7 @@ function actorArtifact(): Record<string, unknown> {
     },
     tokens: { A, B, NIGHT },
     funding: {
-      mintAmount: "1000000",
+      sourceInventoryAmount: "1000000",
       userTokenAAmount: "1000",
       solverTokenBAmount: "1000",
       nightPerUtxo: "5000000000000",

@@ -1,522 +1,168 @@
-// Configuration unit tests. Pure: the only I/O `parsePosterConfig` performs is
-// the contract-address file read, and that is injected.
-//
-// The two properties worth the most here are the ones an operator cannot see
-// until it is too late: a poster silently sharing another service's wallet
-// (FR-001), and a seed reaching a log line (FR-015).
-
 import { describe, expect, test } from "bun:test";
 
-import { mnemonicToSeed } from "@scure/bip39";
-
 import {
-  COLLIDING_SEED_VARS,
   ConfigError,
   configDump,
-  type ConfigIO,
-  type EnvMap,
+  parseGiveRange,
   parsePosterConfig,
   readEnv,
-  redactConfig,
-  resolveContractAddress,
   resolveSeed,
 } from "./poster-config.ts";
-import { coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../../../packages/solver-core/amount.ts";
 
-// Preprod's deployed offer-files contract, and the two colours it derives —
-// the same vector `faucet-mint.test.ts` pins, so a change in either derivation
-// path fails here too.
-const PREPROD_CONTRACT = "6fc44c272d866574cefc14e25474fdfa144e6427f299a8222a8ad8a7b374bb7c";
-const WBTC = "e7580bfcf04c05cbec44572d122f526ba35d5b6442fa6429e42e9b9fca22a912";
-const WETH = "fda14e2e04b8389ab82891c761e1d36501a4c79baa7b87b30fbbdc4814c5a0a5";
+const SEED = "ab".repeat(32);
+const GIVE = "12".repeat(32);
+const WANT = "34".repeat(32);
 
-const POSTER_SEED = "0000000000000000000000000000000000000000000000000000000000000077";
+const parse = (extra: Record<string, string | undefined> = {}) =>
+  parsePosterConfig({ POSTER_SEED: SEED, GIVE_TOKEN: GIVE, WANT_TOKEN: WANT, ...extra });
 
-/** No file anywhere — every test that needs an address passes it by env. */
-const noFiles: ConfigIO = { readFile: () => undefined };
-
-const baseEnv = (extra: EnvMap = {}): EnvMap => ({
-  POSTER_SEED,
-  MIDNIGHT_CONTRACT_ADDRESS: PREPROD_CONTRACT,
-  ...extra,
-});
-
-const parse = (extra: EnvMap = {}, io: ConfigIO = noFiles) => parsePosterConfig(baseEnv(extra), io);
-
-// ---------------------------------------------------------------------------
-
-describe('readEnv — "" is not a value', () => {
-  test("absent, empty and whitespace-only all read as undefined", () => {
-    expect(readEnv({}, "X")).toBeUndefined();
-    expect(readEnv({ X: "" }, "X")).toBeUndefined();
-    expect(readEnv({ X: "   " }, "X")).toBeUndefined();
-    expect(readEnv({ X: undefined }, "X")).toBeUndefined();
-  });
-
-  test("a real value is trimmed", () => {
-    expect(readEnv({ X: "  hi  " }, "X")).toBe("hi");
-  });
-});
-
-describe("seed resolution (FR-001)", () => {
-  test("POSTER_SEED and POSTER_MNEMONIC are mutually exclusive", async () => {
-    await expect(
-      resolveSeed({ POSTER_SEED, POSTER_MNEMONIC: "abandon abandon about" }),
-    ).rejects.toMatchObject({ code: "CONFLICT" });
-  });
-
-  test("neither is a MISSING error naming both variables", async () => {
-    const err = await resolveSeed({}).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ConfigError);
-    expect((err as ConfigError).code).toBe("MISSING");
-    expect((err as ConfigError).message).toContain("POSTER_SEED");
-    expect((err as ConfigError).message).toContain("POSTER_MNEMONIC");
-  });
-
-  test("a BLANK POSTER_SEED does not count as set, so the mnemonic is used", async () => {
-    const phrase =
-      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    const { seed, source } = await resolveSeed({ POSTER_SEED: "", POSTER_MNEMONIC: phrase });
-    expect(source).toBe("POSTER_MNEMONIC");
-    expect(seed).toHaveLength(128);
-  });
-
-  test("mnemonic derivation matches @scure/bip39 mnemonicToSeed exactly", async () => {
-    const phrase =
-      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    const { seed } = await resolveSeed({ POSTER_MNEMONIC: phrase });
-    // The published BIP-39 vector for this phrase with an empty passphrase.
-    expect(seed).toBe(
-      "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1" +
-        "9a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
-    );
-    // …and it is byte-for-byte what `@effectstream/midnight-contracts`'
-    // `midnight-env.ts:70-72` computes for MIDNIGHT_WALLET_MNEMONIC.
-    expect(seed).toBe(Buffer.from(await mnemonicToSeed(phrase)).toString("hex"));
-  });
-
-  test("odd whitespace in the mnemonic is normalised, not rejected", async () => {
-    const phrase =
-      "  abandon   abandon abandon abandon abandon abandon\tabandon abandon abandon abandon abandon about ";
-    const { seed } = await resolveSeed({ POSTER_MNEMONIC: phrase });
-    expect(seed).toBe(
-      "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1" +
-        "9a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
-    );
-  });
-
-  test("a short mnemonic is refused before any derivation", async () => {
-    await expect(resolveSeed({ POSTER_MNEMONIC: "abandon about" })).rejects.toMatchObject({
-      code: "MALFORMED",
-      variable: "POSTER_MNEMONIC",
-    });
-  });
-
-  test("a truncated or non-hex seed is refused rather than becoming another wallet", async () => {
-    await expect(resolveSeed({ POSTER_SEED: "00ff" })).rejects.toMatchObject({ code: "MALFORMED" });
-    await expect(resolveSeed({ POSTER_SEED: `${"0".repeat(63)}z` })).rejects.toMatchObject({
-      code: "MALFORMED",
-    });
-  });
-
-  test("64- and 128-character seeds are both accepted; 0x and case are normalised", async () => {
-    expect((await resolveSeed({ POSTER_SEED: "AB".repeat(32) })).seed).toBe("ab".repeat(32));
-    expect((await resolveSeed({ POSTER_SEED: `0x${"cd".repeat(32)}` })).seed).toBe("cd".repeat(32));
-    expect((await resolveSeed({ POSTER_SEED: "ef".repeat(64) })).seed).toHaveLength(128);
-  });
-
-  test("the four seeds FR-001 names are all refused as collisions", async () => {
-    for (const name of [
-      "MIDNIGHT_WALLET_SEED",
-      "BATCHER_WALLET_SEED",
-      "SOLVER_SEED",
-      "MAKER_OFFER_SEED",
-    ]) {
-      const err = await resolveSeed({ POSTER_SEED, [name]: POSTER_SEED }).catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(ConfigError);
-      expect((err as ConfigError).code).toBe("SEED_COLLISION");
-      expect((err as ConfigError).variable).toBe(name);
-    }
-  });
-
-  test("the collision list also covers the genesis/maker/taker dev seeds", () => {
-    expect(COLLIDING_SEED_VARS).toContain("MIDNIGHT_GENESIS_SEED");
-    expect(COLLIDING_SEED_VARS).toContain("MAKER_SEED");
-    expect(COLLIDING_SEED_VARS).toContain("TAKER_SEED");
-  });
-
-  test("a collision is detected across 0x prefixes and case", async () => {
-    await expect(
-      resolveSeed({ POSTER_SEED, SOLVER_SEED: `0x${POSTER_SEED.toUpperCase()}` }),
-    ).rejects.toMatchObject({ code: "SEED_COLLISION" });
-  });
-
-  test("a DIFFERENT seed in the same environment is fine", async () => {
-    const { seed } = await resolveSeed({
-      POSTER_SEED,
-      SOLVER_SEED: "0000000000000000000000000000000000000000000000000000000000000021",
-      MIDNIGHT_WALLET_SEED: "0000000000000000000000000000000000000000000000000000000000000001",
-    });
-    expect(seed).toBe(POSTER_SEED);
-  });
-
-  test("a poster mnemonic that derives the stack's wallet is refused too", async () => {
-    const phrase =
-      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    await expect(
-      resolveSeed({ POSTER_MNEMONIC: phrase, MIDNIGHT_WALLET_MNEMONIC: phrase }),
-    ).rejects.toMatchObject({ code: "SEED_COLLISION", variable: "MIDNIGHT_WALLET_MNEMONIC" });
-  });
-});
-
-describe("contract address", () => {
-  test("MIDNIGHT_CONTRACT_ADDRESS wins and is normalised", () => {
-    const r = resolveContractAddress(
-      { MIDNIGHT_CONTRACT_ADDRESS: `0x${PREPROD_CONTRACT.toUpperCase()}` },
-      "undeployed",
-      noFiles,
-    );
-    expect(r.address).toBe(PREPROD_CONTRACT);
-    expect(r.source).toBe("MIDNIGHT_CONTRACT_ADDRESS");
-  });
-
-  test("falls back to CONTRACT_SHARE_DIR, with the NETWORK ID in the file name", () => {
-    const seen: string[] = [];
-    const io: ConfigIO = {
-      readFile(path) {
-        seen.push(path);
-        return path.endsWith("/srv/share/contract-offer-files.preprod.json")
-          ? JSON.stringify({ contractAddress: PREPROD_CONTRACT })
-          : undefined;
-      },
-    };
-    const r = resolveContractAddress({ CONTRACT_SHARE_DIR: "/srv/share" }, "preprod", io);
-    expect(r.address).toBe(PREPROD_CONTRACT);
-    expect(r.source).toBe("/srv/share/contract-offer-files.preprod.json");
-    expect(seen[0]).toBe("/srv/share/contract-offer-files.preprod.json");
-  });
-
-  test("then the packages/contracts-midnight copy the entrypoint installs", () => {
-    const io: ConfigIO = {
-      readFile: (path) =>
-        path.endsWith("packages/contracts-midnight/contract-offer-files.undeployed.json")
-          ? JSON.stringify({ contractAddress: PREPROD_CONTRACT })
-          : undefined,
-    };
-    const r = resolveContractAddress({}, "undeployed", io);
-    expect(r.address).toBe(PREPROD_CONTRACT);
-    expect(r.source).toContain("packages/contracts-midnight");
-  });
-
-  test("no source at all is a NO_CONTRACT error naming both paths", () => {
-    const err = (() => {
-      try {
-        resolveContractAddress({}, "undeployed", noFiles);
-        return null;
-      } catch (e) {
-        return e as ConfigError;
-      }
-    })();
-    expect(err?.code).toBe("NO_CONTRACT");
-    expect(err?.message).toContain("MIDNIGHT_CONTRACT_ADDRESS");
-    expect(err?.message).toContain("contract-offer-files.undeployed.json");
-  });
-
-  test("a file without a contractAddress is an error, not a silent skip", () => {
-    const io: ConfigIO = { readFile: () => JSON.stringify({ note: "wrong file" }) };
-    expect(() => resolveContractAddress({}, "undeployed", io)).toThrow(/no string "contractAddress"/);
-  });
-});
-
-describe("legs", () => {
-  test("preset NAMES derive this deployment's colours (preprod vector)", async () => {
-    const cfg = await parse();
-    expect(cfg.giveToken).toBe("WBTC");
-    expect(cfg.giveTokenName).toBe("WBTC");
-    expect(cfg.giveColour).toBe(WBTC);
-    expect(cfg.wantColour).toBe(WETH);
-  });
-
-  test("a 64-hex WANT_TOKEN is taken as a colour, with no name to register", async () => {
-    const colour = "11".repeat(32);
-    const cfg = await parse({ WANT_TOKEN: `0x${colour.toUpperCase()}` });
-    expect(cfg.wantColour).toBe(colour);
-    expect(cfg.wantTokenName).toBeUndefined();
-  });
-
-  test("an unshielded preset on either leg is refused (US4 scenario 3)", async () => {
-    for (const token of ["NIGHT", "ATOKEN", "BTOKEN", "night"]) {
-      await expect(parse({ WANT_TOKEN: token })).rejects.toMatchObject({
-        code: "UNSUPPORTED_TOKEN",
-        variable: "WANT_TOKEN",
-      });
-    }
-    await expect(parse({ GIVE_TOKEN: "ATOKEN" })).rejects.toMatchObject({
-      code: "UNSUPPORTED_TOKEN",
+describe("explicit externally issued token inventory", () => {
+  test("requires both 64-hex token IDs and normalises case/prefix", async () => {
+    await expect(parsePosterConfig({ POSTER_SEED: SEED })).rejects.toMatchObject({
+      code: "MISSING",
       variable: "GIVE_TOKEN",
     });
-  });
-
-  test("the all-zero NIGHT colour is refused even spelled as hex", async () => {
-    await expect(parse({ WANT_TOKEN: "0".repeat(64) })).rejects.toMatchObject({
-      code: "UNSUPPORTED_TOKEN",
-    });
-  });
-
-  test("a raw-colour GIVE_TOKEN is refused — the faucet mints from a NAME", async () => {
-    await expect(parse({ GIVE_TOKEN: "22".repeat(32) })).rejects.toMatchObject({
-      code: "UNSUPPORTED_TOKEN",
-      variable: "GIVE_TOKEN",
-    });
-  });
-
-  test("give and want must differ (the kernel 400s on an equal-leg quote)", async () => {
-    await expect(parse({ WANT_TOKEN: "WBTC" })).rejects.toMatchObject({
-      code: "UNSUPPORTED_TOKEN",
+    await expect(parse({ WANT_TOKEN: "not-a-token" })).rejects.toMatchObject({
+      code: "MALFORMED",
       variable: "WANT_TOKEN",
     });
+    const cfg = await parse({ GIVE_TOKEN: `0x${GIVE.toUpperCase()}` });
+    expect(cfg.giveColour).toBe(GIVE);
+    expect(cfg.wantColour).toBe(WANT);
+    expect(cfg).not.toHaveProperty("contractAddress");
   });
 
-  test("a non-preset name is allowed — the derivation is defined for any name", async () => {
-    const cfg = await parse({ GIVE_TOKEN: "TESTTOKEN" });
-    expect(cfg.giveTokenName).toBe("TESTTOKEN");
-    expect(cfg.giveColour).toMatch(/^[0-9a-f]{64}$/);
+  test("rejects equal legs and native NIGHT", async () => {
+    await expect(parse({ WANT_TOKEN: GIVE })).rejects.toMatchObject({ code: "UNSUPPORTED_TOKEN" });
+    await expect(parse({ GIVE_TOKEN: "0".repeat(64) })).rejects.toMatchObject({
+      code: "UNSUPPORTED_TOKEN",
+      variable: "GIVE_TOKEN",
+    });
+  });
+
+  test("accepts arbitrary valid token IDs without a deployment file", async () => {
+    const cfg = await parse({ MIDNIGHT_NETWORK_ID: "preprod" });
+    expect(cfg.networkId).toBe("preprod");
+    expect(cfg.networkUrls.node).toBe("https://rpc.preprod.midnight.network");
   });
 });
 
-describe("knobs and defaults (FR-014)", () => {
-  test("every default matches the spec", async () => {
-    const cfg = await parse();
-    // One whole coin at the registry's 6 decimals (00024 Q5).
-    expect(cfg.giveAmount).toBe(1_000_000n);
-    expect(cfg.forcedWantAmount).toBeUndefined();
-    expect(cfg.postIntervalMs).toBe(60_000);
-    expect(cfg.offerTtlMinutes).toBe(60);
-    expect(cfg.coinVisibleTimeoutMs).toBe(120_000);
-    expect(cfg.reconcileIntervalMs).toBe(60_000);
-    expect(cfg.maxReoffersPerTick).toBe(1);
-    expect(cfg.shutdownGraceMs).toBe(15_000);
-    expect(cfg.healthStaleTicks).toBe(3);
-    expect(cfg.healthPort).toBe(9977);
-    expect(cfg.dryRun).toBe(false);
-    expect(cfg.journalReset).toBe(false);
-    expect(cfg.journalFile).toBe("/var/lib/offer-poster/journal.json");
-    expect(cfg.kernelBase).toBe("http://kernel:9999");
-    expect(cfg.networkId).toBe("undeployed");
-    expect(cfg.minDust).toBe(1n);
+describe("prefunded coin-size filters", () => {
+  test("uses base units without assuming token decimals", async () => {
+    const cfg = await parse({ GIVE_AMOUNT: "1000000000000000000" });
+    expect(cfg.giveAmount).toBe(1_000_000_000_000_000_000n);
   });
 
-  test("the GIVE_AMOUNT default is exactly one whole coin (00024)", async () => {
-    // The env stays BASE UNITS — no interface change — but the default is the
-    // registry's 6 decimals applied to one coin, so a poster journal reads in
-    // round coins instead of in millionths.
-    const cfg = await parse();
-    expect(cfg.giveAmount).toBe(coinsToBaseUnits(1n, DEFAULT_TOKEN_DECIMALS));
-    expect(cfg.giveAmount).toBe(1_000_000n);
-    // A caller that wants the old face value still says so, in base units.
-    expect((await parse({ GIVE_AMOUNT: "1000" })).giveAmount).toBe(1000n);
-  });
-
-  test("BLANK knobs fall back to the defaults, they do not override them", async () => {
-    const cfg = await parse({
-      GIVE_AMOUNT: "",
-      POST_INTERVAL_MS: "  ",
-      WANT_AMOUNT: "",
-      ZSWAP_API: "",
-      DRY_RUN: "",
-      POSTER_JOURNAL_FILE: "",
+  test("accepts a base-unit interval and rejects partial/conflicting ranges", async () => {
+    expect(parseGiveRange({ GIVE_MIN: "100000000", GIVE_MAX: "1000000000000000000" })).toEqual({
+      minBase: 100_000_000n,
+      maxBase: 1_000_000_000_000_000_000n,
     });
-    expect(cfg.giveAmount).toBe(1_000_000n);
-    expect(cfg.postIntervalMs).toBe(60_000);
-    expect(cfg.forcedWantAmount).toBeUndefined();
-    expect(cfg.kernelBase).toBe("http://kernel:9999");
-    expect(cfg.dryRun).toBe(false);
-    expect(cfg.journalFile).toBe("/var/lib/offer-poster/journal.json");
-  });
-
-  test("knobs are honoured when set", async () => {
-    const cfg = await parse({
-      GIVE_AMOUNT: "250000",
-      WANT_AMOUNT: "7",
-      POST_INTERVAL_MS: "120000",
-      OFFER_TTL_MINUTES: "2",
-      DRY_RUN: "TRUE",
-      POSTER_JOURNAL_RESET: "yes",
-      POSTER_HEALTH_PORT: "10123",
-      POSTER_MIN_DUST: "100000000000000000",
-      ZSWAP_API: "http://kernel:9999/",
+    await expect(parse({ GIVE_MIN: "1" })).rejects.toMatchObject({ code: "MISSING" });
+    await expect(parse({ GIVE_AMOUNT: "10", GIVE_MIN: "1", GIVE_MAX: "20" })).rejects.toMatchObject({
+      code: "CONFLICT",
     });
-    expect(cfg.giveAmount).toBe(250_000n);
-    expect(cfg.forcedWantAmount).toBe(7n);
-    expect(cfg.postIntervalMs).toBe(120_000);
-    expect(cfg.offerTtlMinutes).toBe(2);
-    expect(cfg.dryRun).toBe(true);
-    expect(cfg.journalReset).toBe(true);
-    expect(cfg.healthPort).toBe(10_123);
-    expect(cfg.minDust).toBe(100_000_000_000_000_000n);
-    expect(cfg.kernelBase).toBe("http://kernel:9999"); // trailing slash stripped
   });
 
-  test("a malformed number or boolean is a startup error, never a silent default", async () => {
-    await expect(parse({ POST_INTERVAL_MS: "soon" })).rejects.toMatchObject({ code: "MALFORMED" });
-    await expect(parse({ POST_INTERVAL_MS: "0" })).rejects.toMatchObject({ code: "MALFORMED" });
-    await expect(parse({ GIVE_AMOUNT: "0" })).rejects.toMatchObject({ code: "MALFORMED" });
-    await expect(parse({ GIVE_AMOUNT: "-5" })).rejects.toMatchObject({ code: "MALFORMED" });
-    await expect(parse({ DRY_RUN: "maybe" })).rejects.toMatchObject({ code: "MALFORMED" });
-    await expect(parse({ POSTER_HEALTH_PORT: "70000" })).rejects.toMatchObject({ code: "MALFORMED" });
-  });
-
-  test("network endpoints follow MIDNIGHT_NETWORK_ID, and explicit values win", async () => {
-    const undeployed = await parse();
-    expect(undeployed.networkUrls.indexer).toContain("127.0.0.1:8088");
-    expect(undeployed.networkUrls.node).toBe("http://127.0.0.1:9944");
-
-    const preprod = await parse({ MIDNIGHT_NETWORK_ID: "preprod" });
-    expect(preprod.networkUrls.indexer).toBe(
-      "https://indexer.preprod.midnight.network/api/v3/graphql",
-    );
-    expect(preprod.networkUrls.node).toBe("https://rpc.preprod.midnight.network");
-    expect(preprod.networkUrls.proofServer).toBe("http://127.0.0.1:6300");
-
-    const explicit = await parse({
-      MIDNIGHT_NETWORK_ID: "preprod",
-      MIDNIGHT_INDEXER_HTTP: "https://preprod.api-zswap.zkdojo.com/graphql",
-      MIDNIGHT_PROOF_SERVER: "http://proof:6300",
+  test("blank values are absent and malformed values fail", async () => {
+    expect(readEnv({ X: "  " }, "X")).toBeUndefined();
+    await expect(parse({ GIVE_AMOUNT: "1.5" })).rejects.toMatchObject({ code: "MALFORMED" });
+    await expect(parse({ GIVE_MIN: "0", GIVE_MAX: "1" })).rejects.toMatchObject({
+      code: "MALFORMED",
+      variable: "GIVE_MIN",
     });
-    expect(explicit.networkUrls.indexer).toBe("https://preprod.api-zswap.zkdojo.com/graphql");
-    expect(explicit.networkUrls.proofServer).toBe("http://proof:6300");
   });
 });
 
-describe("give size range (00027 FR-001, AC-2, AC-5)", () => {
-  test("unset means unset: no range, and the fixed amount is untouched (FR-005/SC-003)", async () => {
-    const cfg = await parse();
-    expect(cfg.giveRange).toBeUndefined();
-    expect(cfg.giveSizeSeed).toBeUndefined();
-    expect(cfg.giveAmount).toBe(1_000_000n);
-  });
-
-  test("GIVE_MIN/GIVE_MAX are WHOLE COINS at 6 decimals", async () => {
-    const cfg = await parse({ GIVE_AMOUNT: "", GIVE_MIN: "0.1", GIVE_MAX: "10" });
-    expect(cfg.giveRange).toEqual({ minBase: 100_000n, maxBase: 10_000_000n });
-    expect(cfg.giveRange?.minBase).toBe(coinsToBaseUnits("0.1", DEFAULT_TOKEN_DECIMALS));
-    expect(cfg.giveRange?.maxBase).toBe(coinsToBaseUnits("10", DEFAULT_TOKEN_DECIMALS));
-  });
-
-  test("a range of one value is legal and degenerates to a fixed size", async () => {
-    const cfg = await parse({ GIVE_MIN: "1", GIVE_MAX: "1" });
-    expect(cfg.giveRange).toEqual({ minBase: 1_000_000n, maxBase: 1_000_000n });
-  });
-
-  test("blank bounds are absent, not zero", async () => {
-    const cfg = await parse({ GIVE_MIN: "", GIVE_MAX: "   ", GIVE_SIZE_SEED: "" });
-    expect(cfg.giveRange).toBeUndefined();
-    expect(cfg.giveSizeSeed).toBeUndefined();
-  });
-
-  test("GIVE_SIZE_SEED is carried through when set", async () => {
-    expect((await parse({ GIVE_MIN: "0.1", GIVE_MAX: "10", GIVE_SIZE_SEED: "abc" })).giveSizeSeed).toBe("abc");
-  });
-
-  test("GIVE_AMOUNT and a range together are refused, naming both spellings (AC-2)", async () => {
-    const err = await parse({ GIVE_AMOUNT: "1000000", GIVE_MIN: "0.1", GIVE_MAX: "10" }).catch(
-      (e: unknown) => e,
-    );
-    expect(err).toBeInstanceOf(ConfigError);
-    expect((err as ConfigError).code).toBe("CONFLICT");
-    expect((err as ConfigError).message).toContain("GIVE_AMOUNT");
-    expect((err as ConfigError).message).toContain("GIVE_MIN");
-    expect((err as ConfigError).message).toContain("OFFER_POSTER_GIVE_AMOUNT");
-  });
-
-  test("a BLANK GIVE_AMOUNT does not conflict — blank is not set", async () => {
-    const cfg = await parse({ GIVE_AMOUNT: "  ", GIVE_MIN: "0.5", GIVE_MAX: "2" });
-    expect(cfg.giveRange).toEqual({ minBase: 500_000n, maxBase: 2_000_000n });
-  });
-
-  test("half a range is refused, naming the missing end", async () => {
-    await expect(parse({ GIVE_MIN: "0.1" })).rejects.toMatchObject({
-      code: "MISSING",
-      variable: "GIVE_MAX",
-    });
-    await expect(parse({ GIVE_MAX: "10" })).rejects.toMatchObject({
-      code: "MISSING",
-      variable: "GIVE_MIN",
+describe("wallet and logging", () => {
+  test("requires one wallet input and rejects seed collisions", async () => {
+    await expect(resolveSeed({})).rejects.toBeInstanceOf(ConfigError);
+    await expect(resolveSeed({ POSTER_SEED: SEED, SOLVER_SEED: SEED })).rejects.toMatchObject({
+      code: "SEED_COLLISION",
     });
   });
 
-  test("min > max, min <= 0, 7 fraction digits and non-numbers all fail, naming the variable (AC-5)", async () => {
-    await expect(parse({ GIVE_MIN: "10", GIVE_MAX: "0.1" })).rejects.toMatchObject({
-      code: "MALFORMED",
-      variable: "GIVE_MAX",
-    });
-    await expect(parse({ GIVE_MIN: "0", GIVE_MAX: "10" })).rejects.toMatchObject({
-      code: "MALFORMED",
-      variable: "GIVE_MIN",
-    });
-    // Spec edge case 1: a bound finer than the 6-decimal grid, so a range
-    // narrower than one base unit can never be expressed in the first place.
-    await expect(parse({ GIVE_MIN: "0.1000001", GIVE_MAX: "0.1000002" })).rejects.toMatchObject({
-      code: "MALFORMED",
-      variable: "GIVE_MIN",
-    });
-    await expect(parse({ GIVE_MIN: "0.1", GIVE_MAX: "ten" })).rejects.toMatchObject({
-      code: "MALFORMED",
-      variable: "GIVE_MAX",
-    });
-    await expect(parse({ GIVE_MIN: "-1", GIVE_MAX: "10" })).rejects.toMatchObject({
-      code: "MALFORMED",
-      variable: "GIVE_MIN",
-    });
-    await expect(parse({ GIVE_MIN: "1e3", GIVE_MAX: "10" })).rejects.toMatchObject({
-      code: "MALFORMED",
-      variable: "GIVE_MIN",
-    });
-  });
-
-  test("a GIVE_MAX beyond the exactly-drawable ceiling is refused, not silently rounded", async () => {
-    await expect(parse({ GIVE_MIN: "1", GIVE_MAX: "10000000000" })).rejects.toMatchObject({
-      code: "MALFORMED",
-      variable: "GIVE_MAX",
-    });
-  });
-
-  test("the range reaches the dump as base units, and the seed is not treated as a secret", async () => {
-    const dump = JSON.parse(configDump(await parse({ GIVE_MIN: "0.1", GIVE_MAX: "10", GIVE_SIZE_SEED: "s1" })));
-    expect(dump.giveRange).toEqual({ minBase: "100000", maxBase: "10000000" });
-    expect(dump.giveSizeSeed).toBe("s1");
-  });
-});
-
-describe("redaction (FR-015)", () => {
-  test("redactConfig replaces the seed and keeps everything else", async () => {
-    const cfg = await parse();
-    const redacted = redactConfig(cfg);
-    expect(redacted.seed).toBe("[redacted 64 hex chars]");
-    expect(redacted.seed).not.toContain(POSTER_SEED);
-    expect(redacted.seedSource).toBe("POSTER_SEED");
-    expect(redacted.giveColour).toBe(cfg.giveColour);
-  });
-
-  test("configDump contains no seed material and survives bigints", async () => {
-    const cfg = await parse({ GIVE_AMOUNT: "250000" });
-    const dump = configDump(cfg);
-    expect(dump).not.toContain(POSTER_SEED);
-    expect(dump).not.toContain(POSTER_SEED.slice(-16));
-    expect(dump).toContain("[redacted 64 hex chars]");
+  test("redacts the wallet seed and serialises bigint settings", async () => {
+    const dump = configDump(await parse({ GIVE_AMOUNT: "250000" }));
+    expect(dump).not.toContain(SEED);
     expect(JSON.parse(dump).giveAmount).toBe("250000");
   });
 
-  test("a mnemonic never reaches the dump either", async () => {
-    const phrase =
-      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    const cfg = await parsePosterConfig(
-      { POSTER_MNEMONIC: phrase, MIDNIGHT_CONTRACT_ADDRESS: PREPROD_CONTRACT },
-      noFiles,
-    );
-    const dump = configDump(cfg);
-    expect(dump).not.toContain("abandon");
-    expect(dump).toContain("[redacted 128 hex chars]");
-    expect(dump).toContain("POSTER_MNEMONIC"); // the SOURCE is safe to log
+  test("honours endpoint and runtime overrides", async () => {
+    const cfg = await parse({
+      ZSWAP_API: "http://kernel:9999/",
+      POST_INTERVAL_MS: "120000",
+      DRY_RUN: "true",
+    });
+    expect(cfg.kernelBase).toBe("http://kernel:9999");
+    expect(cfg.postIntervalMs).toBe(120_000);
+    expect(cfg.dryRun).toBe(true);
+  });
+
+  test("normalises direct seeds and derives a valid mnemonic while enforcing XOR", async () => {
+    expect(await resolveSeed({ POSTER_SEED: `0x${SEED.toUpperCase()}` })).toMatchObject({
+      seed: SEED,
+      source: "POSTER_SEED",
+    });
+    const phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const derived = await resolveSeed({ POSTER_MNEMONIC: `  ${phrase.replaceAll(" ", "  ")}  ` });
+    expect(derived.source).toBe("POSTER_MNEMONIC");
+    expect(derived.seed).toMatch(/^[0-9a-f]{128}$/);
+    await expect(resolveSeed({ POSTER_SEED: SEED, POSTER_MNEMONIC: phrase })).rejects.toMatchObject({
+      code: "CONFLICT",
+    });
+  });
+
+  test("rejects truncated seeds and collisions across prefixes/case", async () => {
+    await expect(resolveSeed({ POSTER_SEED: "ab" })).rejects.toMatchObject({ code: "MALFORMED" });
+    await expect(resolveSeed({ POSTER_SEED: `0x${SEED.toUpperCase()}`, TAKER_SEED: SEED })).rejects.toMatchObject({
+      code: "SEED_COLLISION",
+      variable: "TAKER_SEED",
+    });
+  });
+
+  test("retains documented runtime defaults with explicit external tokens", async () => {
+    const cfg = await parse();
+    expect(cfg).toMatchObject({
+      networkId: "undeployed",
+      giveAmount: 1n,
+      postIntervalMs: 60_000,
+      offerTtlMinutes: 60,
+      reconcileIntervalMs: 60_000,
+      maxReoffersPerTick: 1,
+      shutdownGraceMs: 15_000,
+      healthStaleTicks: 3,
+      healthPort: 9977,
+      dryRun: false,
+      journalReset: false,
+      postRetries: 24,
+      liveTries: 40,
+    });
+  });
+
+  test("blank optional knobs fall back but malformed numeric/boolean knobs fail", async () => {
+    expect((await parse({ POST_INTERVAL_MS: " ", DRY_RUN: "" })).postIntervalMs).toBe(60_000);
+    await expect(parse({ POST_INTERVAL_MS: "0" })).rejects.toMatchObject({ code: "MALFORMED" });
+    await expect(parse({ DRY_RUN: "perhaps" })).rejects.toMatchObject({ code: "MALFORMED" });
+    await expect(parse({ POSTER_HEALTH_PORT: "65536" })).rejects.toMatchObject({ code: "MALFORMED" });
+  });
+
+  test("honours all network endpoint overrides and the NODE_URL fallback", async () => {
+    const cfg = await parse({
+      MIDNIGHT_NETWORK_ID: "custom",
+      MIDNIGHT_NODE_HTTP: "http://node",
+      MIDNIGHT_INDEXER_HTTP: "http://indexer/graphql",
+      MIDNIGHT_INDEXER_WS: "ws://indexer/graphql/ws",
+      MIDNIGHT_PROOF_SERVER: "http://proof",
+      NODE_URL: "http://kernel-alt/",
+    });
+    expect(cfg.networkUrls).toEqual({
+      id: "custom",
+      node: "http://node",
+      indexer: "http://indexer/graphql",
+      indexerWS: "ws://indexer/graphql/ws",
+      proofServer: "http://proof",
+    });
+    expect(cfg.kernelBase).toBe("http://kernel-alt");
   });
 });

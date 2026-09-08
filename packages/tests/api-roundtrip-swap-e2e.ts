@@ -17,7 +17,7 @@ import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
-import { joinOfferFiles, mintShielded } from "./lib/offer-files.ts";
+import { requireDistinctTokenColors } from "./lib/prefunded.ts";
 import { buildWallet, shieldedKeys, transferShielded, waitForShielded, waitForSync } from "./lib/wallet.ts";
 import { describeImbalances, mergeFinalized, nonDustImbalances, settleViaBatcher } from "./lib/batcher.ts";
 import { getZswaps, getZswapByHash, reconstructOffer, submitOffer } from "./lib/api.ts";
@@ -27,8 +27,6 @@ setNetworkId(net.id as any);
 
 const TAG = "[api-roundtrip]";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const SEP = { T0: 0xa0, T1: 0xa1 } as const;
-const MINT_AMOUNT = 1_000_000_000n;
 const FUND = 5_000_000n;
 const AMT = 1_000n;
 const P0_SEED = "0000000000000000000000000000000000000000000000000000000000000030";
@@ -68,6 +66,7 @@ async function submitIndexed(blob: string, label: string): Promise<void> {
 }
 
 console.log(`${TAG} building genesis + P0 + P1…`);
+const [T0, T1] = requireDistinctTokenColors(["E2E_TOKEN_0", "E2E_TOKEN_1"]);
 const genesis = await buildWallet(net.walletSeed);
 const p0 = await buildWallet(P0_SEED);
 const p1 = await buildWallet(P1_SEED);
@@ -81,12 +80,8 @@ try {
   const p0Addr = await p0.wallet.shielded.getAddress();
   const p1Addr = await p1.wallet.shielded.getAddress();
 
-  // Mint T0,T1; fund P0 with T0, P1 with T1
-  console.log(`${TAG} minting T0,T1 + funding makers…`);
-  const deployed = await joinOfferFiles(genesis);
-  const nonce = BigInt(Date.now());
-  const T0 = await mintShielded(deployed, SEP.T0, MINT_AMOUNT, nonce);
-  const T1 = await mintShielded(deployed, SEP.T1, MINT_AMOUNT, nonce + 1n);
+  // Transfer externally issued T0/T1 from the prefunded genesis inventory.
+  console.log(`${TAG} funding makers from externally issued inventory…`);
   for (const [c, l] of [[T0, "T0"], [T1, "T1"]] as const) {
     if ((await waitForShielded(genesis, c, FUND, 24)) < FUND) throw new Error(`genesis missing ${l}`);
   }

@@ -25,10 +25,8 @@
 // tokenOut=A. Since 00006-R2 the solver needs NEITHER to quote and settle this
 // offer as a whole rung — fee sizing stopped spending tokenIn, and the maker
 // offer itself pays the rung. tokenOut buys only INTERPOLATED sizes between
-// rungs. `packages/solver/scripts/bootstrap-dev.ts` still mints it both, which
+// rungs. Any swap inventory is supplied outside this deployment, which
 // 00006-V1's unfunded rerun is the control for.
-
-import { readFileSync } from "node:fs";
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
@@ -44,42 +42,30 @@ import { KernelApi } from "./kernel-api.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export interface MintedTokens {
+export interface ExplicitTokens {
   give: string;
   want: string;
-  raw: Record<string, string>;
 }
 
-/** The token colors this stack actually minted.
- *
- *  Colors derive from the DEPLOYED contract address, so they differ for every
- *  fresh stack and cannot be hard-coded anywhere; the post-kernel mint
- *  one-shot publishes them next to the contract address on the shared volume. */
-export function resolveMintedTokens(opts: {
-  file: string;
+/** Resolve the externally issued inventory pair. Both IDs are explicit so this
+ * deployment cannot silently trade assets from another network or issuer. */
+export function resolveExplicitTokens(opts: {
   give?: string;
   want?: string;
-}): MintedTokens {
-  let give = opts.give ?? "";
-  let want = opts.want ?? "";
-  let raw: Record<string, string> = {};
-  if (!give || !want) {
-    try {
-      raw = JSON.parse(readFileSync(opts.file, "utf-8")) as Record<string, string>;
-    } catch (err) {
-      throw new Error(
-        `no give/want token given and ${opts.file} is unreadable (${String(err)}). ` +
-          `That file is written by the post-kernel mint one-shot; if the mint step failed, ` +
-          `its log says why.`,
-      );
-    }
-    give = give || (raw["shieldedA"] ?? "");
-    want = want || (raw["shieldedB"] ?? "");
-  }
+}): ExplicitTokens {
+  const give = (opts.give ?? "").trim().toLowerCase().replace(/^0x/, "");
+  const want = (opts.want ?? "").trim().toLowerCase().replace(/^0x/, "");
   if (!/^[0-9a-f]{64}$/.test(give) || !/^[0-9a-f]{64}$/.test(want)) {
-    throw new Error(`could not resolve two shielded colors: ${JSON.stringify({ give, want, raw })}`);
+    throw new Error(
+      "GIVE_TOKEN and WANT_TOKEN are required 64-hex token IDs. Obtain and fund them through " +
+        "the external issuer before starting this service.",
+    );
   }
-  return { give, want, raw };
+  if (give === want) throw new Error("GIVE_TOKEN and WANT_TOKEN must differ");
+  if (give === "0".repeat(64) || want === "0".repeat(64)) {
+    throw new Error("GIVE_TOKEN and WANT_TOKEN must be shielded assets; native NIGHT is unsupported");
+  }
+  return { give, want };
 }
 
 export interface PostedOffer {
@@ -127,7 +113,10 @@ export async function postMakerOffer(opts: PostMakerOfferOptions): Promise<Poste
   const have = balances[giveToken] ?? 0n;
   log(`maker balance of give-token ${giveToken.slice(0, 10)}…: ${have}`);
   if (have < giveAmount) {
-    throw new Error(`insufficient give-token: have ${have}, need ${giveAmount}`);
+    throw new Error(
+      `insufficient externally prefunded GIVE_TOKEN inventory: wallet has ${have}, needs ${giveAmount}. ` +
+        `Fund MAKER_SEED through the selected network's external issuer and retry`,
+    );
   }
 
   // The ADDRESS OBJECT, not a string — see the header. The want leg is routed

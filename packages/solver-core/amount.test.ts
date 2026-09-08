@@ -7,7 +7,7 @@ import {
 } from "./amount.ts";
 
 describe("the registry default (00024 FR-001/FR-004)", () => {
-  test("is 6 — every token this stack mints or registers", () => {
+  test("is 6 for legacy registrations without explicit metadata", () => {
     expect(DEFAULT_TOKEN_DECIMALS).toBe(6);
   });
 

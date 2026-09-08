@@ -101,7 +101,7 @@ interface ValidatedActorManifest {
   createdAt: string;
   tokens: { A: string; B: string; NIGHT: string };
   funding: {
-    mintAmount: string;
+    sourceInventoryAmount: string;
     userTokenAAmount: string;
     solverTokenBAmount: string;
   };
@@ -580,7 +580,7 @@ function validateActorManifestShape(
   exactKeys(
     fundingRecord,
     [
-      "mintAmount",
+      "sourceInventoryAmount",
       "userTokenAAmount",
       "solverTokenBAmount",
       "nightPerUtxo",
@@ -591,7 +591,10 @@ function validateActorManifestShape(
     "actor manifest.funding",
   );
   const funding = {
-    mintAmount: canonicalPositive(fundingRecord["mintAmount"], "actor manifest.funding.mintAmount"),
+    sourceInventoryAmount: canonicalPositive(
+      fundingRecord["sourceInventoryAmount"],
+      "actor manifest.funding.sourceInventoryAmount",
+    ),
     userTokenAAmount: canonicalPositive(
       fundingRecord["userTokenAAmount"],
       "actor manifest.funding.userTokenAAmount",
@@ -755,8 +758,8 @@ function validateActorManifestShape(
   if (
     funding.userTokenAAmount !== gives[0]!.amount ||
     BigInt(funding.solverTokenBAmount) < BigInt(wants[0]!.amount) ||
-    BigInt(funding.mintAmount) < BigInt(funding.userTokenAAmount) ||
-    BigInt(funding.mintAmount) < BigInt(funding.solverTokenBAmount)
+    BigInt(funding.sourceInventoryAmount) < BigInt(funding.userTokenAAmount) ||
+    BigInt(funding.sourceInventoryAmount) < BigInt(funding.solverTokenBAmount)
   ) {
     throw new Error("actor manifest offer economics disagree with its funding oracle");
   }

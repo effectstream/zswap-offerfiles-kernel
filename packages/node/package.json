@@ -24,8 +24,6 @@
     "@effectstream/utils": "0.103.1",
     "@zswap-da/database": "workspace:*",
     "@zswap-da/validator": "workspace:*",
-    "@zswap-da/contract-offer-files": "workspace:*",
-    "@midnight-ntwrk/compact-js": "2.5.1",
     "@midnight-ntwrk/ledger-v8": "8.1.0",
     "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
     "@midnight-ntwrk/midnight-js-network-id": "4.1.1",

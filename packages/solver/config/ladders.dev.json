@@ -1,16 +1,16 @@
 {
   "tokens": {
-    "TESTA": "ea536508097b4d5c33e444c0e15f2b0b50e3d6277b6a5535ad877b7595098b64",
-    "TESTB": "b3ca74538249b3d8c57cb464968f14735fda823d9a3a16ea13d881fab964a803"
+    "TWBTC": "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc",
+    "TWETH": "087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f"
   },
   "refPricesUsd": {
-    "TESTA": "1",
-    "TESTB": "1"
+    "TWBTC": "77387",
+    "TWETH": "2393.28"
   },
   "pairs": [
     {
-      "tokenIn": "TESTA",
-      "tokenOut": "TESTB",
+      "tokenIn": "TWBTC",
+      "tokenOut": "TWETH",
       "levels": [
         {
           "input": "1000",
@@ -27,8 +27,8 @@
       ]
     },
     {
-      "tokenIn": "TESTB",
-      "tokenOut": "TESTA",
+      "tokenIn": "TWETH",
+      "tokenOut": "TWBTC",
       "levels": [
         {
           "input": "1000",

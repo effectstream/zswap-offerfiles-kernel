@@ -1,8 +1,5 @@
-import { fileURLToPath } from "node:url";
-
 import { getEnv } from "@effectstream/utils/runtime";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
-import { readMidnightContract } from "@effectstream/midnight-contracts/read-contract";
 import {
   resolveOfferTtlSeconds,
   resolveRootWindowSeconds,
@@ -247,18 +244,3 @@ export const isTokenRegistryEnabled = (): boolean =>
 // Unshielded liveness needs no TTL either: created_unshielded is a live-set
 // (create inserts, spend deletes), so it is self-trimming. Only known_roots is
 // TTL-limited, because root validity genuinely expires — ROOT_WINDOW_SECONDS.
-
-
-export const midnightContract = (() => {
-  try {
-    return readMidnightContract("contract-offer-files", {
-      // fileURLToPath, not URL.pathname: pathname percent-encodes, breaking
-      // checkouts under a directory with a space.
-      baseDir: fileURLToPath(new URL("../contracts-midnight/", import.meta.url)),
-      networkId: midnightNetworkConfig.id,
-    });
-  } catch (error) {
-    console.error("[Midnight contract read error]", error);
-    return null;
-  }
-})();

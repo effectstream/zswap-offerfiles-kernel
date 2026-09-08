@@ -6,9 +6,10 @@
 # with the previous run's fills. `bunx orchestrator start` wipes PGlite and
 # Celestia on boot.
 #
-# The batcher now performs its own address-registration + five-output NIGHT
-# bootstrap before the adapter snapshots worker capacity. No external funding
-# or restart step is part of a normal run.
+# The batcher performs its own address-registration + five-output NIGHT
+# bootstrap before the adapter snapshots worker capacity. Swap-token inventory
+# is external: GRAND_TOKEN_TA/TB/UA/UB/TC must identify same-chain assets held
+# by the configured genesis before offer phases run.
 #
 # Pass --keep-stack to run against a stack that is already up.
 set -uo pipefail
@@ -63,19 +64,14 @@ if [[ "${1:-}" != "--keep-stack" ]]; then
 
   reap_orphans
 
-  # midnight-mint-test-tokens intermittently fails on a brand-new chain with
-  # `RpcError: 1010: Invalid Transaction: Custom error: 196`, and the
-  # orchestrator tears the whole stack down when it does. Retry rather than
-  # lose the run.
-  for attempt in 1 2 3; do
-    say "starting a fresh stack (attempt $attempt)"
-    if "$HERE/start-stack.sh"; then say "stack ready"; break; fi
-    say "bootstrap failed — retrying"
-    curl -s -X POST --max-time 10 http://127.0.0.1:4747/shutdown >/dev/null 2>&1
-    sleep 10
-    reap_orphans
-    [[ $attempt == 3 ]] && { say "stack would not bootstrap; see $OUT/stack.log"; exit 1; }
-  done
+  say "starting a fresh chain stack"
+  say "live offer phases require externally provisioned same-chain token fixtures; the stack does not mint them"
+  "$HERE/start-stack.sh"
+  if [[ "${E2E_EXTERNAL_FUNDING_READY:-false}" != "true" ]]; then
+    say "stack is ready for an external same-chain funding fixture"
+    say "after funding the deterministic wallets, rerun this script with --keep-stack"
+    exit 64
+  fi
 fi
 
 for i in $(seq 120); do

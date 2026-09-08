@@ -22,10 +22,6 @@ export const REAL_E1_PINS = Object.freeze({
     "midnightntwrk/proof-server:8.1.0@sha256:801bbc0340e9e96f16735f77b523f23c7459e3359842f7c79c2c53f4e994d531",
   celestiaBunZipSha256: "f5c546736f955141459de231167b6fdf7b01418e8be3609f2cde9dfe46a93a3d",
   celestiaBunBinarySha256: "d83e27167fe3dddfc1203183eba920015b0ba1406c735ea0da93ae8f377c4981",
-  compactInstallerSha256: "85e74a53ae4a67b31fa4d854f3b6ffb4c29f7c53e3372c5008b6a4729a8b4a73",
-  compactArmManagerSha256: "33a8a67174fcd3ae4ede72aae6a1d52daf4ef7af245205edfb098d140946a794",
-  compactArmArchiveSha256: "e4f36268ee652f1415d253d9fabd64a92b5eb0dc7cf28f40fa68c2445c7b3341",
-  compactArmBinarySha256: "a501cc8f20fe1f4d9034204c95853dd80ba977bb77d7c4f7d5d88d4242607def",
   nodeGypVersion: "13.0.1",
   nodeGypPackageJsonSha256: "89f6a95442a6360484cc1d48b35cac8c76b0ec2f2bd1ad8132d5b707de3ed359",
   nodeGypLockSha256: "3a154ec9a1c2738f955405264a7dc581cbaee16256116e2d734a20bfacebc16e",
@@ -35,7 +31,6 @@ export const REAL_E1_PINS = Object.freeze({
   celestiaNodeSha256: "3289e47299086ad9b98c2be55f096c3347b72cd32b9382f9036b3624878b84de",
   celestiaPackageJsonSha256: "29fc59516ac8964dddf80f6e0967f595d88e9c484c7afa82366f46da6706e09d",
   celestiaLockSha256: "7d7b02c122053cefbeaec904ffca20855c9b6313c41386fa8d3076ac95f22c3a",
-  compactVersion: "0.30.0",
   // Acceptance devnet block cadence, matching current Celestia mainnet.
   // celestia-app 6.4.10's ONLY working block-time control is
   // `--delayed-precommit-timeout`; `timeout_commit` in config.toml is
@@ -96,46 +91,14 @@ RUN set -eux; \\
     bun install --frozen-lockfile --ignore-scripts; \\
     echo '${REAL_E1_PINS.nodeGypLockSha256}  bun.lock' | sha256sum -c -; \\
     test "$(./node_modules/.bin/node-gyp --version)" = 'v${REAL_E1_PINS.nodeGypVersion}'
-RUN set -eux; \\
-    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 180 \\
-      -o /tmp/compact-installer.sh \\
-      https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-installer.sh; \\
-    echo '${REAL_E1_PINS.compactInstallerSha256}  /tmp/compact-installer.sh' | sha256sum -c -; \\
-    sh /tmp/compact-installer.sh; \\
-    echo '${REAL_E1_PINS.compactArmManagerSha256}  /root/.local/bin/compact' | sha256sum -c -; \\
-    test "$(/root/.local/bin/compact --version)" = 'compact 0.5.1'; \\
-    /root/.local/bin/compact update ${REAL_E1_PINS.compactVersion}; \\
-    artifact="$(find /root/.compact/versions/${REAL_E1_PINS.compactVersion} -name artifact.zip -type f -print -quit)"; \\
-    compiler="$(find /root/.compact/versions/${REAL_E1_PINS.compactVersion} -name compactc.bin -type f -print -quit)"; \\
-    test -n "$artifact"; \\
-    test -n "$compiler"; \\
-    echo '${REAL_E1_PINS.compactArmArchiveSha256}  '"$artifact" | sha256sum -c -; \\
-    echo '${REAL_E1_PINS.compactArmBinarySha256}  '"$compiler" | sha256sum -c -; \\
-    test "$(/root/.local/bin/compact compile +${REAL_E1_PINS.compactVersion} --version)" = '${REAL_E1_PINS.compactVersion}'; \\
-    rm -f /tmp/compact-installer.sh
 WORKDIR /work
 COPY source/ /work/
 RUN set -eux; \\
     test "$(/opt/node-gyp/node_modules/.bin/node-gyp --version)" = 'v${REAL_E1_PINS.nodeGypVersion}'; \\
     PATH=/opt/node-gyp/node_modules/.bin:$PATH npm_config_nodedir=/usr \\
       bun install --frozen-lockfile --concurrent-scripts=1 2>&1 | tee /tmp/bun-install.log; \\
-    grep -E '(2235 packages installed|Installed 2235 packages)' /tmp/bun-install.log; \\
+    grep -E '(2225 packages installed|Installed 2225 packages)' /tmp/bun-install.log; \\
     rm -f /tmp/bun-install.log
-RUN set -eux; \\
-    bun run --filter @zswap-da/contract-offer-files compact; \\
-    managed='packages/contracts-midnight/contract-offer-files/src/managed'; \\
-    for path in \\
-      compiler/contract-info.json \\
-      contract/index.d.ts contract/index.js contract/index.js.map \\
-      keys/incrementNoun.prover keys/incrementNoun.verifier \\
-      keys/mint_shielded.prover keys/mint_shielded.verifier \\
-      keys/mint_unshielded.prover keys/mint_unshielded.verifier \\
-      zkir/incrementNoun.bzkir zkir/incrementNoun.zkir \\
-      zkir/mint_shielded.bzkir zkir/mint_shielded.zkir \\
-      zkir/mint_unshielded.bzkir zkir/mint_unshielded.zkir; \\
-    do test -f "$managed/$path"; done; \\
-    test "$(find "$managed/keys" -type f | wc -l | tr -d ' ')" = '6'; \\
-    test "$(find "$managed/zkir" -type f | wc -l | tr -d ' ')" = '6'
 RUN set -eux; \\
     test "$(bun --version)" = '${REAL_E1_PINS.appBuildBunVersion}'; \\
     printf '%s\\n' '${REAL_E1_PINS.appBuildBunVersion}' > /opt/zswap-app-build-bun-version.txt
@@ -154,7 +117,6 @@ LABEL org.zswap.e1.role="native-app-toolchain" \\
       org.zswap.e1.app-runtime-bun="${REAL_E1_PINS.appRuntimeBunVersion}" \\
       org.zswap.e1.app-runtime-bun-revision="${REAL_E1_PINS.appRuntimeBunRevision}" \\
       org.zswap.e1.app-runtime-bun-sha256="${REAL_E1_PINS.appRuntimeBunBinarySha256}" \\
-      org.zswap.e1.compact="${REAL_E1_PINS.compactVersion}"
 `;
 }
 
@@ -431,16 +393,7 @@ services:
       - -c
       - >-
         test "$$(bun --version)" = "${REAL_E1_PINS.appRuntimeBunVersion}" &&
-        test "$$(/root/.local/bin/compact --version)" = "compact 0.5.1" &&
-        test "$$(/root/.local/bin/compact compile +${REAL_E1_PINS.compactVersion} --version)" = "${REAL_E1_PINS.compactVersion}" &&
-        bunx orchestrator list --config packages/tests/start.test.ts &&
-        managed=packages/contracts-midnight/contract-offer-files/src/managed &&
-        test -f "$$managed/compiler/contract-info.json" &&
-        test -f "$$managed/contract/index.d.ts" &&
-        test -f "$$managed/contract/index.js" &&
-        test -f "$$managed/contract/index.js.map" &&
-        test "$$(find "$$managed/keys" -type f | wc -l | tr -d ' ')" = "6" &&
-        test "$$(find "$$managed/zkir" -type f | wc -l | tr -d ' ')" = "6"
+        bunx orchestrator list --config packages/tests/start.test.ts
     networks: [build_private]
 
   celestia:
@@ -544,7 +497,6 @@ export interface RealE1AcceptanceComposeInput extends RealE1ComposeInput {
 export function realE1AcceptanceComposeSource(input: RealE1AcceptanceComposeInput): string {
   const source = quoteYaml(input.serviceSource);
   const traffic = quoteYaml(input.trafficPath);
-  const deploymentRuntime = quoteYaml(`${input.runtimeDirectory}/deployment`);
   const actorRuntime = quoteYaml(`${input.runtimeDirectory}/actor`);
   const publicationRuntime = quoteYaml(`${input.runtimeDirectory}/publication`);
   const invalidRuntime = quoteYaml(`${input.runtimeDirectory}/invalid`);
@@ -578,13 +530,7 @@ export function realE1AcceptanceComposeSource(input: RealE1AcceptanceComposeInpu
   const en2BackendForwarderHealth = quoteYaml(
     "const s=require('node:net').connect(9999,'127.0.0.1');const t=setTimeout(()=>process.exit(1),1500);s.on('connect',()=>{clearTimeout(t);s.end();process.exit(0)});s.on('error',()=>process.exit(1))",
   );
-  const copyContract = [
-    "test \"$(stat -c '%a' /inputs/deployment/contract-offer-files.undeployed.json)\" = 600",
-    "test \"$(stat -c '%a' /inputs/deployment/contract-offer-files.undeployed.sha256)\" = 600",
-    "(cd /inputs/deployment && sha256sum -c contract-offer-files.undeployed.sha256)",
-    "install -m 0600 /inputs/deployment/contract-offer-files.undeployed.json packages/contracts-midnight/contract-offer-files.undeployed.json",
-  ].join(" && ");
-  const backendCommand = quoteYaml(`${copyContract} && exec bun run packages/node/main.dev.ts`);
+  const backendCommand = quoteYaml("exec bun run packages/node/main.dev.ts");
   const midnightEnvironment = `
       MIDNIGHT_NETWORK_ID: undeployed
       MIDNIGHT_INDEXER_HTTP: http://midnight-indexer-gateway:8088/api/v3/graphql
@@ -844,7 +790,7 @@ services:
       timeout: 2s
       retries: 60
       start_period: 1s
-${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1:${input.n6RelayNodeHostPort}:9944"\n`}    networks: [midnight_private, midnight_contract_clients, midnight_backend_clients, midnight_actor_clients, midnight_solver_clients]
+${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1:${input.n6RelayNodeHostPort}:9944"\n`}    networks: [midnight_private, midnight_chain_clients, midnight_backend_clients, midnight_actor_clients, midnight_solver_clients]
 
   midnight-indexer-gateway:
     <<: *harness-service
@@ -861,7 +807,7 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
       timeout: 2s
       retries: 60
       start_period: 1s
-    networks: [midnight_private, midnight_contract_clients, midnight_backend_clients, midnight_actor_clients, midnight_solver_clients]
+    networks: [midnight_private, midnight_chain_clients, midnight_backend_clients, midnight_actor_clients, midnight_solver_clients]
 
   midnight-proof-gateway:
     <<: *harness-service
@@ -878,31 +824,7 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
       timeout: 2s
       retries: 180
       start_period: 2s
-    networks: [midnight_private, midnight_contract_clients, midnight_backend_clients, midnight_actor_clients, midnight_solver_clients]
-
-  contract-deployer:
-    <<: *app-service
-    depends_on:
-      midnight-node-gateway: { condition: service_healthy }
-      midnight-indexer-gateway: { condition: service_healthy }
-      midnight-proof-gateway: { condition: service_healthy }
-    command:
-      - bash
-      - -c
-      - >-
-        cd packages/contracts-midnight &&
-        bun run midnight-contract:deploy &&
-        install -m 0600 contract-offer-files.undeployed.json
-        /outputs/deployment/contract-offer-files.undeployed.json &&
-        cd /outputs/deployment &&
-        sha256sum contract-offer-files.undeployed.json > contract-offer-files.undeployed.sha256 &&
-        chmod 0600 contract-offer-files.undeployed.sha256
-    environment:${midnightEnvironment}
-    volumes:
-      - type: bind
-        source: ${deploymentRuntime}
-        target: /outputs/deployment
-    networks: [midnight_contract_clients]
+    networks: [midnight_private, midnight_chain_clients, midnight_backend_clients, midnight_actor_clients, midnight_solver_clients]
 
   celestia:
     image: ${input.celestiaImage}
@@ -973,7 +895,6 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
     depends_on:
       postgres: { condition: service_healthy }
       ntp-responder: { condition: service_healthy }
-      contract-deployer: { condition: service_completed_successfully }
       backend-celestia-proxy: { condition: service_healthy }
       batcher-sink: { condition: service_healthy }
       midnight-node-gateway: { condition: service_healthy }
@@ -1004,11 +925,6 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
       timeout: 8s
       retries: 180
       start_period: 20s
-    volumes:
-      - type: bind
-        source: ${deploymentRuntime}
-        target: /inputs/deployment
-        read_only: true
     networks: [offerfiles_private, backend_egress, midnight_backend_clients, backend_ntp]
 
   backend-proxy:
@@ -1052,7 +968,6 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
     <<: *app-service
     profiles: [acceptance-manual]
     depends_on:
-      contract-deployer: { condition: service_completed_successfully }
       midnight-node-gateway: { condition: service_healthy }
       midnight-indexer-gateway: { condition: service_healthy }
       midnight-proof-gateway: { condition: service_healthy }
@@ -1060,13 +975,15 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
       - bash
       - -c
       - >-
-        ${copyContract} &&
         exec bun packages/tests/grand-e2e/lib/solver-offerfiles-real-actors.ts provision
     environment:${midnightEnvironment}
       E1_RUN_ID: "\${E1_ACCEPTANCE_RUN_ID:?E1_ACCEPTANCE_RUN_ID must be set}"
       E1_GENESIS_SEED: "\${E1_GENESIS_SEED:?E1_GENESIS_SEED must be set}"
       E1_USER_SEED: "\${E1_USER_SEED:?E1_USER_SEED must be set}"
       E1_SOLVER_SEED: "\${E1_SOLVER_SEED:?E1_SOLVER_SEED must be set}"
+      E1_TOKEN_A: "\${E1_TOKEN_A:?E1_TOKEN_A must be set to externally issued same-chain inventory}"
+      E1_TOKEN_B: "\${E1_TOKEN_B:?E1_TOKEN_B must be set to externally issued same-chain inventory}"
+      E1_SOURCE_INVENTORY_AMOUNT: "\${E1_SOURCE_INVENTORY_AMOUNT:-1000000}"
       E1_ACTOR_RESULT_PATH: /outputs/actor/actor-manifest.json
       E1_ACTOR_RUNTIME_PATH: /outputs/actor/actor-runtime.json
       E1_ACTOR_LADDER_PATH: /outputs/actor/solver-ladder.json
@@ -1075,10 +992,6 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
       E1_SYNC_TIMEOUT_MS: "300000"
       E1_FUNDING_TIMEOUT_MS: "300000"
     volumes:
-      - type: bind
-        source: ${deploymentRuntime}
-        target: /inputs/deployment
-        read_only: true
       - type: bind
         source: ${actorRuntime}
         target: /outputs/actor
@@ -1165,7 +1078,6 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
       - bash
       - -c
       - >-
-        ${copyContract} &&
         exec bun packages/tests/grand-e2e/lib/solver-offerfiles-real-solver-service.ts run
     environment:${midnightEnvironment}
       E1_RUN_ID: "\${E1_ACTIVE_RUN_ID:?E1_ACTIVE_RUN_ID must be set}"
@@ -1193,10 +1105,6 @@ ${input.includeN6Services ? "      E1_SOLVER_RELAY_WS_URL: ws://relay-fixture:90
       SOLVER_DRY_RUN: "false"
     volumes:
       - type: bind
-        source: ${deploymentRuntime}
-        target: /inputs/deployment
-        read_only: true
-      - type: bind
         source: ${actorRuntime}
         target: /inputs/actor
         read_only: true
@@ -1214,7 +1122,6 @@ ${n6Services}
       - bash
       - -c
       - >-
-        ${copyContract} &&
         exec bun packages/tests/grand-e2e/lib/solver-offerfiles-real-actors.ts verify-settlement
     environment:${midnightEnvironment}
       E1_RUN_ID: "\${E1_ACCEPTANCE_RUN_ID:?E1_ACCEPTANCE_RUN_ID must be set}"
@@ -1226,10 +1133,6 @@ ${n6Services}
       E1_SYNC_TIMEOUT_MS: "300000"
       E1_SETTLEMENT_TIMEOUT_MS: "300000"
     volumes:
-      - type: bind
-        source: ${deploymentRuntime}
-        target: /inputs/deployment
-        read_only: true
       - type: bind
         source: ${actorRuntime}
         target: /inputs/actor
@@ -1296,7 +1199,7 @@ networks:
   backend_ntp: { internal: true }
   publisher_egress: { internal: true }
   midnight_private: { internal: true }
-  midnight_contract_clients: { internal: true }
+  midnight_chain_clients: { internal: true }
   midnight_backend_clients: { internal: true }
   midnight_actor_clients: { internal: true }
   midnight_solver_clients: { internal: true }

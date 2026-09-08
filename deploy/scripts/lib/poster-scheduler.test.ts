@@ -72,7 +72,7 @@ async function drain(): Promise<void> {
   for (let i = 0; i < 4; i++) await new Promise<void>((r) => setTimeout(r, 0));
 }
 
-const ok = (mode: TickOutcome["mode"] = "mint", extra: Partial<TickOutcome> = {}): TickOutcome => ({
+const ok = (mode: TickOutcome["mode"] = "inventory", extra: Partial<TickOutcome> = {}): TickOutcome => ({
   ok: true,
   mode,
   ...extra,
@@ -284,16 +284,16 @@ describe("overrun", () => {
 });
 
 describe("counters", () => {
-  test("mints count actual mints, not the mode; reoffers count the mode", async () => {
+  test("inventory adoptions count newly journaled prefunded coins; reoffers count the mode", async () => {
     const timers = new FakeTimers();
     const outcomes: TickOutcome[] = [
-      { ok: true, mode: "mint", minted: true, offerId: "aa" },
-      // A mint tick that FAILED after minting: the coin exists, the offer does not.
-      { ok: false, mode: "mint", minted: true, failure: "post_timeout", error: "no" },
-      // A mint tick that failed BEFORE minting: not a mint.
-      { ok: false, mode: "mint", minted: false, failure: "mint_failed", error: "no dust" },
+      { ok: true, mode: "inventory", inventoryAdopted: true, offerId: "aa" },
+      // Adoption is counted even if the later post failed: the coin is journaled.
+      { ok: false, mode: "inventory", inventoryAdopted: true, failure: "post_timeout", error: "no" },
+      // A failure before adoption is not an inventory adoption.
+      { ok: false, mode: "inventory", failure: "wallet_failed", error: "wallet unavailable" },
       { ok: true, mode: "reoffer", offerId: "bb" },
-      { ok: true, mode: "degraded", failure: "insufficient_dust" },
+      { ok: true, mode: "degraded", failure: "insufficient_inventory" },
     ];
     let i = 0;
     const scheduler = new PosterScheduler({
@@ -307,7 +307,7 @@ describe("counters", () => {
 
     const stats = scheduler.stats();
     expect(stats.ticks).toBe(5);
-    expect(stats.mints).toBe(2);
+    expect(stats.inventoryAdoptions).toBe(2);
     expect(stats.reoffers).toBe(1);
     expect(stats.degraded).toBe(1);
     expect(stats.success).toBe(3);
@@ -327,8 +327,8 @@ describe("counters", () => {
       tick: async () => {
         const good = results[i++]!;
         return good
-          ? { ok: true, mode: "mint" as const, minted: true }
-          : { ok: false, mode: "mint" as const, failure: "post_timeout", error: "x" };
+          ? { ok: true, mode: "inventory" as const, inventoryAdopted: true }
+          : { ok: false, mode: "inventory" as const, failure: "post_timeout", error: "x" };
       },
     });
     scheduler.start();

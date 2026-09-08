@@ -2,8 +2,7 @@
 //
 // What this does:
 //   1. Syncs the maker wallet (WALLET_SEED) to find shielded balances.
-//   2. Picks give/want tokens: GIVE_TOKEN/WANT_TOKEN env vars, or colors from
-//      09-mint.ts output (/tmp/zswap-minted-tokens.json), or first two known tokens.
+//   2. Uses GIVE_TOKEN/WANT_TOKEN, or the first two registered token colors.
 //   3. Calls wallet.initSwap() → finalizeTransaction() to produce a signed offer.
 //   4. Encodes it as a swapoffer1… blob.
 //   5. POSTs to /v1/offers (validates crypto + liveness, then forwards to batcher).
@@ -13,12 +12,12 @@
 //   WALLET_SEED=<64-hex>          maker wallet seed
 //   GIVE_TOKEN=<64-hex>           token color to give
 //   WANT_TOKEN=<64-hex>           token color to want
-//   GIVE_AMOUNT=500000            amount in BASE UNITS (= 0.5 coins at the
-//                                 6 decimals every token here carries)
-//   WANT_AMOUNT=750000            (= 0.75 coins)
+//   GIVE_AMOUNT=500000            amount in integer BASE UNITS; its whole-coin
+//                                 value depends on GIVE_TOKEN's decimals
+//   WANT_AMOUNT=750000            amount in WANT_TOKEN base units
 //   TTL_MINUTES=30
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { config, get, post, header } from "./config.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
@@ -43,26 +42,20 @@ const networkUrls = {
 };
 
 // ── 2. Resolve give/want tokens ───────────────────────────────────────────────
-// Priority: explicit env vars → colors from 09-mint.ts temp file → first two known tokens.
+// Priority: explicit env vars → first two known tokens. The maker wallet must
+// already be funded by the external issuer; this script never mints.
 let GIVE_TOKEN = process.env.GIVE_TOKEN ?? "";
 let WANT_TOKEN = process.env.WANT_TOKEN ?? "";
 
 if (!GIVE_TOKEN || !WANT_TOKEN) {
-  try {
-    const minted = JSON.parse(readFileSync("/tmp/zswap-minted-tokens.json", "utf-8"));
-    GIVE_TOKEN = GIVE_TOKEN || minted.shieldedA;
-    WANT_TOKEN = WANT_TOKEN || minted.shieldedB;
-    console.log("Using minted tokens from 09-mint.ts output.");
-  } catch {
-    const tokens = await get<any[]>("/v1/known-tokens");
-    if (tokens.length < 2) {
-      console.error("Need at least 2 tokens. Run 09-mint.ts first, or set GIVE_TOKEN/WANT_TOKEN.");
-      process.exit(1);
-    }
-    GIVE_TOKEN = GIVE_TOKEN || tokens[0].token_color;
-    WANT_TOKEN = WANT_TOKEN || tokens[1].token_color;
-    console.log("Using first two tokens from /v1/known-tokens.");
+  const tokens = await get<any[]>("/v1/known-tokens");
+  if (tokens.length < 2) {
+    console.error("Need at least 2 registered tokens, or set GIVE_TOKEN/WANT_TOKEN.");
+    process.exit(1);
   }
+  GIVE_TOKEN = GIVE_TOKEN || tokens[0].token_color;
+  WANT_TOKEN = WANT_TOKEN || tokens[1].token_color;
+  console.log("Using registered tokens from /v1/known-tokens.");
 }
 const GIVE_AMOUNT = BigInt(process.env.GIVE_AMOUNT ?? "500000");
 const WANT_AMOUNT = BigInt(process.env.WANT_AMOUNT ?? "750000");
@@ -86,7 +79,10 @@ const available = balances[GIVE_TOKEN] ?? 0n;
 
 console.log(`Maker balance of give-token: ${available}`);
 if (available < GIVE_AMOUNT) {
-  console.error(`Insufficient balance: have ${available}, need ${GIVE_AMOUNT}`);
+  console.error(
+    `Insufficient externally prefunded balance: have ${available}, need ${GIVE_AMOUNT}. ` +
+    `Fund WALLET_SEED for GIVE_TOKEN=${GIVE_TOKEN} with same-chain inventory before running this example.`,
+  );
   await wallet.stop().catch(() => {});
   process.exit(1);
 }

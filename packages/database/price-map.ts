@@ -2,17 +2,15 @@
 // for quotes and GET /v1/prices) and by packages/price-feed (which decides
 // which assets to fetch).
 //
-// WHY BY NAME. Faucet-minted colours derive from the deployed contract
-// address, so every clean redeploy of a devnet or of preprod produces new
-// colours for WBTC/WETH/TESTTOKEN*. A colour-keyed map would be stale the
-// moment the stack is rebuilt, and a wrong price is worse than none. Names
-// survive redeploys because the faucet and the frontend mint under fixed
-// names, so the default map is keyed by NAME. `known_tokens.asset_id` and the
+// WHY BY NAME. External test-token deployments use network-specific colours,
+// while their canonical names stay stable. A colour-keyed default would be
+// stale across networks, and a wrong price is worse than none. The default map
+// is therefore keyed by NAME. `known_tokens.asset_id` and the
 // PRICE_FEED_MAP env var exist for the cases a name cannot express.
 //
 // SNIGHT is the same story with a fixed address: the shielded-night wrapper's
 // colour is derived from its contract address, so it differs per network.
-// 000-init.sql seeds the PREVIEW colour and documents the patch other networks
+// 000-init.sql seeds the PREPROD colour and documents the patch other networks
 // need; the NAME entry below is what prices the row wherever it is registered
 // without an asset_id — a hand-patched colour on preprod included.
 //

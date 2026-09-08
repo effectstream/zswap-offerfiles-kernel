@@ -3,6 +3,8 @@
 // Prereq (HANDOFF §2/§3): the dev stack must already be running, launched as
 //   NODE_ENV=development ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 bun run dev
 // This runner does NOT start the stack (a stack restart wipes pglite).
+// GRAND_TOKEN_TA/TB/UA/UB/TC must identify distinct externally issued
+// same-chain assets already held by the configured genesis wallet.
 //
 // Phase order: p0 smoke → actor setup → p1 happy → p2 api → p4 adversarial →
 // p3 lifecycle → p5 load (with p6 chaos inside) → p7b audit → p7a determinism.

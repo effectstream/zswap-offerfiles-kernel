@@ -35,9 +35,8 @@
  *   and the repository root, because the deployment entrypoint lives there and
  *   is precisely the file whose option drift this gate must catch.
  *
- * Anything else reached through the import graph (notably the gitignored
- * Compact output under `packages/contracts-midnight`, which CI stubs) is
- * typechecked but only COUNTED — the same convention `backend-typecheck.ts`
+ * Anything else reached through the import graph is typechecked but only
+ * COUNTED — the same convention `backend-typecheck.ts`
  * uses, so this gate never depends on generated proof artifacts.
  */
 import ts from "typescript";

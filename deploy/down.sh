@@ -4,11 +4,11 @@
 # `docker compose down` alone leaves the volumes. That is the wrong default
 # here: every volume in this project is CHAIN-KEYED. The kernel's ledger
 # mirror, the indexer's SQLite, the batcher's parked inputs and the solver's
-# operation journal all describe one specific genesis and one specific deployed
-# contract address. Keeping any of them across a chain reset produces a stack
-# that starts cleanly and is wrong — offers that cannot be found, nullifiers
-# that refer to nothing, a journal recovering operations against a contract that
-# no longer exists. So volumes go with the containers, always, as a set.
+# operation journal all describe one specific genesis. Keeping any of them
+# across a chain reset produces a stack that starts cleanly and is wrong —
+# offers that cannot be found, nullifiers that refer to nothing, and a journal
+# recovering operations against a different ledger. Volumes therefore go with
+# the containers as one set.
 #
 #   ./down.sh                 containers + networks + volumes
 #   ./down.sh --keep-images   the same, but leave the built images

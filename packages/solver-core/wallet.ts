@@ -1,7 +1,6 @@
 // Wallet helpers shared by the swap e2e scripts: build a facade for a seed,
 // wait for sync, read shielded balances, and move shielded tokens between
-// wallets. Built on @effectstream/midnight-contracts (the same SDK the
-// template's contracts-midnight scripts use).
+// wallets. Built on the shared @effectstream/midnight-contracts wallet SDK.
 
 import * as Rx from "rxjs";
 import { UnshieldedAddress, type MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";

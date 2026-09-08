@@ -50,25 +50,6 @@ async function main(): Promise<void> {
     const { midnightReadyTest } = await import("./infra/midnight-ready.test.ts");
     await midnightReadyTest();
 
-    await waitForProcess("midnight-contract", {
-      waitForExit: true,
-      timeoutMs: 300_000,
-    });
-    console.log("Offer-files contract deployed.");
-
-    // Startup mint runs in parallel with sync; wait so Phase B doesn't race it.
-    try {
-      await waitForProcess("midnight-mint-test-tokens", {
-        waitForExit: true,
-        timeoutMs: 300_000,
-      });
-      console.log("Startup test-token mint finished.");
-    } catch (e) {
-      console.warn(
-        `Startup mint did not finish cleanly: ${e instanceof Error ? e.message : String(e)} (continuing)`,
-      );
-    }
-
     await waitForProcess("sync");
     await waitForHealth();
     console.log("Sync node is healthy.\n");

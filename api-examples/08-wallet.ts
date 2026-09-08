@@ -18,7 +18,6 @@ header("Wallet");
 
 // Midnight config is served by the node — no need to hard-code it.
 const midnightCfg = await get<{
-  contractAddress: string;
   indexerUri: string;
   indexerWsUri: string;
   proofServerUri: string;

@@ -2,16 +2,13 @@
  * Whole coins ⇄ base units (00024 FR-004).
  *
  * WHY THIS EXISTS. Amounts on chain and on the wire are integer BASE UNITS —
- * `mint_shielded`/`mint_unshielded` take `Uint<64>`, `/v1/quote` takes and
- * returns integer strings, and every ledger amount is a bigint. What a human
+ * `/v1/quote` takes and returns integer strings, and every ledger amount is a bigint. What a human
  * says is a WHOLE COIN: "1.5 WBTC", not "1500000". The bridge between the two
- * is `known_tokens.decimals`, which since 00024 is `6` for every token this
- * stack mints or registers.
+ * is `known_tokens.decimals`, which can vary per registered token.
  *
  * Before this module every caller hand-rolled that bridge — `1000n`, `× 10n **
- * 6n`, an integer division that silently truncated — and the faucet paths
- * disagreed with the registry about what a "1000" meant. One helper, used by
- * the faucet/mint entry points, keeps them honest.
+ * 6n`, an integer division that silently truncated. One helper keeps amount
+ * conversion consistent with registry metadata.
  *
  * THE RULES.
  *   - String maths only. `Number` cannot hold 2^64 and cannot hold `0.1`, so a
@@ -26,14 +23,13 @@
  * registry's default, not an assumption baked into the arithmetic, so a future
  * token with 8 or 18 decimals needs no change here.
  *
- * This file deliberately has NO imports: it is bundled into the browser docs
- * playground (`docs/src/wallet/mintable.ts`) as well as run by the deploy
- * scripts under bun.
+ * This file deliberately has no imports so browser and deployment callers can
+ * share it without pulling in runtime dependencies.
  */
 
 /**
- * Base units per coin for every token the offer-files stack mints or registers
- * (00024 FR-001). Mirrors `known_tokens.decimals DEFAULT 6` in
+ * Legacy default for registered tokens without explicit metadata. Mirrors
+ * `known_tokens.decimals DEFAULT 6` in
  * `packages/database/migrations/000-init.sql`.
  */
 export const DEFAULT_TOKEN_DECIMALS = 6;

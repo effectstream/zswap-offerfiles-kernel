@@ -1,11 +1,11 @@
 // FULL LIFECYCLE e2e against a RUNNING dev stack:
-//   mint test tokens (2 shielded + 1 unshielded via the offer-files contract)
-//   → make a minted A↔B offer → /v1/offers (validators + liveness)
+//   verify externally prefunded inventory → make an A↔B offer
+//   → /v1/offers (validators + liveness)
 //   → batcher → Celestia → celestia-zswap ingestion (re-validated) → indexed
 //   → taker balances + settles on Midnight → nullifier consumed
 //   → midnight-zswap-event primitive → nullifiers + offer ARCHIVED.
 // Proves all four liveness primitives live: known_roots (ZswapRoot),
-// created_unshielded (UnshieldedCreate — via the unshielded mint),
+// created_unshielded (UnshieldedCreate — from external funding),
 // spent_nullifiers (Nullifier), and — stretch, environment-permitting —
 // spent_unshielded (UnshieldedSpend) via an unshielded-give offer.
 //
@@ -16,7 +16,7 @@ import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { mintTestTokens } from "../contracts-midnight/mint-test-tokens.ts";
+import { requireDistinctTokenColors } from "./lib/prefunded.ts";
 
 const API = "http://127.0.0.1:9999";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -58,17 +58,21 @@ const before = {
 };
 console.log("[lifecycle] before:", JSON.stringify(before));
 
-// ── 1. Mint test tokens (idempotent; the unshielded mint emits
-// unshieldedCreatedOutputs → UnshieldedCreate primitive → created_unshielded). ──
-console.log("[lifecycle] minting test tokens via the offer-files contract…");
-const colors = await mintTestTokens();
-console.log("[lifecycle] minted colors:", JSON.stringify(colors));
+// ── 1. Resolve externally issued token colors. The genesis wallet must be
+// prefunded before this test starts; there is no local mint fallback. ──
+const [shieldedA, shieldedB, unshielded] = requireDistinctTokenColors([
+  "E2E_SHIELDED_TOKEN_A",
+  "E2E_SHIELDED_TOKEN_B",
+  "E2E_UNSHIELDED_TOKEN",
+]);
+const colors = { shieldedA, shieldedB, unshielded };
+console.log("[lifecycle] external token colors:", JSON.stringify(colors));
 const createdOk = await waitFor("created_unshielded > 0", async () =>
   (await count("created_unshielded")) > 0, 24);
-check("created_unshielded populated (UnshieldedCreate primitive live)", createdOk,
+check("externally funded unshielded output indexed (UnshieldedCreate primitive live)", createdOk,
   `before=${before.created_unshielded} now=${await count("created_unshielded")}`);
 
-// ── 2. Make a minted A↔B offer ──
+// ── 2. Make an A↔B offer from prefunded inventory ──
 console.log("[lifecycle] building genesis wallet…");
 const result = await buildWalletAndWaitForFunds(
   { id: net.id, indexer: net.indexer, indexerWS: net.indexerWS, node: net.node, proofServer: net.proofServer } as any,
@@ -78,13 +82,17 @@ const { wallet, zswapSecretKeys, dustSecretKey } = result;
 const keys = { shieldedSecretKeys: zswapSecretKeys, dustSecretKey };
 
 try {
-  // Wait until the wallet sees BOTH minted shielded colors.
-  const haveMinted = await waitFor("wallet sees minted colors", async () => {
+  const haveInventory = await waitFor("wallet sees external token colors", async () => {
     const st = await wallet.shielded.waitForSyncedState();
     const b = st.balances as Record<string, bigint>;
     return (b[colors.shieldedA] ?? 0n) >= GIVE_AMOUNT && (b[colors.shieldedB] ?? 0n) > 0n;
   }, 24);
-  check("genesis wallet holds both minted shielded colors", haveMinted);
+  check("genesis wallet holds both externally issued shielded colors", haveInventory);
+  if (!haveInventory) {
+    throw new Error(
+      "genesis lacks required same-chain external inventory for E2E_SHIELDED_TOKEN_A/B",
+    );
+  }
 
   const address = await wallet.shielded.getAddress();
   const recipe = await wallet.initSwap(
@@ -99,7 +107,7 @@ try {
 
   // ── 3. Submit → batcher → Celestia ──
   const sub = await submitOffer(blob);
-  check("minted-token offer accepted by submit gate (crypto + liveness + root-known)", sub.status === 200, `status=${sub.status} ${JSON.stringify(sub.body?.error ?? "")}`);
+  check("prefunded-token offer accepted by submit gate (crypto + liveness + root-known)", sub.status === 200, `status=${sub.status} ${JSON.stringify(sub.body?.error ?? "")}`);
 
   // ── 4. Indexed by celestia-zswap (re-validated at ingestion) ──
   const indexedOk = await waitFor("offer indexed", async () => (await count("offer_file")) > before.offers, 24);
@@ -138,7 +146,7 @@ try {
   // unshielded-input path may hit the known wallet-sdk-node-client packaging
   // bug — tolerate and skip. ──
   try {
-    // Pure-unshielded swap intent: give minted colorU, want unshielded NIGHT
+    // Pure-unshielded swap intent: give externally issued colorU, want NIGHT
     // back to our own unshielded address (mixed unshielded-give/shielded-want
     // intents come out give-only from the facade).
     const ust: any = await (wallet as any).unshielded.waitForSyncedState?.();

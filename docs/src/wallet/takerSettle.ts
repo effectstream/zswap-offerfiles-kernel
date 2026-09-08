@@ -1,6 +1,6 @@
 // Build a taker settlement tx for a maker `swapoffer1…` blob using Lace.
-// Trimmed port of paima-engine templates/zswap-da browserContract.proveAndSubmitOffer,
-// balancing only — the Accept panel submits the returned hex to the batcher itself.
+// Balancing helper for the Accept panel, which submits the returned hex to the
+// batcher itself.
 //
 // Two strategies, dispatched on the maker tx shape:
 //   - segment-0 deltas, no Intent slots (shielded-only) → mirror the legs via

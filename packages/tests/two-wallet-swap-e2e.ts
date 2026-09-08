@@ -1,9 +1,7 @@
 // TWO-WALLET ZSwap e2e against a RUNNING dev stack (`bun run dev`):
 //
 //   1. genesis wallet (funded) syncs + registers NIGHT→dust
-//   2. mint four colors via the offer-files contract:
-//        ZToken, XToken → SHIELDED (minted to genesis, the caller)
-//        AToken, BToken → UNSHIELDED (A → maker, B → genesis)
+//   2. use externally issued ZToken/XToken inventory held by genesis
 //   3. genesis shielded-transfers ZToken to a fresh MAKER wallet
 //   4. MAKER creates an UNBALANCED swap offer  +X / -Z  (give Z, want X),
 //      payFees:false → maker needs no dust
@@ -24,7 +22,7 @@ import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
-import { joinOfferFiles, mintShielded, mintUnshielded } from "./lib/offer-files.ts";
+import { requireDistinctTokenColors } from "./lib/prefunded.ts";
 import {
   buildWallet,
   shieldedBalances,
@@ -40,10 +38,6 @@ setNetworkId(net.id as any);
 const API = "http://127.0.0.1:9999";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Token domain separators (one byte, filled to 32). Distinct from the startup
-// mint's 0xa1/0xb2/0xc3 so we never collide with its colors.
-const SEP = { Z: 0x5a, X: 0x58, A: 0x41, B: 0x42 } as const;
-const MINT_AMOUNT = 1_000_000_000n;
 const Z_TO_MAKER = 10_000_000n; // genesis → maker, enough to cover the give
 const GIVE_Z = 500_000n; // maker gives Z
 const WANT_X = 750_000n; // maker wants X
@@ -92,14 +86,14 @@ async function submitOffer(blob: string): Promise<{ status: number; body: any }>
 
 const before = {
   known_roots: await count("known_roots"),
-  created_unshielded: await count("created_unshielded"),
   spent_nullifiers: await count("nullifiers"),
   offers: await count("offer_file"),
 };
 console.log("[2wallet] before:", JSON.stringify(before));
 
-// ── 1. Genesis wallet: sync + register for dust (pays mint/settle fees) ──
-console.log("[2wallet] building genesis wallet (taker / minter)…");
+// ── 1. Genesis wallet: sync + register for dust (pays funding/settle fees) ──
+const [Z, X] = requireDistinctTokenColors(["E2E_SHIELDED_TOKEN_Z", "E2E_SHIELDED_TOKEN_X"]);
+console.log("[2wallet] building externally prefunded genesis wallet (taker)…");
 const genesis = await buildWallet(net.walletSeed);
 const maker = await buildWallet(MAKER_SEED);
 try {
@@ -114,38 +108,12 @@ try {
   const makerShieldedAddr = await maker.wallet.shielded.getAddress();
   console.log(`[2wallet] maker unshielded=${maker.unshieldedAddress.slice(0, 24)}…`);
 
-  // ── 2. Mint four colors via the offer-files contract ──
-  console.log("[2wallet] joining offer-files contract + minting Z/X (shielded) and A/B (unshielded)…");
-  const deployed = await joinOfferFiles(genesis);
-  const nonce = BigInt(Date.now());
-  const Z = await mintShielded(
-    deployed,
-    SEP.Z,
-    MINT_AMOUNT,
-    nonce + 0n,
-    genesis.zswapSecretKeys.coinPublicKey,
-  );
-  const X = await mintShielded(
-    deployed,
-    SEP.X,
-    MINT_AMOUNT,
-    nonce + 1n,
-    genesis.zswapSecretKeys.coinPublicKey,
-  );
-  const A = await mintUnshielded(deployed, SEP.A, MINT_AMOUNT, maker.unshieldedAddress);
-  const B = await mintUnshielded(deployed, SEP.B, MINT_AMOUNT, genesis.unshieldedAddress);
-  console.log(
-    `[2wallet] minted Z=${Z.slice(0, 12)}… X=${X.slice(0, 12)}… A=${A.slice(0, 12)}… B=${B.slice(0, 12)}…`,
-  );
-  check("ZToken/XToken minted (shielded)", !!Z && !!X);
-  check("AToken/BToken minted (unshielded)", !!A && !!B);
-
-  const createdOk = await waitFor("created_unshielded grew", async () => (await count("created_unshielded")) > before.created_unshielded, 24);
-  check("created_unshielded populated by A/B mints (UnshieldedCreate primitive live)", createdOk, `before=${before.created_unshielded} now=${await count("created_unshielded")}`);
-
-  // genesis must actually see the freshly-minted Z before it can transfer it
+  // ── 2. Verify externally issued inventory before transferring to maker ──
+  console.log(`[2wallet] configured Z=${Z.slice(0, 12)}… X=${X.slice(0, 12)}…`);
   const gZ = await waitForShielded(genesis, Z, GIVE_Z, 24);
-  check("genesis holds minted ZToken", gZ >= GIVE_Z, `bal=${gZ}`);
+  check("genesis holds externally prefunded ZToken", gZ >= GIVE_Z, `bal=${gZ}`);
+  const gX = await waitForShielded(genesis, X, WANT_X, 24);
+  check("genesis holds externally prefunded XToken", gX >= WANT_X, `bal=${gX}`);
 
   // ── 3. Move ZToken to the fresh MAKER wallet (genesis pays the fee) ──
   console.log(`[2wallet] transferring ${Z_TO_MAKER} ZToken genesis → maker…`);

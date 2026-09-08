@@ -9,11 +9,8 @@
 // Every endpoint comes from env (see infra/docker-compose.yml); nothing here
 // assumes localhost.
 
-import path from "node:path";
 import type { OrchestratorConfig } from "@effectstream/orchestrator/config";
 import { DbNames, launchPglite } from "@effectstream/orchestrator/launch-pglite";
-
-const root = import.meta.dirname!;
 
 const env = (name: string, fallback?: string): string => {
   const value = process.env[name] ?? fallback;
@@ -35,7 +32,6 @@ const CHAIN_WAIT_TARGETS = [
   hostPort(env("CELESTIA_RPC_URL")),
 ].map((target) => `tcp:${target}`);
 
-const CONTRACT_DEPLOY = "midnight-contract";
 const CHAIN_WAIT = "chain-wait";
 const SYNC_API_HEALTH = "sync-api-health";
 const LOCAL_ZSWAP_API = "http://127.0.0.1:9999";
@@ -60,35 +56,13 @@ export default {
     },
 
     {
-      name: CONTRACT_DEPLOY,
-      description: "Deploy the offer-files contract to the containerised node",
-      cwd: path.join(root, "packages/contracts-midnight"),
-      args: ["run", "midnight-contract:deploy"],
-      env: { MIDNIGHT_STORAGE_PASSWORD: "YourPasswordMy1!" },
-      waitToExit: true,
-      critical: true,
-      dependsOn: [DbNames.PGLITE_WAIT, CHAIN_WAIT],
-    },
-
-    {
-      name: "midnight-mint-test-tokens",
-      description: "Mint dev test tokens (2 shielded + 1 unshielded)",
-      cwd: path.join(root, "packages/contracts-midnight"),
-      args: ["run", "mint-test-tokens.ts"],
-      env: { ZSWAP_API },
-      waitToExit: true,
-      // NOT critical: a mint hiccup must not tear the stack down.
-      dependsOn: [CONTRACT_DEPLOY, SYNC_API_HEALTH],
-    },
-
-    {
       name: "sync",
       description: "ZSwap-DA sync node (Celestia + Midnight)",
       args: ["run", "packages/node/main.dev.ts"],
       waitToExit: false,
       type: "system-dependency",
       env: { ENABLE_TOKEN_REGISTRY: "true" },
-      dependsOn: [DbNames.PGLITE_WAIT, CHAIN_WAIT, CONTRACT_DEPLOY],
+      dependsOn: [DbNames.PGLITE_WAIT, CHAIN_WAIT],
     },
 
     {
@@ -106,7 +80,7 @@ export default {
       args: ["run", "packages/batcher/batcher.dev.ts"],
       waitToExit: false,
       type: "system-dependency",
-      dependsOn: [CHAIN_WAIT, CONTRACT_DEPLOY, "midnight-mint-test-tokens"],
+      dependsOn: [CHAIN_WAIT, SYNC_API_HEALTH],
     },
 
     {
@@ -116,7 +90,7 @@ export default {
       waitToExit: false,
       // Not a system-dependency: the stack is usable without a solver, and a
       // solver fault must never tear it down.
-      dependsOn: [CONTRACT_DEPLOY, "midnight-mint-test-tokens", SYNC_API_HEALTH, "sync"],
+      dependsOn: [CHAIN_WAIT, SYNC_API_HEALTH, "sync"],
     },
   ],
 } satisfies OrchestratorConfig;

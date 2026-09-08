@@ -848,9 +848,8 @@ export function createMonitor(config: FrontendConfig, deps: MonitorDeps = {}): M
         color: (asString(row["token_color"]) ?? "").toLowerCase(),
         name: asString(row["name"]) ?? "",
         kind: asString(row["kind"]),
-        // Older nodes (preprod today) have no `decimals` column at all. Since
-        // 00024 every token this stack mints or registers has 6, so 6 is the
-        // reading that matches what the faucet actually minted.
+        // Older nodes may have no `decimals` column. Preserve the historical
+        // 6-decimal fallback while current registries send explicit metadata.
         decimals: Math.max(0, Math.trunc(asNumber(row["decimals"], DEFAULT_TOKEN_DECIMALS))),
       }))
       .filter((row) => row.color !== "");

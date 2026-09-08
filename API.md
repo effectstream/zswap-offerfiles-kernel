@@ -10,8 +10,8 @@ or `bun run docs:build` and open
 [`http://localhost:9999/docs`](http://localhost:9999/docs). Debug offer upload
 (`POST /v1/offers`), browse the open book, poll status, stream SSE,
 settle via the batcher's `midnight-balancer` target, and connect a wallet to
-inspect balances / mint test tokens (`VITE_PROOF_SERVER_URL`, default
-`http://localhost:6300`).
+inspect balances or open the external faucet (`VITE_FAUCET_URL`, default
+`https://mint-test-tokens.pages.dev/`; default network `preprod`).
 
 **Repository validation scope.** There are two strict, no-emit TypeScript gates,
 and `bun run typecheck` runs both.
@@ -29,11 +29,10 @@ and `bun run typecheck` runs both.
   longer accepts) lived in a test file.
 
 Neither gate is a workspace-wide typecheck: each reports, but does not fail on,
-diagnostics in dependencies outside its own roots — including the gitignored
-Compact output, which CI stubs as declarations for both gates. CI also bundles
-API examples 01, 03, 05, 07, and 11 before running the docs playground
-typecheck. Example 11's Midnight network-id and ledger-v9 imports are direct
-root dependencies, not transitive assumptions.
+diagnostics in dependencies outside its own roots. CI also bundles API examples
+01, 03, 05, 07, and 11 before running the docs playground typecheck. Example
+11's Midnight network-id and ledger-v9 imports are direct root dependencies,
+not transitive assumptions.
 
 ---
 
@@ -75,7 +74,6 @@ CELESTIA_FETCH_CONCURRENCY=12           # parallel RPC calls per window
 
 # ── Midnight ─────────────────────────────────────────────────────────────────
 MIDNIGHT_NETWORK_ID=undeployed|preview|mainnet
-MIDNIGHT_CONTRACT_ADDRESS=mn1...        # required on preview/mainnet
 MIDNIGHT_START_BLOCK=1
 MIDNIGHT_DELAY_MS=30000                 # indexer poll delay
 
@@ -200,7 +198,7 @@ curl http://host:9999/health
 
 #### `GET /v1/health`
 
-Compact protocol-readiness probe. It uses the same aggregate state as the
+Aggregate protocol-readiness probe. It uses the same state as the
 detailed endpoint below and returns `{ "status": "ok|syncing|error", "synced":
 true|false }`. Unlike `/health`, this is not merely HTTP-process liveness.
 
@@ -595,8 +593,8 @@ a basket does not appear as a market at all.
 
 #### `GET /v1/known-tokens`
 
-> **⚠️ Demo endpoint — do not use as a source of truth.**
-> This registry is a temporary convenience feature for this demo. The official Midnight token-metadata standard is not yet live. Names and kinds stored here are manually curated and unverified. Do not rely on this endpoint for authoritative token information.
+> **⚠️ Mixed registry endpoint — do not treat the endpoint itself as a source of truth.**
+> Fresh databases contain six records pinned from the external canonical test-token registry, while local operators may also add manually curated rows. Use the published registry revision when provenance matters.
 
 All registered token colors.
 
@@ -607,20 +605,30 @@ curl http://host:9999/v1/known-tokens
 ```json
 [
   { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded", "decimals": 6, "asset_id": "midnight-3" },
-  { "id": 2, "token_color": "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c", "name": "SNIGHT", "kind": "shielded", "decimals": 6, "asset_id": "midnight-3" },
-  { "id": 5, "token_color": "e7580bfcf04c05cbec44572d122f526ba35d5b6442fa6429e42e9b9fca22a912", "name": "WBTC", "kind": "shielded", "decimals": 6, "asset_id": null }
+  { "id": 2, "token_color": "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819", "name": "SNIGHT", "kind": "shielded", "decimals": 6, "asset_id": "midnight-3" },
+  { "id": 3, "token_color": "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc", "name": "TWBTC", "kind": "shielded", "decimals": 8, "asset_id": "bitcoin" }
 ]
 ```
 
-`NIGHT`, `SNIGHT`, `USDC` and `USDM` are seeded by the schema. `SNIGHT` — the
+`NIGHT`, `SNIGHT`, `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and
+`UTWBTC` are seeded by the schema. The six `TW*`/`UTW*` records exactly match
+the pinned ready Preprod registry revision
+`ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc`;
+their complete source fixture and checksum are in
+`packages/database/fixtures/`. The optional `start.dev.ts` import can replace
+those six rows in an existing database for an explicitly selected network. A
+failed import preserves all current values, and editing `000-init.sql` alone
+never changes an already initialized database.
+
+`SNIGHT` — the
 [shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
 held as a shielded token — is the one seed whose colour depends on the network,
-because it derives from the contract address. The schema seeds **preview**
-(`793c29c9…f99c`, shown above); **preprod** is `8fac382b…6819`, and `mainnet` has
-no deployment yet. Another network patches that row in `000-init.sql` before its
-database is created, or registers the colour on an existing database with an
-`UPDATE` / `POST /v1/known-tokens`. It carries NIGHT's `decimals` and prices off
-the same asset, so equal base units are at par.
+because it derives from the contract address. The schema seeds **Preprod**
+(`8fac382b…6819`, shown above); Preview is `793c29c9…f99c`, and `mainnet` has
+no deployment yet. An operator selecting another network patches that separate
+row before a fresh database is created, or updates it deliberately in an
+existing database. It carries NIGHT's `decimals` and prices off the same asset,
+so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
 appearing in an offer says nothing about its name, and an offer's value layer
@@ -638,7 +646,7 @@ token-metadata standard lands.
 > Requires `ENABLE_TOKEN_REGISTRY=true`; otherwise returns `404 NOT_ENABLED`. Enable it for local dev and e2e only.
 > Registering a name here does not make it canonical. Any operator can write any name against any color. Wait for the official token-metadata standard before building user-facing trust on top of this endpoint.
 
-Register a human-readable name for a token color before any offers appear (e.g. immediately after a browser-wallet mint).
+Register a human-readable name for a local/test token color before any offers appear.
 
 ```bash
 curl -X POST http://host:9999/v1/known-tokens \
@@ -658,10 +666,10 @@ curl -X POST http://host:9999/v1/known-tokens \
 ```
 
 `name` must be unique (max 16 chars, stored uppercased). `kind` is `"shielded"` or
-`"unshielded"`. `decimals` is optional (integer, `[0, 38]`) and **defaults to 6** —
-every token this stack mints or registers has 6 decimals, and the faucets hand out
-whole coins scaled by `10^6`. Send it explicitly anyway; a bridged token on another
-scale must state its own value, or its USD price is off by `10^(6 − its decimals)`.
+`"unshielded"`. `decimals` is optional (integer, `[0, 38]`) and **defaults to 6**
+for legacy/local registrations. Canonical imports state 8 for BTC variants, 18
+for ETH and 6 for stablecoins. Any other scale must be explicit, or its USD
+price is off by `10^(6 − its decimals)`.
 `asset_id` is optional too: omitted means "price it by NAME".
 
 **Success `200`**
@@ -908,24 +916,24 @@ still writes one, deliberately, so an operator can inspect and override it.)
 
 `feed` is all-nulls when the service has never run against this database.
 
-**Mapping.** Faucet-minted colours change on every clean redeploy (they derive from
-the contract address), so tokens map to assets by **name**: `WBTC`/`WSBTC`/`BTC` →
-`bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`
-(Moneta's Cardano USDM, the asset the VIA Labs bridge carries to Midnight),
-`NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3` (the shielded-night wrapper is
-locked 1:1 against NIGHT, so it is the same asset — no new price to fetch).
-`known_tokens.asset_id` overrides the map, and `PRICE_FEED_MAP`
+**Mapping.** Token colors are opaque, network-specific external IDs. Rows without
+an explicit asset ID therefore use a normalized-name fallback: `WBTC`/`WSBTC`/`BTC`
+→ `bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` →
+`usdm-2` (Moneta's Cardano USDM, the asset the VIA Labs bridge carries to
+Midnight), `NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3` (the shielded-night
+wrapper is locked 1:1 against NIGHT, so it is the same asset — no new price to
+fetch). Canonical registry rows carry explicit asset IDs. `known_tokens.asset_id`
+overrides the fallback map, and `PRICE_FEED_MAP`
 (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
 **`decimals` is base units per priced coin, not display decimals.** `NIGHT` is
 seeded with `decimals: 6` — 1 NIGHT is 10⁶ Stars, its base unit
 (`STARS_PER_NIGHT` in `midnight-ledger/ledger/src/structure.rs`) — so its
 per-base-unit price is the seeded `midnight-3` coin price divided by `10^6`.
-**Every token this stack mints or registers has 6 decimals**, and the faucets
-hand out whole coins scaled by `10^6` (1 000 coins = `1000000000` base units),
-so a colour registered through `POST /v1/known-tokens` without an explicit
-`decimals` defaults to `6`. Registrants should send it anyway; a bridged token
-on another scale states its own value.
+Canonical registry tokens preserve their published decimals: BTC variants are
+8, ETH is 18, and stablecoins are 6. A legacy/local colour registered through
+`POST /v1/known-tokens` without an explicit `decimals` still defaults to `6`.
+Registrants should send it anyway.
 
 **The `price-feed` service.** `packages/price-feed` is a separate process, not part
 of the node: the node never calls CoinGecko. It refreshes `asset_prices` once a day
@@ -1146,7 +1154,7 @@ correct consumer of this stream already implements it.
 
 #### `GET /v1/midnight/config`
 
-Public Midnight configuration the browser contract client needs. Never includes secrets.
+Public Midnight network configuration the browser wallet needs. Never includes secrets.
 
 ```bash
 curl http://host:9999/v1/midnight/config
@@ -1154,7 +1162,6 @@ curl http://host:9999/v1/midnight/config
 
 ```json
 {
-  "contractAddress": "mn1abc...",
   "indexerUri":      "https://indexer.midnight.network:8088/graphql",
   "indexerWsUri":    "wss://indexer.midnight.network:8088/graphql",
   "proofServerUri":  "https://proof.midnight.network",
@@ -1162,7 +1169,7 @@ curl http://host:9999/v1/midnight/config
 }
 ```
 
-Returns `500` if `MIDNIGHT_CONTRACT_ADDRESS` is not set.
+The endpoint remains available without any application contract metadata.
 
 ---
 

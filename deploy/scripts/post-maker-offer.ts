@@ -7,19 +7,16 @@
 //
 // Env:
 //   ZSWAP_API / NODE_URL   kernel API base       (default http://kernel:9999)
-//   MAKER_SEED             maker wallet seed     (default genesis …0001, which
-//                          is the wallet `mint-test-tokens` credits)
-//   GIVE_TOKEN, WANT_TOKEN 64-hex colors; default: read MINTED_TOKENS_FILE
+//   MAKER_SEED             externally prefunded maker wallet seed
+//   GIVE_TOKEN, WANT_TOKEN required 64-hex token IDs
 //   GIVE_AMOUNT, WANT_AMOUNT, TTL_MINUTES
-//   MINTED_TOKENS_FILE     default /srv/offerfiles-deploy/minted-tokens.json,
-//                          published by entrypoint-mint-test-tokens.sh
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import { buildWallet } from "../../packages/solver-core/wallet.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
-import { postMakerOfferWithWallet, resolveMintedTokens } from "./lib/maker-offer.ts";
+import { postMakerOfferWithWallet, resolveExplicitTokens } from "./lib/maker-offer.ts";
 
 globalThis.WebSocket = WebSocket;
 setNetworkId(net.id as never);
@@ -31,8 +28,7 @@ const api = new KernelApi(
 );
 const MAKER_SEED =
   process.env["MAKER_SEED"] ?? "0000000000000000000000000000000000000000000000000000000000000001";
-const { give, want } = resolveMintedTokens({
-  file: process.env["MINTED_TOKENS_FILE"] ?? "/srv/offerfiles-deploy/minted-tokens.json",
+const { give, want } = resolveExplicitTokens({
   give: process.env["GIVE_TOKEN"] ?? "",
   want: process.env["WANT_TOKEN"] ?? "",
 });

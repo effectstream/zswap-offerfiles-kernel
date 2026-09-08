@@ -9,10 +9,11 @@ import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
-import { joinOfferFiles, mintShielded } from "../lib/offer-files.ts";
+import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
   buildWallet,
   shieldedKeys,
+  transferShielded,
   waitForShielded,
   waitForSync,
 } from "../lib/wallet.ts";
@@ -22,8 +23,6 @@ globalThis.WebSocket = WebSocket;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const TAG = "[root-unknown]";
-const SEP = { GIVE: 0xc0, ADVANCE: 0xc1 } as const;
-const MINT = 1_000_000_000n;
 const GIVE = 1_000_000n;
 const WANT_TOKEN = "ff".repeat(32);
 const WANT = 5_000_000n;
@@ -32,6 +31,10 @@ export async function rootUnknownTest(db: Client): Promise<void> {
   setNetworkId(net.id as any);
 
   console.log(`${TAG} building genesis…`);
+  const [G, ADVANCE] = requireDistinctTokenColors([
+    "E2E_ROOT_GIVE_TOKEN",
+    "E2E_ROOT_ADVANCE_TOKEN",
+  ]);
   const genesis = await buildWallet(net.walletSeed);
 
   try {
@@ -45,16 +48,7 @@ export async function rootUnknownTest(db: Client): Promise<void> {
     }
     const addr = await genesis.wallet.shielded.getAddress();
 
-    console.log(`${TAG} minting give token + building offer…`);
-    const deployed = await joinOfferFiles(genesis);
-    const nonce = BigInt(Date.now());
-    const G = await mintShielded(
-      deployed,
-      SEP.GIVE,
-      MINT,
-      nonce,
-      genesis.zswapSecretKeys.coinPublicKey,
-    );
+    console.log(`${TAG} building offer from externally issued inventory…`);
     if ((await waitForShielded(genesis, G, GIVE, 24)) < GIVE)
       throw new Error("genesis missing give token");
 
@@ -111,14 +105,11 @@ export async function rootUnknownTest(db: Client): Promise<void> {
       ).rows[0]?.height ?? 0,
     );
 
-    console.log(`${TAG} advancing the coin tree past the offer's root…`);
-    await mintShielded(
-      deployed,
-      SEP.ADVANCE,
-      MINT,
-      nonce + 1n,
-      genesis.zswapSecretKeys.coinPublicKey,
-    );
+    console.log(`${TAG} advancing the coin tree with a prefunded-token self transfer…`);
+    if ((await waitForShielded(genesis, ADVANCE, 1n, 24)) < 1n) {
+      throw new Error("genesis missing E2E_ROOT_ADVANCE_TOKEN inventory");
+    }
+    await transferShielded(genesis, ADVANCE, 1n, addr);
     const advanced = await waitFor(
       "tree advanced past offer root",
       async () =>

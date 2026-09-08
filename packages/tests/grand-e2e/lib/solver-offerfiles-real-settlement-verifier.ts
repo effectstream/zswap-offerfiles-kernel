@@ -584,12 +584,12 @@ function parseActorArtifact(artifact: SealedJson, config: RealSettlementVerifier
   exactKeys(
     funding,
     [
-      "mintAmount", "userTokenAAmount", "solverTokenBAmount", "nightPerUtxo",
+      "sourceInventoryAmount", "userTokenAAmount", "solverTokenBAmount", "nightPerUtxo",
       "nightUtxosPerActor", "nightFundingTransaction", "tokenFundingTransactions",
     ],
     "actor artifact.funding",
   );
-  for (const key of ["mintAmount", "userTokenAAmount", "solverTokenBAmount", "nightPerUtxo"] as const) {
+  for (const key of ["sourceInventoryAmount", "userTokenAAmount", "solverTokenBAmount", "nightPerUtxo"] as const) {
     canonicalPositiveDecimal(funding[key], `actor artifact.funding.${key}`);
   }
   canonicalSafeInteger(funding["nightUtxosPerActor"], "actor artifact.funding.nightUtxosPerActor", 1);

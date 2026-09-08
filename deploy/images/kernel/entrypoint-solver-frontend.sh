@@ -13,12 +13,8 @@
 # seen) and never a reason to refuse to start. A wait here would delete exactly
 # the behaviour the service exists for.
 #
-# It does not call `adopt_contract_address` either. The site never names a
-# token colour from the contract — it labels colours from the kernel's own
-# `GET /v1/known-tokens` and falls back to short hex — so it has no reason to
-# read the deployed identity, and the service does not mount the shared volume
-# that holds it. (Calling it here would block for CONTRACT_WAIT_TIMEOUT_S and
-# then fail, which is a fifteen-minute way of saying "wrong dependency".)
+# The site labels explicit token IDs from the kernel's `GET /v1/known-tokens`
+# and falls back to short hex. It needs no issuer state or shared identity file.
 #
 # THIS SCRIPT MUST NOT VALIDATE THE SITE'S OWN CONFIGURATION — the same rule
 # entrypoint-solver.sh follows. `packages/solver-frontend/env.ts` resolves every

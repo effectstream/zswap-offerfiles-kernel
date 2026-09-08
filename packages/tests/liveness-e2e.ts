@@ -48,8 +48,8 @@ const check = (name: string, cond: boolean, extra = "") => {
 const counts = await tableCounts();
 console.log("[e2e] liveness tables:", JSON.stringify(counts));
 check("known_roots populated by midnight-zswap-root primitive", counts.known_roots > 0);
-// Populated by the startup `midnight-mint-test-tokens` process (the unshielded
-// mint emits unshieldedCreatedOutputs).
+// Requires a same-chain external funding fixture that emitted unshielded
+// created outputs before this live test starts.
 check("created_unshielded populated by midnight-unshielded-create primitive", counts.created_unshielded > 0);
 
 // 2) garbage → 400 BAD_ENCODING (submit gate runs)

@@ -72,29 +72,6 @@ results.push(
     : fail("MIDNIGHT_NETWORK_ID", `expected "preview", got "${networkId || "(unset)"}"`),
 );
 
-const contractAddr = get("MIDNIGHT_CONTRACT_ADDRESS");
-if (!contractAddr) {
-  results.push(fail("MIDNIGHT_CONTRACT_ADDRESS", "not set — run deploy.ts with MIDNIGHT_NETWORK_ID=preview"));
-} else if (!isHex(contractAddr, 32)) {
-  results.push(fail("MIDNIGHT_CONTRACT_ADDRESS", "must be 64-char hex (32 bytes)"));
-} else {
-  // Cross-check against committed preview.json if it exists
-  const previewJsonPath = resolve(ROOT, "packages/contracts-midnight/contract-offer-files.preview.json");
-  if (existsSync(previewJsonPath)) {
-    const committed = JSON.parse(readFileSync(previewJsonPath, "utf-8")).contractAddress as string;
-    if (contractAddr.toLowerCase() !== committed.toLowerCase()) {
-      results.push(fail(
-        "MIDNIGHT_CONTRACT_ADDRESS",
-        "does not match packages/contracts-midnight/contract-offer-files.preview.json — wrong address?",
-      ));
-    } else {
-      results.push(pass("MIDNIGHT_CONTRACT_ADDRESS — matches preview.json ✓"));
-    }
-  } else {
-    results.push(pass("MIDNIGHT_CONTRACT_ADDRESS — set, 64-char hex"));
-  }
-}
-
 const midnightStart = get("MIDNIGHT_START_BLOCK");
 if (midnightStart && !isPositiveInt(midnightStart)) {
   results.push(fail("MIDNIGHT_START_BLOCK", "must be a positive integer if set"));

@@ -22,7 +22,7 @@
 //                     "the expected deltas landed" into "and the wallet holds
 //                     nothing else" — the decisive on-chain evidence for
 //                     00006 SC-004 that the solver was never provisioned any
-//                     token. A solver minted the usual 1e9 of each would fail
+//                     token. A solver preloaded with a large balance would fail
 //                     it by nine orders of magnitude, whatever any receipt or
 //                     configuration file claimed.
 //   OUT_FILE          optional path to write the JSON report to

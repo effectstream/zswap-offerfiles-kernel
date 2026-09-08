@@ -6,7 +6,7 @@
 # correct one for a local devnet: the `dev`/`mainnet` split names the target
 # NETWORK, not the maturity of the code, and `main.mainnet.ts` resolves mainnet
 # endpoints. It is NOT `bun run dev` — that is the orchestrator, which would
-# kill the chain services on 9944/8088/6300 and re-deploy the contract.
+# kill the chain services on 9944/8088/6300.
 set -euo pipefail
 
 . /usr/local/bin/entrypoint-common.sh
@@ -14,8 +14,6 @@ set -euo pipefail
 require_env MIDNIGHT_NETWORK_ID MIDNIGHT_NODE_HTTP MIDNIGHT_INDEXER_HTTP \
             MIDNIGHT_INDEXER_WS MIDNIGHT_PROOF_SERVER_URL \
             CELESTIA_RPC_URL DB_HOST DB_PORT
-
-adopt_contract_address
 
 wait_tcp "${DB_HOST}" "${DB_PORT}" "pglite" "${DB_WAIT_TIMEOUT_S:-300}"
 wait_node_block "${MIDNIGHT_NODE_HTTP}" 1 "${NODE_BLOCK_TIMEOUT_S:-600}"

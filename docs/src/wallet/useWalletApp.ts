@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   connectInjected,
   connectLocal,
@@ -8,16 +8,7 @@ import {
   type Connected,
   type WalletState,
 } from './wallet'
-import { useContract } from './useContract'
-import {
-  domainSepFromName,
-  MINT_AMOUNT,
-  MINT_COINS,
-  NIGHT_COLOR,
-  PRESET_TOKENS,
-  type MintableKind,
-  type MintableToken,
-} from './mintable'
+import { NIGHT_COLOR } from './token-colors'
 import { api, run, type KnownToken, type MidnightConfig } from '../api'
 
 export type WalletStatus = 'disconnected' | 'connecting' | 'connected'
@@ -29,12 +20,7 @@ export function useWalletApp() {
   const [error, setError] = useState<string | null>(null)
   const [injected, setInjected] = useState<{ name: string; displayName: string; icon?: string }[]>([])
   const [known, setKnown] = useState<KnownToken[]>([])
-  const [colorById, setColorById] = useState<Record<string, string>>({})
-  const [mintingId, setMintingId] = useState<string | null>(null)
-  const [mintMsg, setMintMsg] = useState<string | null>(null)
   const [nodeMidnight, setNodeMidnight] = useState<MidnightConfig | null>(null)
-
-  const contract = useContract(connected?.connectedApi ?? null)
 
   const laceIndexerOk = Boolean(
     wstate?.laceConfig?.indexerUri
@@ -51,25 +37,10 @@ export function useWalletApp() {
     try {
       const tokens = await run(api.knownTokens())
       setKnown(tokens)
-      const map: Record<string, string> = {}
-      for (const t of tokens) map[t.name] = t.token_color.toLowerCase()
-      setColorById((prev) => ({ ...prev, ...map }))
     } catch { /* node down */ }
   }, [])
 
-  // Preset shortcuts ∪ whatever this network's node already knows about (minus
-  // NIGHT) — same-named tokens dedupe, so a preset already minted here just
-  // shows its real color instead of a second placeholder entry.
-  const mintable = useMemo<MintableToken[]>(() => {
-    const byName = new Map(PRESET_TOKENS.map((t) => [t.name, t]))
-    for (const k of known) {
-      if (k.token_color.toLowerCase() === NIGHT_COLOR) continue
-      if (!byName.has(k.name)) {
-        byName.set(k.name, { name: k.name, kind: k.kind as MintableKind, domainSep: domainSepFromName(k.name) })
-      }
-    }
-    return Array.from(byName.values())
-  }, [known])
+  const registeredTokens = known
 
   const refreshBalances = useCallback(async () => {
     if (!connected) return
@@ -79,6 +50,13 @@ export function useWalletApp() {
       setError(e?.message ?? String(e))
     }
   }, [connected])
+
+  // User-triggered refresh reloads registry metadata too. The 15-second
+  // balance poll below stays balance-only, so an optional startup import can
+  // become visible without a page reload or a new metadata polling loop.
+  const refreshWallet = useCallback(async () => {
+    await Promise.all([refreshBalances(), refreshKnown()])
+  }, [refreshBalances, refreshKnown])
 
   useEffect(() => {
     discoverInjected().then(setInjected).catch(() => setInjected([]))
@@ -100,12 +78,13 @@ export function useWalletApp() {
       const c = await connectInjected(name)
       setConnected(c)
       setWstate(await readState(c))
+      await refreshKnown()
       setStatus('connected')
     } catch (e: any) {
       setStatus('disconnected')
       setError(e?.message ?? String(e))
     }
-  }, [])
+  }, [refreshKnown])
 
   const connectSeed = useCallback(async (seed?: string) => {
     setStatus('connecting')
@@ -114,27 +93,27 @@ export function useWalletApp() {
       const c = await connectLocal(seed)
       setConnected(c)
       setWstate(await readState(c))
+      await refreshKnown()
       setStatus('connected')
     } catch (e: any) {
       setStatus('disconnected')
       setError(e?.message ?? String(e))
     }
-  }, [])
+  }, [refreshKnown])
 
   const disconnect = useCallback(() => {
     setConnected(null)
     setWstate(null)
     setStatus('disconnected')
     setError(null)
-    setMintMsg(null)
   }, [])
 
-  const balanceFor = useCallback((token: MintableToken): string => {
-    const color = colorById[token.name]
-    if (!color || !wstate) return '0'
+  const balanceFor = useCallback((token: KnownToken | undefined): string => {
+    if (!token || !wstate) return '0'
+    const color = token.token_color.toLowerCase()
     const bag = token.kind === 'shielded' ? wstate.shieldedBalances : wstate.unshieldedBalances
     return bag[color] ?? bag[color.toLowerCase()] ?? '0'
-  }, [colorById, wstate])
+  }, [wstate])
 
   const nightBalance = useCallback((): { shielded: string; unshielded: string } => {
     if (!wstate) return { shielded: '0', unshielded: '0' }
@@ -144,54 +123,23 @@ export function useWalletApp() {
     }
   }, [wstate])
 
-  const mint = useCallback(async (token: MintableToken) => {
-    if (!connected?.connectedApi) {
-      setError('Minting requires Lace (browser wallet). Connect Lace, not the local seed wallet.')
-      return
-    }
-    setMintingId(token.name)
-    setMintMsg(null)
-    setError(null)
-    try {
-      const res = token.kind === 'shielded'
-        ? await contract.mintShielded(token.domainSep, MINT_AMOUNT, BigInt(Date.now()), token.name)
-        : await contract.mintUnshielded(token.domainSep, MINT_AMOUNT, token.name)
-      setColorById((prev) => ({ ...prev, [token.name]: res.color.toLowerCase() }))
-      setMintMsg(`Minted +${MINT_COINS} ${token.name} (${MINT_AMOUNT} base units) · color ${res.color.slice(0, 12)}…`)
-      await refreshKnown()
-      // Give Lace a moment to index, then refresh.
-      setTimeout(() => { refreshBalances() }, 2000)
-    } catch (e: any) {
-      setError(e?.message ?? String(e))
-    } finally {
-      setMintingId(null)
-    }
-  }, [connected, contract, refreshBalances, refreshKnown])
-
   return {
     status,
     connected,
     wstate,
     error,
     injected,
-    mintable,
-    colorById,
-    mintingId,
-    mintMsg,
-    contractLoading: contract.loading,
-    contractError: contract.error,
-    proofServer: contract.config?.proofServerUri,
+    registeredTokens,
     nodeMidnight,
     laceIndexerOk,
     laceNetworkOk,
     connectLace,
     connectSeed,
     disconnect,
-    refreshBalances,
+    refreshBalances: refreshWallet,
     balanceFor,
     nightBalance,
-    mint,
-    canMint: connected?.kind === 'injected',
+    canBuildOffers: connected?.kind === 'injected',
   }
 }
 

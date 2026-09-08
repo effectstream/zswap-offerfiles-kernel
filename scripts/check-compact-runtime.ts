@@ -23,8 +23,6 @@ export interface CompactRuntimeState {
 
 const REQUIRED_DIRECT_PINS = [
   "package.json#dependencies",
-  "packages/contracts-midnight/package.json#dependencies",
-  "packages/contracts-midnight/contract-offer-files/package.json#dependencies",
 ] as const;
 
 const REQUIRED_OVERRIDE = "package.json#overrides";
@@ -108,8 +106,6 @@ async function main(): Promise<void> {
   const repositoryRoot = path.resolve(import.meta.dir, "..");
   const manifestPaths = [
     "package.json",
-    "packages/contracts-midnight/package.json",
-    "packages/contracts-midnight/contract-offer-files/package.json",
   ];
   const manifests = Object.fromEntries(
     await Promise.all(

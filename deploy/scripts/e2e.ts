@@ -70,7 +70,7 @@ import {
   takerHalfStandInSpec,
 } from "../../packages/solver-core/fee-sizing.ts";
 import { KernelApi, type LiveOffer } from "./lib/kernel-api.ts";
-import { postMakerOffer, resolveMintedTokens, type PostedOffer } from "./lib/maker-offer.ts";
+import { postMakerOffer, resolveExplicitTokens, type PostedOffer } from "./lib/maker-offer.ts";
 
 globalThis.WebSocket = WebSocket;
 setNetworkId(net.id as never);
@@ -87,8 +87,6 @@ const TAKER_SEED =
   process.env["TAKER_SEED"] ?? "0000000000000000000000000000000000000000000000000000000000000032";
 const EVIDENCE_DIR = process.env["E2E_EVIDENCE_DIR"] ?? "/var/lib/e2e";
 const JOURNAL_PATH = process.env["SOLVER_JOURNAL_PATH"] ?? "/var/lib/cow-solver/operations.sqlite";
-const MINTED_FILE =
-  process.env["MINTED_TOKENS_FILE"] ?? "/srv/offerfiles-deploy/minted-tokens.json";
 const CASES = (process.env["E2E_CASES"] ?? "A,B,C,D")
   .split(",")
   .map((s) => s.trim())
@@ -522,15 +520,14 @@ async function offlineStandInFee(
   }
 }
 
-// ── 00006 SC-004: prove the solver was given NO token provisioning ───────────
+// ── 00006 SC-004: verify externally managed solver inventory ────────────────
 
 interface ProvisionReceipt {
   mode?: string;
   script?: string;
   measuredAt?: string;
-  mintedTokens?: string[];
-  tokensTransferredToSolver?: string[];
-  dustRegistered?: boolean;
+  inventorySource?: string;
+  dustReady?: boolean;
   nightBeforeDustRegistrationSpecks?: string;
   nightAfterDustRegistrationSpecks?: string;
   solverShielded?: Record<string, string>;
@@ -554,7 +551,7 @@ interface ProvisionReceipt {
  * The receipt is not the only evidence and is not meant to be: the run's other
  * half is `deploy/scripts/read-wallet.ts` afterwards, which reads the solver's
  * REAL post-run balance off the chain and must find the case-B surplus and
- * nothing else. A solver that had been minted the usual 1e9 of each token would
+ * nothing else. A solver that held a large preloaded balance of each token would
  * fail that gate by nine orders of magnitude.
  */
 function assertUnfundedSolver(tokenIn: string, tokenOut: string): ProvisionReceipt | null {
@@ -575,16 +572,13 @@ function assertUnfundedSolver(tokenIn: string, tokenOut: string): ProvisionRecei
   record("05-solver-provision-receipt", receipt);
 
   assert(
-    receipt.mode === "fee-currency-only",
-    "solver provisioning ran in the FEE-CURRENCY-ONLY mode",
+    receipt.mode === "external-prefunded",
+    "solver provisioning inspected EXTERNALLY PREFUNDED fee inventory",
     { mode: receipt.mode, script: receipt.script },
   );
-  assert(
-    (receipt.mintedTokens?.length ?? -1) === 0 &&
-      (receipt.tokensTransferredToSolver?.length ?? -1) === 0,
-    "provisioning minted NO token and transferred NO token to the solver",
-    { minted: receipt.mintedTokens, transferred: receipt.tokensTransferredToSolver },
-  );
+  assert(receipt.inventorySource === "external", "solver inventory source is external", {
+    inventorySource: receipt.inventorySource,
+  });
   const shielded = receipt.solverShielded ?? {};
   const nonZero = Object.entries(shielded).filter(([, v]) => BigInt(v) !== 0n);
   assert(
@@ -613,12 +607,12 @@ function assertUnfundedSolver(tokenIn: string, tokenOut: string): ProvisionRecei
     receipt.nightBeforeDustRegistrationSpecks ?? receipt.solverUnshielded?.[NIGHT] ?? "0",
   );
   assert(
-    receipt.dustRegistered === true && nightFunding > 0n,
-    "the solver DOES hold fee currency (NIGHT, registered for dust) — the one thing it needs",
+    receipt.dustReady === true && nightFunding > 0n,
+    "the solver holds externally prefunded NIGHT and its DUST is usable",
     {
       nightBeforeDustRegistration: nightFunding.toString(),
       nightAfterDustRegistration: receipt.nightAfterDustRegistrationSpecks ?? "n/a",
-      dustRegistered: receipt.dustRegistered,
+      dustReady: receipt.dustReady,
     },
   );
   return receipt;
@@ -1197,11 +1191,14 @@ async function runCase(
 const started = Date.now();
 let exitCode = 1;
 try {
-  const minted = resolveMintedTokens({ file: MINTED_FILE });
+  const inventory = resolveExplicitTokens({
+    give: process.env["E2E_TOKEN_OUT"],
+    want: process.env["E2E_TOKEN_IN"],
+  });
   // The deployment's maker offer GIVES A and WANTS B, so for the solver — and
   // therefore for the taker — the directed pair is tokenIn=B, tokenOut=A.
-  const tokenOut = minted.give;
-  const tokenIn = minted.want;
+  const tokenOut = inventory.give;
+  const tokenIn = inventory.want;
   log(`kernel   : ${KERNEL.base}`);
   log(`relay    : ${RELAY}`);
   log(`network  : ${net.id}`);
@@ -1217,8 +1214,7 @@ try {
     offerGive: OFFER_GIVE.toString(),
     offerWant: OFFER_WANT.toString(),
     cases: CASES,
-    mintedTokensFile: MINTED_FILE,
-    minted: minted.raw,
+    inventorySource: "explicit environment (E2E_TOKEN_IN/E2E_TOKEN_OUT)",
     journalPath: JOURNAL_PATH,
   });
 

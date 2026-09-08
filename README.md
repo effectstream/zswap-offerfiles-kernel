@@ -58,11 +58,21 @@ selects Preview, Stagenet or local `undeployed` (which skips the public import).
 HTTP/metadata error or database rejection logs a skip and the rest of the stack
 continues with the database's existing rows.
 
+A fresh database already contains the six canonical Preprod rows, together
+with NIGHT and Preprod SNIGHT, so this optional request is not required for an
+offline Preprod start. The seed is pinned to public registry revision
+`ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc`
+from `effectstream/mint-test-tokens` source commit
+`4a6aee1ed50dea17875f28b2d2cf398bfee315fb`. The complete source document and
+checksum are recorded in `packages/database/fixtures/`.
+
 The one-shot runs only in orchestration, after migrations. It does not add a
 server import endpoint or refresh job. A successful run upserts only the six
 canonical names; unrelated tokens, offer history and manual prices retain their
 existing colors. Editing `000-init.sql` affects only a fresh database, while the
-one-shot can update the operator-selected live database. The old
+one-shot updates an existing operator-selected database to Preview, Preprod or
+Stagenet without resetting it. If that request fails, the existing database is
+left exactly as it was; it is not reset to the SQL defaults. The old
 `packages/contracts-midnight/mint-test-tokens.ts` command remains an explicit
 local test helper and does not mint the canonical issuer's token IDs.
 
@@ -156,7 +166,8 @@ Tokens map to assets **by name** — `WBTC`/`WSBTC`/`BTC` → `bitcoin`, `WETH`/
 `SNIGHT` → `midnight-3` — because faucet-minted colours derive from the contract
 address and change on every clean redeploy. `known_tokens.asset_id` overrides the
 map; canonical `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and `UTWBTC`
-records carry explicit asset IDs. `PRICE_FEED_MAP`
+records carry explicit asset IDs and are seeded from the pinned Preprod
+registry on a fresh database. `PRICE_FEED_MAP`
 (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
 `SNIGHT` is the [shielded-night](https://github.com/effectstream/shielded-night)

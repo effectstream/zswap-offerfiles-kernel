@@ -3,7 +3,12 @@ import { createServer } from "node:net";
 import pg from "pg";
 import { closeTestPglite } from "./test-pglite.ts";
 import { migrationTable } from "./migration-order.ts";
-import { applyCanonicalRegistry, validateCanonicalRegistry } from "./token-registry.ts";
+import { tokenPriceFromAsset } from "./price-map.ts";
+import {
+  applyCanonicalRegistry,
+  validateCanonicalRegistry,
+  type RegistryNetwork,
+} from "./token-registry.ts";
 import {
   registryUrl,
   runOptionalRegistryImport,
@@ -89,6 +94,16 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+const PINNED_FIXTURES: Record<RegistryNetwork, URL> = {
+  preprod: new URL("./fixtures/mint-test-tokens.preprod.json", import.meta.url),
+  preview: new URL("./fixtures/mint-test-tokens.preview.json", import.meta.url),
+  stagenet: new URL("./fixtures/mint-test-tokens.stagenet.json", import.meta.url),
+};
+
+async function pinnedRegistry(network: RegistryNetwork): Promise<unknown> {
+  return await Bun.file(PINNED_FIXTURES[network]).json();
+}
+
 async function freePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
     const server = createServer();
@@ -102,7 +117,36 @@ async function freePort(): Promise<number> {
   });
 }
 
+async function withFreshDatabase(
+  run: (client: InstanceType<typeof pg.Client>, port: number) => Promise<void>,
+): Promise<void> {
+  const port = await freePort();
+  const { startPglite } = await import("@effectstream/db/start-pglite");
+  const handle = await startPglite(port);
+  const client = new pg.Client({ host: "127.0.0.1", port, user: "postgres", database: "postgres" });
+  try {
+    await client.connect();
+    for (const migration of migrationTable) await client.query(migration.sql);
+    await run(client, port);
+  } finally {
+    await closeTestPglite(handle, client);
+  }
+}
+
 describe("canonical registry validation", () => {
+  test("accepts the pinned published Preprod, Preview and Stagenet registries", async () => {
+    const expectedRevisions = {
+      preprod: "ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc",
+      preview: "c15d38f3a00a319c15ff10e39a2d4926763a4438e7fbb3bfc202bd15aa5a7d28",
+      stagenet: "59041d2fd2acfdad53e437e5a4d2ba88a6f24e4f9e55869b66f465f3da11a0d1",
+    } as const;
+    for (const network of ["preprod", "preview", "stagenet"] as const) {
+      const registry = validateCanonicalRegistry(await pinnedRegistry(network), network);
+      expect(registry).toMatchObject({ network, revision: expectedRevisions[network] });
+      expect(registry.tokens).toHaveLength(6);
+    }
+  });
+
   test("accepts exactly six active canonical tokens with 8/18/6 decimal metadata", () => {
     const result = validateCanonicalRegistry(readyRegistry(), "preprod");
     expect(result.tokens.map((token) => [token.name, token.decimals, token.kind, token.assetId])).toEqual([
@@ -150,6 +194,110 @@ describe("canonical registry validation", () => {
     duplicate.status = "superseded";
     duplicateId.tokens[0].deployments.push(duplicate);
     expect(() => validateCanonicalRegistry(duplicateId, "preprod")).toThrow(/duplicate deploymentId/);
+  });
+});
+
+describe("pinned Preprod database defaults", () => {
+  test("fresh offline initialization matches the published registry and removes legacy placeholders", async () => {
+    await withFreshDatabase(async (client) => {
+      const preprod = validateCanonicalRegistry(await pinnedRegistry("preprod"), "preprod");
+      const rows = (await client.query(
+        "SELECT token_color, name, kind, decimals, asset_id FROM known_tokens ORDER BY name",
+      )).rows;
+      expect(rows).toHaveLength(8);
+      expect(rows.some((row) => row.name === "USDC" || row.name === "USDM")).toBe(false);
+      const canonical = rows.filter((row) => preprod.tokens.some((token) => token.name === row.name));
+      expect(canonical).toEqual(preprod.tokens.map((token) => ({
+        token_color: token.tokenColor,
+        name: token.name,
+        kind: token.kind,
+        decimals: token.decimals,
+        asset_id: token.assetId,
+      })).sort((a, b) => a.name.localeCompare(b.name)));
+
+      const ownership = (await client.query(
+        "SELECT name, token_color, network, registry_revision FROM canonical_token_registry_state ORDER BY name",
+      )).rows;
+      expect(ownership).toHaveLength(6);
+      expect(ownership).toEqual(preprod.tokens.map((token) => ({
+        name: token.name,
+        token_color: token.tokenColor,
+        network: "preprod",
+        registry_revision: preprod.revision,
+      })).sort((a, b) => a.name.localeCompare(b.name)));
+
+      const prices = new Map((await client.query(
+        `SELECT kt.name, kt.decimals, ap.price_usd
+           FROM known_tokens kt
+           JOIN asset_prices ap ON ap.asset_id = kt.asset_id
+          WHERE kt.name = ANY($1::text[])`,
+        [preprod.tokens.map((token) => token.name)],
+      )).rows.map((row) => [String(row.name), tokenPriceFromAsset(String(row.price_usd), Number(row.decimals))]));
+      expect(prices.get("TWBTC")).toBe("0.00077387");
+      expect(prices.get("TWETH")).toBe("0.00000000000000239328");
+      expect(prices.get("TWUSDC")).toBe("0.000000999818");
+      expect(prices.get("TWUSDM")).toBe("0.000001001");
+      expect(prices.get("UTWUSDC")).toBe("0.000000999818");
+      expect(prices.get("UTWBTC")).toBe("0.00077387");
+    });
+  });
+
+  test("same-network import is idempotent and published Preview/Stagenet replace seeded Preprod", async () => {
+    await withFreshDatabase(async (client) => {
+      const selectRows = async () => (await client.query(
+        "SELECT token_color, name, kind, decimals, asset_id FROM known_tokens WHERE name LIKE 'TW%' OR name LIKE 'UTW%' ORDER BY name",
+      )).rows;
+      const preprod = validateCanonicalRegistry(await pinnedRegistry("preprod"), "preprod");
+      const before = await selectRows();
+      await applyCanonicalRegistry(client, preprod);
+      expect(await selectRows()).toEqual(before);
+
+      for (const network of ["preview", "stagenet"] as const) {
+        const replacement = validateCanonicalRegistry(await pinnedRegistry(network), network);
+        await applyCanonicalRegistry(client, replacement);
+        expect(await selectRows()).toEqual(replacement.tokens.map((token) => ({
+          token_color: token.tokenColor,
+          name: token.name,
+          kind: token.kind,
+          decimals: token.decimals,
+          asset_id: token.assetId,
+        })).sort((a, b) => a.name.localeCompare(b.name)));
+        expect((await client.query(
+          "SELECT DISTINCT network, registry_revision FROM canonical_token_registry_state",
+        )).rows).toEqual([{ network, registry_revision: replacement.revision }]);
+      }
+    });
+  });
+
+  test("an unreachable registry leaves the fresh Preprod defaults unchanged", async () => {
+    await withFreshDatabase(async (client, databasePort) => {
+      const beforeKnown = (await client.query(
+        "SELECT token_color, name, kind, decimals, asset_id FROM known_tokens ORDER BY name",
+      )).rows;
+      const beforeState = (await client.query(
+        "SELECT name, token_color, network, registry_revision FROM canonical_token_registry_state ORDER BY name",
+      )).rows;
+      const unavailablePort = await freePort();
+      const outcome = await runOptionalRegistryImport({
+        baseUrl: `http://127.0.0.1:${unavailablePort}/`,
+        network: "preprod",
+        timeoutMs: 75,
+        db: {
+          host: "127.0.0.1",
+          port: databasePort,
+          user: "postgres",
+          password: "postgres",
+          database: "postgres",
+        },
+      });
+      expect(outcome.status).toBe("skipped");
+      expect((await client.query(
+        "SELECT token_color, name, kind, decimals, asset_id FROM known_tokens ORDER BY name",
+      )).rows).toEqual(beforeKnown);
+      expect((await client.query(
+        "SELECT name, token_color, network, registry_revision FROM canonical_token_registry_state ORDER BY name",
+      )).rows).toEqual(beforeState);
+    });
   });
 });
 

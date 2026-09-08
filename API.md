@@ -595,8 +595,8 @@ a basket does not appear as a market at all.
 
 #### `GET /v1/known-tokens`
 
-> **⚠️ Demo endpoint — do not use as a source of truth.**
-> This registry is a temporary convenience feature for this demo. The official Midnight token-metadata standard is not yet live. Names and kinds stored here are manually curated and unverified. Do not rely on this endpoint for authoritative token information.
+> **⚠️ Mixed registry endpoint — do not treat the endpoint itself as a source of truth.**
+> Fresh databases contain six records pinned from the external canonical test-token registry, while local operators may also add manually curated rows. Use the published registry revision when provenance matters.
 
 All registered token colors.
 
@@ -608,18 +608,29 @@ curl http://host:9999/v1/known-tokens
 [
   { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded", "decimals": 6, "asset_id": "midnight-3" },
   { "id": 2, "token_color": "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819", "name": "SNIGHT", "kind": "shielded", "decimals": 6, "asset_id": "midnight-3" },
-  { "id": 5, "token_color": "e7580bfcf04c05cbec44572d122f526ba35d5b6442fa6429e42e9b9fca22a912", "name": "WBTC", "kind": "shielded", "decimals": 6, "asset_id": null }
+  { "id": 3, "token_color": "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc", "name": "TWBTC", "kind": "shielded", "decimals": 8, "asset_id": "bitcoin" }
 ]
 ```
 
-`NIGHT`, `SNIGHT`, `USDC` and `USDM` are seeded by the schema. `SNIGHT` — the
+`NIGHT`, `SNIGHT`, `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and
+`UTWBTC` are seeded by the schema. The six `TW*`/`UTW*` records exactly match
+the pinned ready Preprod registry revision
+`ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc`;
+their complete source fixture and checksum are in
+`packages/database/fixtures/`. The optional `start.dev.ts` import can replace
+those six rows in an existing database for an explicitly selected network. A
+failed import preserves all current values, and editing `000-init.sql` alone
+never changes an already initialized database.
+
+`SNIGHT` — the
 [shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
 held as a shielded token — is the one seed whose colour depends on the network,
 because it derives from the contract address. The schema seeds **Preprod**
 (`8fac382b…6819`, shown above); Preview is `793c29c9…f99c`, and `mainnet` has
-no deployment yet. Another network patches that row in `000-init.sql` before its
-database is created, or updates an existing database deliberately. It carries NIGHT's `decimals` and prices off
-the same asset, so equal base units are at par.
+no deployment yet. An operator selecting another network patches that separate
+row before a fresh database is created, or updates it deliberately in an
+existing database. It carries NIGHT's `decimals` and prices off the same asset,
+so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
 appearing in an offer says nothing about its name, and an offer's value layer

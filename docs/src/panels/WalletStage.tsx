@@ -1,4 +1,4 @@
-import { NIGHT_COLOR } from '../wallet/mintable'
+import { NIGHT_COLOR } from '../wallet/token-colors'
 import { baseUnitsToCoins } from '../../../packages/solver-core/amount.ts'
 import { FAUCET_NETWORK, FAUCET_URL } from '../config'
 import type { WalletApp } from '../wallet/useWalletApp'

@@ -35,20 +35,10 @@
       "dependencies": {
         "@effectstream/mip-zswap-offer": "0.4.0-v9.0",
         "@effectstream/wallets": "0.200.2",
-        "@midnight-ntwrk/compact-js": "2.5.5-rc.7",
         "@midnight-ntwrk/dapp-connector-api": "4.0.1",
-        "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.6",
-        "@midnight-ntwrk/midnight-js-fetch-zk-config-provider": "5.0.0-beta.6",
-        "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.6",
-        "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.6",
-        "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0-beta.6",
         "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6",
-        "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.6",
-        "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.6",
         "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
-        "@midnightntwrk/wallet-sdk-address-format": "4.0.0-beta.2",
         "@scure/base": "^2.0.0",
-        "@zswap-da/contract-offer-files": "workspace:*",
         "react": "^19.2.0",
         "react-dom": "^19.2.0",
       },
@@ -90,37 +80,6 @@
         "wait-on": "8.0.3",
       },
     },
-    "packages/contracts-midnight": {
-      "name": "@zswap-da/contracts-midnight",
-      "version": "0.1.0",
-      "dependencies": {
-        "@effectstream/midnight-contracts": "0.200.2",
-        "@effectstream/npm-midnight-indexer": "0.200.2",
-        "@effectstream/npm-midnight-node": "0.200.2",
-        "@effectstream/npm-midnight-proof-server": "0.200.2",
-        "@effectstream/utils": "0.200.2",
-        "@midnight-ntwrk/compact-js": "2.5.5-rc.7",
-        "@midnight-ntwrk/compact-runtime": "0.19.0",
-        "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.6",
-        "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6",
-        "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
-        "@midnightntwrk/onchain-runtime-v4": "4.0.0-rc.3",
-        "@midnightntwrk/wallet-sdk-abstractions": "3.0.0-beta.0",
-        "@midnightntwrk/wallet-sdk-address-format": "4.0.0-beta.2",
-        "@zswap-da/contract-offer-files": "workspace:*",
-        "rxjs": "^7.8.2",
-        "wait-on": "8.0.3",
-      },
-    },
-    "packages/contracts-midnight/contract-offer-files": {
-      "name": "@zswap-da/contract-offer-files",
-      "version": "0.1.0",
-      "dependencies": {
-        "@midnight-ntwrk/compact-js": "2.5.5-rc.7",
-        "@midnight-ntwrk/compact-runtime": "0.19.0",
-        "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
-      },
-    },
     "packages/database": {
       "name": "@zswap-da/database",
       "version": "0.1.0",
@@ -135,6 +94,16 @@
       },
       "devDependencies": {
         "@paima/pgtyped-cli": "^2.4.5",
+      },
+    },
+    "packages/midnight-infra": {
+      "name": "@zswap-da/midnight-infra",
+      "version": "0.1.0",
+      "dependencies": {
+        "@effectstream/npm-midnight-indexer": "0.200.2",
+        "@effectstream/npm-midnight-node": "0.200.2",
+        "@effectstream/npm-midnight-proof-server": "0.200.2",
+        "wait-on": "8.0.3",
       },
     },
     "packages/node": {
@@ -152,7 +121,6 @@
         "@effectstream/sm": "0.200.2",
         "@effectstream/utils": "0.200.2",
         "@fastify/rate-limit": "^10.0.0",
-        "@midnight-ntwrk/compact-js": "2.5.5-rc.7",
         "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.6",
         "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6",
         "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
@@ -162,7 +130,6 @@
         "@noble/hashes": "^1.8.0",
         "@scure/base": "^2.0.0",
         "@sinclair/typebox": "0.34.41",
-        "@zswap-da/contract-offer-files": "workspace:*",
         "@zswap-da/database": "workspace:*",
         "@zswap-da/offer-guard": "workspace:*",
         "@zswap-da/solver-core": "workspace:*",
@@ -224,11 +191,9 @@
       "dependencies": {
         "@effectstream/midnight-contracts": "0.200.2",
         "@effectstream/mip-zswap-offer": "0.4.0-v9.0",
-        "@midnight-ntwrk/compact-js": "2.5.5-rc.7",
         "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.6",
         "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
         "@midnightntwrk/wallet-sdk-address-format": "4.0.0-beta.2",
-        "@zswap-da/contract-offer-files": "workspace:*",
         "rxjs": "^7.8.2",
       },
     },
@@ -245,7 +210,6 @@
       "dependencies": {
         "@effectstream/midnight-contracts": "0.200.2",
         "@effectstream/mip-zswap-offer": "0.4.0-v9.0",
-        "@midnight-ntwrk/compact-js": "2.5.5-rc.7",
         "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.6",
         "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6",
         "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
@@ -254,7 +218,6 @@
         "@noble/curves": "^1.9.7",
         "@noble/hashes": "^1.8.0",
         "@scure/base": "^2.0.0",
-        "@zswap-da/contract-offer-files": "workspace:*",
         "@zswap-da/offer-guard": "workspace:*",
         "@zswap-da/solver-core": "workspace:*",
         "@zswap-da/validator": "workspace:*",
@@ -564,8 +527,6 @@
     "@midnight-ntwrk/dapp-connector-api": ["@midnight-ntwrk/dapp-connector-api@4.0.1", "", {}, "sha512-IstRo8xfmlJlGgUcAJeRzPUmGCp0/xZR3/bfTOk33MHrzbGmB79r/zYziGavcclo1pkkoBHAodX4vz3xgFxczw=="],
 
     "@midnight-ntwrk/midnight-js-contracts": ["@midnight-ntwrk/midnight-js-contracts@5.0.0-beta.6", "", { "dependencies": { "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6", "@midnight-ntwrk/midnight-js-protocol": "5.0.0-beta.6", "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.6", "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.6", "effect": "^3.20.0" } }, "sha512-z8feJLi/vDhPluYMH/0lrVQ003zMyT4PLB20/aCXVSLQy5sxvNCOiahKIU4+dasUM9vXtlVinDGYB6uFHVKbwg=="],
-
-    "@midnight-ntwrk/midnight-js-fetch-zk-config-provider": ["@midnight-ntwrk/midnight-js-fetch-zk-config-provider@5.0.0-beta.6", "", { "dependencies": { "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.6", "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.6", "cross-fetch": "^4.1.0" } }, "sha512-KUoF7/MCCnxKpwhc1ww2fy2YiG84lpR7Osw1wUTiz984VCCyLsajyZiZzg2kIJehhx9O99oX0yuj1LIfp8RCGg=="],
 
     "@midnight-ntwrk/midnight-js-http-client-proof-provider": ["@midnight-ntwrk/midnight-js-http-client-proof-provider@5.0.0-beta.6", "", { "dependencies": { "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.6", "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6", "@midnight-ntwrk/midnight-js-protocol": "5.0.0-beta.6", "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.6", "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.6", "cross-fetch": "^4.1.0", "fetch-retry": "^6.0.0" } }, "sha512-5PHS28YspoNw6D1C4QluolcsaSvsbcXsCv0CKKTesrxA7iwgT/5ZXFbFbengTLsgr3Qgd2IZdv2Ed09gApxBJA=="],
 
@@ -1197,15 +1158,13 @@
 
     "@zswap-da/batcher": ["@zswap-da/batcher@workspace:packages/batcher"],
 
-    "@zswap-da/contract-offer-files": ["@zswap-da/contract-offer-files@workspace:packages/contracts-midnight/contract-offer-files"],
-
     "@zswap-da/contracts-celestia": ["@zswap-da/contracts-celestia@workspace:packages/contracts-celestia"],
-
-    "@zswap-da/contracts-midnight": ["@zswap-da/contracts-midnight@workspace:packages/contracts-midnight"],
 
     "@zswap-da/database": ["@zswap-da/database@workspace:packages/database"],
 
     "@zswap-da/docs-playground": ["@zswap-da/docs-playground@workspace:docs"],
+
+    "@zswap-da/midnight-infra": ["@zswap-da/midnight-infra@workspace:packages/midnight-infra"],
 
     "@zswap-da/node": ["@zswap-da/node@workspace:packages/node"],
 

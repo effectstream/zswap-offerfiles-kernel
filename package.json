@@ -3,7 +3,6 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "packages/contracts-midnight/contract-offer-files",
     "docs"
   ],
   "scripts": {
@@ -17,9 +16,7 @@
     "test": "bun run packages/tests/run-tests.ts",
     "test:grand": "bun run packages/tests/grand-e2e/run.ts",
     "seed:market": "bun run packages/tests/seed-market.ts",
-    "build:midnight": "bun run --filter @zswap-da/contract-offer-files compact",
     "build:pgtypes": "bun run --filter @zswap-da/database pgtyped:update",
-    "check:compact-artifacts": "bun run scripts/check-compact-artifacts.ts",
     "check:compact-runtime": "bun run scripts/check-compact-runtime.ts",
     "check:pgtypes": "bun run scripts/check-pgtyped.ts",
     "docs:dev": "bun run --filter @zswap-da/docs-playground dev",

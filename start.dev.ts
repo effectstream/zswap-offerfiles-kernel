@@ -1,79 +1,30 @@
-import fs from "node:fs";
 import path from "node:path";
 import type { OrchestratorConfig } from "@effectstream/orchestrator/config";
 import { DbNames, launchPglite } from "@effectstream/orchestrator/launch-pglite";
 import {
-  launchMidnight,
-  MidnightNames,
-} from "@effectstream/orchestrator/launch-midnight";
-import {
   launchCelestia,
   CelestiaNames,
 } from "@effectstream/orchestrator/launch-celestia";
+import {
+  launchMidnightServices,
+  MidnightServiceNames,
+} from "./scripts/launch-midnight-services.ts";
 
 const root = import.meta.dirname!;
 
-// The compactc pin lives in infra/compact-version.txt and is run through
-// infra/compact.sh: a host `$COMPACTC` of that exact version if set, otherwise
-// the checksum-pinned `compact-toolchain` image. The check invokes that runner
-// directly so a stale COMPACT_IMAGE or wrong host binary fails before compile.
-const COMPACT_VERSION = fs
-  .readFileSync(path.join(root, "infra/compact-version.txt"), "utf8")
-  .trim();
-
-const compactCheckScript = `
-const { execFileSync } = require("child_process");
-let out = "";
-try {
-  out = execFileSync(${JSON.stringify(path.join(root, "infra/compact.sh"))}, ["--version"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
-    timeout: 120000,
-  }).trim();
-} catch (error) {
-  console.error("ERROR: checksum-pinned compactc ${COMPACT_VERSION} route is unavailable: " + error.message);
-  process.exit(1);
-}
-if (out !== "${COMPACT_VERSION}") {
-  console.error("ERROR: infra/compact.sh reports '" + out + "', expected exact compactc ${COMPACT_VERSION}.");
-  process.exit(1);
-}
-console.log("compactc ${COMPACT_VERSION} available through verified infra/compact.sh route");
-`.trim();
-
-const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
+const midnightDeps = [
+  MidnightServiceNames.NODE_WAIT,
+  MidnightServiceNames.INDEXER_WAIT,
+  MidnightServiceNames.PROOF_SERVER_WAIT,
+];
 const syncApiHealth = "sync-api-health";
 const tokenRegistryImport = "canonical-token-registry";
 
 export default {
   processes: [
-    {
-      name: "compact-check",
-      description: `Check that compactc ${COMPACT_VERSION} is reachable (COMPACTC or Docker, via infra/compact.sh)`,
-      args: ["-e", compactCheckScript],
-      waitToExit: true,
-      critical: true,
-    },
-
     ...launchPglite(),
 
-    {
-      name: "compact-build",
-      description: "Compile Compact contract (offer-files)",
-      cwd: path.join(root, "packages/contracts-midnight/contract-offer-files"),
-      args: ["run", "compact"],
-      waitToExit: true,
-      dependsOn: ["compact-check"],
-    },
-
-    ...launchMidnight(
-      "@zswap-da/contracts-midnight",
-      { cwd: path.join(root, "packages/contracts-midnight") },
-      {
-        env: { MIDNIGHT_STORAGE_PASSWORD: "YourPasswordMy1!" },
-        dependsOn: ["compact-build"],
-      },
-    ),
+    ...launchMidnightServices(path.join(root, "packages/midnight-infra")),
 
     ...launchCelestia(
       "@zswap-da/contracts-celestia",
@@ -156,6 +107,6 @@ export default {
     // (`--profile prices` in deploy/).
 
     // The frontend lives in paima-engine/templates/zswap-da — run it separately
-    // against this stack (vite on :10600, fetches API + ZK keys from :9999).
+    // against this stack (Vite on :10600, API + network config from :9999).
   ],
 } satisfies OrchestratorConfig;

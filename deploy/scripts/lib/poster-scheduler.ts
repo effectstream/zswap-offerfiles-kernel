@@ -17,9 +17,8 @@
 // it returns, and counts. A tick that THROWS is counted as a failure with the
 // error's message — the loop must survive any single bad tick (US3).
 
-/** What one tick did. `mode` mirrors FR-010's three outcomes plus `idle`
- *  (nothing to do — reserved; the poster always mints or degrades today). */
-export type TickMode = "mint" | "reoffer" | "degraded" | "idle";
+/** What one tick did. */
+export type TickMode = "inventory" | "reoffer" | "degraded" | "idle";
 
 export interface TickOutcome {
   /** False when the tick failed. A `degraded` tick that did nothing wrong is
@@ -30,10 +29,8 @@ export interface TickOutcome {
   offerId?: string;
   /** The coin this tick used. */
   nonce?: string;
-  /** A mint transaction actually landed in this tick. Counted separately from
-   *  `mode` because a `mint` tick can fail AFTER the mint (the coin is then on
-   *  chain and journaled, and SC-003's "mints < ticks" must still be truthful). */
-  minted?: boolean;
+  /** A previously unjournaled prefunded coin was adopted in this tick. */
+  inventoryAdopted?: boolean;
   /** Failure taxonomy label (FR-015), e.g. `insufficient_dust`. */
   failure?: string;
   /** One-line message for the log and `/health`. */
@@ -67,7 +64,7 @@ export interface SchedulerOptions {
 export interface SchedulerStats {
   /** Ticks that have STARTED. */
   ticks: number;
-  mints: number;
+  inventoryAdoptions: number;
   reoffers: number;
   degraded: number;
   success: number;
@@ -122,7 +119,7 @@ export class PosterScheduler {
     this.#window = opts.durationWindow ?? 100;
     this.#stats = {
       ticks: 0,
-      mints: 0,
+      inventoryAdoptions: 0,
       reoffers: 0,
       degraded: 0,
       success: 0,
@@ -250,7 +247,7 @@ export class PosterScheduler {
     s.lastError = outcome.error ?? null;
     s.lastFailure = outcome.failure ?? null;
     if (outcome.offerId !== undefined) s.lastOfferId = outcome.offerId;
-    if (outcome.minted === true) s.mints += 1;
+    if (outcome.inventoryAdopted === true) s.inventoryAdoptions += 1;
     if (outcome.mode === "reoffer") s.reoffers += 1;
     if (outcome.mode === "degraded") s.degraded += 1;
     if (outcome.ok) {

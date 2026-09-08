@@ -2,7 +2,7 @@
 // Mirrors api-roundtrip-swap-e2e.ts but uses the shared DB client and assert()
 // from helpers. Infra is already up when this runs (Phase A verified it).
 //
-// Flow: mint T0/T1 → fund P0/P1 makers → push offers via /v1/offers
+// Flow: transfer prefunded T0/T1 → P0/P1 makers → push offers via /v1/offers
 //   → wait for Celestia indexing → read back from GET /v1/offers
 //   → reconstruct from API blob → merge + settle via batcher
 //   → verify nullifiers + archival + balances
@@ -20,7 +20,7 @@ import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { joinOfferFiles, mintShielded } from "../lib/offer-files.ts";
+import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
   buildWallet,
   shieldedKeys,
@@ -39,8 +39,6 @@ import { getZswaps, getZswapByHash, reconstructOffer, submitOffer } from "../lib
 globalThis.WebSocket = WebSocket;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const SEP = { T0: 0xa0, T1: 0xa1 } as const;
-const MINT_AMOUNT = 1_000_000_000n;
 const FUND = 5_000_000n;
 const AMT = 1_000n;
 const P0_SEED = "0000000000000000000000000000000000000000000000000000000000000030";
@@ -60,6 +58,7 @@ export async function apiTest(db: Client): Promise<void> {
   }
 
   const TAG = "[api-roundtrip]";
+  const [T0, T1] = requireDistinctTokenColors(["E2E_TOKEN_0", "E2E_TOKEN_1"]);
   console.log(`${TAG} building genesis + P0 + P1…`);
   const genesis = await buildWallet(net.walletSeed);
   const p0 = await buildWallet(P0_SEED);
@@ -77,24 +76,8 @@ export async function apiTest(db: Client): Promise<void> {
     const p0Addr = await p0.wallet.shielded.getAddress();
     const p1Addr = await p1.wallet.shielded.getAddress();
 
-    // Mint T0, T1; fund P0 with T0, P1 with T1
-    console.log(`${TAG} minting T0,T1 + funding makers…`);
-    const deployed = await joinOfferFiles(genesis);
-    const nonce = BigInt(Date.now());
-    const T0 = await mintShielded(
-      deployed,
-      SEP.T0,
-      MINT_AMOUNT,
-      nonce,
-      genesis.zswapSecretKeys.coinPublicKey,
-    );
-    const T1 = await mintShielded(
-      deployed,
-      SEP.T1,
-      MINT_AMOUNT,
-      nonce + 1n,
-      genesis.zswapSecretKeys.coinPublicKey,
-    );
+    // Fund makers from externally issued genesis inventory.
+    console.log(`${TAG} funding makers from externally issued inventory…`);
     for (const [c, l] of [[T0, "T0"], [T1, "T1"]] as const) {
       if ((await waitForShielded(genesis, c, FUND, 24)) < FUND)
         throw new Error(`genesis missing ${l}`);

@@ -1,17 +1,11 @@
 // Full swap lifecycle folded into the Phase-B runner.
-// Infra is already up when this runs (Phase A + migrations + startup mint).
+// Infra is already up when this runs (Phase A + migrations).
 //
-// Flow: mint A/B via offer-files helpers → create A↔B offer
+// Flow: verify externally prefunded A/B → create A↔B offer
 //   → /v1/offers → wait for Celestia indexing
 //   → balance + settle on Midnight → nullifier consumed → offer ARCHIVED.
 //
-// Does NOT call mintTestTokens() — that races the orchestrator's
-// midnight-mint-test-tokens process (TransactionInvalidError).
-
 import type { Client } from "pg";
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { assert } from "../helpers.ts";
 import {
   count,
@@ -20,106 +14,25 @@ import {
   waitFor,
 } from "../lib/db.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import {
-  rawTokenType,
-  sampleContractAddress,
-  Transaction,
-} from "@midnightntwrk/ledger-v9";
-import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
+import { Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { joinOfferFiles, mintShielded } from "../lib/offer-files.ts";
+import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
   buildWallet,
-  shieldedBalances,
   shieldedKeys,
   waitForShielded,
   waitForSync,
   waitForWalletSettlement,
 } from "../lib/wallet.ts";
 import { submitOffer } from "../lib/api.ts";
-import {
-  shieldedContractRecipient,
-  shieldedUserRecipient,
-  unshieldedUserRecipient,
-} from "@zswap-da/contract-offer-files/mint-recipient";
 
 globalThis.WebSocket = WebSocket;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const SEP = { A: 0xe0, B: 0xe1 } as const;
-const MINT_AMOUNT = 1_000_000_000n;
 const GIVE_AMOUNT = 500_000n;
 const WANT_AMOUNT = 750_000n;
-const LEDGER_V9_CONTRACT_OUTPUT_ERROR =
-  "a contract-owned coin output was left unclaimed";
-const LEDGER_V9_CONTRACT_OUTPUT_NODE_ERROR =
-  "1010: Invalid Transaction: Custom error: 218";
-
-const toHex = (bytes: Uint8Array): string =>
-  Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-
-function causeChain(error: unknown): string {
-  const messages: string[] = [];
-  const seen = new Set<unknown>();
-  let current: unknown = error;
-  while (current !== undefined && current !== null && !seen.has(current)) {
-    seen.add(current);
-    messages.push(current instanceof Error ? current.message : String(current));
-    current =
-      typeof current === "object" && current !== null
-        ? (current as { cause?: unknown }).cause
-        : undefined;
-  }
-  return messages.join(" <- ");
-}
-
-async function requireRejection(
-  label: string,
-  expected: string,
-  action: () => Promise<unknown>,
-): Promise<void> {
-  let rejection: unknown;
-  try {
-    await action();
-  } catch (error) {
-    rejection = error;
-  }
-  if (rejection === undefined) {
-    throw new Error(`${label}: call unexpectedly succeeded; expected "${expected}"`);
-  }
-  const chain = causeChain(rejection);
-  if (!chain.includes(expected)) {
-    throw new Error(
-      `${label}: expected full cause chain to include "${expected}", got "${chain}"`,
-      { cause: rejection },
-    );
-  }
-}
-
-async function assertPinnedLedgerContractOutputError(): Promise<void> {
-  const ledgerEntry = fileURLToPath(
-    import.meta.resolve("@midnightntwrk/ledger-v9"),
-  );
-  const ledgerDir = dirname(ledgerEntry);
-  const packageJson = JSON.parse(
-    await readFile(resolve(ledgerDir, "package.json"), "utf8"),
-  ) as { version?: string };
-  if (packageJson.version !== "1.0.0-rc.3") {
-    throw new Error(
-      `expected the pinned ledger-v9 1.0.0-rc.3 diagnostic mapping, got ${packageJson.version ?? "unknown"}`,
-    );
-  }
-  const ledgerWasm = await readFile(
-    resolve(ledgerDir, "midnight_ledger_wasm_v9_bg.wasm"),
-  );
-  if (!ledgerWasm.includes(LEDGER_V9_CONTRACT_OUTPUT_ERROR)) {
-    throw new Error(
-      `pinned ledger-v9 WASM is missing exact diagnostic "${LEDGER_V9_CONTRACT_OUTPUT_ERROR}"`,
-    );
-  }
-}
 
 export async function zswapFlowTest(db: Client): Promise<void> {
   setNetworkId(net.id as any);
@@ -132,7 +45,7 @@ export async function zswapFlowTest(db: Client): Promise<void> {
   };
   console.log("[lifecycle] before:", JSON.stringify(before));
 
-  // Startup mint (orchestrator) should have produced UnshieldedCreate events.
+  // External prefunding should have produced UnshieldedCreate events.
   const createdOk = await waitFor(
     "created_unshielded > 0",
     async () => (await count(db, "created_unshielded")) > 0,
@@ -143,7 +56,11 @@ export async function zswapFlowTest(db: Client): Promise<void> {
     async () => createdOk,
   );
 
-  console.log("[lifecycle] building genesis wallet + minting A/B…");
+  const [shieldedA, shieldedB] = requireDistinctTokenColors([
+    "E2E_SHIELDED_TOKEN_A",
+    "E2E_SHIELDED_TOKEN_B",
+  ]);
+  console.log("[lifecycle] building externally prefunded genesis wallet…");
   const genesis = await buildWallet(net.walletSeed);
 
   try {
@@ -156,127 +73,11 @@ export async function zswapFlowTest(db: Client): Promise<void> {
       );
     }
 
-    const deployed = await joinOfferFiles(genesis);
-    const contractAddress = String(
-      (deployed as any).deployTxData?.public?.contractAddress ?? "",
-    ).toLowerCase();
-    const expectedA = rawTokenType(
-      new Uint8Array(32).fill(SEP.A),
-      contractAddress,
-    ).toLowerCase();
-    const expectedB = rawTokenType(
-      new Uint8Array(32).fill(SEP.B),
-      contractAddress,
-    ).toLowerCase();
-    const balancesBeforeMint = await shieldedBalances(genesis);
-    const balanceABefore = balancesBeforeMint[expectedA] ?? 0n;
-    const balanceBBefore = balancesBeforeMint[expectedB] ?? 0n;
-    const nonce = BigInt(Date.now());
-    const shieldedA = await mintShielded(
-      deployed,
-      SEP.A,
-      MINT_AMOUNT,
-      nonce,
-      genesis.zswapSecretKeys.coinPublicKey,
-    );
-    // Same error-170 guard as multi-token: never reuse the facade for a second
-    // prove+submit before it has replayed the first.
-    await waitForWalletSettlement(genesis, { label: "post-mint-A" });
-    const shieldedB = await mintShielded(
-      deployed,
-      SEP.B,
-      MINT_AMOUNT,
-      nonce + 1n,
-      genesis.zswapSecretKeys.coinPublicKey,
-    );
-    await waitForWalletSettlement(genesis, { label: "post-mint-B" });
-
-    await assert("genesis wallet holds both minted shielded colors", async () => {
-      if (shieldedA !== expectedA) {
-        throw new Error(
-          `explicit-user mint colour mismatch: expected rawTokenType ${expectedA}, got ${shieldedA}`,
-        );
-      }
-      if (shieldedB !== expectedB) {
-        throw new Error(
-          `second explicit-user mint colour mismatch: expected rawTokenType ${expectedB}, got ${shieldedB}`,
-        );
-      }
-
-      const balanceA = await waitForShielded(
-        genesis,
-        shieldedA,
-        balanceABefore + MINT_AMOUNT,
-        24,
-      );
-      if (balanceA - balanceABefore !== MINT_AMOUNT) {
-        throw new Error(
-          `explicit-user mint balance delta mismatch: requested ${MINT_AMOUNT}, before ${balanceABefore}, settled ${balanceA}`,
-        );
-      }
-      const balanceB = await waitForShielded(
-        genesis,
-        shieldedB,
-        balanceBBefore + MINT_AMOUNT,
-        12,
-      );
-      if (balanceB - balanceBBefore !== MINT_AMOUNT) {
-        throw new Error(
-          `second explicit-user mint balance delta mismatch: requested ${MINT_AMOUNT}, before ${balanceBBefore}, settled ${balanceB}`,
-        );
-      }
-
-      // ledger-v9 rc.3's WASM contains the semantic rejection, while its node
-      // submission surface reduces that reason to the stable custom code 218.
-      // Pin both exact surfaces so this cannot pass on an unrelated failure.
-      await assertPinnedLedgerContractOutputError();
-      let nonSelfContract = sampleContractAddress();
-      while (nonSelfContract.toLowerCase() === contractAddress) {
-        nonSelfContract = sampleContractAddress();
-      }
-      await requireRejection(
-        "non-self contract recipient without receive",
-        LEDGER_V9_CONTRACT_OUTPUT_NODE_ERROR,
-        () =>
-          (deployed.callTx as any).mint_shielded(
-            new Uint8Array(32).fill(0xe2),
-            1n,
-            nonce + 2n,
-            shieldedContractRecipient(nonSelfContract),
-          ),
-      );
-
-      await requireRejection(
-        "zero shielded mint",
-        "mint amount must be positive",
-        () =>
-          (deployed.callTx as any).mint_shielded(
-            new Uint8Array(32).fill(0xe3),
-            0n,
-            nonce + 3n,
-            shieldedUserRecipient(genesis.zswapSecretKeys.coinPublicKey),
-          ),
-      );
-
-      const parsedUnshielded = MidnightBech32m.parse(
-        genesis.unshieldedAddress,
-      );
-      const userAddress = toHex(
-        Uint8Array.prototype.slice.call(parsedUnshielded.data, 0, 32),
-      );
-      await requireRejection(
-        "zero unshielded mint",
-        "mint amount must be positive",
-        () =>
-          (deployed.callTx as any).mint_unshielded(
-            new Uint8Array(32).fill(0xe4),
-            0n,
-            unshieldedUserRecipient(userAddress),
-          ),
-      );
-
-      return true;
-    });
+    const haveInventory =
+      (await waitForShielded(genesis, shieldedA, GIVE_AMOUNT, 24)) >= GIVE_AMOUNT &&
+      (await waitForShielded(genesis, shieldedB, WANT_AMOUNT, 12)) >= WANT_AMOUNT;
+    await assert("genesis wallet holds both externally issued colors", async () => haveInventory);
+    if (!haveInventory) throw new Error("genesis lacks required externally prefunded A/B inventory");
 
     const address = await genesis.wallet.shielded.getAddress();
     const keys = shieldedKeys(genesis);
@@ -322,9 +123,8 @@ export async function zswapFlowTest(db: Client): Promise<void> {
     if (!offerRow) return;
 
     console.log("[lifecycle] balancing + settling the A↔B offer on Midnight…");
-    // The genesis facade just minted and made offers; reusing it for a second
-    // prove+submit before it has replayed its own transactions is the exact
-    // rc.4 error-170 (InvalidDustSpendProof) trap — see waitForWalletSettlement.
+    // The genesis facade made the offer above; let its wallet replay that
+    // transaction before the next prove-and-submit operation.
     await waitForWalletSettlement(genesis, { label: "pre-settle" });
     const offerTx = Transaction.deserialize(
       "signature",

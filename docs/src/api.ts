@@ -8,7 +8,6 @@ import { API_BASE, BATCHER_URL } from './config'
 import { DEFAULT_TOKEN_DECIMALS } from '../../packages/solver-core/amount.ts'
 
 export type MidnightConfig = {
-  contractAddress: string
   indexerUri: string
   indexerWsUri: string
   proofServerUri: string

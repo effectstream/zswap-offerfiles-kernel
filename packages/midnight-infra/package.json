@@ -1,5 +1,5 @@
 {
-  "name": "@zswap-da/contracts-midnight",
+  "name": "@zswap-da/midnight-infra",
   "version": "0.1.0",
   "private": true,
   "exports": {},
@@ -9,26 +9,12 @@
     "midnight-indexer:start": "RUST_BACKTRACE=1 LEDGER_NETWORK_ID=\"Undeployed\" SUBSTRATE_NODE_WS_URL=\"ws://localhost:9944\" APP__INFRA__SECRET=$(openssl rand -hex 32 | tr 'a-f' 'A-F') FEATURES_WALLET_ENABLED=\"true\" APP__INFRA__NODE__URL=\"ws://localhost:9944\" APP__INFRA__SPO_NODE__URL=\"ws://127.0.0.1:1\" APP__INFRA__SPO_NODE__RECONNECT_MAX_ATTEMPTS=1000000000 bun ./node_modules/.bin/npm-midnight-indexer --binary --clean",
     "midnight-indexer:wait": "wait-on tcp:8088",
     "midnight-proof-server:start": "RUST_BACKTRACE=full SUBSTRATE_NODE_WS_URL=\"ws://localhost:9944\" bun ./node_modules/.bin/npm-midnight-proof-server",
-    "midnight-proof-server:wait": "wait-on tcp:6300",
-    "midnight-contract:clean": "rm -rf midnight-level-db-deploy && rm -f contract.json contract-offer-files.undeployed.json",
-    "midnight-contract:deploy": "bun run midnight-contract:clean && bun run deploy.ts"
+    "midnight-proof-server:wait": "wait-on tcp:6300"
   },
   "dependencies": {
-    "@effectstream/midnight-contracts": "0.200.2",
     "@effectstream/npm-midnight-indexer": "0.200.2",
     "@effectstream/npm-midnight-node": "0.200.2",
     "@effectstream/npm-midnight-proof-server": "0.200.2",
-    "@effectstream/utils": "0.200.2",
-    "@midnight-ntwrk/compact-runtime": "0.19.0",
-    "@midnight-ntwrk/compact-js": "2.5.5-rc.7",
-    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
-    "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.6",
-    "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6",
-    "@midnightntwrk/onchain-runtime-v4": "4.0.0-rc.3",
-    "@midnightntwrk/wallet-sdk-abstractions": "3.0.0-beta.0",
-    "@midnightntwrk/wallet-sdk-address-format": "4.0.0-beta.2",
-    "@zswap-da/contract-offer-files": "workspace:*",
-    "rxjs": "^7.8.2",
     "wait-on": "8.0.3"
   }
 }

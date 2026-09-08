@@ -1,5 +1,12 @@
 # ledger-v9 migration — audit, and where it is blocked
 
+> **Historical migration record.** The ledger-v9 SDK and runtime pins remain,
+> but this repository no longer ships, compiles or deploys the OfferFiles demo
+> faucet contract. Contract sources, generated artifacts and mint APIs described
+> below were removed in the external-faucet correction on 2026-09-08. Treat the
+> remaining measurements as the history that established the target protocol
+> versions, not as current build or deployment instructions.
+
 Branch `00001-ledger-v9`. Target: move this workspace off the ledger-v8 line
 (`@midnight-ntwrk/ledger-v8@8.1.0`, midnight-js 4.1.1, wallet-SDK v1 facade,
 `@effectstream/*` 0.103.x, compactc 0.30) onto the node-2.x line so the kernel

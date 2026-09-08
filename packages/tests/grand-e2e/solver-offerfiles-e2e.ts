@@ -71,7 +71,6 @@ const REAL_E1_APP_IMAGE_LABELS = Object.freeze({
   "org.zswap.e1.app-runtime-bun": REAL_E1_PINS.appRuntimeBunVersion,
   "org.zswap.e1.app-runtime-bun-revision": REAL_E1_PINS.appRuntimeBunRevision,
   "org.zswap.e1.app-runtime-bun-sha256": REAL_E1_PINS.appRuntimeBunBinarySha256,
-  "org.zswap.e1.compact": REAL_E1_PINS.compactVersion,
 });
 const REAL_E1_CELESTIA_IMAGE_LABELS = Object.freeze({
   "org.zswap.e1.role": "celestia-amd64-wrapper",
@@ -482,6 +481,8 @@ interface RealE1AcceptanceConfig {
   storagePassword: string;
   userSeed: string;
   solverSeed: string;
+  tokenA: string;
+  tokenB: string;
   secrets: string[];
   oneShotLogs: Array<{ service: string; path: string; bytes: number; sha256: string; text: string }>;
 }
@@ -1082,7 +1083,6 @@ async function realE1SourceManifest(children: Set<ChildProcessWithoutNullStreams
         { timeoutMs: 30_000 },
       ),
     ]);
-    const managedPrefix = "packages/contracts-midnight/contract-offer-files/src/managed/";
     const tracked = trackedResult.stdout.split("\0").filter(Boolean);
     const untracked = untrackedResult.stdout.split("\0").filter(Boolean);
     const allowedUntracked = new Set(REAL_E1_ALLOWED_UNTRACKED_PATHS);
@@ -1091,9 +1091,7 @@ async function realE1SourceManifest(children: Set<ChildProcessWithoutNullStreams
       unexpectedUntracked.length === 0,
       `real E1 source context has unapproved untracked paths: ${unexpectedUntracked.join(", ")}`,
     );
-    const entries = [...tracked, ...untracked].filter(
-      (path) => path !== managedPrefix.slice(0, -1) && !path.startsWith(managedPrefix),
-    );
+    const entries = [...tracked, ...untracked];
     const missingRequired = REAL_E1_REQUIRED_SOURCE_PATHS.filter((path) => !entries.includes(path));
     assert(missingRequired.length === 0, `real E1 required source paths are absent: ${missingRequired.join(", ")}`);
     assert(entries.length > 0, "real E1 source manifest is empty");
@@ -1145,7 +1143,7 @@ async function createRealE1SessionFiles(
       mkdir(join(appContext, "source"), { recursive: true }),
       mkdir(celestiaContext, { recursive: true }),
       mkdir(runtimeDirectory, { recursive: true, mode: 0o700 }),
-      ...["deployment", "actor", "publication", "invalid", "solver", "wallet-settlement", "backend-settlement", "control"].map((name) =>
+      ...["actor", "publication", "invalid", "solver", "wallet-settlement", "backend-settlement", "control"].map((name) =>
         mkdir(join(runtimeDirectory, name), { recursive: true, mode: 0o700 }),
       ),
       writeFile(traffic, "", { encoding: "utf8", mode: 0o600 }),
@@ -1638,7 +1636,6 @@ async function captureRealE1ServiceFailureSummary(
       "--tail",
       "200",
       "offerfiles-backend",
-      "contract-deployer",
     ],
     {
       allowFailure: true,
@@ -1650,7 +1647,7 @@ async function captureRealE1ServiceFailureSummary(
     `project=${session.project}`,
     "--- original command error ---",
     commandError.message,
-    "--- selected service tail: offerfiles-backend + contract-deployer ---",
+    "--- selected service tail: offerfiles-backend ---",
     `captureExitCode=${selectedLogs.code}`,
     selectedLogs.stdout,
     selectedLogs.stderr,
@@ -2784,8 +2781,6 @@ async function assertRealE1ImageSelfChecks(
         `test "$(/opt/node-gyp/node_modules/.bin/node-gyp --version)" = "v${REAL_E1_PINS.nodeGypVersion}"`,
         `test "$(sha256sum /opt/node-gyp/package.json | cut -d' ' -f1)" = "${REAL_E1_PINS.nodeGypPackageJsonSha256}"`,
         `test "$(sha256sum /opt/node-gyp/bun.lock | cut -d' ' -f1)" = "${REAL_E1_PINS.nodeGypLockSha256}"`,
-        "test \"$(/root/.local/bin/compact --version)\" = \"compact 0.5.1\"",
-        `test \"$(/root/.local/bin/compact compile +${REAL_E1_PINS.compactVersion} --version)\" = \"${REAL_E1_PINS.compactVersion}\"`,
         "test -s /opt/zswap-dpkg-manifest.txt",
         "bun packages/tests/grand-e2e/lib/solver-offerfiles-real-runtime-smoke.ts",
         "bun build packages/tests/grand-e2e/lib/solver-offerfiles-real-runtime-smoke.ts --target=bun --outfile=/tmp/e1-runtime-smoke.js >/tmp/e1-runtime-smoke-build.stdout 2>/tmp/e1-runtime-smoke-build.stderr",
@@ -2793,7 +2788,7 @@ async function assertRealE1ImageSelfChecks(
         "! grep -F '__legacyDecorateClassTS' /tmp/e1-runtime-smoke.js",
         "printf 'app-runtime-legacy-helper=absent\\n'",
         "rm -f /tmp/e1-runtime-smoke.js /tmp/e1-runtime-smoke-build.stdout /tmp/e1-runtime-smoke-build.stderr",
-        `printf 'app-build-bun=${REAL_E1_PINS.appBuildBunVersion}\\napp-runtime-bun=${REAL_E1_PINS.appRuntimeBunVersion}\\napp-runtime-bun-revision=${REAL_E1_PINS.appRuntimeBunRevision}\\napp-runtime-bun-sha256=${REAL_E1_PINS.appRuntimeBunBinarySha256}\\nnode-gyp=${REAL_E1_PINS.nodeGypVersion}\\nnode-gyp-package-json=${REAL_E1_PINS.nodeGypPackageJsonSha256}\\nnode-gyp-lock=${REAL_E1_PINS.nodeGypLockSha256}\\ncompact-manager=0.5.1\\ncompact-compiler=0.30.0\\napp-dpkg-manifest=%s\\n' "$(sha256sum /opt/zswap-dpkg-manifest.txt | cut -d' ' -f1)"`,
+        `printf 'app-build-bun=${REAL_E1_PINS.appBuildBunVersion}\\napp-runtime-bun=${REAL_E1_PINS.appRuntimeBunVersion}\\napp-runtime-bun-revision=${REAL_E1_PINS.appRuntimeBunRevision}\\napp-runtime-bun-sha256=${REAL_E1_PINS.appRuntimeBunBinarySha256}\\nnode-gyp=${REAL_E1_PINS.nodeGypVersion}\\nnode-gyp-package-json=${REAL_E1_PINS.nodeGypPackageJsonSha256}\\nnode-gyp-lock=${REAL_E1_PINS.nodeGypLockSha256}\\napp-dpkg-manifest=%s\\n' "$(sha256sum /opt/zswap-dpkg-manifest.txt | cut -d' ' -f1)"`,
         "printf '__APP_DPKG_BEGIN__\\n'",
         "cat /opt/zswap-dpkg-manifest.txt",
         "printf '__APP_DPKG_END__\\n'",
@@ -2871,8 +2866,6 @@ async function assertRealE1ImageSelfChecks(
     "real E1 node-gyp package self-check output missing",
   );
   assert(values["node-gyp-lock"] === REAL_E1_PINS.nodeGypLockSha256, "real E1 node-gyp lock self-check output missing");
-  assert(values["compact-manager"] === "0.5.1", "real E1 Compact manager self-check output missing");
-  assert(values["compact-compiler"] === REAL_E1_PINS.compactVersion, "real E1 Compact compiler self-check output missing");
   assert(values["celestia-app"] === REAL_E1_PINS.celestiaAppVersion, "Celestia app self-check output missing");
   assert(values["celestia-node"] === REAL_E1_PINS.celestiaNodeVersion, "Celestia node self-check output missing");
   assert(/^[0-9a-f]{64}$/.test(values["app-dpkg-manifest"] ?? ""), "app dpkg manifest hash missing");
@@ -3408,7 +3401,7 @@ async function runRealE1Topology(): Promise<RealE1Result> {
       buildCachePolicy:
         "Only this run's unique image tags are removed without force. Surviving content-addressed IIDs are recorded as shared image/BuildKit cache and are never deleted by IID; that workstation cache is not a committed test artifact.",
       nextImplementationBoundary:
-        "Add the contract-deployment handoff and production Offer Files, batcher, solver, wallet actor, and refusal/race scenarios; this topology preflight does not satisfy SC-004 or SC-005.",
+        "Run the production Offer Files, batcher, solver, externally funded wallet actor, and refusal/race scenarios; this topology preflight does not satisfy the live acceptance criteria.",
     };
   } catch (error) {
     let safeError = error instanceof Error ? error : new Error(String(error));
@@ -3471,6 +3464,11 @@ function createRealE1AcceptanceConfig(): RealE1AcceptanceConfig {
   const storagePassword = `e1-${randomBytes(32).toString("hex")}`;
   const userSeed = randomBytes(32).toString("hex");
   const solverSeed = randomBytes(32).toString("hex");
+  const tokenA = process.env["E1_TOKEN_A"]?.trim().toLowerCase() ?? "";
+  const tokenB = process.env["E1_TOKEN_B"]?.trim().toLowerCase() ?? "";
+  assert(/^[0-9a-f]{64}$/.test(tokenA), "E1_TOKEN_A must be an externally issued same-chain 64-hex token");
+  assert(/^[0-9a-f]{64}$/.test(tokenB), "E1_TOKEN_B must be an externally issued same-chain 64-hex token");
+  assert(tokenA !== tokenB, "E1_TOKEN_A and E1_TOKEN_B must differ");
   assert(userSeed !== solverSeed && userSeed !== E1_GENESIS_SEED && solverSeed !== E1_GENESIS_SEED, "generated actor seeds collided");
   return {
     runId,
@@ -3480,6 +3478,8 @@ function createRealE1AcceptanceConfig(): RealE1AcceptanceConfig {
     storagePassword,
     userSeed,
     solverSeed,
+    tokenA,
+    tokenB,
     oneShotLogs: [],
     secrets: [
       postgresPassword,
@@ -3543,6 +3543,8 @@ function realE1AcceptanceEnvironment(
     `E1_GENESIS_SEED=${E1_GENESIS_SEED}`,
     `E1_USER_SEED=${config.userSeed}`,
     `E1_SOLVER_SEED=${config.solverSeed}`,
+    `E1_TOKEN_A=${config.tokenA}`,
+    `E1_TOKEN_B=${config.tokenB}`,
     "",
   ].join("\n");
 }
@@ -3848,7 +3850,6 @@ async function assertAcceptanceComposeIsManualSafe(session: RealE1Session): Prom
   for (const service of [
     "traffic-recorder",
     "ntp-responder",
-    "contract-deployer",
     "offerfiles-backend",
     "backend-proxy",
   ]) {
@@ -3952,16 +3953,12 @@ async function assertAcceptanceComposeIsManualSafe(session: RealE1Session): Prom
     "${E1_ACTIVE_GARBAGE_OUTPUT_DIRECTORY:?E1_ACTIVE_GARBAGE_OUTPUT_DIRECTORY must be set}",
   );
   const expectedMounts: Record<string, Array<[string, string, boolean]>> = {
-    "contract-deployer": [[join(runtime, "deployment"), "/outputs/deployment", false]],
-    "offerfiles-backend": [[join(runtime, "deployment"), "/inputs/deployment", true]],
+    "offerfiles-backend": [],
     "telemetry-relay": [
       [join(runtime, "actor"), "/inputs/actor", true],
       [join(runtime, "control"), "/run/e1-control", true],
     ],
-    "actor-provisioner": [
-      [join(runtime, "deployment"), "/inputs/deployment", true],
-      [join(runtime, "actor"), "/outputs/actor", false],
-    ],
+    "actor-provisioner": [[join(runtime, "actor"), "/outputs/actor", false]],
     "offer-publisher": [
       [join(runtime, "actor"), "/inputs/actor", true],
       [join(runtime, "publication"), "/outputs/publication", false],
@@ -3975,12 +3972,10 @@ async function assertAcceptanceComposeIsManualSafe(session: RealE1Session): Prom
       [activeGarbageOutput, "/outputs/publication", false],
     ],
     "solver-case": [
-      [join(runtime, "deployment"), "/inputs/deployment", true],
       [join(runtime, "actor"), "/inputs/actor", true],
       [activeSolverOutput, "/outputs/solver", false],
     ],
     "settlement-verifier": [
-      [join(runtime, "deployment"), "/inputs/deployment", true],
       [join(runtime, "actor"), "/inputs/actor", true],
       [join(runtime, "wallet-settlement"), "/outputs/settlement", false],
     ],
@@ -8034,7 +8029,7 @@ async function runEn4(): Promise<En4Result> {
   let identity: RealE1AcceptanceIdentity | undefined;
   let activeSolver = "";
   let result: Omit<En4Result, "cleanup"> | undefined;
-  const relayChainNetwork = `${session.project}_midnight_contract_clients`;
+  const relayChainNetwork = `${session.project}_midnight_chain_clients`;
   const boundaryCleanupKey = `en4-boundary-${session.project}`;
   let boundaryCleanupPromise: Promise<CleanupEvidence> | undefined;
   let relayChainDisconnected = false;
@@ -8561,23 +8556,6 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
     }
     await assertFailureDiagnosticsAreSecretFree(session, "telemetry-relay", config.secrets);
 
-    const deploymentPath = join(
-      session.files.runtimeDirectory,
-      "deployment",
-      "contract-offer-files.undeployed.json",
-    );
-    const deploymentChecksumPath = join(
-      session.files.runtimeDirectory,
-      "deployment",
-      "contract-offer-files.undeployed.sha256",
-    );
-    const deploymentBytes = await assertPrivateArtifact(deploymentPath);
-    const deploymentSha256 = createHash("sha256").update(deploymentBytes).digest("hex");
-    const deploymentChecksum = (await assertPrivateArtifact(deploymentChecksumPath)).toString("utf8");
-    assert(
-      deploymentChecksum === `${deploymentSha256}  contract-offer-files.undeployed.json\n`,
-      "sealed contract deployment checksum mismatch",
-    );
     await assertPrivateArtifact(join(session.files.runtimeDirectory, "control", "boot-solver-token"));
 
     const backendHealth = await execAcceptanceJson(
@@ -8682,10 +8660,6 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
       (await assertPrivateArtifact(preSpentPath)).equals(preSpentBytes),
       "pre-spent liveness authority changed after its read-only handoffs",
     );
-    assert(
-      createHash("sha256").update(await assertPrivateArtifact(deploymentPath)).digest("hex") === deploymentSha256,
-      "contract deployment changed after its read-only handoffs",
-    );
     const runtimeEntries = await readdir(session.files.runtimeDirectory, { withFileTypes: true });
     assert(
       JSON.stringify(runtimeEntries.map((entry) => entry.name).sort()) ===
@@ -8693,7 +8667,6 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
           "actor",
           "backend-settlement",
           "control",
-          "deployment",
           "invalid",
           "publication",
           "solver",
@@ -8740,8 +8713,6 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
 
     const artifacts = await captureRealE1Artifacts(session);
     for (const [label, bytes] of [
-      ["contract deployment", deploymentBytes],
-      ["contract deployment checksum", Buffer.from(deploymentChecksum)],
       ["actor manifest", actorManifestBytes],
       ["solver ladder", ladderBytes],
       ["pre-spent liveness", preSpentBytes],
@@ -8952,23 +8923,6 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
     }
     await assertFailureDiagnosticsAreSecretFree(session, "telemetry-relay", config.secrets);
 
-    const deploymentPath = join(
-      session.files.runtimeDirectory,
-      "deployment",
-      "contract-offer-files.undeployed.json",
-    );
-    const deploymentChecksumPath = join(
-      session.files.runtimeDirectory,
-      "deployment",
-      "contract-offer-files.undeployed.sha256",
-    );
-    const deploymentBytes = await assertPrivateArtifact(deploymentPath);
-    const deploymentSha256 = createHash("sha256").update(deploymentBytes).digest("hex");
-    const deploymentChecksumBytes = await assertPrivateArtifact(deploymentChecksumPath);
-    assert(
-      deploymentChecksumBytes.toString("utf8") === `${deploymentSha256}  contract-offer-files.undeployed.json\n`,
-      "scenario sealed contract deployment checksum mismatch",
-    );
     const bootIdentity = acceptanceIdentity(config, "boot");
     const bootTokenPath = join(session.files.runtimeDirectory, "control", "boot-solver-token");
     const bootTokenBytes = await assertPrivateArtifact(bootTokenPath);
@@ -9130,9 +9084,8 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
       (await assertPrivateArtifact(actorManifestPath)).equals(actorManifestBytes) &&
         (await assertPrivateArtifact(ladderPath)).equals(ladderBytes) &&
         (await assertPrivateArtifact(preSpentPath)).equals(preSpentBytes) &&
-        (await assertPrivateArtifact(publicationPath)).equals(publicationBytes) &&
-        createHash("sha256").update(await assertPrivateArtifact(deploymentPath)).digest("hex") === deploymentSha256,
-      "sealed deployment/actor/publication authority changed across the E1 matrix",
+        (await assertPrivateArtifact(publicationPath)).equals(publicationBytes),
+      "sealed actor/publication authority changed across the E1 matrix",
     );
     for (const bytes of invalidCorpus.artifactBytes) {
       assertNoGeneratedSecrets("E1 invalid-corpus sealed artifact", bytes.toString("utf8"), config.secrets);

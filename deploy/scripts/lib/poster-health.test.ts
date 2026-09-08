@@ -2,7 +2,7 @@
 //
 // The policy — which state, 200 or 503 — is a pure function, so it is tested
 // directly. The server itself is exercised once over a real socket on an
-// ephemeral port (port 0), because the routing and the content types are the
+// caller-selected high port, because the routing and the content types are the
 // other half of the contract and they are cheap to check.
 
 import { describe, expect, test } from "bun:test";
@@ -17,7 +17,7 @@ import type { SchedulerStats } from "./poster-scheduler.ts";
 
 const stats = (over: Partial<SchedulerStats> = {}): SchedulerStats => ({
   ticks: 10,
-  mints: 4,
+  inventoryAdoptions: 4,
   reoffers: 6,
   degraded: 0,
   success: 10,
@@ -27,7 +27,7 @@ const stats = (over: Partial<SchedulerStats> = {}): SchedulerStats => ({
   startedAt: 1_000,
   lastTickAt: 61_000,
   lastTickMs: 812,
-  lastMode: "mint",
+  lastMode: "inventory",
   lastOfferId: "abc",
   lastError: null,
   lastFailure: null,
@@ -39,7 +39,6 @@ const stats = (over: Partial<SchedulerStats> = {}): SchedulerStats => ({
 const inputs = (over: Partial<HealthInputs> = {}): HealthInputs => ({
   stats: stats(),
   staleTicks: 3,
-  dustBalance: 123_456_789_012_345_678_901n,
   liveOffers: 6,
   freeCoins: 2,
   candidates: 1,
@@ -78,14 +77,12 @@ describe("state machine", () => {
   test("a DEGRADED tick is visible but not unhealthy (US1 scenario 6)", () => {
     const answer = healthSnapshot(
       inputs({
-        stats: stats({ lastMode: "degraded", lastFailure: "insufficient_dust", degraded: 4 }),
-        dustBalance: 0n,
+        stats: stats({ lastMode: "degraded", lastFailure: "insufficient_inventory", degraded: 4 }),
       }),
     );
     expect(answer.status).toBe(200);
     expect(answer.body["state"]).toBe("degraded");
-    expect(answer.body["lastFailure"]).toBe("insufficient_dust");
-    expect(answer.body["dustBalance"]).toBe("0");
+    expect(answer.body["lastFailure"]).toBe("insufficient_inventory");
   });
 
   test("shutting down wins over everything, and is not an error", () => {
@@ -108,25 +105,17 @@ describe("payload", () => {
     for (const key of [
       "state",
       "ticks",
-      "mints",
+      "inventoryAdoptions",
       "reoffers",
       "lastTickAt",
       "lastOfferId",
       "lastError",
-      "dustBalance",
       "liveOffers",
       "freeCoins",
       "p95TickMs",
     ]) {
       expect(body).toHaveProperty(key);
     }
-  });
-
-  test("DUST is a decimal string, so values above 2^53 survive JSON", () => {
-    const { body } = healthSnapshot(inputs());
-    expect(body["dustBalance"]).toBe("123456789012345678901");
-    expect(JSON.parse(JSON.stringify(body))["dustBalance"]).toBe("123456789012345678901");
-    expect(healthSnapshot(inputs({ dustBalance: null })).body["dustBalance"]).toBeNull();
   });
 
   test("lastTickAt is an ISO timestamp, or null before the first tick", () => {
@@ -155,9 +144,8 @@ describe("metrics", () => {
     expect(text).toContain("offer_poster_tick_ms_p95 NaN");
   });
 
-  test("DUST is printed unrounded", () => {
-    expect(renderMetrics(inputs())).toContain("offer_poster_dust_balance 123456789012345678901");
-    expect(renderMetrics(inputs({ dustBalance: null }))).not.toContain("dust_balance");
+  test("inventory adoption is exposed as a counter", () => {
+    expect(renderMetrics(inputs())).toContain("offer_poster_inventory_adoptions_total 4");
   });
 });
 
@@ -165,9 +153,7 @@ describe("the server", () => {
   test("routes /health, /metrics and /journal, and 404s the rest", async () => {
     let current = inputs();
     const server = startHealthServer({
-      // Port 0 = an ephemeral port the OS picks, so this cannot collide with
-      // anything else on a shared machine.
-      port: 0,
+      port: Number(process.env.POSTER_TEST_PORT ?? "18743"),
       hostname: "127.0.0.1",
       snapshot: () => current,
       journal: () => ({ version: 1, coins: {} }),

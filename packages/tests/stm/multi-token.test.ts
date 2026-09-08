@@ -14,14 +14,13 @@ import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { joinOfferFiles, mintShielded } from "../lib/offer-files.ts";
+import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
   buildWallet,
   shieldedKeys,
   transferShielded,
   waitForShielded,
   waitForSync,
-  waitForWalletSettlement,
 } from "../lib/wallet.ts";
 import {
   describeImbalances,
@@ -34,8 +33,6 @@ globalThis.WebSocket = WebSocket;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const TAG = "[multi-token]";
-const SEP = { T0: 0x80, T1: 0x81, T2: 0x82 } as const;
-const MINT_AMOUNT = 1_000_000_000n;
 const FUND = 5_000_000n;
 const A0 = 1_000n;
 const A1 = 1_000n;
@@ -61,6 +58,12 @@ export async function multiTokenTest(db: Client): Promise<void> {
   };
   console.log(`${TAG} before:`, JSON.stringify(before));
 
+  const [T0, T1, T2] = requireDistinctTokenColors([
+    "E2E_MULTI_TOKEN_0",
+    "E2E_MULTI_TOKEN_1",
+    "E2E_MULTI_TOKEN_2",
+  ]);
+
   console.log(`${TAG} building genesis + P0 + P1…`);
   const genesis = await buildWallet(net.walletSeed);
   const p0 = await buildWallet(P0_SEED);
@@ -79,37 +82,8 @@ export async function multiTokenTest(db: Client): Promise<void> {
     const p0Addr = await p0.wallet.shielded.getAddress();
     const p1Addr = await p1.wallet.shielded.getAddress();
 
-    console.log(`${TAG} minting T0,T1,T2…`);
-    const deployed = await joinOfferFiles(genesis);
-    const nonce = BigInt(Date.now());
-    // Serial mints on ONE facade: each mint is a prove+submit, and reusing the
-    // facade before it replays its own submission is the rc.4 error-170
-    // (InvalidDustSpendProof) trap — gate between them (see waitForWalletSettlement).
-    const T0 = await mintShielded(
-      deployed,
-      SEP.T0,
-      MINT_AMOUNT,
-      nonce,
-      genesis.zswapSecretKeys.coinPublicKey,
-    );
-    await waitForWalletSettlement(genesis, { label: `${TAG} post-mint-T0` });
-    const T1 = await mintShielded(
-      deployed,
-      SEP.T1,
-      MINT_AMOUNT,
-      nonce + 1n,
-      genesis.zswapSecretKeys.coinPublicKey,
-    );
-    await waitForWalletSettlement(genesis, { label: `${TAG} post-mint-T1` });
-    const T2 = await mintShielded(
-      deployed,
-      SEP.T2,
-      MINT_AMOUNT,
-      nonce + 2n,
-      genesis.zswapSecretKeys.coinPublicKey,
-    );
-    await waitForWalletSettlement(genesis, { label: `${TAG} post-mint-T2` });
-    await assert("T0,T1,T2 minted", async () => !!T0 && !!T1 && !!T2);
+    console.log(`${TAG} using externally issued T0,T1,T2…`);
+    await assert("T0,T1,T2 configured", async () => !!T0 && !!T1 && !!T2);
 
     for (const [color, label] of [[T0, "T0"], [T1, "T1"], [T2, "T2"]] as const) {
       if ((await waitForShielded(genesis, color, FUND, 24)) < FUND)

@@ -222,15 +222,17 @@ export async function p2Api(db: Client, art: P1Artifacts): Promise<void> {
   }
 
   // ── Midnight config ───────────────────────────────────────────────────────
-  await check("midnight config exposes contract + endpoints, no secrets", async () => {
+  await check("midnight config exposes network endpoints, no contract or secrets", async () => {
     const r = await getMidnightConfig();
     const b = r.body ?? {};
     const keys = JSON.stringify(b).toLowerCase();
     return (
       r.status === 200 &&
-      !!b.contractAddress &&
       !!b.indexerUri &&
+      !!b.indexerWsUri &&
       !!b.proofServerUri &&
+      !!b.networkId &&
+      b.contractAddress === undefined &&
       !keys.includes("seed") &&
       !keys.includes("secret")
     );

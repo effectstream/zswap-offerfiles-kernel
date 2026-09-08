@@ -2,51 +2,28 @@ import path from "node:path";
 import type { OrchestratorConfig } from "@effectstream/orchestrator/config";
 import { DbNames, launchPglite } from "@effectstream/orchestrator/launch-pglite";
 import {
-  launchMidnight,
-  MidnightNames,
-} from "@effectstream/orchestrator/launch-midnight";
-import {
   launchCelestia,
   CelestiaNames,
 } from "@effectstream/orchestrator/launch-celestia";
+import {
+  launchMidnightServices,
+  MidnightServiceNames,
+} from "../../scripts/launch-midnight-services.ts";
 
 const root = path.resolve(import.meta.dirname!, "../..");
 
-const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
-const midnightMintTestTokens = "midnight-mint-test-tokens";
+const midnightDeps = [
+  MidnightServiceNames.NODE_WAIT,
+  MidnightServiceNames.INDEXER_WAIT,
+  MidnightServiceNames.PROOF_SERVER_WAIT,
+];
 const syncApiHealth = "sync-api-health";
 
 export default {
   processes: [
     ...launchPglite(),
 
-    {
-      name: "compact-build",
-      description: "Compile Compact contract (offer-files)",
-      cwd: path.join(root, "packages/contracts-midnight/contract-offer-files"),
-      args: ["run", "compact"],
-      waitToExit: true,
-    },
-
-    ...launchMidnight(
-      "@zswap-da/contracts-midnight",
-      { cwd: path.join(root, "packages/contracts-midnight") },
-      {
-        env: { MIDNIGHT_STORAGE_PASSWORD: "YourPasswordMy1!" },
-        dependsOn: ["compact-build"],
-      },
-    ),
-
-    {
-      name: midnightMintTestTokens,
-      description: "Mint test tokens (2 shielded + 1 unshielded) via the offer-files contract",
-      cwd: path.join(root, "packages/contracts-midnight"),
-      args: ["run", "mint-test-tokens.ts"],
-      env: { ZSWAP_API: "http://127.0.0.1:9999" },
-      waitToExit: true,
-      // NOT critical: a mint hiccup must not tear the test stack down.
-      dependsOn: [MidnightNames.CONTRACT_DEPLOY, syncApiHealth],
-    },
+    ...launchMidnightServices(path.join(root, "packages/midnight-infra")),
 
     ...launchCelestia(
       "@zswap-da/contracts-celestia",
@@ -88,9 +65,7 @@ export default {
       stopProcessAtPort: [3334],
       waitToExit: false,
       type: "system-dependency",
-      // Match the dev stack: the batcher's temporary full-wallet bootstrap
-      // starts only after the mint wallet has released its indexer sessions.
-      dependsOn: [...midnightDeps, midnightMintTestTokens],
+      dependsOn: [...midnightDeps, syncApiHealth],
     },
   ],
 } satisfies OrchestratorConfig;

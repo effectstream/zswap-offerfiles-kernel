@@ -18,12 +18,6 @@ function validManifests(): Record<string, PackageManifest> {
       dependencies: { ...dependencies },
       overrides: { ...dependencies },
     },
-    "packages/contracts-midnight/package.json": {
-      dependencies: { ...dependencies },
-    },
-    "packages/contracts-midnight/contract-offer-files/package.json": {
-      dependencies: { ...dependencies },
-    },
   };
 }
 
@@ -65,18 +59,18 @@ describe("compact runtime invariant", () => {
     ).toThrow("found []");
   });
 
-  test("rejects a stale first-party direct pin", () => {
+  test("rejects a stale root direct pin", () => {
     const state = stateWith({
       packages: {
         [COMPACT_RUNTIME_PACKAGE]: [EXPECTED_COMPACT_RUNTIME_LOCATOR],
       },
     });
-    state.manifests["packages/contracts-midnight/package.json"]!.dependencies![
+    state.manifests["package.json"]!.dependencies![
       COMPACT_RUNTIME_PACKAGE
     ] = "0.18.0-rc.1";
 
     expect(() => assertCompactRuntimeInvariant(state)).toThrow(
-      "packages/contracts-midnight/package.json#dependencies",
+      "package.json#dependencies",
     );
   });
 });

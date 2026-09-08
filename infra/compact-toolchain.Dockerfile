@@ -1,21 +1,19 @@
-# compact-toolchain — the pinned compactc compiler in a container, so no host
-# machine needs a matching Compact install to build this contract.
+# compact-toolchain — the preserved ledger-v9 compactc compiler pin in a
+# container. The kernel no longer ships a local Compact contract, but this
+# target branch retains its authenticated compiler route for downstream work.
 #
 # The LFDT-Minokawa release archive is selected for the build architecture and
-# authenticated against compact-checksums.sha256 before extraction. Keeping the
-# toolchain in a small image gives host and CI compilation one identical route.
+# authenticated against compact-checksums.sha256 before extraction.
 #
 # ENTRYPOINT is compactc itself (the version manager is not installed), so the
-# invocation is `compactc <flags> <src> <outdir>` — see
-# packages/contracts-midnight/contract-offer-files/package.json.
+# invocation is `compactc <flags> <src> <outdir>`.
 #
 # NOTE ON ZKIR: we deliberately do NOT pass `--feature-zkir-v3`. compactc 0.34
 # still defaults to ZKIR version 2, which emits `verifier-key[v6]` keys; the ledger
 # maps those to ProofVersioned::V2, which the PLAIN `proof-server:9.0.0-rc.5`
 # image proves. Passing `--feature-zkir-v3` would emit `verifier-key[v7]` keys
 # and require the `9.0.0-rc.5_experimental` proof-server build instead. This
-# contract has no cross-contract calls and no secp256k1/keccak primitives, so
-# there is nothing to gain from the v3 lane and a harder deployment if we take it.
+# The v2 lane remains the preserved default for this target toolchain.
 
 FROM debian:stable-slim
 
@@ -55,9 +53,7 @@ RUN set -eux; \
     printf '#!/bin/sh\nexec /opt/compactc/compactc "$@"\n' > /usr/local/bin/compactc; \
     chmod +x /usr/local/bin/compactc
 
-# Fail the BUILD, not some later contract compile, if the default (v2) zkir
-# backend is missing: without it compactc silently emits no verifier keys after
-# printing a warning, and the failure would only surface at proving time.
+# Fail the build if the preserved default (v2) zkir backend is missing.
 RUN test -x /opt/compactc/zkir || { echo "image lacks the default zkir backend" >&2; exit 1; } \
  && test "$(compactc --version)" = "$COMPACT_VERSION" \
  && test "$(compactc --language-version)" = "0.26.0" \

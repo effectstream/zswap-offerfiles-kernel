@@ -67,6 +67,21 @@ const getJson = async (url: string) => {
   return { status: res.statusCode, body: res.json() };
 };
 
+describe("GET /v1/midnight/config — network-only wallet configuration", () => {
+  test("serves network endpoints without contract metadata", async () => {
+    delete process.env["MIDNIGHT_CONTRACT_ADDRESS"];
+    const { status, body } = await getJson("/v1/midnight/config");
+    expect(status).toBe(200);
+    expect(body.contractAddress).toBeUndefined();
+    expect(body).toMatchObject({
+      networkId: expect.any(String),
+      indexerUri: expect.any(String),
+      indexerWsUri: expect.any(String),
+      proofServerUri: expect.any(String),
+    });
+  });
+});
+
 describe("GET /v1/offers — keyset pagination over HTTP", () => {
   test("first page returns {offers, next_cursor}; cursor chains to the end exactly once", async () => {
     const seen: string[] = [];
@@ -274,8 +289,8 @@ const registerToken = (
   color: string,
   name: string,
   kind: "shielded" | "unshielded" = "shielded",
-  // 00024 FR-001: the registry default. A faucet-minted colour is registered
-  // with 6, so a fixture that says nothing must behave like one that does.
+  // 00024 FR-001: manually registered legacy rows default to 6 decimals, so a
+  // fixture that says nothing must behave like one that states that default.
   decimals = 6,
   assetId: string | null = null,
 ) =>

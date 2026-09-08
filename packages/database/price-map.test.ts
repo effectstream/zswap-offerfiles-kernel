@@ -49,9 +49,9 @@ test("decimals default to 6 and come from the token row otherwise", () => {
   expect(resolveAssetId({ name: "WBTC", decimals: 0 })?.decimals).toBe(0);
 });
 
-test("a name-priced faucet token prices at the asset price / 10^6", () => {
-  // WBTC is faucet-minted: no asset_id, priced BY NAME through
-  // DEFAULT_NAME_ASSET_MAP, and since 00024 registered with 6 decimals. One
+test("a manually registered token can use the name-price fallback", () => {
+  // This legacy WBTC row has no asset_id, so it is priced BY NAME through
+  // DEFAULT_NAME_ASSET_MAP, and was registered with 6 decimals. One
   // base unit is therefore a millionth of a coin.
   const mapped = resolveAssetId({ name: "WBTC", decimals: 6, asset_id: null })!;
   expect(mapped).toEqual({ assetId: "bitcoin", decimals: 6 });

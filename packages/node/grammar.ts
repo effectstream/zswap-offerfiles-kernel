@@ -5,7 +5,6 @@ import type { GrammarDefinition } from "@effectstream/concise";
 export const grammar = {
   // Primitives
   "celestia-zswap": builtinGrammars.celestiaGeneric,
-  "midnight-zswap": builtinGrammars.midnightGeneric,
   // Midnight:NullifierAndCommitment (effectstream#838): discriminated
   // union on payload.kind = "nullifier" | "commitment". 0.103.0 exports the
   // typed grammar only from primitives/src (not via builtinGrammars or

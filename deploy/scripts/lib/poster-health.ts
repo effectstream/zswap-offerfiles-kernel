@@ -7,12 +7,9 @@
 // failed nine ticks in a row is worse than one with no health endpoint at all.
 //
 // WHAT COUNTS AS UNHEALTHY. `HEALTH_STALE_TICKS` CONSECUTIVE FAILED ticks turn
-// `/health` into a 503. A `degraded` tick is NOT a failure: a poster whose
-// wallet has run out of DUST is behaving exactly as designed (US1 scenario 6),
-// and flipping to 503 there would make compose restart a container that is
-// waiting for the operator to send it NIGHT. `state` still says `degraded`, and
-// `lastFailure` still says `insufficient_dust`, so the condition is visible
-// without being fatal.
+// `/health` into a 503. A `degraded` tick is not a process failure: it can mean
+// the externally managed inventory is currently empty. The condition remains
+// visible through `lastFailure` without causing a restart loop.
 
 import type { JournalSummary } from "./poster-journal.ts";
 import type { SchedulerStats } from "./poster-scheduler.ts";
@@ -23,8 +20,6 @@ export interface HealthInputs {
   stats: SchedulerStats;
   /** `HEALTH_STALE_TICKS`. */
   staleTicks: number;
-  /** Spendable DUST at the last reading, or `null` when never read. */
-  dustBalance: bigint | null;
   /** Offers the journal believes are live. */
   liveOffers: number;
   /** Coins of the give colour the wallet could spend right now. */
@@ -39,12 +34,9 @@ export interface HealthInputs {
   /** `true` once startup finished; a poster still syncing its wallet reports
    *  `starting` rather than pretending to be healthy. */
   ready: boolean;
-  /** The configured give-size range in BASE UNITS, when the poster draws its
-   *  size per mint (00027 FR-003). `undefined`/absent = the fixed `GIVE_AMOUNT`
-   *  is in force, and `/health` looks exactly as it did before 00027. */
+  /** The configured accepted give-size range in base units. */
   giveRange?: { minBase: bigint; maxBase: bigint } | undefined;
-  /** The size the poster last asked the faucet for, base units — the answer to
-   *  "what is it posting right now?". `null` before the first draw. */
+  /** The size of the most recently selected inventory coin. */
   lastGiveAmount?: bigint | null | undefined;
 }
 
@@ -71,7 +63,7 @@ export function healthSnapshot(input: HealthInputs): HealthAnswer {
     ready: input.ready,
     uptimeMs: Math.max(0, input.now - input.startedAt),
     ticks: stats.ticks,
-    mints: stats.mints,
+    inventoryAdoptions: stats.inventoryAdoptions,
     reoffers: stats.reoffers,
     degradedTicks: stats.degraded,
     success: stats.success,
@@ -86,7 +78,6 @@ export function healthSnapshot(input: HealthInputs): HealthAnswer {
     lastFailure: stats.lastFailure,
     // A bigint would break `JSON.stringify`; decimal strings are what the whole
     // journal uses for amounts anyway.
-    dustBalance: input.dustBalance === null ? null : input.dustBalance.toString(),
     liveOffers: input.liveOffers,
     freeCoins: input.freeCoins,
     candidates: input.candidates,
@@ -120,9 +111,9 @@ export function renderMetrics(input: HealthInputs): string {
     lines.push(`offer_poster_${name} ${value === null ? "NaN" : value}`);
   };
   metric("ticks_total", stats.ticks, "Ticks started.");
-  metric("mints_total", stats.mints, "Mint transactions that landed on chain.");
+  metric("inventory_adoptions_total", stats.inventoryAdoptions, "Prefunded coins adopted by ticks.");
   metric("reoffers_total", stats.reoffers, "Ticks that re-offered a released coin.");
-  metric("degraded_total", stats.degraded, "Ticks that could neither mint nor re-offer.");
+  metric("degraded_total", stats.degraded, "Ticks that could neither adopt inventory nor re-offer.");
   metric("success_total", stats.success, "Ticks that finished without a failure.");
   metric("failure_total", stats.failure, "Ticks that failed.");
   metric("overruns_total", stats.overruns, "Ticks that overran POST_INTERVAL_MS.");
@@ -135,8 +126,8 @@ export function renderMetrics(input: HealthInputs): string {
   metric("candidates", input.candidates, "Journaled coins eligible for re-offer.", "gauge");
   metric("ready", input.ready ? 1 : 0, "1 once startup completed.", "gauge");
   if (input.giveRange !== undefined) {
-    // Base units, printed unrounded for the same reason DUST is below.
-    lines.push("# HELP offer_poster_last_give_amount Size of the last coin minted, base units.");
+    // Base units, printed unrounded so high-decimal assets stay exact.
+    lines.push("# HELP offer_poster_last_give_amount Size of the last selected coin, base units.");
     lines.push("# TYPE offer_poster_last_give_amount gauge");
     lines.push(
       `offer_poster_last_give_amount ${
@@ -152,13 +143,6 @@ export function renderMetrics(input: HealthInputs): string {
     "1 while /health answers 200.",
     "gauge",
   );
-  if (input.dustBalance !== null) {
-    lines.push("# HELP offer_poster_dust_balance Spendable DUST at the last reading.");
-    lines.push("# TYPE offer_poster_dust_balance gauge");
-    // Deliberately printed unrounded: DUST values exceed 2^53 and a Number cast
-    // would silently lose precision in exactly the digits that matter.
-    lines.push(`offer_poster_dust_balance ${input.dustBalance.toString()}`);
-  }
   return `${lines.join("\n")}\n`;
 }
 

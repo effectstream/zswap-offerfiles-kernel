@@ -29,8 +29,6 @@ require_env ZSWAP_API SOLVER_JOURNAL_PATH
 # same value and will reject a relative or `:memory:` path itself.
 mkdir -p "$(dirname "${SOLVER_JOURNAL_PATH}")"
 
-adopt_contract_address
-
 wait_http "${ZSWAP_API}/v1/health" "kernel API" "${KERNEL_WAIT_TIMEOUT_S:-600}"
 
 # The relay does not have to be up: `relay-client` retries the socket. But

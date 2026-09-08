@@ -78,7 +78,6 @@ import { declaredMarkers, duplicateMarkerReason, DUPLICATE_MARKERS } from "./mar
 import { canonicalRootHex } from "@zswap-da/validator";
 
 import { grammar } from "./grammar.ts";
-import { extractMidnightLedgerSnapshot } from "./zswap-logic.ts";
 import { emitAppEvent } from "./event-bus.ts";
 import { failStopAppInput } from "./app-input-savepoint.ts";
 import { evaluateOfferLivenessInStateMachine } from "./offer-liveness.ts";
@@ -903,16 +902,6 @@ addTransition("celestia-zswap", function* (data) {
     console.error("[ZSWAP] Failed to save offer file", e);
     throw e;
   }
-});
-
-addTransition("midnight-zswap", function* (data) {
-  const snapshot = extractMidnightLedgerSnapshot(data.parsedInput.payload);
-  if (!snapshot) return;
-
-  console.log(
-    `[MIDNIGHT] Ledger snapshot at block ${data.blockHeight}`,
-    snapshot,
-  );
 });
 
 // Scheduled TTL cleanup: if the offer is still active AND its persisted expiry

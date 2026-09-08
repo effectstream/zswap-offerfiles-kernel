@@ -39,7 +39,7 @@ import {
   waitForSync,
   waitForUnshielded,
 } from "../../lib/wallet.ts";
-import { joinOfferFiles, mintShielded, mintUnshielded } from "../../lib/offer-files.ts";
+import { requireBalance, requireDistinctTokenColors } from "../../lib/prefunded.ts";
 import { nonDustImbalances, settleViaBatcher } from "../../lib/batcher.ts";
 import { reconstructOffer } from "../../lib/api.ts";
 import {
@@ -50,12 +50,11 @@ import {
   GIVE_SPAN,
   INDEX_WAIT_TRIES,
   MAKER_SEEDS,
-  MINT_AMOUNT,
+  REQUIRED_GENESIS_INVENTORY,
   PAIR_PRICE,
   SHIELDED_COIN,
   TAKER_COIN,
   TAKER_SEEDS,
-  TOKEN_SEPS,
   TX_TTL_MS,
   UNSHIELDED_COIN,
   type TokenKey,
@@ -113,7 +112,6 @@ export class PoolWallet {
 export interface Actors {
   genesis: WalletResult;
   genesisPw: PoolWallet;
-  deployed: any;
   makers: PoolWallet[];
   cancelSingles: PoolWallet[]; // one-coin wallets (single-one-tx shape)
   cancelDoubles: PoolWallet[]; // two-coin wallets (split/partial/consolidated)
@@ -400,7 +398,7 @@ async function genesisTransferOnce(
  * wallet syncs — the retry loop self-synchronizes on that (InsufficientFunds
  * simply means "change not visible yet").
  */
-async function genesisFanOut(
+export async function genesisFanOut(
   genesis: WalletResult,
   shielded: boolean,
   color: string,
@@ -428,7 +426,7 @@ async function genesisFanOut(
   }
 }
 
-// ── Setup: build, mint, fund, split ─────────────────────────────────────────
+// ── Setup: build, verify external inventory, fund, split ────────────────────
 
 export interface FundingPlan {
   makerShieldedCoins: number;
@@ -482,43 +480,24 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
     unshieldedAddressObj(genesis),
   );
 
-  console.log(`${TAG} joining offer-files contract + minting 5 colors…`);
-  const deployed = await joinOfferFiles(genesis);
-  const nonce = BigInt(Date.now());
-  ledger.colors.TA = await mintShielded(
-    deployed,
-    TOKEN_SEPS.TA,
-    MINT_AMOUNT,
-    nonce,
-    genesis.zswapSecretKeys.coinPublicKey,
-  );
-  ledger.colors.TB = await mintShielded(
-    deployed,
-    TOKEN_SEPS.TB,
-    MINT_AMOUNT,
-    nonce + 1n,
-    genesis.zswapSecretKeys.coinPublicKey,
-  );
-  ledger.colors.UA = await mintUnshielded(deployed, TOKEN_SEPS.UA, MINT_AMOUNT, genesis.unshieldedAddress);
-  ledger.colors.UB = await mintUnshielded(deployed, TOKEN_SEPS.UB, MINT_AMOUNT, genesis.unshieldedAddress);
-  // TC funds the §2.5 basket specialist only — a much smaller mint than the
-  // trading colours, which the whole maker/taker fan-out draws on.
-  ledger.colors.TC = await mintShielded(
-    deployed,
-    TOKEN_SEPS.TC,
-    MINT_AMOUNT,
-    nonce + 2n,
-    genesis.zswapSecretKeys.coinPublicKey,
-  );
+  console.log(`${TAG} loading externally issued test colors…`);
+  const [TA, TB, UA, UB, TC] = requireDistinctTokenColors([
+    "GRAND_TOKEN_TA",
+    "GRAND_TOKEN_TB",
+    "GRAND_TOKEN_UA",
+    "GRAND_TOKEN_UB",
+    "GRAND_TOKEN_TC",
+  ]);
+  Object.assign(ledger.colors, { TA, TB, UA, UB, TC });
   console.log(`${TAG} colors:`, JSON.stringify(ledger.colors));
 
   for (const key of ["TA", "TB", "TC"] as const) {
-    const got = await waitForShielded(genesis, ledger.colors[key]!, MINT_AMOUNT, 36);
-    if (got < MINT_AMOUNT) throw new Error(`genesis missing shielded mint ${key}`);
+    const got = await waitForShielded(genesis, ledger.colors[key]!, REQUIRED_GENESIS_INVENTORY, 36);
+    requireBalance(`grand-e2e genesis/${key}`, ledger.colors[key]!, got, REQUIRED_GENESIS_INVENTORY);
   }
   for (const key of ["UA", "UB"] as const) {
-    const got = await waitForUnshielded(genesis, ledger.colors[key]!, MINT_AMOUNT, 36);
-    if (got < MINT_AMOUNT) throw new Error(`genesis missing unshielded mint ${key}`);
+    const got = await waitForUnshielded(genesis, ledger.colors[key]!, REQUIRED_GENESIS_INVENTORY, 36);
+    requireBalance(`grand-e2e genesis/${key}`, ledger.colors[key]!, got, REQUIRED_GENESIS_INVENTORY);
   }
 
   console.log(`${TAG} building ${MAKER_SEEDS.length} makers + 4 cancel specialists + ${TAKER_SEEDS.length} takers…`);
@@ -637,7 +616,6 @@ export async function setupActors(totalOffers: number): Promise<Actors> {
   return {
     genesis,
     genesisPw,
-    deployed,
     makers,
     cancelSingles,
     cancelDoubles,

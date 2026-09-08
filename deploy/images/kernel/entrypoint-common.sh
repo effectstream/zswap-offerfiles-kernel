@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # entrypoint-common.sh — sourced by every kernel-image entrypoint.
 #
-# Two jobs:
-#   1. Publish the deployed contract identity to the process that is about to
-#      start, from the shared `offerfiles-deploy` volume.
-#   2. Provide the shared readiness waits (see wait-for.sh).
+# Provides shared readiness waits (see wait-for.sh) and environment cleanup.
 #
 # It deliberately does NOT set endpoint defaults. `@effectstream/midnight-contracts`
 # already defaults an unset `MIDNIGHT_NETWORK_ID` to `undeployed` with
@@ -65,55 +62,8 @@ done
 unset _optional_env
 
 REPO_ROOT="${REPO_ROOT:-/app}"
-CONTRACT_SHARE_DIR="${CONTRACT_SHARE_DIR:-/srv/offerfiles-deploy}"
-MIDNIGHT_NETWORK_ID_EFFECTIVE="${MIDNIGHT_NETWORK_ID:-undeployed}"
-CONTRACT_FILE_NAME="contract-offer-files.${MIDNIGHT_NETWORK_ID_EFFECTIVE}.json"
-CONTRACT_TARGET_DIR="${REPO_ROOT}/packages/contracts-midnight"
 
 log() { echo "[$(basename "${0}")] $*" >&2; }
-
-# Wait for, then adopt, the contract identity the deploy one-shot published.
-#
-# BOTH halves are needed and neither is redundant:
-#   - the JSON file, because `readMidnightContract()` (packages/node/env.ts)
-#     resolves the address by reading exactly
-#     `packages/contracts-midnight/contract-offer-files.<network>.json`;
-#   - `MIDNIGHT_CONTRACT_ADDRESS`, because the same function lets that variable
-#     override the file, and because scripts that never call it still get the
-#     address.
-# Copied, not symlinked: the file is on a read-mostly shared volume and the
-# reader resolves paths relative to the package directory.
-adopt_contract_address() {
-  local src="${CONTRACT_SHARE_DIR}/${CONTRACT_FILE_NAME}"
-  local waited=0
-  local timeout="${CONTRACT_WAIT_TIMEOUT_S:-900}"
-
-  while [ ! -f "${src}" ]; do
-    waited=$((waited + 2))
-    if [ "${waited}" -ge "${timeout}" ]; then
-      log "TIMEOUT after ${timeout}s waiting for ${src}"
-      log "the offerfiles-deploy one-shot has not published a contract address"
-      return 1
-    fi
-    sleep 2
-  done
-
-  install -m 0644 "${src}" "${CONTRACT_TARGET_DIR}/${CONTRACT_FILE_NAME}"
-
-  local address
-  address="$(bun -e "
-    const json = await Bun.file(process.argv[1]).json();
-    const value = json.contractAddress;
-    if (typeof value !== 'string' || value.length === 0) {
-      console.error('contract file has no string contractAddress');
-      process.exit(1);
-    }
-    process.stdout.write(value);
-  " "${src}")"
-
-  export MIDNIGHT_CONTRACT_ADDRESS="${address}"
-  log "contract ${CONTRACT_FILE_NAME} adopted: ${address}"
-}
 
 # Fail loudly on a variable a container cannot sensibly default.
 require_env() {

@@ -8,9 +8,8 @@ import { count, offerArchivedConsumed, waitFor } from "../lib/db.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
-import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { joinOfferFiles, mintUnshielded } from "../lib/offer-files.ts";
+import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
   buildWallet,
   shieldedKeys,
@@ -29,8 +28,6 @@ globalThis.WebSocket = WebSocket;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const TAG = "[unshielded-only]";
-const SEP = { U0: 0xd0, U1: 0xd1 } as const;
-const MINT = 1_000_000_000n;
 const AMT = 1_000n;
 const M0_SEED = "0000000000000000000000000000000000000000000000000000000000000050";
 const M1_SEED = "0000000000000000000000000000000000000000000000000000000000000051";
@@ -39,9 +36,9 @@ const M1_SEED = "000000000000000000000000000000000000000000000000000000000000005
 const ownerHex = (mnAddr: string): string =>
   MidnightBech32m.parse(mnAddr).data.toString("hex").toLowerCase();
 
-type MintUtxo = { owner: string; intent_hash: string; output_no: number };
+type FundingUtxo = { owner: string; intent_hash: string; output_no: number };
 
-async function mintUtxosGone(db: Client, refs: MintUtxo[]): Promise<boolean> {
+async function fundingUtxosGone(db: Client, refs: FundingUtxo[]): Promise<boolean> {
   for (const r of refs) {
     const res = await db.query(
       `SELECT 1 FROM created_unshielded
@@ -62,47 +59,38 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
   };
   console.log(`${TAG} before:`, JSON.stringify(before));
 
-  console.log(`${TAG} building genesis + M0 + M1…`);
-  const genesis = await buildWallet(net.walletSeed);
+  const [U0, U1] = requireDistinctTokenColors([
+    "E2E_UNSHIELDED_TOKEN_0",
+    "E2E_UNSHIELDED_TOKEN_1",
+  ]);
+  console.log(`${TAG} building externally prefunded M0 + M1…`);
   const m0 = await buildWallet(M0_SEED);
   const m1 = await buildWallet(M1_SEED);
 
   try {
-    await waitForSync(genesis, { requireUnshieldedFunds: true });
-    try {
-      await registerNightForDust(genesis as any);
-    } catch (e) {
-      console.warn(
-        `${TAG} registerNightForDust: ${e instanceof Error ? e.message : String(e)} (continuing)`,
-      );
-    }
     await waitForSync(m0).catch(() => {});
     await waitForSync(m1).catch(() => {});
 
     const m0Unshielded = unshieldedAddressObj(m0);
 
-    console.log(`${TAG} minting U0→M0, U1→M1…`);
-    const deployed = await joinOfferFiles(genesis);
-    const U0 = await mintUnshielded(deployed, SEP.U0, MINT, m0.unshieldedAddress);
-    const U1 = await mintUnshielded(deployed, SEP.U1, MINT, m1.unshieldedAddress);
-
+    console.log(`${TAG} verifying external U0→M0, U1→M1 funding…`);
     const createdOk = await waitFor(
-      "created_unshielded grew",
-      async () => (await count(db, "created_unshielded")) >= before.created_unshielded + 2,
+      "prefunded outputs indexed",
+      async () => (await count(db, "created_unshielded")) >= 2,
       24,
     );
-    await assert("U0/U1 minted (UnshieldedCreate primitive)", async () => createdOk);
+    await assert("U0/U1 external funding indexed (UnshieldedCreate primitive)", async () => createdOk);
 
     const mintOwners = [ownerHex(m0.unshieldedAddress), ownerHex(m1.unshieldedAddress)];
     const mintRows = (
-      await db.query<MintUtxo>(
+      await db.query<FundingUtxo>(
         `SELECT owner, intent_hash, output_no FROM created_unshielded
          WHERE owner = ANY($1::text[])`,
         [mintOwners],
       )
     ).rows;
     await assert(
-      "mint UTXOs recorded for M0/M1",
+      "external funding UTXOs recorded for M0/M1",
       async () => mintRows.length >= 2,
     );
 
@@ -173,14 +161,14 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
     const settle = await settleViaBatcher(balancedTx as any);
     await assert("batcher settled unshielded swap", async () => settle.ok);
 
-    // Mint UTXOs spent whole (change is new rows) → those triples DELETE'd
+    // Funding UTXOs spent whole (change is new rows) → those triples deleted.
     const spentOk = await waitFor(
-      "mint UTXOs deleted from created_unshielded",
-      async () => mintUtxosGone(db, mintRows),
+      "funding UTXOs deleted from created_unshielded",
+      async () => fundingUtxosGone(db, mintRows),
       36,
     );
     await assert(
-      "mint UTXOs gone from created_unshielded (both legs spent)",
+      "funding UTXOs gone from created_unshielded (both legs spent)",
       async () => spentOk,
     );
 
@@ -202,6 +190,5 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
   } finally {
     await m0.wallet.stop().catch(() => {});
     await m1.wallet.stop().catch(() => {});
-    await genesis.wallet.stop().catch(() => {});
   }
 }

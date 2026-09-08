@@ -2,7 +2,7 @@
  * Focused real-chain actors for the Offer Files solver E1/E4 acceptance run.
  *
  * This fixture deliberately owns no HTTP or Celestia behavior. It provisions
- * two fresh Midnight wallets from a funded undeployed genesis wallet, creates
+ * two fresh Midnight wallets from an externally prefunded genesis wallet, creates
  * a real shielded A -> B offer, and persists the exact oracle that the outer
  * Compose runner must later compare with the live solver/chain result.
  *
@@ -12,7 +12,7 @@
  *   bun packages/tests/grand-e2e/lib/solver-offerfiles-real-actors.ts verify-settlement
  *
  * Required environment:
- *   E1_RUN_ID, E1_USER_SEED, E1_SOLVER_SEED,
+ *   E1_RUN_ID, E1_USER_SEED, E1_SOLVER_SEED, E1_TOKEN_A, E1_TOKEN_B,
  *   E1_ACTOR_RESULT_PATH, E1_ACTOR_RUNTIME_PATH, E1_ACTOR_LADDER_PATH,
  *   E1_ACTOR_PRE_SPENT_PATH
  * verify-settlement uses E1_ACTOR_SETTLEMENT_PATH in place of the ladder path.
@@ -32,7 +32,6 @@ import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
 
-import { joinOfferFiles, mintShielded } from "@zswap-da/solver-core/offer-files";
 import {
   buildWallet,
   shieldedBalances,
@@ -85,6 +84,14 @@ function requireSeed(name: string, value: string | undefined): string {
   return value.toLowerCase();
 }
 
+function requireTokenColor(name: string, value: string | undefined): string {
+  const color = value?.trim().toLowerCase() ?? "";
+  if (!/^[0-9a-f]{64}$/.test(color)) {
+    throw new Error(`${name} must be a lowercase 64-hex externally issued token color`);
+  }
+  return color;
+}
+
 function positiveBigint(name: string, value: string | undefined, fallback: bigint): bigint {
   const raw = value ?? fallback.toString();
   if (!/^[1-9][0-9]{0,29}$/.test(raw)) {
@@ -100,12 +107,6 @@ function positiveSafeInteger(name: string, value: string | undefined, fallback: 
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`${name} must be a positive safe integer`);
   }
-  return parsed;
-}
-
-function separatorByte(name: string, value: string | undefined, fallback: number): number {
-  const parsed = positiveSafeInteger(name, value, fallback);
-  if (parsed > 255) throw new Error(`${name} must be in [1, 255]`);
   return parsed;
 }
 
@@ -224,9 +225,9 @@ export interface RealActorConfig {
   runtimePath: string;
   ladderPath: string;
   preSpentPath: string;
-  tokenASeparator: number;
-  tokenBSeparator: number;
-  mintAmount: bigint;
+  tokenA: string;
+  tokenB: string;
+  sourceInventoryAmount: bigint;
   giveAmount: bigint;
   wantAmount: bigint;
   solverTokenBAmount: bigint;
@@ -235,7 +236,6 @@ export interface RealActorConfig {
   offerTtlMs: number;
   syncTimeoutMs: number;
   fundingTimeoutMs: number;
-  mintNonce: bigint;
 }
 
 export interface RealActorSettlementConfig {
@@ -310,15 +310,19 @@ export function readRealActorConfig(
   if (solverTokenBAmount < wantAmount) {
     throw new Error("E1_SOLVER_TOKEN_B_AMOUNT must cover E1_WANT_AMOUNT");
   }
-  const mintAmount = positiveBigint("E1_MINT_AMOUNT", env["E1_MINT_AMOUNT"], 1_000_000n);
-  if (mintAmount < giveAmount || mintAmount < solverTokenBAmount) {
-    throw new Error("E1_MINT_AMOUNT must cover both actor token grants");
+  const sourceInventoryAmount = positiveBigint(
+    "E1_SOURCE_INVENTORY_AMOUNT",
+    env["E1_SOURCE_INVENTORY_AMOUNT"],
+    1_000_000n,
+  );
+  if (sourceInventoryAmount < giveAmount || sourceInventoryAmount < solverTokenBAmount) {
+    throw new Error("E1_SOURCE_INVENTORY_AMOUNT must cover both actor token grants");
   }
 
-  const tokenASeparator = separatorByte("E1_TOKEN_A_SEPARATOR", env["E1_TOKEN_A_SEPARATOR"], 0xd4);
-  const tokenBSeparator = separatorByte("E1_TOKEN_B_SEPARATOR", env["E1_TOKEN_B_SEPARATOR"], 0xd5);
-  if (tokenASeparator === tokenBSeparator) {
-    throw new Error("E1 token A and token B separators must differ");
+  const tokenA = requireTokenColor("E1_TOKEN_A", env["E1_TOKEN_A"]);
+  const tokenB = requireTokenColor("E1_TOKEN_B", env["E1_TOKEN_B"]);
+  if (tokenA === tokenB) {
+    throw new Error("E1_TOKEN_A and E1_TOKEN_B must differ");
   }
   const resultPath = requireAbsolutePath("E1_ACTOR_RESULT_PATH", env["E1_ACTOR_RESULT_PATH"]);
   const runtimePath = requireAbsolutePath("E1_ACTOR_RUNTIME_PATH", env["E1_ACTOR_RUNTIME_PATH"]);
@@ -340,9 +344,9 @@ export function readRealActorConfig(
     runtimePath,
     ladderPath,
     preSpentPath,
-    tokenASeparator,
-    tokenBSeparator,
-    mintAmount,
+    tokenA,
+    tokenB,
+    sourceInventoryAmount,
     giveAmount,
     wantAmount,
     solverTokenBAmount,
@@ -366,11 +370,6 @@ export function readRealActorConfig(
       "E1_FUNDING_TIMEOUT_MS",
       env["E1_FUNDING_TIMEOUT_MS"],
       240_000,
-    ),
-    mintNonce: positiveBigint(
-      "E1_MINT_NONCE",
-      env["E1_MINT_NONCE"],
-      BigInt(`0x${sha256(`${runId}:mint-nonce`).slice(0, 24)}`) + 1n,
     ),
   };
 }
@@ -702,7 +701,7 @@ export interface RealActorManifest {
   };
   tokens: { A: string; B: string; NIGHT: string };
   funding: {
-    mintAmount: string;
+    sourceInventoryAmount: string;
     userTokenAAmount: string;
     solverTokenBAmount: string;
     nightPerUtxo: string;
@@ -1544,8 +1543,7 @@ export async function provisionRealActors(
     try {
       await registerNightForDust(genesis as any);
     } catch (error) {
-      // The contract deploy/mint process may have registered the shared
-      // genesis first. Only that one pre-existing registration is tolerated.
+      // A prior same-chain funding step may have registered the shared genesis.
       if (!/already|registered|exists/i.test(error instanceof Error ? error.message : String(error))) {
         throw error;
       }
@@ -1556,45 +1554,31 @@ export async function provisionRealActors(
       waitNonZero: true,
     });
 
-    await phase("minting-tokens");
-    const deployed = await joinOfferFiles(genesis);
-    const tokenA = await mintShielded(
-      deployed,
-      config.tokenASeparator,
-      config.mintAmount,
-      config.mintNonce,
-    );
-    const tokenB = await mintShielded(
-      deployed,
-      config.tokenBSeparator,
-      config.mintAmount,
-      config.mintNonce + 1n,
-    );
-    if (tokenA === tokenB || !/^[0-9a-f]{64}$/.test(tokenA) || !/^[0-9a-f]{64}$/.test(tokenB)) {
-      throw new Error("real mint returned invalid or identical A/B token colors");
-    }
+    await phase("verifying-external-token-inventory");
+    const { tokenA, tokenB } = config;
     const genesisTokenA = await waitForShielded(
       genesis,
       tokenA,
-      config.mintAmount,
+      config.sourceInventoryAmount,
       60,
       2_000,
     );
-    if (genesisTokenA !== config.mintAmount) {
+    if (genesisTokenA !== config.sourceInventoryAmount) {
       throw new Error(
-        `genesis must expose exactly one newly minted token-A balance: ` +
-          `observed=${genesisTokenA} expected=${config.mintAmount}`,
+        `genesis must expose the exact externally prefunded token-A balance: ` +
+          `observed=${genesisTokenA} expected=${config.sourceInventoryAmount}; ` +
+          `provision it as one same-chain shielded UTXO before running E1`,
       );
     }
     if ((await waitForShielded(genesis, tokenB, config.solverTokenBAmount, 60, 2_000)) < config.solverTokenBAmount) {
-      throw new Error("genesis did not observe minted token B");
+      throw new Error("genesis lacks externally prefunded token B inventory");
     }
 
     await phase("building-pre-spent-liveness-offer");
     const preSpentCandidate = await buildRealPreSpentOfferCandidate(genesis, {
       tokenA,
       tokenB,
-      giveAmount: config.mintAmount,
+      giveAmount: config.sourceInventoryAmount,
       wantAmount: config.wantAmount,
       expiresAt: new Date(Date.now() + config.offerTtlMs),
     });
@@ -1760,7 +1744,7 @@ export async function provisionRealActors(
       },
       tokens: { A: tokenA, B: tokenB, NIGHT },
       funding: {
-        mintAmount: config.mintAmount.toString(),
+        sourceInventoryAmount: config.sourceInventoryAmount.toString(),
         userTokenAAmount: config.giveAmount.toString(),
         solverTokenBAmount: config.solverTokenBAmount.toString(),
         nightPerUtxo: config.nightPerUtxo.toString(),

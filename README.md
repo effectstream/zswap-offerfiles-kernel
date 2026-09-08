@@ -2,7 +2,7 @@
 
 A decentralized token swap platform that combines **Midnight Network** (privacy-preserving ZK contracts) with **Celestia** (data availability layer). Users create atomic swap offers that are published to Celestia, indexed by the sync node, and completed on Midnight.
 
-This repo is the **backend**: sync node, batcher, contracts, database, validator, the COW
+This repo is the **backend**: sync node, batcher, chain launchers, database, validator, the COW
 solver (a separate process that quotes and settles against a Midnight Intents relay), and
 e2e tests. It is frontend-agnostic — an example browser frontend lives in the [effectstream monorepo](https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da) (see [Frontend](#frontend)).
 
@@ -16,7 +16,7 @@ Check deployed API playground: https://api-zswap.zkdojo.com/docs
 
 ```bash
 bun install
-bun run dev   # PGLite + Compact compile + Midnight + Celestia + sync + batcher
+bun run dev   # PGLite + Midnight + Celestia + sync + batcher
 ```
 
 After the database initializes, `start.dev.ts` runs the optional
@@ -41,9 +41,8 @@ canonical names; unrelated tokens, offer history and manual prices retain their
 existing colors. Editing `000-init.sql` affects only a fresh database, while the
 one-shot updates an existing operator-selected database to Preview, Preprod or
 Stagenet without resetting it. If that request fails, the existing database is
-left exactly as it was; it is not reset to the SQL defaults. The old
-`packages/contracts-midnight/mint-test-tokens.ts` command remains an explicit
-local test helper and does not mint the canonical issuer's token IDs.
+left exactly as it was; it is not reset to the SQL defaults. This repository
+contains no faucet contract or local mint fallback.
 
 - API: http://localhost:9999
 - API playground: `bun run docs:dev` → http://localhost:10601/docs/ (or build + http://localhost:9999/docs)
@@ -70,10 +69,8 @@ monorepo (formerly `paima-engine`) at
 It runs against this stack and doubles as a reference for wiring your own UI to
 this backend.
 
-Check out the effectstream monorepo as a **sibling** of this repo (the frontend
-resolves `@zswap-da/contract-offer-files` via a relative `file:` dependency).
-Start this repo's dev stack first (it compiles the Compact contract), then start
-the frontend:
+Check out the effectstream monorepo as a **sibling** of this repo. Start this
+repo's dev stack, provide same-chain wallet inventory, then start the frontend:
 
 ```bash
 git clone git@github.com:effectstream/effectstream.git     # if not already checked out
@@ -82,22 +79,18 @@ bun install
 bun run dev   # vite on :10600
 ```
 
-The frontend fetches the API, the batcher, and all ZK assets from this backend:
-`GET /keys/*` and `GET /zkir/*` serve the contract circuit keys (from
-`packages/contracts-midnight/contract-offer-files/src/managed`) and the zswap +
-dust primitive keys (from the Midnight ZK-params cache,
-`~/.cache/midnight/zk-params`, override with `MIDNIGHT_ZK_PARAMS_DIR`). Without
-the primitive keys browser offer construction fails with
-`GET /keys/midnight/zswap/output.prover 404` — run the proof server once (the
-dev stack does) to populate the cache. Test tokens are obtained from
+The frontend fetches the API's public network configuration and offer data,
+then constructs native Midnight offer transactions through its wallet. Test
+tokens for supported public test networks are obtained from
 [`mint-test-tokens`](https://mint-test-tokens.pages.dev/?network=preprod).
+Fresh local chains require a separately provisioned same-chain fixture.
 
 ## Environments
 
 | Layer | Dev (`bun run dev`) | Mainnet (`bun run start:mainnet`) |
 |-------|---------------------|------------------------------------|
 | DA | Local Celestia devnet (`packages/contracts-celestia`) | Celestia mainnet beta via local light node |
-| Privacy chain | Local Midnight devnet (`packages/contracts-midnight`) | Midnight (the `@effectstream/midnight-contracts` resolved networkId) |
+| Privacy chain | Local Midnight devnet (`packages/midnight-infra`) | Midnight (the `@effectstream/midnight-contracts` resolved networkId) |
 | Database | PGLite (in-memory) | PGLite (in-memory) |
 | Node entry | `packages/node/main.dev.ts` | `packages/node/main.mainnet.ts` |
 | Batcher entry | `packages/batcher/batcher.dev.ts` | `packages/batcher/batcher.mainnet.ts` |
@@ -130,13 +123,14 @@ cost does not grow with the registry. Three tables back it:
 | `known_tokens` | a colour's `decimals` (base units per coin) and optional `asset_id`. Prices are served **per base unit**, i.e. the asset price ÷ `10^decimals` |
 | `token_prices` | only operator overrides (`manual`) and the deterministic demo rows (`fallback`) for tokens with no asset behind them |
 
-Tokens map to assets **by name** — `WBTC`/`WSBTC`/`BTC` → `bitcoin`, `WETH`/`WSETH`/
-`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3`,
-`SNIGHT` → `midnight-3` — because faucet-minted colours derive from the contract
-address and change on every clean redeploy. `known_tokens.asset_id` overrides the
-map; canonical `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and `UTWBTC`
-records carry explicit asset IDs and are seeded from the pinned Preprod
-registry on a fresh database. `PRICE_FEED_MAP`
+Tokens without an explicit asset ID map to assets **by normalized name** —
+`WBTC`/`WSBTC`/`BTC` → `bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` →
+`usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3`.
+Token colors are opaque, network-specific external IDs, so the name map is only
+a fallback for manually registered rows. `known_tokens.asset_id` overrides it;
+canonical `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and `UTWBTC` records
+carry explicit asset IDs and are seeded from the pinned Preprod registry on a
+fresh database. `PRICE_FEED_MAP`
 (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
 `SNIGHT` is the [shielded-night](https://github.com/effectstream/shielded-night)
@@ -551,7 +545,16 @@ pretend the current whole-block mode provides that availability guarantee.
 bun run test
 ```
 
-Boots the same undeployed stack as `bun run dev` (PGlite `:5432`, Midnight
+The live Phase B suite no longer creates token identities. Before running it,
+provision the deterministic wallets with same-chain externally issued
+inventory and set the token-color variables used by each case:
+`E2E_SHIELDED_TOKEN_A/B`, `E2E_TOKEN_0/1`, `E2E_MULTI_TOKEN_0/1/2`,
+`E2E_UNSHIELDED_TOKEN_0/1`, and `E2E_ROOT_GIVE_TOKEN/E2E_ROOT_ADVANCE_TOKEN`.
+A freshly reset local chain has no such issuer, so this live gate cannot pass
+until an external same-chain fixture has funded it. The public faucet supports
+Preview, Preprod and Stagenet; it does not fund the local `undeployed` chain.
+
+The runner boots the undeployed stack (PGLite `:5432`, Midnight
 node/indexer/proof-server, Celestia, sync `:9999`, batcher `:3334`) via
 `packages/tests/start.test.ts`, then runs:
 
@@ -607,10 +610,10 @@ zswap-offerfile-kernel/
 │   ├── validator/                            # @zswap-da/validator (shared offer validation)
 │   ├── batcher/                              # @zswap-da/batcher
 │   ├── solver/                               # @zswap-da/solver (book mirror, ladders, swap-job settlement)
-│   ├── solver-core/                          # @zswap-da/solver-core (shared clients, ladder derivation, contracts)
+│   ├── solver-core/                          # @zswap-da/solver-core (shared clients and ladder derivation)
 │   ├── offer-guard/                          # @zswap-da/offer-guard (checks node + batcher must agree on)
 │   ├── price-feed/                           # @zswap-da/price-feed (daily CoinGecko refresh; optional process)
-│   ├── contracts-midnight/                   # @zswap-da/contracts-midnight (+ contract-offer-files subworkspace)
+│   ├── midnight-infra/                       # Midnight node/indexer/proof-server launch scripts
 │   ├── contracts-celestia/                   # @zswap-da/contracts-celestia (bridge + fund scripts)
 │   └── tests/                                # @zswap-da/tests
 ```
@@ -623,11 +626,11 @@ monorepo at
 
 | Package | Files |
 |---------|-------|
-| `node/` | `main.{dev,mainnet}.ts`, `config.{dev,mainnet}.ts`, `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `prices.ts` (price resolution + `GET /v1/prices`), `docs.ts` (`GET /docs` serves Vite playground dist), `zk-assets.ts` (`/keys/*`, `/zkir/*` static ZK assets), `zswap-logic.ts`, `batcher-client.ts`, `event-bus.ts` |
+| `node/` | `main.{dev,mainnet}.ts`, `config.{dev,mainnet}.ts`, `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `prices.ts` (price resolution + `GET /v1/prices`), `docs.ts` (`GET /docs` serves Vite playground dist), `batcher-client.ts`, `event-bus.ts` |
 | `database/` | `mod.ts` (re-exports), `migration-order.ts`, `migrations/000-init.sql` (THE schema — one file applied from zero; there is no numbered chain, and the 001/002 files this table used to list are gone), `migrations/local-migration.sql` (local-only additions), `price-map.ts` (token NAME → reference asset, per-base-unit conversion), `sql/queries.sql` (+ generated `queries.queries.ts`), `sql/queries.app.ts` |
 | `validator/` | `validate.ts` (pipeline), `derive.ts`, `refstate.ts`, `types.ts`, `README.md`, `scripts/check-preview-indexer.ts` |
 | `batcher/` | `batcher.{dev,mainnet}.ts`, `config.ts`, `midnight-balancing.ts`, `celestia.ts` (`ZswapCelestiaAdapter.validateInput` — pre-fee offer gate) |
-| `contracts-midnight/` | `package.json` (scripts for `launchMidnight`), `deploy.ts`, `contract-offer-files/` (Compact source + compiled output) |
+| `midnight-infra/` | `package.json` (Midnight node, indexer and proof-server process scripts) |
 | `contracts-celestia/` | `package.json` (`celestia-{node,bridge,fund}:*` scripts), `fund-bridge.ts` |
 | `solver/` | `solver.{dev,preview,mainnet}.ts` (per-network entrypoints), `env.ts`, `src/launch.ts` (the `start:solver` configuration contract), `src/run.ts` (`runSolver`), `src/book-sync.ts`, `src/ladder-source.ts`, `src/relay-client.ts`, `src/swap-job-executor.ts`, `src/stock.ts`, `src/operation-journal.ts` |
 | `solver-core/` | `api-client.ts` (kernel REST/SSE + exact files), `ladder-derivation.ts`, `admission-policy.ts` (one typed policy for publication and admission), `relay-ws-contract.ts`, `receipt-client.ts`, `batcher.ts`, `wallet.ts` |
@@ -656,7 +659,6 @@ monorepo at
 | Key | Source | Purpose |
 |-----|--------|---------|
 | `celestia-zswap` | Celestia DA primitive | Validate a published offer blob (structure + ZK proofs + spent-set liveness), then index it (gives/wants, nullifiers, unshielded spends; schedule TTL cleanup) or drop + emit `offer_rejected`. |
-| `midnight-zswap` | Midnight ledger primitive | Snapshot contract state. |
 | `midnight-nullifier` | Midnight nullifier primitive | Record the nullifier in `spent_nullifiers` (liveness) and archive any offer whose shielded nullifier is consumed on chain. |
 | `midnight-unshielded-spend` | Midnight unshielded-spend primitive | Record the UTXO in `spent_unshielded` (liveness) and archive any offer whose unshielded UTXO is spent. |
 | `midnight-unshielded-create` | Midnight unshielded-create primitive | Record every created unshielded UTXO in `created_unshielded` (existence liveness). |
@@ -697,7 +699,7 @@ There are **two ways** to post and read offers:
 | `POST` | `/v1/offers/files` | Exact-files read: 1–8 content identities in, exact indexed bytes out for the live+valid ones and a stable verdict for the rest. Side-effect-free; current state is re-read after proof verification. |
 | `GET` | `/v1/known-tokens` | Token color → name registry. |
 | `POST` | `/v1/known-tokens` | Register a token name/color/kind (dev/e2e only; off in production). |
-| `GET` | `/v1/midnight/config` | Public Midnight config the browser contract client needs. |
+| `GET` | `/v1/midnight/config` | Public Midnight network config the browser wallet needs. |
 | `POST` | `/v1/offers` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, `409` on duplicate, else forward to the batcher → Celestia. Returns the offer's `offerId`. |
 | `GET` | `/v1/offers/stream` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
 | `GET` | `/v1/offers/updates` | Websocket update stream carrying the same lifecycle events, plus a per-subscription sequence number so a consumer mirroring the book can prove it missed nothing. |

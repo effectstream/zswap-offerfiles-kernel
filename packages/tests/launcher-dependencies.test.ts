@@ -1,11 +1,4 @@
-import { expect, mock, test } from "bun:test";
-
-// Config construction probes `compact --version`. These tests inspect the
-// dependency graph only, so isolate that external preflight while leaving the
-// production launcher and its real Compact check unchanged.
-mock.module("node:child_process", () => ({
-  spawnSync: () => ({ status: 0 }),
-}));
+import { expect, test } from "bun:test";
 
 interface ProcessSpec {
   name: string;
@@ -26,27 +19,29 @@ function processByName(config: LauncherConfig, name: string): ProcessSpec {
   return found;
 }
 
-function expectLinearStartup(
+const REMOVED = ["compact-check", "compact-build", "midnight-contract", "midnight-mint-test-tokens"];
+
+function expectNetworkOnlyStartup(
   config: LauncherConfig,
-  contractDeploy: string,
+  chainDependencies: string[],
   walletConsumers: string[],
 ): void {
+  const names = new Set(config.processes.map((item) => item.name));
+  for (const removed of REMOVED) expect(names.has(removed), `${removed} must stay removed`).toBe(false);
+
   const sync = processByName(config, "sync");
   const health = processByName(config, "sync-api-health");
-  const mint = processByName(config, "midnight-mint-test-tokens");
-
   expect(sync.env?.["ENABLE_TOKEN_REGISTRY"]).toBe("true");
-  expect(sync.dependsOn).toContain(contractDeploy);
+  for (const dependency of chainDependencies) expect(sync.dependsOn).toContain(dependency);
   expect(health.dependsOn).toEqual(["sync"]);
   expect(health.waitToExit).toBe(true);
   expect(health.critical).toBe(true);
   expect(health.args?.at(-1)).toMatch(/^https?-get:\/\/.+\/v1\/health$/);
-  expect(mint.dependsOn).toContain(contractDeploy);
-  expect(mint.dependsOn).toContain("sync-api-health");
-  expect(mint.env?.["ZSWAP_API"]).toMatch(/^https?:\/\//);
 
   for (const consumer of walletConsumers) {
-    expect(processByName(config, consumer).dependsOn).toContain("midnight-mint-test-tokens");
+    const deps = processByName(config, consumer).dependsOn ?? [];
+    expect(deps).toContain("sync-api-health");
+    for (const dependency of chainDependencies) expect(deps).toContain(dependency);
   }
 
   const byName = new Map(config.processes.map((item) => [item.name, item]));
@@ -65,17 +60,33 @@ function expectLinearStartup(
   for (const name of byName.keys()) visit(name);
 }
 
-test.serial("start.dev.ts uses contract -> sync health -> mint -> wallet consumers", async () => {
+const localMidnightReady = [
+  "midnight-node-wait",
+  "midnight-indexer-wait",
+  "midnight-proof-server-wait",
+];
+
+test("node grammar retains native offer events without the removed contract snapshot", async () => {
+  const { grammar } = await import("../node/grammar.ts");
+  const keys = Object.keys(grammar);
+  expect(keys).not.toContain("midnight-zswap");
+  expect(keys).toContain("midnight-zswap-event");
+  expect(keys).toContain("midnight-unshielded-spend");
+  expect(keys).toContain("midnight-unshielded-create");
+  expect(keys).toContain("midnight-zswap-root");
+});
+
+test.serial("start.dev.ts launches chain services with no local contract", async () => {
   const config = (await import("../../start.dev.ts")).default as unknown as LauncherConfig;
-  expectLinearStartup(config, "midnight-contract", ["batcher", "solver"]);
+  expectNetworkOnlyStartup(config, localMidnightReady, ["batcher", "solver"]);
 });
 
-test.serial("packages/tests/start.test.ts uses the same health edge", async () => {
+test.serial("packages/tests/start.test.ts uses the same network-only health edge", async () => {
   const config = (await import("./start.test.ts")).default as unknown as LauncherConfig;
-  expectLinearStartup(config, "midnight-contract", ["batcher"]);
+  expectNetworkOnlyStartup(config, localMidnightReady, ["batcher"]);
 });
 
-test.serial("start.attach.ts uses configured API health before minting", async () => {
+test.serial("start.attach.ts waits on external chain and kernel health only", async () => {
   const vars = {
     MIDNIGHT_NODE_HTTP: "http://midnight-node:9944",
     MIDNIGHT_INDEXER_HTTP: "http://indexer:8088/api/v3/graphql",
@@ -90,12 +101,9 @@ test.serial("start.attach.ts uses configured API health before minting", async (
   }
   try {
     const config = (await import("../../start.attach.ts")).default as unknown as LauncherConfig;
-    expectLinearStartup(config, "midnight-contract", ["batcher", "solver"]);
+    expectNetworkOnlyStartup(config, ["chain-wait"], ["batcher", "solver"]);
     expect(processByName(config, "sync-api-health").args?.at(-1)).toBe(
       "http-get://attached-kernel:9999/v1/health",
-    );
-    expect(processByName(config, "midnight-mint-test-tokens").env?.["ZSWAP_API"]).toBe(
-      "http://attached-kernel:9999/",
     );
   } finally {
     for (const [name, value] of saved) {

@@ -34,7 +34,6 @@ import {
   MIDNIGHT_NETWORK_ID,
   OFFER_MAX_BYTES,
   ROOT_WINDOW_SECONDS,
-  midnightContract,
 } from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/solver-core/amount";
@@ -63,7 +62,6 @@ import {
 import { registerExactFilesRoute } from "./offer-files-read.ts";
 import { registerOfferConsumptionRoute } from "./offer-consumption-read.ts";
 import { registerOfferUpdatesStream } from "./offer-updates-stream.ts";
-import { registerZkAssetRoutes } from "./zk-assets.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
 import { declaredMarkers, duplicateMarkerReason, DUPLICATE_MARKERS } from "./marker-dedup.ts";
@@ -164,11 +162,6 @@ export const apiRouter: StartConfigApiRouter = async function (
   // BATCHER_SPONSOR_POLICY throws HERE — before the server is ready — instead
   // of on the first submission.
   console.log(`[API] ${describeSponsorshipPolicy()}`);
-
-  // GET /keys/*, /zkir/* — ZK assets for the browser prover (the frontend now
-  // lives in its own repo and fetches these from this API instead of staging
-  // copies into its public/ dir).
-  registerZkAssetRoutes(server);
 
   // GET /docs — interactive API playground (upload + accept/settle debugger).
   registerDocsRoutes(server);
@@ -644,9 +637,8 @@ export const apiRouter: StartConfigApiRouter = async function (
     return realHistory(dbConn, pair.base, pair.quote);
   });
 
-  // POST /v1/known-tokens — register a token name/color pair. The browser-wallet
-  // mint path submits the contract call client-side and still needs the backend
-  // DB to know the token name for indexing/display.
+  // POST /v1/known-tokens — register an externally issued token name/color pair
+  // so the backend can index and display it.
   server.post(
     "/v1/known-tokens",
     {
@@ -658,10 +650,9 @@ export const apiRouter: StartConfigApiRouter = async function (
             color: { type: "string" },
             name: { type: "string" },
             kind: { type: "string", enum: ["shielded", "unshielded"] },
-            // Base units per coin. Omitted means 6 (00024): every token this
-            // stack mints or registers has 6 decimals, and the faucet hands
-            // out whole coins scaled by 10^6. Registrants SHOULD still send it
-            // explicitly — a token on another scale states its own value, or
+            // Base units per coin. Omitted means the legacy default of 6.
+            // Registrants SHOULD still send it explicitly: a token on another
+            // scale states its own value, or
             // its USD price would be off by 10^(6 − its decimals).
             decimals: { type: "integer", minimum: 0, maximum: 38 },
             // Reference asset (a CoinGecko id). Omitted means "price it by
@@ -738,17 +729,10 @@ export const apiRouter: StartConfigApiRouter = async function (
     },
   );
 
-  // GET /v1/midnight/config — expose the public Midnight config the browser
-  // contract client needs (contract address, indexer, proof server). Never
-  // include secrets.
+  // GET /v1/midnight/config — expose public network endpoints for browser
+  // wallets. Offer Files has no application contract address.
   server.get("/v1/midnight/config", async () => {
-    const contractAddress =
-      midnightContract?.contractAddress ?? process.env.MIDNIGHT_CONTRACT_ADDRESS;
-    if (!contractAddress) {
-      throw new Error("Midnight contract metadata is not available");
-    }
     return {
-      contractAddress,
       indexerUri: midnightNetworkConfig.indexer,
       indexerWsUri: midnightNetworkConfig.indexerWS,
       proofServerUri: midnightNetworkConfig.proofServer,
@@ -962,7 +946,7 @@ export const apiRouter: StartConfigApiRouter = async function (
               "Lace proved against a Merkle root this node has never synced. " +
               "Usually Lace's indexer URI differs from this node even when networkId matches " +
               `(node networkId=${MIDNIGHT_NETWORK_ID}, indexer=${midnightNetworkConfig.indexer}). ` +
-              "In Lace → undeployed, set indexer to this node's indexer, mint there, rebuild the offer. " +
+              "Configure Lace for this node's indexer, obtain same-chain inventory, then rebuild the offer. " +
               "Retrying the same blob will not help if the root is foreign.",
             diagnostics: {
               offerRoot: root,

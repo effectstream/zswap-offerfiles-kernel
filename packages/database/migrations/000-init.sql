@@ -129,8 +129,7 @@ CREATE TABLE canonical_token_registry_state (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Locally minted colours (WBTC, WETH, TESTTOKEN*) are NOT seeded: they derive
--- from the local contract address and change on every clean redeploy. The six
+-- Legacy local colours (WBTC, WETH, TESTTOKEN*) are NOT seeded. The six
 -- external faucet tokens below ARE seeded from the pinned ready Preprod
 -- registry, so a fresh database has canonical defaults even while the faucet
 -- service is offline. Source evidence and immutable snapshots live in
@@ -178,9 +177,8 @@ CREATE TABLE canonical_token_registry_state (
 --           one from the addresses above, so neither the row nor this comment
 --           can rot after a contract redeploy.
 --
--- Explicit local test helpers can still mint WBTC/WETH/TESTTOKEN* values with
--- 6 decimals. Those helpers are not the canonical external issuer and are not
--- run by start.dev.ts.
+-- Local test helpers must use externally issued same-chain values; none of
+-- WBTC/WETH/TESTTOKEN* is a canonical default or added here.
 INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES
 ('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 6, 'midnight-3'),
 -- preprod sNight — see the SNIGHT note above before selecting another network.

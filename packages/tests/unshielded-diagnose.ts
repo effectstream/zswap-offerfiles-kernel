@@ -17,15 +17,13 @@ import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { deriveLegs } from "@zswap-da/validator";
 
-import { joinOfferFiles, mintShielded, mintUnshielded } from "./lib/offer-files.ts";
+import { requireDistinctTokenColors } from "./lib/prefunded.ts";
 import { buildWallet, shieldedKeys, transferShielded, waitForShielded, waitForSync } from "./lib/wallet.ts";
 
 globalThis.WebSocket = WebSocket;
 setNetworkId(net.id as any);
 
 const TAG = "[diag]";
-const SEP = { T0: 0xb0, T1: 0xb1, U: 0xb2 } as const;
-const MINT = 1_000_000_000n;
 const FUND = 5_000_000n;
 const AMT = 1_000n;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -84,7 +82,12 @@ function introspect(label: string, tx: any) {
   }
 }
 
-console.log(`${TAG} building wallets + minting…`);
+const [T0, T1, U] = requireDistinctTokenColors([
+  "E2E_SHIELDED_TOKEN_0",
+  "E2E_SHIELDED_TOKEN_1",
+  "E2E_UNSHIELDED_TOKEN",
+]);
+console.log(`${TAG} building wallets with external prefunding prerequisites…`);
 const genesis = await buildWallet(net.walletSeed);
 // One wallet per offer so coin reservation from a prior unproven tx never
 // collides (that was a diagnostic artifact, not real behavior).
@@ -101,14 +104,9 @@ try {
   const pBunshielded = UnshieldedAddress.codec.decode(net.id as any, pB.unshieldedKeystore.getBech32Address());
   const pCaddr = await pC.wallet.shielded.getAddress();
 
-  const deployed = await joinOfferFiles(genesis);
-  const nonce = BigInt(Date.now());
-  const T0 = await mintShielded(deployed, SEP.T0, MINT, nonce);
-  const T1 = await mintShielded(deployed, SEP.T1, MINT, nonce + 1n);
-  const U = await mintUnshielded(deployed, SEP.U, MINT, pC.unshieldedAddress);
-  console.log(`${TAG} T0=${short(T0)} (shielded)  T1=${short(T1)} (shielded)  U=${short(U)} (unshielded→pC)`);
+  console.log(`${TAG} T0=${short(T0)} (shielded)  T1=${short(T1)} (shielded)  U=${short(U)} (pC must be prefunded)`);
 
-  // Fund pA + pB with T0; pC already minted U directly.
+  // Fund pA + pB from genesis; pC must already hold external U inventory.
   for (const [w, addr] of [[pA, pAaddr], [pB, pBaddr]] as const) {
     if ((await waitForShielded(genesis, T0, FUND, 24)) >= FUND) await transferShielded(genesis, T0, FUND, addr);
   }

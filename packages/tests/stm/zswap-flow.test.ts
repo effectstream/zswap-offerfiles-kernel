@@ -1,13 +1,10 @@
 // Full swap lifecycle folded into the Phase-B runner.
-// Infra is already up when this runs (Phase A + migrations + startup mint).
+// Infra is already up when this runs (Phase A + migrations).
 //
-// Flow: mint A/B via offer-files helpers → create A↔B offer
+// Flow: verify externally prefunded A/B → create A↔B offer
 //   → /v1/offers → wait for Celestia indexing
 //   → balance + settle on Midnight → nullifier consumed → offer ARCHIVED.
 //
-// Does NOT call mintTestTokens() — that races the orchestrator's
-// midnight-mint-test-tokens process (TransactionInvalidError).
-
 import type { Client } from "pg";
 import { assert } from "../helpers.ts";
 import {
@@ -21,7 +18,7 @@ import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { joinOfferFiles, mintShielded } from "../lib/offer-files.ts";
+import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
   buildWallet,
   shieldedKeys,
@@ -33,8 +30,6 @@ import { submitOffer } from "../lib/api.ts";
 globalThis.WebSocket = WebSocket;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const SEP = { A: 0xe0, B: 0xe1 } as const;
-const MINT_AMOUNT = 1_000_000_000n;
 const GIVE_AMOUNT = 500_000n;
 const WANT_AMOUNT = 750_000n;
 
@@ -49,7 +44,7 @@ export async function zswapFlowTest(db: Client): Promise<void> {
   };
   console.log("[lifecycle] before:", JSON.stringify(before));
 
-  // Startup mint (orchestrator) should have produced UnshieldedCreate events.
+  // External prefunding should have produced UnshieldedCreate events.
   const createdOk = await waitFor(
     "created_unshielded > 0",
     async () => (await count(db, "created_unshielded")) > 0,
@@ -60,7 +55,11 @@ export async function zswapFlowTest(db: Client): Promise<void> {
     async () => createdOk,
   );
 
-  console.log("[lifecycle] building genesis wallet + minting A/B…");
+  const [shieldedA, shieldedB] = requireDistinctTokenColors([
+    "E2E_SHIELDED_TOKEN_A",
+    "E2E_SHIELDED_TOKEN_B",
+  ]);
+  console.log("[lifecycle] building externally prefunded genesis wallet…");
   const genesis = await buildWallet(net.walletSeed);
 
   try {
@@ -73,15 +72,11 @@ export async function zswapFlowTest(db: Client): Promise<void> {
       );
     }
 
-    const deployed = await joinOfferFiles(genesis);
-    const nonce = BigInt(Date.now());
-    const shieldedA = await mintShielded(deployed, SEP.A, MINT_AMOUNT, nonce);
-    const shieldedB = await mintShielded(deployed, SEP.B, MINT_AMOUNT, nonce + 1n);
-
-    const haveMinted =
+    const haveInventory =
       (await waitForShielded(genesis, shieldedA, GIVE_AMOUNT, 24)) >= GIVE_AMOUNT &&
       (await waitForShielded(genesis, shieldedB, WANT_AMOUNT, 12)) >= WANT_AMOUNT;
-    await assert("genesis wallet holds both minted shielded colors", async () => haveMinted);
+    await assert("genesis wallet holds both externally issued colors", async () => haveInventory);
+    if (!haveInventory) throw new Error("genesis lacks required externally prefunded A/B inventory");
 
     const address = await genesis.wallet.shielded.getAddress();
     const keys = shieldedKeys(genesis);

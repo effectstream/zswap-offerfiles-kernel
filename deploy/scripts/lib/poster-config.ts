@@ -1,4 +1,4 @@
-// Environment -> `PosterConfig`. Pure apart from ONE injectable file read.
+// Environment -> `PosterConfig`. Pure and free of deployment artefacts.
 //
 // Everything the offer poster needs to decide what to do is resolved here, once,
 // at startup, and every refusal happens here rather than three minutes later in
@@ -24,30 +24,17 @@
 //     over the same coins. `redactConfig` is the ONLY way this object should
 //     ever reach a log.
 //
-//  3. COLOURS ARE DERIVED FROM THE CONTRACT, NOT CONFIGURED. `GIVE_TOKEN` /
-//     `WANT_TOKEN` accept a faucet preset NAME (WBTC, WETH, …) or a 64-hex
-//     colour; a name is resolved offline through `rawTokenType(domainSep, addr)`
-//     so it is right for THIS deployment and no other. An unshielded preset is
-//     refused outright — a cross-layer offer is rejected by the kernel (FR-014 /
-//     US4 scenario 3).
+//  3. TOKEN IDS ARE EXPLICIT. `GIVE_TOKEN` and `WANT_TOKEN` are required 64-hex
+//     shielded token IDs from the selected network's external registry. No
+//     issuer address, deployment JSON or local derivation participates.
 
 import { Buffer } from "node:buffer";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { mnemonicToSeed } from "@scure/bip39";
 
-import {
-  assertShieldedPreset,
-  isColourHex,
-  normaliseHex32,
-  normaliseTokenName,
-  presetKind,
-  resolveColour,
-} from "./faucet-mint.ts";
-import { baseUnitsToCoins, coinsToBaseUnits, DEFAULT_TOKEN_DECIMALS } from "../../../packages/solver-core/amount.ts";
-import { type GiveRange, MAX_DRAWABLE_BASE_UNITS } from "./poster-size.ts";
+export interface GiveRange {
+  minBase: bigint;
+  maxBase: bigint;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -76,30 +63,15 @@ export interface PosterConfig {
   readonly networkId: string;
   /** Kernel API base (`ZSWAP_API`). */
   readonly kernelBase: string;
-  /** The deployed offer-files contract, 64 lowercase hex. */
-  readonly contractAddress: string;
-  /** Where the contract address came from — safe to log, useful when it is wrong. */
-  readonly contractAddressSource: string;
-
   // ── legs ─────────────────────────────────────────────────────────────────
-  /** As configured (a preset NAME, or a 64-hex colour). */
+  /** Explicit 64-hex token ID. */
   readonly giveToken: string;
-  /** The give-leg NAME when one was configured; `undefined` for a raw colour.
-   *  Minting REQUIRES a name — the faucet derives the colour from it. */
-  readonly giveTokenName: string | undefined;
   readonly giveColour: string;
-  /** The FIXED per-mint size, in base units (`GIVE_AMOUNT`). When `giveRange`
-   *  is set this value is unused — every fresh mint draws its own size — and it
-   *  is kept only so the dump shows what a range-less run would have posted. */
+  /** Required prefunded coin size, in base units (`GIVE_AMOUNT`). */
   readonly giveAmount: bigint;
-  /** `GIVE_MIN`/`GIVE_MAX` in base units, when the operator asked for a spread
-   *  of sizes instead of one (00027 FR-001). Mutually exclusive with
-   *  `GIVE_AMOUNT`; `undefined` means today's fixed-size behaviour, unchanged. */
+  /** Optional accepted prefunded coin-size interval, in base units. */
   readonly giveRange: GiveRange | undefined;
-  /** `GIVE_SIZE_SEED` — makes the draw reproducible (FR-002). Not a secret. */
-  readonly giveSizeSeed: string | undefined;
   readonly wantToken: string;
-  readonly wantTokenName: string | undefined;
   readonly wantColour: string;
   /** `WANT_AMOUNT`, when the operator forces a fixed want leg (FR-005). */
   readonly forcedWantAmount: bigint | undefined;
@@ -107,7 +79,6 @@ export interface PosterConfig {
   // ── loop ─────────────────────────────────────────────────────────────────
   readonly postIntervalMs: number;
   readonly offerTtlMinutes: number;
-  readonly coinVisibleTimeoutMs: number;
   readonly reconcileIntervalMs: number;
   readonly maxReoffersPerTick: number;
   readonly shutdownGraceMs: number;
@@ -120,10 +91,7 @@ export interface PosterConfig {
   readonly journalReset: boolean;
 
   // ── budgets ──────────────────────────────────────────────────────────────
-  /** Minimum spendable DUST before a tick is allowed to MINT (FR-010). */
-  readonly minDust: bigint;
   readonly syncTimeoutMs: number;
-  readonly dustWaitTimeoutMs: number;
   /** Bounded `ROOT_UNKNOWN` / `UTXO_NOT_LIVE` retries on `POST /v1/offers`. */
   readonly postRetries: number;
   readonly postRetryMs: number;
@@ -140,8 +108,7 @@ export type ConfigErrorCode =
   | "CONFLICT"
   | "MALFORMED"
   | "SEED_COLLISION"
-  | "UNSUPPORTED_TOKEN"
-  | "NO_CONTRACT";
+  | "UNSUPPORTED_TOKEN";
 
 /** Every refusal in this module. `code` lets the caller pick an exit status
  *  without matching on prose. The message NEVER contains a secret. */
@@ -205,32 +172,17 @@ function readBigint(env: EnvMap, key: string, fallback: bigint, opts: { min?: bi
   return value;
 }
 
-/**
- * A WHOLE-COIN amount (`"0.1"`, `"10"`, `"1.5"`) to base units at the registry's
- * 6 decimals.
- *
- * `coinsToBaseUnits` is exact-or-nothing by design (00024 Q9), so "more than 6
- * fraction digits" arrives here as a throw and leaves as a `ConfigError` naming
- * the variable — which is also what makes spec edge case 1 (a range narrower
- * than the 6-decimal grid, e.g. `0.1000001`–`0.1000002`) impossible to express:
- * a bound finer than one base unit is rejected before any range check runs, so
- * every accepted range contains at least one representable value by
- * construction.
- */
-function readCoins(env: EnvMap, key: string): bigint | undefined {
+function readOptionalBigint(env: EnvMap, key: string): bigint | undefined {
   const raw = readEnv(env, key);
   if (raw === undefined) return undefined;
-  try {
-    return coinsToBaseUnits(raw, DEFAULT_TOKEN_DECIMALS);
-  } catch (err) {
+  if (!/^\d+$/.test(raw)) {
     throw new ConfigError(
       "MALFORMED",
-      `${key} must be a whole-coin amount with at most ${DEFAULT_TOKEN_DECIMALS} decimal places ` +
-        `(e.g. 0.1, 1.5, 10), got ${JSON.stringify(raw)}: ` +
-        (err instanceof Error ? err.message : String(err)),
+      `${key} must be a positive decimal integer in the token's base units, got ${JSON.stringify(raw)}`,
       key,
     );
   }
+  return BigInt(raw);
 }
 
 /**
@@ -243,8 +195,8 @@ function readCoins(env: EnvMap, key: string): bigint | undefined {
  * asked for.
  */
 export function parseGiveRange(env: EnvMap): GiveRange | undefined {
-  const minBase = readCoins(env, "GIVE_MIN");
-  const maxBase = readCoins(env, "GIVE_MAX");
+  const minBase = readOptionalBigint(env, "GIVE_MIN");
+  const maxBase = readOptionalBigint(env, "GIVE_MAX");
 
   if (minBase === undefined && maxBase === undefined) return undefined;
   if (minBase === undefined) {
@@ -254,28 +206,16 @@ export function parseGiveRange(env: EnvMap): GiveRange | undefined {
     throw new ConfigError("MISSING", "GIVE_MIN is set but GIVE_MAX is not; a range needs both ends", "GIVE_MAX");
   }
   if (minBase < 1n) {
-    // Not merely a taste: the draw is `min · (max/min)^u`, and `log(0)` is
-    // `-Infinity`. A zero-coin offer is also unpostable.
     throw new ConfigError(
       "MALFORMED",
-      `GIVE_MIN must be greater than zero, got ${baseUnitsToCoins(minBase, DEFAULT_TOKEN_DECIMALS)} coins`,
+      `GIVE_MIN must be greater than zero base units, got ${minBase}`,
       "GIVE_MIN",
     );
   }
   if (maxBase < minBase) {
     throw new ConfigError(
       "MALFORMED",
-      `GIVE_MAX (${baseUnitsToCoins(maxBase, DEFAULT_TOKEN_DECIMALS)} coins) must be >= GIVE_MIN ` +
-        `(${baseUnitsToCoins(minBase, DEFAULT_TOKEN_DECIMALS)} coins)`,
-      "GIVE_MAX",
-    );
-  }
-  if (maxBase > MAX_DRAWABLE_BASE_UNITS) {
-    throw new ConfigError(
-      "MALFORMED",
-      `GIVE_MAX must be at most ${baseUnitsToCoins(MAX_DRAWABLE_BASE_UNITS, DEFAULT_TOKEN_DECIMALS)} ` +
-        `coins (${MAX_DRAWABLE_BASE_UNITS} base units): above that the log-uniform draw cannot round ` +
-        `back to the exact amount it drew. Use a fixed GIVE_AMOUNT for sizes that large`,
+      `GIVE_MAX (${maxBase}) must be >= GIVE_MIN (${minBase}) base units`,
       "GIVE_MAX",
     );
   }
@@ -417,128 +357,31 @@ export async function resolveSeed(
 }
 
 // ---------------------------------------------------------------------------
-// Contract address
-// ---------------------------------------------------------------------------
-
-/** The repo root, from this file's location (`deploy/scripts/lib` -> up 3).
- *  `fileURLToPath`, not `URL.pathname`: pathname percent-encodes, which breaks
- *  a checkout under a directory with a space (the same note as
- *  `packages/solver-core/offer-files.ts:21-23`). */
-export const REPO_ROOT: string = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-
-export interface ConfigIO {
-  /** Read a UTF-8 file, or return `undefined` when it does not exist. */
-  readFile(path: string): string | undefined;
-}
-
-const defaultIO: ConfigIO = {
-  readFile(path: string): string | undefined {
-    try {
-      return readFileSync(path, "utf-8");
-    } catch {
-      return undefined;
-    }
-  },
-};
-
-export interface ContractAddressResolution {
-  address: string;
-  /** Human-readable provenance for the startup log. */
-  source: string;
-}
-
-/**
- * Where the deployed contract address comes from, in priority order:
- *
- *  1. `MIDNIGHT_CONTRACT_ADDRESS` — what `entrypoint-common.sh`'s
- *     `adopt_contract_address` EXPORTS (`:125`) after waiting for the
- *     `offerfiles-deploy` one-shot. In compose this is always the live path.
- *  2. `${CONTRACT_SHARE_DIR}/contract-offer-files.<networkId>.json` — the shared
- *     volume the same function reads (`:98`), for a poster started without the
- *     entrypoint.
- *  3. `<repo>/packages/contracts-midnight/contract-offer-files.<networkId>.json`
- *     — where the entrypoint INSTALLS it (`:112`) and where
- *     `packages/solver-core/offer-files.ts:53-57` reads it from. That file is
- *     also what a local `bun run` sees after a local deploy.
- *
- * Note the network id in the file name: `getContractAddress()` in solver-core
- * hard-codes `undeployed`, which is right for the compose stack and wrong for
- * preprod. The poster is network-aware because US4 requires a preprod dry run.
- */
-export function resolveContractAddress(
-  env: EnvMap,
-  networkId: string,
-  io: ConfigIO = defaultIO,
-): ContractAddressResolution {
-  const explicit = readEnv(env, "MIDNIGHT_CONTRACT_ADDRESS");
-  if (explicit !== undefined) {
-    return {
-      address: normaliseHex32(explicit, "MIDNIGHT_CONTRACT_ADDRESS"),
-      source: "MIDNIGHT_CONTRACT_ADDRESS",
-    };
-  }
-
-  const fileName = `contract-offer-files.${networkId}.json`;
-  const shareDir = readString(env, "CONTRACT_SHARE_DIR", "/srv/offerfiles-deploy");
-  const candidates = [
-    resolve(shareDir, fileName),
-    resolve(REPO_ROOT, "packages/contracts-midnight", fileName),
-  ];
-
-  for (const path of candidates) {
-    const text = io.readFile(path);
-    if (text === undefined) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch (err) {
-      throw new ConfigError("NO_CONTRACT", `${path} is not valid JSON (${String(err)})`);
-    }
-    const address = (parsed as { contractAddress?: unknown } | null)?.contractAddress;
-    if (typeof address !== "string" || address.trim() === "") {
-      throw new ConfigError("NO_CONTRACT", `${path} has no string "contractAddress"`);
-    }
-    return { address: normaliseHex32(address.trim(), `contractAddress in ${path}`), source: path };
-  }
-
-  throw new ConfigError(
-    "NO_CONTRACT",
-    `no deployed offer-files contract: set MIDNIGHT_CONTRACT_ADDRESS, or make one of ` +
-      `${candidates.join(" / ")} readable (the offerfiles-deploy one-shot publishes it)`,
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Legs
 // ---------------------------------------------------------------------------
 
 interface ResolvedLeg {
-  /** As configured. */
   token: string;
-  /** The preset/faucet NAME, or `undefined` when a raw colour was given. */
-  name: string | undefined;
   colour: string;
 }
 
-/** A leg is either a faucet token NAME (minted and derived offline) or a raw
- *  64-hex colour (usable as a want leg, never mintable). Unshielded presets are
- *  refused: a cross-layer offer is rejected by the kernel (US4 scenario 3). */
-function resolveLeg(env: EnvMap, key: string, fallback: string, contractAddress: string): ResolvedLeg {
-  const token = readString(env, key, fallback);
-  try {
-    assertShieldedPreset(token);
-  } catch (err) {
+function resolveLeg(env: EnvMap, key: string): ResolvedLeg {
+  const raw = readEnv(env, key);
+  if (raw === undefined) {
     throw new ConfigError(
-      "UNSUPPORTED_TOKEN",
-      `${key}=${JSON.stringify(token)}: ${err instanceof Error ? err.message : String(err)}`,
+      "MISSING",
+      `${key} is required: set the 64-hex token ID from the selected network's external registry`,
       key,
     );
   }
-  if (isColourHex(token)) {
-    return { token, name: undefined, colour: normaliseHex32(token, key) };
+  const colour = raw.replace(/^0[xX]/, "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(colour)) {
+    throw new ConfigError("MALFORMED", `${key} must be a 64-hex token ID`, key);
   }
-  const name = normaliseTokenName(token);
-  return { token, name, colour: resolveColour(name, contractAddress) };
+  if (colour === "0".repeat(64)) {
+    throw new ConfigError("UNSUPPORTED_TOKEN", `${key} is native NIGHT; offer legs must be shielded`, key);
+  }
+  return { token: colour, colour };
 }
 
 // ---------------------------------------------------------------------------
@@ -549,15 +392,13 @@ function resolveLeg(env: EnvMap, key: string, fallback: string, contractAddress:
  * Parse and validate the poster's whole environment.
  *
  * Async only because BIP-39 seed derivation is. Throws {@link ConfigError} for
- * every refusal; nothing here touches the network, and the only filesystem
- * access is the injectable contract-address read.
+ * every refusal; nothing here touches the network or filesystem.
  */
-export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): Promise<PosterConfig> {
+export async function parsePosterConfig(env: EnvMap): Promise<PosterConfig> {
   const { seed, source: seedSource } = await resolveSeed(env);
 
   // Endpoint defaults MUST match `@effectstream/midnight-contracts`'s
-  // `midnightNetworkConfig`, which is what the wallet facade and the contract
-  // join actually read (`src/midnight-env.ts:29-83`). The poster resolves them
+  // `midnightNetworkConfig`, which is what the wallet facade reads. The poster resolves them
   // itself as well so the startup log can show them and a mismatch is visible.
   const networkId = readString(env, "MIDNIGHT_NETWORK_ID", "undeployed");
   const isUndeployed = networkId === "undeployed";
@@ -593,40 +434,17 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
     "",
   );
 
-  const { address: contractAddress, source: contractAddressSource } = resolveContractAddress(
-    env,
-    networkId,
-    io,
-  );
-
-  const give = resolveLeg(env, "GIVE_TOKEN", "WBTC", contractAddress);
-  const want = resolveLeg(env, "WANT_TOKEN", "WETH", contractAddress);
+  const give = resolveLeg(env, "GIVE_TOKEN");
+  const want = resolveLeg(env, "WANT_TOKEN");
   if (give.colour === want.colour) {
     throw new ConfigError(
       "UNSUPPORTED_TOKEN",
-      `GIVE_TOKEN and WANT_TOKEN resolve to the same colour ${give.colour.slice(0, 12)}…; ` +
+      `GIVE_TOKEN and WANT_TOKEN are the same token ID ${give.colour.slice(0, 12)}…; ` +
         `the kernel answers 400 VALIDATION for a quote whose legs are equal`,
       "WANT_TOKEN",
     );
   }
-  if (give.name === undefined) {
-    // The faucet mints from a NAME (`mint_shielded(domainSepFromName(name), …)`),
-    // so a raw colour on the give leg can never be minted. Re-offering a coin
-    // that is already in the wallet would still work, but a poster that can only
-    // re-offer is not what FR-003 describes — refuse rather than degrade.
-    throw new ConfigError(
-      "UNSUPPORTED_TOKEN",
-      `GIVE_TOKEN must be a faucet token NAME (e.g. WBTC), not a raw colour: the poster mints the ` +
-        `give leg and the faucet derives the colour from the name`,
-      "GIVE_TOKEN",
-    );
-  }
-  // `presetKind` returns undefined for a name the frontend faucet does not
-  // offer. That is allowed (the derivation is defined for any name) but worth
-  // recording so the startup log can say so.
-  void presetKind(give.name);
-
-  // ── give size: one fixed amount, or a range to draw from (00027 FR-001) ──
+  // ── prefunded coin size: one exact amount, or an accepted base-unit range ──
   const giveRange = parseGiveRange(env);
   if (giveRange !== undefined && readEnv(env, "GIVE_AMOUNT") !== undefined) {
     throw new ConfigError(
@@ -649,30 +467,21 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
     networkUrls,
     networkId,
     kernelBase,
-    contractAddress,
-    contractAddressSource,
 
     giveToken: give.token,
-    giveTokenName: give.name,
     giveColour: give.colour,
-    // BASE UNITS, as the env has always been. The default is ONE WHOLE COIN
-    // at the registry's 6 decimals (00024 Q5), so a poster journal reads in
-    // round coins instead of in millionths.
-    giveAmount: readBigint(env, "GIVE_AMOUNT", coinsToBaseUnits(1n, DEFAULT_TOKEN_DECIMALS), {
+    // Base units are explicit because tokens may have 6, 8, 18 or other
+    // registry-defined decimals. The default accepts a one-base-unit coin.
+    giveAmount: readBigint(env, "GIVE_AMOUNT", 1n, {
       min: 1n,
     }),
-    // 00027: when this is set, `giveAmount` above is inert and every FRESH mint
-    // draws its own size log-uniformly between the two bounds.
     giveRange,
-    giveSizeSeed: readEnv(env, "GIVE_SIZE_SEED"),
     wantToken: want.token,
-    wantTokenName: want.name,
     wantColour: want.colour,
     forcedWantAmount,
 
     postIntervalMs: readInt(env, "POST_INTERVAL_MS", 60_000, { min: 1 }),
     offerTtlMinutes: readInt(env, "OFFER_TTL_MINUTES", 60, { min: 1 }),
-    coinVisibleTimeoutMs: readInt(env, "COIN_VISIBLE_TIMEOUT_MS", 120_000, { min: 1 }),
     reconcileIntervalMs: readInt(env, "RECONCILE_INTERVAL_MS", 60_000, { min: 1 }),
     maxReoffersPerTick: readInt(env, "POSTER_MAX_REOFFERS_PER_TICK", 1, { min: 1 }),
     shutdownGraceMs: readInt(env, "SHUTDOWN_GRACE_MS", 15_000, { min: 0 }),
@@ -683,9 +492,7 @@ export async function parsePosterConfig(env: EnvMap, io: ConfigIO = defaultIO): 
     journalFile: readString(env, "POSTER_JOURNAL_FILE", "/var/lib/offer-poster/journal.json"),
     journalReset: readBool(env, "POSTER_JOURNAL_RESET", false),
 
-    minDust: readBigint(env, "POSTER_MIN_DUST", 1n, { min: 0n }),
     syncTimeoutMs: readInt(env, "POSTER_SYNC_TIMEOUT_MS", 180_000, { min: 1 }),
-    dustWaitTimeoutMs: readInt(env, "POSTER_DUST_WAIT_TIMEOUT_MS", 300_000, { min: 1 }),
     postRetries: readInt(env, "POSTER_POST_RETRIES", 24, { min: 1 }),
     postRetryMs: readInt(env, "POSTER_POST_RETRY_MS", 5_000, { min: 1 }),
     liveTries: readInt(env, "POSTER_LIVE_TRIES", 40, { min: 1 }),

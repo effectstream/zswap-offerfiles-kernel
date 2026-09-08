@@ -16,8 +16,7 @@
 # orchestrator (`bun run dev`, `start.dev.ts`) never runs in a container:
 # `launchMidnight()`/`launchCelestia()` open with `stopProcessAtPort [9944,
 # 8088, 6300, 26657, 26658, 3334]`, which would kill the very chain services
-# this project runs as siblings, and their deploy step would mint a second
-# contract identity while the volumes still referenced the first.
+# this project runs as siblings.
 #
 # ── Ports ────────────────────────────────────────────────────────────────────
 # This is a SHARED host. Nothing binds a wildcard address and nothing takes a
@@ -74,8 +73,6 @@ x-kernel-image: &kernel-image
   build:
     context: ..
     dockerfile: deploy/images/kernel/Dockerfile
-    args:
-      COMPACT_VERSION: ${COMPACT_VERSION:-0.30.0}
 
 x-logging: &logging
   logging:
@@ -238,26 +235,6 @@ services:
       retries: 40
       start_period: 15s
 
-  # Contract-only one-shot. It deploys exactly once per volume and atomically
-  # publishes the address. The kernel starts next; minting needs its healthy API.
-  offerfiles-deploy:
-    <<: [*kernel-image, *logging]
-    entrypoint: ["/usr/local/bin/entrypoint-deploy.sh"]
-    restart: "no"
-    depends_on:
-      midnight-node:
-        condition: service_healthy
-      proof-server:
-        condition: service_healthy
-      indexer:
-        condition: service_healthy
-    environment:
-      <<: [*midnight-endpoints, *celestia-endpoints]
-      MIDNIGHT_STORAGE_PASSWORD: ${MIDNIGHT_STORAGE_PASSWORD:-YourPasswordMy1!}
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
-    volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy
-
   # ══ kernel components ═══════════════════════════════════════════════════════
 
   kernel:
@@ -269,11 +246,8 @@ services:
         condition: service_healthy
       celestia:
         condition: service_healthy
-      offerfiles-deploy:
-        condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
       EFFECTSTREAM_API_PORT: "9999"
       DB_HOST: pglite
       DB_PORT: "5432"
@@ -299,8 +273,6 @@ services:
       BATCHER_SPONSOR_UNPRICED: ${BATCHER_SPONSOR_UNPRICED:-allow}
       SPONSOR_DISCOUNT_BPS: ${SPONSOR_DISCOUNT_BPS:-250}
       PRICE_FEED_MAP: ${PRICE_FEED_MAP:-}
-    volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy:ro
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${HOST_KERNEL_PORT:-19999}:9999"
     healthcheck:
@@ -315,27 +287,6 @@ services:
       retries: 60
       start_period: 60s
 
-  # Post-kernel one-shot: mint the three dev tokens, register their names through
-  # the live /v1 API, and atomically publish minted-tokens.json. It retains the
-  # old non-fatal mint behavior, but every wallet consumer waits for it to exit
-  # so no second facade overlaps the genesis mint wallet.
-  mint-test-tokens:
-    <<: [*kernel-image, *logging]
-    entrypoint: ["/usr/local/bin/entrypoint-mint-test-tokens.sh"]
-    restart: "no"
-    depends_on:
-      kernel:
-        condition: service_healthy
-      offerfiles-deploy:
-        condition: service_completed_successfully
-    environment:
-      <<: *midnight-endpoints
-      MIDNIGHT_STORAGE_PASSWORD: ${MIDNIGHT_STORAGE_PASSWORD:-YourPasswordMy1!}
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
-      ZSWAP_API: http://kernel:9999
-    volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy
-
   batcher:
     <<: [*kernel-image, *logging]
     entrypoint: ["/usr/local/bin/entrypoint-batcher.sh"]
@@ -343,15 +294,8 @@ services:
     depends_on:
       celestia:
         condition: service_healthy
-      offerfiles-deploy:
-        condition: service_completed_successfully
-      mint-test-tokens:
-        condition: service_completed_successfully
-      register-minted-tokens:
-        condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
       BATCHER_PORT: "3334"
       BATCHER_STORAGE_DIR: /var/lib/batcher
       # …0003 by default (packages/batcher/config.ts). It must differ from every
@@ -372,7 +316,6 @@ services:
       BATCHER_PRICE_MAX_AGE_MS: ${BATCHER_PRICE_MAX_AGE_MS:-172800000}
       SPONSOR_DISCOUNT_BPS: ${SPONSOR_DISCOUNT_BPS:-250}
     volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - batcher-data:/var/lib/batcher
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${HOST_BATCHER_PORT:-13334}:3334"
@@ -387,19 +330,11 @@ services:
       retries: 60
       start_period: 60s
 
-  # ══ devnet seeding (one-shots) ══════════════════════════════════════════════
+  # ══ externally prefunded inventory checks (one-shots) ═══════════════════════
   #
-  # These two exist because of a silent failure mode, not for convenience. Since
-  # R2, ladder publication is bounded by the solver's own spendable inventory,
-  # and the ladder itself is derived from the mirrored maker book. With an
-  # unfunded solver or an empty book the stack reaches all-services-healthy, the
-  # solver authenticates to the relay, and it publishes empty capabilities and
-  # empty levels forever — with nothing logged as an error. Both halves are
-  # therefore provisioned by the deployment, and both fail LOUDLY.
-  #
-  # DEVNET ONLY: they mint to public dev seeds on a throwaway chain. Set
-  # SOLVER_PROVISION_ENABLED=false / MAKER_OFFER_ENABLED=false for a deployment
-  # that funds its solver and sources its book out of band.
+  # These services never deploy or mint an asset. Operators first fund the
+  # configured wallets through the external issuer, then provide both 64-hex
+  # token IDs. The checks fail with the missing balance/token prerequisite.
 
   solver-provision:
     <<: [*kernel-image, *logging]
@@ -412,27 +347,11 @@ services:
         condition: service_healthy
       indexer:
         condition: service_healthy
-      offerfiles-deploy:
-        condition: service_completed_successfully
-      mint-test-tokens:
-        condition: service_completed_successfully
-      register-minted-tokens:
-        condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
-      SOLVER_PROVISION_ENABLED: ${SOLVER_PROVISION_ENABLED:-true}
-      # ── 00006-V1: which HALF of provisioning runs ──────────────────────────
-      # "true"  → packages/solver/scripts/bootstrap-dev.ts: NIGHT + dust
-      #           registration + MINT both swap tokens. The pre-00006 funded
-      #           path, kept as SC-004's control.
-      # "false" → deploy/scripts/provision-solver-fees.ts: NIGHT + dust
-      #           registration and NOTHING ELSE. The solver's wallet is left
-      #           holding zero of every swap token, which since 00006 is enough
-      #           to publish and settle whole-maker rungs.
-      # Distinct from SOLVER_PROVISION_ENABLED=false, which skips fee currency
-      # too and leaves a solver that cannot pay for anything.
-      SOLVER_PROVISION_MINT_TOKENS: ${SOLVER_PROVISION_MINT_TOKENS:-true}
+      SOLVER_PROVISION_ENABLED: ${SOLVER_PROVISION_ENABLED:-false}
+      SOLVER_PROVISION_TOKEN_IN: ${SOLVER_PROVISION_TOKEN_IN:-}
+      SOLVER_PROVISION_TOKEN_OUT: ${SOLVER_PROVISION_TOKEN_OUT:-}
       # Where the fee-only path writes its machine-readable receipt: the solver
       # wallet's balances as MEASURED by the only process entitled to open that
       # facade, at the moment provisioning finished and before the solver boots.
@@ -445,7 +364,6 @@ services:
       SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
       SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-/srv/solver-config/ladders.dev.json}
     volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - solver-config:/srv/solver-config
 
   maker-offer:
@@ -455,23 +373,12 @@ services:
     depends_on:
       kernel:
         condition: service_healthy
-      offerfiles-deploy:
-        condition: service_completed_successfully
-      mint-test-tokens:
-        condition: service_completed_successfully
-      register-minted-tokens:
-        condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
-      MAKER_OFFER_ENABLED: ${MAKER_OFFER_ENABLED:-true}
+      MAKER_OFFER_ENABLED: ${MAKER_OFFER_ENABLED:-false}
       ZSWAP_API: http://kernel:9999
-      # The genesis wallet by default: `mint-test-tokens` credits exactly that
-      # wallet, so it is the one that can actually give a test token away.
+      # This wallet must already hold GIVE_TOKEN and enough NIGHT/DUST.
       MAKER_SEED: ${MAKER_OFFER_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
-      # Unset ⇒ read from minted-tokens.json, published on the shared volume by
-      # the post-kernel mint one-shot. Colors derive from the deployed contract
-      # address, so they differ on every fresh stack and cannot be written here.
       GIVE_TOKEN: ${MAKER_OFFER_GIVE_TOKEN:-}
       WANT_TOKEN: ${MAKER_OFFER_WANT_TOKEN:-}
       GIVE_AMOUNT: ${MAKER_OFFER_GIVE_AMOUNT:-500000}
@@ -479,40 +386,16 @@ services:
       TTL_MINUTES: ${MAKER_OFFER_TTL_MINUTES:-120}
       MAKER_OFFER_MARKER_DIR: /var/lib/maker-offer
     volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - maker-offer-state:/var/lib/maker-offer
-
-  # Compatibility/backstop registration for this release. The preceding mint
-  # one-shot already posts all three names through /v1/known-tokens; on a clean
-  # stack this service must therefore observe three 409 "already registered"
-  # outcomes. It remains non-fatal for operators with the registry disabled.
-  register-minted-tokens:
-    <<: [*kernel-image, *logging]
-    entrypoint: ["/usr/local/bin/entrypoint-register-minted-tokens.sh"]
-    restart: "no"
-    depends_on:
-      kernel:
-        condition: service_healthy
-      offerfiles-deploy:
-        condition: service_completed_successfully
-      mint-test-tokens:
-        condition: service_completed_successfully
-    environment:
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
-      ZSWAP_API: http://kernel:9999
-      REGISTER_MINTED_TOKENS_ENABLED: ${REGISTER_MINTED_TOKENS_ENABLED:-true}
-    volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy:ro
 
   # ══ Midnight Intents relay (UNMODIFIED reference) ═══════════════════════════
 
 
   # ── the offer poster (00007, profile: poster) ────────────────────────────────
   # OPT-IN, and unlike `maker-offer` above it is not a seeding one-shot: it is a
-  # LOOP that every POST_INTERVAL_MS either re-offers a coin its journal says
-  # came back, or mints one fresh GIVE_TOKEN coin from the faucet circuit (fees
-  # from its OWN dust) and posts a single ZSwap offer whose only input is that
-  # exact coin. `docker compose up` does not start it; see deploy/README.md.
+  # LOOP that every POST_INTERVAL_MS either re-offers a released journal coin or
+  # adopts another already-spendable GIVE_TOKEN coin from its prefunded wallet.
+  # It never mints. `docker compose up` does not start it; see deploy/README.md.
   #
   # ── why the *midnight-endpoints anchor is NOT merged here ───────────────────
   # That anchor carries `MIDNIGHT_WALLET_SEED: ${MIDNIGHT_GENESIS_SEED:-…0001}`,
@@ -540,19 +423,12 @@ services:
     depends_on:
       kernel:
         condition: service_healthy
-      offerfiles-deploy:
-        condition: service_completed_successfully
-      mint-test-tokens:
-        condition: service_completed_successfully
-      register-minted-tokens:
-        condition: service_completed_successfully
     environment:
       MIDNIGHT_NETWORK_ID: ${MIDNIGHT_NETWORK_ID:-undeployed}
       MIDNIGHT_NODE_HTTP: http://midnight-node:9944
       MIDNIGHT_INDEXER_HTTP: http://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}
       MIDNIGHT_INDEXER_WS: ws://indexer:8088${MIDNIGHT_INDEXER_API_PATH:-/api/v3/graphql}/ws
       MIDNIGHT_PROOF_SERVER_URL: http://proof-server:6300
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
       ZSWAP_API: http://kernel:9999
       # REQUIRED, and deliberately WITHOUT a default. A shared default seed
       # would put two posters — or a poster and a maker — on one wallet on the
@@ -565,20 +441,14 @@ services:
       # The alternative wallet input: a BIP-39 phrase, derived Lace-compatibly.
       # Set exactly ONE of the two — both together is a startup error.
       POSTER_MNEMONIC: ${OFFER_POSTER_MNEMONIC:-}
-      # Every knob below is blank-by-default ON PURPOSE: blank means "the code's
-      # default", which is the single place those numbers are written down
-      # (deploy/scripts/lib/poster-config.ts). The entrypoint unsets the blank
-      # ones so the container's environment never claims otherwise.
+      # Both token IDs are required by the opt-in entrypoint. They are explicit
+      # 64-hex IDs from the selected network's registry.
       GIVE_TOKEN: ${OFFER_POSTER_GIVE_TOKEN:-}
       GIVE_AMOUNT: ${OFFER_POSTER_GIVE_AMOUNT:-}
-      # A RANGE instead of the fixed amount above (00027): whole coins, at most
-      # 6 decimals, drawn log-uniformly per FRESH mint so the book carries a
-      # spread of sizes. Both ends or neither; mutually exclusive with
-      # GIVE_AMOUNT (the poster exits 78 naming both). GIVE_SIZE_SEED makes the
-      # sequence reproducible and is not a secret.
+      # Optional base-unit inventory filter. Both ends or neither; mutually
+      # exclusive with GIVE_AMOUNT.
       GIVE_MIN: ${OFFER_POSTER_GIVE_MIN:-}
       GIVE_MAX: ${OFFER_POSTER_GIVE_MAX:-}
-      GIVE_SIZE_SEED: ${OFFER_POSTER_SIZE_SEED:-}
       WANT_TOKEN: ${OFFER_POSTER_WANT_TOKEN:-}
       # Blank = the want leg is sized from GET /v1/quote every tick, which is
       # what keeps the offer sponsorable. Setting it FORCES an amount and
@@ -586,25 +456,19 @@ services:
       WANT_AMOUNT: ${OFFER_POSTER_WANT_AMOUNT:-}
       POST_INTERVAL_MS: ${OFFER_POSTER_INTERVAL_MS:-}
       OFFER_TTL_MINUTES: ${OFFER_POSTER_TTL_MINUTES:-}
-      COIN_VISIBLE_TIMEOUT_MS: ${OFFER_POSTER_COIN_VISIBLE_TIMEOUT_MS:-}
       RECONCILE_INTERVAL_MS: ${OFFER_POSTER_RECONCILE_INTERVAL_MS:-}
       POSTER_MAX_REOFFERS_PER_TICK: ${OFFER_POSTER_MAX_REOFFERS_PER_TICK:-}
       SHUTDOWN_GRACE_MS: ${OFFER_POSTER_SHUTDOWN_GRACE_MS:-}
       HEALTH_STALE_TICKS: ${OFFER_POSTER_HEALTH_STALE_TICKS:-}
-      # The floor of spendable DUST a tick requires before it will MINT (a
-      # re-offer costs none). P5 measures the real per-mint cost; until then the
-      # code's default of 1 means "any dust at all".
-      POSTER_MIN_DUST: ${OFFER_POSTER_MIN_DUST:-}
       POSTER_SYNC_TIMEOUT_MS: ${OFFER_POSTER_SYNC_TIMEOUT_MS:-}
-      POSTER_DUST_WAIT_TIMEOUT_MS: ${OFFER_POSTER_DUST_WAIT_TIMEOUT_MS:-}
       # POST /v1/offers retry ladder (ROOT_UNKNOWN / UTXO_NOT_LIVE only) and the
       # liveness poll that follows an accepted post.
       POSTER_POST_RETRIES: ${OFFER_POSTER_POST_RETRIES:-}
       POSTER_POST_RETRY_MS: ${OFFER_POSTER_POST_RETRY_MS:-}
       POSTER_LIVE_TRIES: ${OFFER_POSTER_LIVE_TRIES:-}
       POSTER_LIVE_INTERVAL_MS: ${OFFER_POSTER_LIVE_INTERVAL_MS:-}
-      # Startup-only: derive the colours, read a quote, report, exit 0. Never
-      # mints, never posts. `restart: unless-stopped` will keep re-running it,
+      # Startup-only: inspect configured inventory, read a quote, report, exit 0.
+      # Never posts. `restart: unless-stopped` will keep re-running it,
       # so use `docker compose run --rm offer-poster` for a one-off dry run.
       DRY_RUN: ${OFFER_POSTER_DRY_RUN:-}
       # Refuses to start on a corrupt or foreign journal unless this is true —
@@ -619,7 +483,6 @@ services:
       # HOST_OFFER_POSTER_HEALTH_PORT.
       POSTER_HEALTH_PORT: "9977"
     volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - offer-poster-state:/var/lib/offer-poster
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${HOST_OFFER_POSTER_HEALTH_PORT:-19977}:9977"
@@ -637,8 +500,8 @@ services:
       # `degraded` (no dust yet) — 503 arrives only after HEALTH_STALE_TICKS
       # consecutive FAILED ticks. So this window is not about the first 200: it
       # is how long the SERVER may take to bind at all, and binding happens
-      # after wallet sync + dust registration + the dust wait + the contract
-      # join. Fifteen minutes covers a cold indexer sync with room to spare.
+      # after wallet sync and inventory inspection. Fifteen minutes covers a
+      # cold indexer sync with room to spare.
       start_period: 15m
   relay:
     <<: *logging
@@ -722,12 +585,6 @@ services:
         condition: service_healthy
       relay:
         condition: service_healthy
-      offerfiles-deploy:
-        condition: service_completed_successfully
-      mint-test-tokens:
-        condition: service_completed_successfully
-      register-minted-tokens:
-        condition: service_completed_successfully
       # NOT just ordering: solver-provision drives a wallet on SOLVER_SEED, and
       # two facades on one seed against one node force each other's connection
       # down. It also writes the ladder config this service reads.
@@ -735,7 +592,6 @@ services:
         condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
       # ── the seven mandatory boundaries of `bun run start.solver.ts` ────────
       # (MIDNIGHT_NETWORK_ID arrives via *midnight-endpoints.) Omitting ANY of
       # these is a deterministic exit 1 listing all of them — SC-004's
@@ -806,10 +662,9 @@ services:
       SOLVER_DUST_MAX_PER_JOB: ${SOLVER_DUST_MAX_PER_JOB:-}
       SOLVER_DUST_MAX_PER_WINDOW: ${SOLVER_DUST_MAX_PER_WINDOW:-}
       SOLVER_DUST_WINDOW_MS: ${SOLVER_DUST_WINDOW_MS:-}
-      # The GENERATED ladder, not the in-repo one. Token colors derive from the
-      # deployed contract address, so the checked-in `ladders.dev.json` names
-      # colors from an older deployment; `solver-provision` rewrites it with
-      # this stack's real ones onto the shared volume. (Publication itself
+      # The GENERATED ladder names explicit external token IDs. Provisioning
+      # writes it onto the shared volume so a checked-in ladder for another
+      # registry or network cannot be used silently. (Publication itself
       # derives from the mirrored book and ignores this file — but the
       # direct-fill engine's `ladders.maxPayout()` does not.)
       SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-/srv/solver-config/ladders.dev.json}
@@ -831,7 +686,6 @@ services:
     # ports:
     #   - "${BIND_ADDR:-127.0.0.1}:${HOST_SOLVER_STATUS_PORT:-19100}:9100"
     volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - solver-config:/srv/solver-config:ro
       # Per-instance and chain-keyed: a journal that outlives the genesis it was
       # written against is worse than no journal, so this volume is torn down
@@ -871,15 +725,10 @@ services:
     # once, and the loop reprints the same list rather than burying it.
     restart: unless-stopped
     depends_on:
-      # The kernel is the only long-running prerequisite. The two token
-      # one-shots serialize startup so the first token-name panel is complete;
-      # `solver` is deliberately absent — see the note above.
+      # The kernel is the only long-running prerequisite; `solver` is
+      # deliberately absent — see the note above.
       kernel:
         condition: service_healthy
-      mint-test-tokens:
-        condition: service_completed_successfully
-      register-minted-tokens:
-        condition: service_completed_successfully
     environment:
       # 0.0.0.0 inside the container so the published port below reaches it.
       # The site's own env resolver warns about a non-loopback host (it has no
@@ -953,10 +802,6 @@ services:
       # `run.ts` checks for the tables and says so plainly if they are absent.
       kernel:
         condition: service_healthy
-      mint-test-tokens:
-        condition: service_completed_successfully
-      register-minted-tokens:
-        condition: service_completed_successfully
     environment:
       DB_HOST: pglite
       DB_PORT: "5432"
@@ -986,25 +831,20 @@ services:
         condition: service_healthy
       batcher:
         condition: service_healthy
-      mint-test-tokens:
-        condition: service_completed_successfully
-      register-minted-tokens:
-        condition: service_completed_successfully
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
-      CONTRACT_SHARE_DIR: /srv/offerfiles-deploy
       ZSWAP_API: http://kernel:9999
       BATCHER_SUBMIT_URL: http://batcher:3334
       RELAY_HTTP_URL: http://relay:3000
       RELAY_WS_URL: ws://relay:9001
       SOLVER_AUTH_TOKEN: ${SOLVER_AUTH_TOKEN:-}
       SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
-      # The MAKER is the genesis wallet: `mint-test-tokens` credits exactly that
-      # wallet, so it is the only one holding a test token to give away — and
-      # the driver posts its own extra offers (one per case, since a settled
-      # case consumes the one it used).
+      # The maker wallet must be prefunded externally with E2E_TOKEN_OUT; the
+      # taker must be prefunded with E2E_TOKEN_IN when E2E_SKIP_PROVISION=true.
       MAKER_SEED: ${MAKER_OFFER_SEED:-0000000000000000000000000000000000000000000000000000000000000001}
       TAKER_SEED: ${TAKER_SEED:-0000000000000000000000000000000000000000000000000000000000000032}
+      E2E_TOKEN_IN: ${E2E_TOKEN_IN:-}
+      E2E_TOKEN_OUT: ${E2E_TOKEN_OUT:-}
       E2E_EVIDENCE_DIR: /var/lib/e2e
       # The solver's own journal, so the driver can assert the SETTLED terminal
       # and that no operation is left holding a claim. Mounted rw (not ro)
@@ -1023,7 +863,7 @@ services:
       # ── 00006-V1 / SC-004 ──────────────────────────────────────────────────
       # When true the driver REFUSES to run unless the solver-provision receipt
       # proves the solver was given fee currency only — zero of every swap
-      # token, nothing minted. The receipt is a measurement taken with the
+      # token. The receipt is a measurement taken with the
       # solver's own facade while the solver was stopped; this driver cannot
       # take it itself (two facades on one seed against one node force each
       # other's connection down).
@@ -1034,7 +874,6 @@ services:
       # force alongside the number it produced. Blank = the solver's default, 1.
       SOLVER_FEE_SIZING_TAKER_INPUTS: ${SOLVER_FEE_SIZING_TAKER_INPUTS:-}
     volumes:
-      - offerfiles-deploy:/srv/offerfiles-deploy:ro
       - e2e-evidence:/var/lib/e2e
       - solver-journal:/var/lib/cow-solver
       # Read-only: the driver asserts on the provisioning receipt, never writes
@@ -1043,28 +882,23 @@ services:
 
 volumes:
   # The poster's coin journal (profile `poster`). Chain-keyed like the rest and
-  # then some: the journal records the contract address it was written against
-  # and REFUSES to start on a mismatch, because a coin minted under another
-  # deployment does not exist here. `down.sh` passes --profile poster so this
-  # volume goes with the containers.
+  # then some: the journal records the network and give-token identity it was
+  # written against and refuses a mismatch. `down.sh` passes --profile poster.
   offer-poster-state:
   # Chain-keyed. These MUST be wiped together: a kernel ledger mirror, a solver
   # journal or an indexer database that survives a chain reset refers to
-  # nullifiers, offers and contract addresses that no longer exist, and every
+  # nullifiers and offers that no longer exist, and every
   # symptom of that shows up somewhere else entirely. deploy/down.sh removes the
   # whole set.
   midnight-node-data:
   indexer-data:
   celestia-data:
   pglite-data:
-  offerfiles-deploy:
   batcher-data:
   solver-journal:
   relay-wallet-cache:
   e2e-evidence:
-  # The ladder config generated against THIS chain's contract address, and the
-  # marker recording that the solver was funded. Chain-keyed like the rest:
-  # carrying either across a chain reset would point the solver at token colors
-  # that no longer exist.
+  # The ladder config generated from explicit token IDs, and the marker
+  # recording that prefunding was checked. Chain-keyed like the rest.
   solver-config:
   maker-offer-state:

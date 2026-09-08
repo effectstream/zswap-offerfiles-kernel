@@ -18,8 +18,6 @@ set -euo pipefail
 
 require_env ZSWAP_API MIDNIGHT_NETWORK_ID
 
-adopt_contract_address
-
 wait_http "${ZSWAP_API}/v1/health" "kernel API" "${KERNEL_WAIT_TIMEOUT_S:-600}"
 if [ -n "${RELAY_HTTP_URL:-}" ]; then
   wait_http "${RELAY_HTTP_URL}/tokens" "relay HTTP" "${RELAY_WAIT_TIMEOUT_S:-300}"

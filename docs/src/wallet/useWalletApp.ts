@@ -8,7 +8,7 @@ import {
   type Connected,
   type WalletState,
 } from './wallet'
-import { NIGHT_COLOR } from './mintable'
+import { NIGHT_COLOR } from './token-colors'
 import { api, run, type KnownToken, type MidnightConfig } from '../api'
 
 export type WalletStatus = 'disconnected' | 'connecting' | 'connected'

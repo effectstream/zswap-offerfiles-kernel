@@ -3,23 +3,16 @@
 // WHY THIS IS A SEPARATE FILE FROM `offer-poster.ts`
 // -------------------------------------------------
 // Every decision the loop makes lives here, behind injected dependencies, and
-// nothing here imports the wallet SDK, the ledger or the contract. That is not
-// tidiness for its own sake: `deploy/scripts/offer-poster.ts` transitively pulls
-// in `packages/solver-core/offer-files.ts`, which constructs a `CompiledContract`
-// AT MODULE LOAD from `packages/contracts-midnight/contract-offer-files/src/managed`
-// — a Compact build artefact that a fresh clone does not have (`bun run
-// build:midnight` produces it). Importing the poster in a unit test therefore
-// fails on a clean checkout, and CI has no reason to compile Compact to test a
-// scheduling decision. Keeping the decisions here makes them testable with
-// fakes and a real `Journal` on a temp directory.
+// nothing here imports the wallet SDK or ledger. Keeping the decisions here
+// makes them testable with fakes and a real `Journal` on a temp directory.
 //
 // THE ORDER OF A TICK (spec FR-009, FR-010)
 // -----------------------------------------
 //   reconcile               refresh every non-terminal offer's kernel status;
 //                           `consumed` closes the coin; compute the candidate
 //                           set against the wallet's CURRENT `availableCoins`
-//   candidate?              re-offer that exact coin — no mint, no DUST needed
-//   else DUST sufficient?   mint one coin, wait for the wallet to see it, offer it
+//   candidate?              re-offer that exact coin
+//   else inventory?         adopt one already-spendable prefunded coin, offer it
 //   else                    degrade, and say why
 //
 // and then, for whichever coin was chosen:
@@ -47,14 +40,12 @@ import type { TickMode, TickOutcome } from "./poster-scheduler.ts";
 // ---------------------------------------------------------------------------
 
 export const FAILURES = {
-  insufficientDust: "insufficient_dust",
-  coinNotVisible: "coin_not_visible",
+  insufficientInventory: "insufficient_inventory",
   wrongInputNullifier: "wrong_input_nullifier",
   notSponsored: "not_sponsored",
   unpriced: "unpriced",
   postTimeout: "post_timeout",
   kernelUnreachable: "kernel_unreachable",
-  mintFailed: "mint_failed",
   buildFailed: "build_failed",
   quoteFailed: "quote_failed",
   coinVanished: "coin_vanished",
@@ -85,25 +76,10 @@ export interface TickWallet {
   /** Nonces of every currently spendable shielded coin, any colour. The proof
    *  a journaled coin is free (FR-009 — the kernel status is only a hint). */
   availableNonces(): Promise<string[]>;
+  /** Every currently spendable shielded coin. */
+  availableCoins(): Promise<SpendableCoin[]>;
   /** The spendable coin with this nonce, or `undefined` when it is not free. */
   findCoin(nonce: string): Promise<SpendableCoin | undefined>;
-  /** Spendable DUST, in the ledger's own units. */
-  dustBalance(): Promise<bigint>;
-}
-
-export interface MintedCoinRef {
-  coin: { nonce: string; type: string; value: bigint };
-  nullifier: string;
-  txHash: string;
-  mintNonce: bigint;
-}
-
-export interface TickMinter {
-  /** A nonce never used before in this process (`faucet-mint.freshNonce`). */
-  freshNonce(): bigint;
-  /** `mint_shielded(domainSepFromName(name), amount, nonce)`; resolves once the
-   *  transaction is on chain, with the coin the contract created. */
-  mint(name: string, amount: bigint, nonce: bigint): Promise<MintedCoinRef>;
 }
 
 export interface BuiltOffer {
@@ -194,18 +170,13 @@ export type TickLog = (fields: LogFields) => void;
  *  so a test need not build a whole config. */
 export interface TickConfig {
   giveColour: string;
-  /** Faucet token NAME — minting needs the name, not the colour. */
-  giveTokenName: string;
-  /** The fixed per-mint size. Ignored when `TickDeps.drawGiveAmount` is
-   *  supplied (00027: the operator configured a RANGE instead). */
+  /** Exact acceptable prefunded coin size when giveRange is absent. */
   giveAmount: bigint;
+  /** Optional inclusive acceptable range, in base units. */
+  giveRange?: { minBase: bigint; maxBase: bigint } | undefined;
   wantColour: string;
   forcedWantAmount?: bigint | undefined;
   offerTtlMinutes: number;
-  coinVisibleTimeoutMs: number;
-  /** Poll spacing while waiting for the minted coin to appear. */
-  coinVisiblePollMs?: number;
-  minDust: bigint;
   maxReoffersPerTick: number;
   postRetries: number;
   postRetryMs: number;
@@ -217,31 +188,17 @@ export interface TickDeps {
   cfg: TickConfig;
   journal: Journal;
   wallet: TickWallet;
-  minter: TickMinter;
   builder: TickBuilder;
   api: TickApi;
   clock: TickClock;
   log: TickLog;
-  /**
-   * How big should THIS mint be, in base units (00027 FR-002)?
-   *
-   * Absent — the default — every mint is `cfg.giveAmount`, exactly as before.
-   * Present, it is called ONCE PER FRESH MINT and its answer is what the faucet
-   * is asked for. Injected rather than computed here for the same reason the
-   * clock is: this module must stay free of randomness so a tick is replayable,
-   * and `poster-size.ts` owns the distribution and the seed.
-   *
-   * RE-OFFERS NEVER CALL IT (AC-4). A released coin is re-offered at the value
-   * it already has; its size was drawn when it was minted and cannot change.
-   */
-  drawGiveAmount?: (() => bigint) | undefined;
 }
 
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
 
-/** `tick=3 mode=mint phase=post ms=812 nonce=ab… offerId=cd…` — one line per
+/** `tick=3 mode=inventory phase=post ms=812 nonce=ab… offerId=cd…` — one line per
  *  phase per tick (FR-015). Field order is fixed so `grep`/`awk` work; extra
  *  fields follow in insertion order. Nothing here can carry a secret: the
  *  caller only ever passes identifiers and durations. */
@@ -425,8 +382,7 @@ export function refusalCode(status: number, body: unknown): string {
 
 /** `ROOT_UNKNOWN` means the node has not yet synced the merkle root the offer
  *  was built against and `UTXO_NOT_LIVE` that it has not yet seen the coin;
- *  both self-resolve within a few blocks, and both are retried with the SAME
- *  blob — never with a fresh mint (US1 scenario 5). */
+ *  both self-resolve within a few blocks, and both are retried with the SAME blob. */
 export function isRetryablePostError(body: unknown): boolean {
   const err = (body as { error?: unknown } | null)?.error ?? body;
   const text = typeof err === "string" ? err : JSON.stringify(err ?? null);
@@ -436,8 +392,7 @@ export function isRetryablePostError(body: unknown): boolean {
 /**
  * Quote, build, assert, post and verify ONE offer for ONE coin.
  *
- * The coin is passed in already proven free — either straight out of the mint,
- * or out of `availableCoins` for a re-offer.
+ * The coin is passed in already proven free from `availableCoins`.
  */
 export async function offerCoin(
   deps: TickDeps,
@@ -717,122 +672,24 @@ async function revertQuietly(deps: TickDeps, built: BuiltOffer, base: Record<str
 }
 
 // ---------------------------------------------------------------------------
-// Mint (FR-003 / FR-004)
+// Externally prefunded inventory selection
 // ---------------------------------------------------------------------------
 
-export interface MintOutcome {
-  ok: boolean;
-  coin?: SpendableCoin;
-  /** The mint transaction landed, whatever happened afterwards. */
-  minted: boolean;
-  failure?: string;
-  error?: string;
-}
-
-/**
- * Mint one coin and wait until the wallet can spend it.
- *
- * ON THE ORDER OF THE JOURNAL WRITES — this differs from FR-003's letter, and
- * it has to. FR-003 says "journal the nonce BEFORE submit", but the identity a
- * coin has is `evolveNonce(mintNonce, domainSep)`, computed INSIDE the circuit
- * (`offer-files.compact:22`); `evolveNonce` is not exported by `ledger-v8`, by
- * `onchain-runtime-v3` or by `compact-runtime` (checked at these versions), and
- * the generated circuit module is a Compact build artefact `deploy/` cannot
- * import. So the chain nonce simply does not exist until `mint_shielded`
- * returns, and there is nothing to write down before it does.
- *
- * What is preserved is the guarantee FR-003 was reaching for: the FIRST thing
- * that happens after the mint returns is the journal write, before the quote,
- * the build or the post. The crash window is a couple of synchronous file
- * operations, and SC-004's kill point ("after the mint log line, before post")
- * is safely inside the journaled region.
- */
-export async function mintCoin(deps: TickDeps, ctx: { tick: number }): Promise<MintOutcome> {
-  const { cfg, journal, minter, wallet, clock, log } = deps;
-  const base = { tick: ctx.tick, mode: "mint" as const };
-  const mintNonce = minter.freshNonce();
-  const startedAt = clock.now();
-  // 00027 FR-002: one draw per FRESH mint. The want leg is sized further down
-  // in `offerCoin` from the coin's OWN value, so it follows this number without
-  // any change there.
-  const giveAmount = deps.drawGiveAmount === undefined ? cfg.giveAmount : deps.drawGiveAmount();
-
-  let minted: MintedCoinRef;
-  try {
-    minted = await minter.mint(cfg.giveTokenName, giveAmount, mintNonce);
-  } catch (err) {
-    const message = errMessage(err);
-    log({ ...base, phase: "mint", ms: clock.now() - startedAt, result: "error", mintNonce, detail: message });
-    return {
-      ok: false,
-      minted: false,
-      // A dust shortfall surfaces from deep inside the SDK's balancer; the
-      // pre-check cannot see the exact fee, so classify it here too.
-      failure: /dust|fee|insufficient/i.test(message) ? FAILURES.insufficientDust : FAILURES.mintFailed,
-      error: message,
-    };
-  }
-
-  const nonce = minted.coin.nonce.toLowerCase();
-  journal.recordMintIntent(nonce, minted.coin.type, minted.coin.value);
-  journal.recordMinted(nonce, { txHash: minted.txHash, nullifier: minted.nullifier });
-  log({
-    ...base,
-    phase: "mint",
-    ms: clock.now() - startedAt,
-    nonce: shortHex(nonce),
-    mintNonce,
-    give: giveAmount,
-    value: minted.coin.value,
-    tx: shortHex(minted.txHash),
-  });
-
-  // FR-004: the wallet has to SEE the coin before it can spend it.
-  const visibleStartedAt = clock.now();
-  const pollMs = cfg.coinVisiblePollMs ?? 2_000;
-  const deadline = visibleStartedAt + cfg.coinVisibleTimeoutMs;
-  for (;;) {
-    let found: SpendableCoin | undefined;
-    try {
-      found = await wallet.findCoin(nonce);
-    } catch (err) {
-      log({ ...base, phase: "visible", nonce: shortHex(nonce), result: "error", detail: errMessage(err) });
+/** Pick one unjournaled spendable coin of the explicit give token and requested
+ * size. The wallet is the authority for nonce/nullifier and availability. */
+export function selectInventoryCoin(
+  coins: readonly SpendableCoin[],
+  journal: Journal,
+  cfg: TickConfig,
+): SpendableCoin | undefined {
+  return coins.find((coin) => {
+    if (coin.type.toLowerCase() !== cfg.giveColour.toLowerCase()) return false;
+    if (journal.getCoin(coin.nonce) !== undefined) return false;
+    if (cfg.giveRange !== undefined) {
+      return coin.value >= cfg.giveRange.minBase && coin.value <= cfg.giveRange.maxBase;
     }
-    if (found !== undefined) {
-      log({ ...base, phase: "visible", ms: clock.now() - visibleStartedAt, nonce: shortHex(nonce) });
-      // Trust the wallet's nullifier over the locally computed one when they
-      // disagree — but they must not, so say so rather than paper over it.
-      if (found.nullifier.toLowerCase() !== minted.nullifier.toLowerCase()) {
-        log({
-          ...base,
-          phase: "visible",
-          nonce: shortHex(nonce),
-          result: "nullifier_disagreement",
-          wallet: found.nullifier,
-          computed: minted.nullifier,
-        });
-      }
-      return { ok: true, minted: true, coin: found };
-    }
-    if (clock.now() >= deadline) break;
-    await clock.sleep(pollMs);
-  }
-
-  // US1 scenario 3: the coin is journaled as `minted`, NOT lost. It is on chain;
-  // a later tick will find it in `availableCoins` and re-offer it.
-  log({
-    ...base,
-    phase: "visible",
-    ms: clock.now() - visibleStartedAt,
-    nonce: shortHex(nonce),
-    result: "timeout",
+    return coin.value === cfg.giveAmount;
   });
-  return {
-    ok: false,
-    minted: true,
-    failure: FAILURES.coinNotVisible,
-    error: `minted coin ${nonce} was not spendable within COIN_VISIBLE_TIMEOUT_MS=${cfg.coinVisibleTimeoutMs}`,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -840,13 +697,12 @@ export async function mintCoin(deps: TickDeps, ctx: { tick: number }): Promise<M
 // ---------------------------------------------------------------------------
 
 /**
- * Reconcile, then re-offer released coins if there are any, else mint one, else
- * degrade. At most `POSTER_MAX_REOFFERS_PER_TICK` offers per tick.
+ * Reconcile, then re-offer released coins if there are any, else adopt one
+ * prefunded coin, else degrade. At most `POSTER_MAX_REOFFERS_PER_TICK` re-offers.
  *
- * A candidate ALWAYS wins over a mint, even when DUST is plentiful: re-offering
+ * A candidate ALWAYS wins over new inventory: re-offering
  * keeps the wallet's coin count bounded by the number of live offers (US2), and
- * it needs no DUST at all, which is what makes US1 scenario 6 ("insufficient
- * DUST still services a re-offer") work without a special case.
+ * preserves the journal's ownership ordering.
  */
 export async function runTick(deps: TickDeps, tick: number): Promise<TickOutcome> {
   const { cfg, wallet, clock, log } = deps;
@@ -904,63 +760,50 @@ export async function runTick(deps: TickDeps, tick: number): Promise<TickOutcome
     };
   }
 
-  // ── mint branch ─────────────────────────────────────────────────────────
-  let dust = 0n;
+  // ── externally prefunded inventory branch ───────────────────────────────
+  let available: SpendableCoin[];
   try {
-    dust = await wallet.dustBalance();
+    available = await wallet.availableCoins();
   } catch (err) {
-    log({ tick, phase: "dust", result: "error", detail: errMessage(err) });
-  }
-  if (dust < cfg.minDust) {
-    // US1 scenario 6. Not a FAILURE — the world is in a state the poster cannot
-    // fix, and `/health` says so through `mode=degraded`. A run of these does
-    // not trip the 503, which is deliberate: a poster waiting for NIGHT is
-    // working correctly.
-    log({
-      tick,
+    return {
+      ok: false,
       mode: "degraded",
-      phase: "end",
-      ms: clock.now() - startedAt,
-      result: FAILURES.insufficientDust,
-      dust,
-      min_dust: cfg.minDust,
-    });
+      failure: FAILURES.insufficientInventory,
+      error: `could not read prefunded wallet inventory: ${errMessage(err)}`,
+    };
+  }
+  const coin = selectInventoryCoin(available, deps.journal, cfg);
+  if (coin === undefined) {
+    const size = cfg.giveRange === undefined
+      ? `exactly ${cfg.giveAmount} base units`
+      : `between ${cfg.giveRange.minBase} and ${cfg.giveRange.maxBase} base units`;
+    log({ tick, mode: "degraded", phase: "end", result: FAILURES.insufficientInventory });
     return {
       ok: true,
       mode: "degraded",
-      failure: FAILURES.insufficientDust,
-      error: `spendable DUST ${dust} < POSTER_MIN_DUST ${cfg.minDust}; skipping the mint (re-offers need no DUST)`,
+      failure: FAILURES.insufficientInventory,
+      error: `no unjournaled spendable GIVE_TOKEN coin ${size}. Prefund POSTER_SEED with token ` +
+        `${cfg.giveColour} through the selected network's external issuer`,
     };
   }
-
-  const mint = await mintCoin(deps, { tick });
-  if (!mint.ok || mint.coin === undefined) {
-    log({ tick, mode: "mint", phase: "end", ms: clock.now() - startedAt, result: "failed", failure: mint.failure });
-    return {
-      ok: false,
-      mode: "mint",
-      minted: mint.minted,
-      ...(mint.failure !== undefined ? { failure: mint.failure } : {}),
-      ...(mint.error !== undefined ? { error: mint.error } : {}),
-    };
-  }
-
-  const result = await offerCoin(deps, mint.coin, { tick, mode: "mint" });
+  deps.journal.recordInventory(coin.nonce, coin.type, coin.value, coin.nullifier);
+  log({ tick, mode: "inventory", phase: "select", nonce: shortHex(coin.nonce), value: coin.value });
+  const result = await offerCoin(deps, coin, { tick, mode: "inventory" });
   log({
     tick,
-    mode: "mint",
+    mode: "inventory",
     phase: "end",
     ms: clock.now() - startedAt,
-    nonce: shortHex(mint.coin.nonce),
+    nonce: shortHex(coin.nonce),
     offerId: shortHex(result.offerId),
     result: result.ok ? "ok" : "failed",
     ...(result.failure !== undefined ? { failure: result.failure } : {}),
   });
   return {
     ok: result.ok,
-    mode: "mint",
-    minted: true,
-    nonce: mint.coin.nonce,
+    mode: "inventory",
+    inventoryAdopted: true,
+    nonce: coin.nonce,
     ...(result.offerId !== undefined ? { offerId: result.offerId } : {}),
     ...(result.failure !== undefined ? { failure: result.failure } : {}),
     ...(result.error !== undefined ? { error: result.error } : {}),

@@ -75,7 +75,6 @@ CELESTIA_FETCH_CONCURRENCY=12           # parallel RPC calls per window
 
 # ── Midnight ─────────────────────────────────────────────────────────────────
 MIDNIGHT_NETWORK_ID=undeployed|preview|mainnet
-MIDNIGHT_CONTRACT_ADDRESS=mn1...        # required on preview/mainnet
 MIDNIGHT_START_BLOCK=1
 MIDNIGHT_DELAY_MS=30000                 # indexer poll delay
 
@@ -918,13 +917,14 @@ still writes one, deliberately, so an operator can inspect and override it.)
 
 `feed` is all-nulls when the service has never run against this database.
 
-**Mapping.** Faucet-minted colours change on every clean redeploy (they derive from
-the contract address), so tokens map to assets by **name**: `WBTC`/`WSBTC`/`BTC` →
-`bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` → `usdm-2`
-(Moneta's Cardano USDM, the asset the VIA Labs bridge carries to Midnight),
-`NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3` (the shielded-night wrapper is
-locked 1:1 against NIGHT, so it is the same asset — no new price to fetch).
-`known_tokens.asset_id` overrides the map, and `PRICE_FEED_MAP`
+**Mapping.** Token colors are opaque, network-specific external IDs. Rows without
+an explicit asset ID therefore use a normalized-name fallback: `WBTC`/`WSBTC`/`BTC`
+→ `bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` →
+`usdm-2` (Moneta's Cardano USDM, the asset the VIA Labs bridge carries to
+Midnight), `NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3` (the shielded-night
+wrapper is locked 1:1 against NIGHT, so it is the same asset — no new price to
+fetch). Canonical registry rows carry explicit asset IDs. `known_tokens.asset_id`
+overrides the fallback map, and `PRICE_FEED_MAP`
 (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
 **`decimals` is base units per priced coin, not display decimals.** `NIGHT` is
@@ -1155,7 +1155,7 @@ correct consumer of this stream already implements it.
 
 #### `GET /v1/midnight/config`
 
-Public Midnight configuration the browser contract client needs. Never includes secrets.
+Public Midnight network configuration the browser wallet needs. Never includes secrets.
 
 ```bash
 curl http://host:9999/v1/midnight/config
@@ -1163,7 +1163,6 @@ curl http://host:9999/v1/midnight/config
 
 ```json
 {
-  "contractAddress": "mn1abc...",
   "indexerUri":      "https://indexer.midnight.network:8088/graphql",
   "indexerWsUri":    "wss://indexer.midnight.network:8088/graphql",
   "proofServerUri":  "https://proof.midnight.network",
@@ -1171,7 +1170,7 @@ curl http://host:9999/v1/midnight/config
 }
 ```
 
-Returns `500` if `MIDNIGHT_CONTRACT_ADDRESS` is not set.
+The endpoint remains available without any application contract metadata.
 
 ---
 

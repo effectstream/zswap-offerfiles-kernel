@@ -36,9 +36,15 @@ let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 const COLOR_NIGHT = "0".repeat(64);
-const COLOR_USDC = "1".repeat(64);
-const COLOR_USDM = "003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73";
 const COLOR_SNIGHT = "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
+const CANONICAL_PREPROD = {
+  TWBTC: ["b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc", "shielded", 8, "bitcoin"],
+  TWETH: ["087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f", "shielded", 18, "ethereum"],
+  TWUSDC: ["a5c902be8fff1a0c3f10a926b24c3eaa8a93215535915b5af47d2c6a59febab5", "shielded", 6, "usd-coin"],
+  TWUSDM: ["931ceb35c81dc57978fea79de042a4a31f7694d012d0d79b351789502fc7b6ee", "shielded", 6, "usdm-2"],
+  UTWUSDC: ["4ecbf451771bebdc0e9ad7aed27405b7f5dee20121bcf0be5746a4ef22748e9f", "unshielded", 6, "usd-coin"],
+  UTWBTC: ["be3354fbcec9efa8c2d75eb64ab49a7fd2bda9cfa76b3cf6ede47fef63b6878e", "unshielded", 8, "bitcoin"],
+} as const;
 const COLOR_TEST = "a".repeat(64);
 
 // The shielded-night contract addresses, as committed in that repo's
@@ -118,9 +124,18 @@ test("SC-001 basis: WBTC→WETH from the seeds alone is the BTC/ETH rate", async
   expect(rate).toBeLessThan(33);
 });
 
-test("the four redeploy-stable tokens are seeded, and only those", async () => {
+test("fresh defaults are NIGHT, Preprod SNIGHT and the six canonical Preprod tokens", async () => {
   const tokens = await getKnownTokensWithAssets.run(undefined, client);
-  expect(tokens.map((t) => t.name)).toEqual(["NIGHT", "SNIGHT", "USDC", "USDM"]);
+  expect(tokens.map((t) => t.name)).toEqual([
+    "NIGHT",
+    "SNIGHT",
+    "TWBTC",
+    "TWETH",
+    "TWUSDC",
+    "TWUSDM",
+    "UTWBTC",
+    "UTWUSDC",
+  ]);
 
   const byName = new Map(tokens.map((t) => [t.name, t]));
   // 6 decimals: 1 NIGHT = 10^6 Stars (base units) — STARS_PER_NIGHT in
@@ -143,34 +158,28 @@ test("the four redeploy-stable tokens are seeded, and only those", async () => {
     decimals: byName.get("NIGHT")!.decimals,
     asset_id: "midnight-3",
   });
-  // 6 decimals: a placeholder colour (no USDC on preprod), kept at USDC's
-  // real shape — 6 decimals on every chain it exists on — same reasoning as
-  // USDM below.
-  expect(byName.get("USDC")).toMatchObject({
-    token_color: COLOR_USDC,
-    kind: "shielded",
-    decimals: 6,
-    asset_id: "usd-coin",
-  });
-  // The VIA Labs bridge's Midnight-preview token type: unshielded, 6 decimals.
-  expect(byName.get("USDM")).toMatchObject({
-    token_color: COLOR_USDM,
-    kind: "unshielded",
-    decimals: 6,
-    asset_id: "usdm-2",
-  });
+  for (const [name, [token_color, kind, decimals, asset_id]] of Object.entries(CANONICAL_PREPROD)) {
+    expect(byName.get(name)).toMatchObject({ token_color, kind, decimals, asset_id });
+  }
+  expect(byName.has("USDC")).toBe(false);
+  expect(byName.has("USDM")).toBe(false);
 });
 
-test("USDM's per-base-unit price is the seeded usdm-2 price / 1e6", async () => {
+test("canonical Preprod BTC, ETH and stablecoins use their published price scales", async () => {
   const assets = await assetsByIdRaw();
   const tokens = await getKnownTokensWithAssets.run(undefined, client);
-  const usdm = tokens.find((t) => t.name === "USDM")!;
-  const mapped = resolveAssetId(usdm)!;
-  expect(mapped).toEqual({ assetId: "usdm-2", decimals: 6 });
-  // 1.001 / 10^6 — exactly, with no float noise and no assumed peg.
-  expect(tokenPriceFromAsset(assets.get(mapped.assetId)!.price_usd, mapped.decimals)).toBe(
-    "0.000001001",
-  );
+  const expected = {
+    TWBTC: "0.00077387",
+    TWETH: "0.00000000000000239328",
+    TWUSDC: "0.000000999818",
+    TWUSDM: "0.000001001",
+    UTWUSDC: "0.000000999818",
+    UTWBTC: "0.00077387",
+  } as const;
+  for (const [name, price] of Object.entries(expected)) {
+    const mapped = resolveAssetId(tokens.find((token) => token.name === name)!)!;
+    expect(tokenPriceFromAsset(assets.get(mapped.assetId)!.price_usd, mapped.decimals)).toBe(price);
+  }
 });
 
 test("NIGHT's per-base-unit price is the seeded midnight-3 price / 1e6 (1 NIGHT = 10^6 Stars)", async () => {
@@ -199,7 +208,7 @@ test("every seeded known token resolves to a seeded asset", async () => {
 // ── sNight: the one seeded colour that moves with a contract (00021) ───────
 //
 // SNIGHT's colour is tokenType(pad(32, "shielded-night:wrapper"), self()), so
-// unlike the other three seeds it changes with the shielded-night contract
+// unlike native NIGHT it changes with the shielded-night contract
 // ADDRESS, i.e. with the network. 000-init.sql seeds *preprod* and carries the
 // preview address/colour in the same note. Both are
 // re-derived here from the addresses committed in the shielded-night repo, so

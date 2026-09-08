@@ -262,8 +262,10 @@ const TESTA = `d1${"3".repeat(62)}`;
 const OVERRIDDEN = `c0${"f".repeat(62)}`;
 
 const COLOR_NIGHT = "0".repeat(64);
-const COLOR_USDC = "1".repeat(64);
-const COLOR_USDM = "003bacd9a361ba0d425e408776020e40271375e8b8de42d73eec046a44947d73";
+const COLOR_TWBTC = "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc";
+const COLOR_TWETH = "087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f";
+const COLOR_TWUSDC = "a5c902be8fff1a0c3f10a926b24c3eaa8a93215535915b5af47d2c6a59febab5";
+const COLOR_TWUSDM = "931ceb35c81dc57978fea79de042a4a31f7694d012d0d79b351789502fc7b6ee";
 
 /** `GET /v1/prices` for a set of colours — `tokens` is required (Q-11). */
 const pricesFor = (...colors: string[]) => getJson(`/v1/prices?tokens=${colors.join(",")}`);
@@ -284,7 +286,13 @@ const registerToken = (
 
 describe("GET /v1/prices", () => {
   test("a fresh database already serves the seeded reference prices", async () => {
-    const { status, body } = await pricesFor(COLOR_NIGHT, COLOR_USDC, COLOR_USDM);
+    const { status, body } = await pricesFor(
+      COLOR_NIGHT,
+      COLOR_TWBTC,
+      COLOR_TWETH,
+      COLOR_TWUSDC,
+      COLOR_TWUSDM,
+    );
     expect(status).toBe(200);
     expect(body.sponsor_discount).toBe(0.025);
 
@@ -297,11 +305,15 @@ describe("GET /v1/prices", () => {
       last_error: null,
     });
 
-    // ONLY the assets the requested tokens reference — bitcoin and ethereum
-    // are seeded but nothing here points at them, so listing them would be
-    // payload nobody asked for.
+    // ONLY the assets the requested tokens reference.
     const assets = new Map<string, any>(body.assets.map((a: any) => [a.asset_id, a]));
-    expect([...assets.keys()].sort()).toEqual(["midnight-3", "usd-coin", "usdm-2"]);
+    expect([...assets.keys()].sort()).toEqual([
+      "bitcoin",
+      "ethereum",
+      "midnight-3",
+      "usd-coin",
+      "usdm-2",
+    ]);
     // The stablecoin is an observed price like the rest — not 1, and with a
     // provider timestamp of its own.
     expect(assets.get("usdm-2")).toMatchObject({
@@ -311,9 +323,10 @@ describe("GET /v1/prices", () => {
     });
     expect(assets.get("midnight-3").provider_updated_at).toBe("2026-09-02T20:26:20.000Z");
 
-    // The three seeded tokens, priced PER BASE UNIT.
+    // Canonical seeded tokens are priced PER BASE UNIT at their published
+    // 8/18/6 decimal scales.
     const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
-    expect([...tokens.keys()].sort()).toEqual(["NIGHT", "USDC", "USDM"]);
+    expect([...tokens.keys()].sort()).toEqual(["NIGHT", "TWBTC", "TWETH", "TWUSDC", "TWUSDM"]);
     // 6 decimals: 1 NIGHT = 10^6 Stars (base units), so the price served per
     // base unit is the seeded midnight-3 coin price divided by 1e6.
     expect(tokens.get("NIGHT")).toMatchObject({
@@ -322,10 +335,20 @@ describe("GET /v1/prices", () => {
       price_usd: "0.00000001918181",
       source: "seed",
     });
-    // 6 decimals: the seeded usdm-2 price divided by 1e6, and this is the
-    // number the sponsorship gate multiplies amounts by.
-    expect(tokens.get("USDM")).toMatchObject({
-      kind: "unshielded",
+    expect(tokens.get("TWBTC")).toMatchObject({
+      kind: "shielded",
+      decimals: 8,
+      price_usd: "0.00077387",
+      source: "seed",
+    });
+    expect(tokens.get("TWETH")).toMatchObject({
+      kind: "shielded",
+      decimals: 18,
+      price_usd: "0.00000000000000239328",
+      source: "seed",
+    });
+    expect(tokens.get("TWUSDM")).toMatchObject({
+      kind: "shielded",
       decimals: 6,
       price_usd: "0.000001001",
       source: "seed",
@@ -349,10 +372,10 @@ describe("GET /v1/prices", () => {
 
   test("only the requested colours come back, and unknown ones are silently absent", async () => {
     const unknown = `ab${"9".repeat(62)}`;
-    const { status, body } = await pricesFor(COLOR_USDC, unknown);
+    const { status, body } = await pricesFor(COLOR_TWUSDC, unknown);
     expect(status).toBe(200);
-    // NIGHT and USDM are seeded and priced, but were not asked for.
-    expect(body.tokens.map((t: any) => t.name)).toEqual(["USDC"]);
+    // Other defaults are seeded and priced, but were not asked for.
+    expect(body.tokens.map((t: any) => t.name)).toEqual(["TWUSDC"]);
     // An unknown colour is an answer ("no reference price"), not a client
     // error: the batcher asks about whatever colours an offer's legs carry.
     expect(body.tokens.map((t: any) => t.token_color)).not.toContain(unknown);
@@ -370,11 +393,11 @@ describe("GET /v1/prices", () => {
       ["/v1/prices", /tokens is required/],
       ["/v1/prices?tokens=", /tokens is required/],
       ["/v1/prices?tokens=,,", /tokens is required/],
-      [`/v1/prices?tokens=${COLOR_USDC},nothex`, /not a 64-hex token color/],
+      [`/v1/prices?tokens=${COLOR_TWUSDC},nothex`, /not a 64-hex token color/],
       [`/v1/prices?tokens=${"1".repeat(63)}`, /not a 64-hex token color/],
       [`/v1/prices?tokens=${"1".repeat(65)}`, /not a 64-hex token color/],
       // Two `tokens=` params arrive as an array, which is not a colour list.
-      [`/v1/prices?tokens=${COLOR_USDC}&tokens=${COLOR_NIGHT}`, /single comma-separated string/],
+      [`/v1/prices?tokens=${COLOR_TWUSDC}&tokens=${COLOR_NIGHT}`, /single comma-separated string/],
     ];
     for (const [url, reason] of cases) {
       const { status, body } = await getJson(url);
@@ -400,13 +423,13 @@ describe("GET /v1/prices", () => {
     // API disagreeing about the case of the same 64 hex characters would be a
     // trap. Duplicates collapse rather than duplicating rows in the response.
     const { status, body } = await pricesFor(
-      COLOR_USDM.toUpperCase(),
-      COLOR_USDM,
-      ` ${COLOR_USDM} `.replace(/ /g, ""),
+      COLOR_TWUSDM.toUpperCase(),
+      COLOR_TWUSDM,
+      ` ${COLOR_TWUSDM} `.replace(/ /g, ""),
     );
     expect(status).toBe(200);
     expect(body.tokens).toHaveLength(1);
-    expect(body.tokens[0].token_color).toBe(COLOR_USDM);
+    expect(body.tokens[0].token_color).toBe(COLOR_TWUSDM);
   });
 
   test("feed status is reported once the service has run", async () => {
@@ -566,7 +589,8 @@ describe("GET /v1/quote — reference prices (SC-001)", () => {
 // ── sNight, a seeded default token (00021) ─────────────────────────────────
 //
 // Nothing is registered here: the SNIGHT row comes out of 000-init.sql like
-// NIGHT/USDC/USDM, so what these read back over HTTP is exactly what a fresh
+// NIGHT and the six canonical Preprod rows, so what these read back over HTTP
+// is exactly what a fresh
 // deployment serves. The seeded colour is *preprod*; another network patches
 // the row deliberately — see the SNIGHT note in 000-init.sql.
 

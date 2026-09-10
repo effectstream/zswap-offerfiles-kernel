@@ -1339,12 +1339,16 @@ Submit a blob directly to the batcher queue. Structure and cryptographic proofs 
 
 **Rate-limited `429`**
 
+Per client IP, `API_RATE_LIMIT_MAX` requests per minute across every `/v1/*`
+route (default 600; `/v1/health` and `/v1/health/sync` are exempt). The
+`x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` headers
+are set on every counted response; back off on `429` instead of retry-looping.
+
 ```json
 {
-  "success": false,
-  "error": "Rate limit exceeded",
-  "message": "Too many requests. Please retry after 60 seconds.",
-  "retryAfter": 60
+  "statusCode": 429,
+  "error": "RATE_LIMITED",
+  "reason": "Too many requests — please wait before retrying."
 }
 ```
 

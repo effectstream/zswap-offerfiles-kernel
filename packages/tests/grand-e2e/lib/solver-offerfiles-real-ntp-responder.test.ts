@@ -498,8 +498,8 @@ describe("real E1 bounded NTP responder", () => {
     });
   }, 10_000);
 
-  test("serves the pinned ntp-time-sync@0.5.0 eight-sample two-round request", async () => {
-    expect(ntpPackageManifest.version).toBe("0.5.0");
+  test("serves the pinned ntp-time-sync@0.6.0 eight-sample two-round request", async () => {
+    expect(ntpPackageManifest.version).toBe("0.6.0");
     const harness = await startHarness();
     const server = `${harness.bindAddress}:${harness.ntpPort}`;
     const synchronizer = new ntpPackage.NtpTimeSync({

@@ -16,7 +16,7 @@
     "@midnight-ntwrk/ledger-v8": "8.1.0",
     "@midnight-ntwrk/dapp-connector-api": "4.0.1",
     "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
-    "@effectstream/wallets": "0.103.1"
+    "@effectstream/wallets": "0.104.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.7",

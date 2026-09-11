@@ -437,6 +437,7 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `CELESTIA_POLLING_INTERVAL_MS` | optional | Sync cadence. Defaults: devnet 6 000 ms, mainnet 30 000 ms. |
 | `MIDNIGHT_START_BLOCK` | yes | Numeric block height to start Midnight sync from. |
 | `NTP_START_TIME` | optional | NTP reference timestamp; resumed from DB when unset. |
+| `API_RATE_LIMIT_MAX`, `API_RATE_LIMIT_ALLOWLIST` | optional | Per-client-IP budget for `/v1/*` per minute (default 600; `/v1/health*` exempt) and comma-separated IPs exempt from it. Size it for a solver plus its console on one address (~450/min worst case); `deploy/` sets 6000. |
 | `BATCHER_SUBMIT_TIMEOUT_MS` | optional | Absolute batcher fetch + receipt-body deadline; default 310 000 ms, bounded to 1 000–600 000 ms. |
 | `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
 | `API_UPDATES_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/updates` websocket cap; default 100. Excess clients are refused the connection (this endpoint's refusals are disconnects, not HTTP statuses — see API.md). |

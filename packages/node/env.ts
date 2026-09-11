@@ -129,7 +129,7 @@ export const OFFER_MAX_BYTES = parseInt(
 // building a router gets them — the same reason isTokenRegistryEnabled below
 // is a function.
 export const apiRateLimitMax = (): number =>
-  parseInt(getEnv("API_RATE_LIMIT_MAX") ?? "60");
+  parseInt(getEnv("API_RATE_LIMIT_MAX") ?? "600");
 
 export const apiRateLimitAllowList = (): string[] =>
   (getEnv("API_RATE_LIMIT_ALLOWLIST") ?? "")

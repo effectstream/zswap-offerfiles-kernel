@@ -13,9 +13,9 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@effectstream/midnight-contracts": "0.103.1",
+    "@effectstream/midnight-contracts": "0.104.3",
     "@effectstream/mip-zswap-offer": "0.3.0",
-    "@effectstream/utils": "0.103.1",
+    "@effectstream/utils": "0.104.3",
     "@midnight-ntwrk/ledger-v8": "8.1.0",
     "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
     "@zswap-da/solver-core": "workspace:*",

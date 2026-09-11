@@ -12,9 +12,9 @@
     "midnight-proof-server:wait": "wait-on tcp:6300"
   },
   "dependencies": {
-    "@effectstream/npm-midnight-indexer": "0.103.1",
-    "@effectstream/npm-midnight-node": "0.103.1",
-    "@effectstream/npm-midnight-proof-server": "0.103.1",
+    "@effectstream/npm-midnight-indexer": "0.104.3",
+    "@effectstream/npm-midnight-node": "0.104.3",
+    "@effectstream/npm-midnight-proof-server": "0.104.3",
     "wait-on": "8.0.3"
   }
 }

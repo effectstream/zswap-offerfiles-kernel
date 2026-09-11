@@ -112,3 +112,12 @@ test.serial("start.attach.ts waits on external chain and kernel health only", as
     }
   }
 });
+
+test.serial("start.external.ts preflights external chain and has no contract process", async () => {
+  const config = (await import("../../start.external.ts")).default as unknown as LauncherConfig;
+  expectNetworkOnlyStartup(config, ["preflight-external"], ["batcher"]);
+  expect(processByName(config, "preflight-external")).toMatchObject({
+    waitToExit: true,
+    critical: true,
+  });
+});

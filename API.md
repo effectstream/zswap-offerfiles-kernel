@@ -29,11 +29,10 @@ and `bun run typecheck` runs both.
   longer accepts) lived in a test file.
 
 Neither gate is a workspace-wide typecheck: each reports, but does not fail on,
-diagnostics in dependencies outside its own roots — including the gitignored
-Compact output, which CI stubs as declarations for both gates. CI also bundles
-API examples 01, 03, 05, 07, and 11 before running the docs playground
-typecheck. Example 11's Midnight network-id and ledger-v8 imports are direct
-root dependencies, not transitive assumptions.
+diagnostics in dependencies outside its own roots. CI also bundles API examples
+01, 03, 05, 07, and 11 before running the docs playground typecheck. Example
+11's Midnight network-id and ledger-v9 imports are direct root dependencies,
+not transitive assumptions.
 
 ---
 
@@ -199,7 +198,7 @@ curl http://host:9999/health
 
 #### `GET /v1/health`
 
-Compact protocol-readiness probe. It uses the same aggregate state as the
+Aggregate protocol-readiness probe. It uses the same state as the
 detailed endpoint below and returns `{ "status": "ok|syncing|error", "synced":
 true|false }`. Unlike `/health`, this is not merely HTTP-process liveness.
 
@@ -1190,7 +1189,7 @@ the solver mirrors the kernel's book and owns its own wallet, journal and relay
 connection. A container deployment gives each of them its own service, with the
 solver depending on the kernel and relay rather than starting them.
 
-**Supported domain.** Midnight 1.x / ledger-v8 only. The solver settles offers
+**Supported domain.** Midnight 2.x / ledger-v9 only. The solver settles offers
 that normalize to **one shielded give leg and one shielded want leg** with
 distinct token colors and positive amounts, at most **8 makers per job**, plus an
 optional shielded residual paid from its own inventory. Unshielded legs, mixed

@@ -13,16 +13,16 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@effectstream/midnight-contracts": "0.103.1",
-    "@effectstream/mip-zswap-offer": "0.3.0",
-    "@effectstream/utils": "0.103.1",
-    "@midnight-ntwrk/ledger-v8": "8.1.0",
-    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+    "@effectstream/midnight-contracts": "0.200.2",
+    "@effectstream/mip-zswap-offer": "0.4.0-v9.0",
+    "@effectstream/utils": "0.200.2",
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
+    "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.6",
     "@zswap-da/solver-core": "workspace:*",
     "@zswap-da/validator": "workspace:*",
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
-    "@midnightntwrk/wallet-sdk-capabilities": "3.3.1"
+    "@midnightntwrk/wallet-sdk-capabilities": "4.0.0-beta.2"
   }
 }

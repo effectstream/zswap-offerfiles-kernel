@@ -56,6 +56,9 @@ export function createMidnightBalancingAdapter(
           `${ready.spendableDustUtxos} spendable dust streams${ready.split ? " (self-split)" : ""}`,
       );
     }
+    if (allowContractTx()) {
+      installContractTxValidationLane(walletResult, batcherConfig.midnight.id);
+    }
     return walletResult;
   });
 
@@ -78,4 +81,70 @@ export function createMidnightBalancingAdapter(
     minSpendableDustPerCoin: batcherConfig.minSpendableDustPerCoin,
     maxInputChars: batcherConfig.maxInputChars,
   });
+}
+
+// ── contract-transaction validation lane ────────────────────────────────────
+//
+// The balancing adapter validates every merged transaction through the wallet
+// facade, whose validation service checks wellFormed against a BLANK ledger
+// state. A blank state cannot hold any contract's verifier keys, so a
+// delegated transaction that CALLS a contract (e.g. the zswap-da frontend's
+// faucet mint) always fails with "call to non-existant contract" — the same
+// failure class packages/validator/validate.ts handles for contract-maker
+// offers. Mirror that lane here: strict validation runs first, and ONLY the
+// exact missing-contract failure widens to a retry with
+// verifyContractProofs=false. Native zswap/dust proofs and signatures are
+// still verified on the retry; the contract-call proof is verified by the
+// node at settlement. Opt-in via BATCHER_ALLOW_CONTRACT_TX, matching the
+// kernel's ALLOW_CONTRACT_MAKER_OFFERS pattern.
+export function allowContractTx(): boolean {
+  return process.env["BATCHER_ALLOW_CONTRACT_TX"] === "true";
+}
+
+const MISSING_CONTRACT_RE = /non-existant contract|non-existent contract/i;
+
+function causeChain(error: unknown): string {
+  const parts: string[] = [];
+  let cursor: unknown = error;
+  for (let i = 0; i < 8 && cursor; i++) {
+    parts.push(String((cursor as { message?: unknown }).message ?? cursor));
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return parts.join(" <- ");
+}
+
+export function installContractTxValidationLane(
+  // The facade type is structural here on purpose: the adapter only needs
+  // validateTransaction to keep its (tx, options) contract.
+  walletResult: { wallet: any },
+  networkId: string,
+): void {
+  const wallet = walletResult.wallet;
+  const strictValidate = wallet.validateTransaction.bind(wallet);
+  wallet.validateTransaction = async (tx: any, options: any) => {
+    try {
+      return await strictValidate(tx, options);
+    } catch (error) {
+      const chain = causeChain(error);
+      if (!MISSING_CONTRACT_RE.test(chain)) throw error;
+      const parameters = options?.blockData?.ledgerParameters;
+      if (!parameters) throw error; // fail closed without real limits/params
+      const { LedgerState, WellFormedStrictness } = await import(
+        "@midnightntwrk/ledger-v9"
+      );
+      const state = LedgerState.blank(networkId);
+      state.parameters = parameters;
+      const strictness = new WellFormedStrictness();
+      strictness.enforceBalancing = options?.flags?.enforceBalancing ?? true;
+      strictness.verifySignatures = options?.flags?.verifySignatures ?? true;
+      strictness.enforceLimits = options?.flags?.enforceLimits ?? true;
+      strictness.verifyContractProofs = false;
+      tx.wellFormed(state, strictness, new Date());
+      console.log(
+        "[zswap-da-batcher] contract-tx lane: wellFormed passed with " +
+          "verifyContractProofs=false (missing-contract retry; node verifies " +
+          "the contract proof at settlement)",
+      );
+    }
+  };
 }

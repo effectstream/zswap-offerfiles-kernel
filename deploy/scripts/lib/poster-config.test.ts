@@ -64,6 +64,36 @@ describe("prefunded coin-size filters", () => {
     });
   });
 
+  test("a malformed number or boolean is a startup error, never a silent default", async () => {
+    await expect(parse({ POST_INTERVAL_MS: "soon" })).rejects.toMatchObject({ code: "MALFORMED" });
+    await expect(parse({ POST_INTERVAL_MS: "0" })).rejects.toMatchObject({ code: "MALFORMED" });
+    await expect(parse({ GIVE_AMOUNT: "0" })).rejects.toMatchObject({ code: "MALFORMED" });
+    await expect(parse({ GIVE_AMOUNT: "-5" })).rejects.toMatchObject({ code: "MALFORMED" });
+    await expect(parse({ DRY_RUN: "maybe" })).rejects.toMatchObject({ code: "MALFORMED" });
+    await expect(parse({ POSTER_HEALTH_PORT: "70000" })).rejects.toMatchObject({ code: "MALFORMED" });
+  });
+
+  test("network endpoints follow MIDNIGHT_NETWORK_ID, and explicit values win", async () => {
+    const undeployed = await parse();
+    expect(undeployed.networkUrls.indexer).toContain("127.0.0.1:8088");
+    expect(undeployed.networkUrls.node).toBe("http://127.0.0.1:9944");
+
+    const preprod = await parse({ MIDNIGHT_NETWORK_ID: "preprod" });
+    expect(preprod.networkUrls.indexer).toBe(
+      "https://indexer.preprod.midnight.network/api/v4/graphql",
+    );
+    expect(preprod.networkUrls.node).toBe("https://rpc.preprod.midnight.network");
+    expect(preprod.networkUrls.proofServer).toBe("http://127.0.0.1:6300");
+
+    const explicit = await parse({
+      MIDNIGHT_NETWORK_ID: "preprod",
+      MIDNIGHT_INDEXER_HTTP: "https://preprod.api-zswap.zkdojo.com/graphql",
+      MIDNIGHT_PROOF_SERVER: "http://proof:6300",
+    });
+    expect(explicit.networkUrls.indexer).toBe("https://preprod.api-zswap.zkdojo.com/graphql");
+    expect(explicit.networkUrls.proofServer).toBe("http://proof:6300");
+  });
+
   test("blank values are absent and malformed values fail", async () => {
     expect(readEnv({ X: "  " }, "X")).toBeUndefined();
     await expect(parse({ GIVE_AMOUNT: "1.5" })).rejects.toMatchObject({ code: "MALFORMED" });

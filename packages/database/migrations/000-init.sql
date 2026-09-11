@@ -159,7 +159,7 @@ CREATE TABLE canonical_token_registry_state (
 --           Unlike native NIGHT, sNight's colour is
 --             tokenType(pad(32, "shielded-night:wrapper"), self())
 --           i.e. rawTokenType(pad32("shielded-night:wrapper"), <contract
---           address>) with @midnight-ntwrk/ledger-v8 — so it derives from the
+--           address>) with @midnightntwrk/ledger-v9 — so it derives from the
 --           contract ADDRESS and differs per network:
 --             preview  address 80b89b9a4213c61da84f54b2ea02e2809f9c4dedbdafacd04b38d4667bee1396
 --                      colour  793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c

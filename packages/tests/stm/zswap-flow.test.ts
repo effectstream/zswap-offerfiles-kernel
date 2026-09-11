@@ -14,7 +14,7 @@ import {
   waitFor,
 } from "../lib/db.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { Transaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -24,6 +24,7 @@ import {
   shieldedKeys,
   waitForShielded,
   waitForSync,
+  waitForWalletSettlement,
 } from "../lib/wallet.ts";
 import { submitOffer } from "../lib/api.ts";
 
@@ -122,6 +123,9 @@ export async function zswapFlowTest(db: Client): Promise<void> {
     if (!offerRow) return;
 
     console.log("[lifecycle] balancing + settling the A↔B offer on Midnight…");
+    // The genesis facade made the offer above; let its wallet replay that
+    // transaction before the next prove-and-submit operation.
+    await waitForWalletSettlement(genesis, { label: "pre-settle" });
     const offerTx = Transaction.deserialize(
       "signature",
       "proof",

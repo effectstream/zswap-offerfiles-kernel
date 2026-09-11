@@ -10,7 +10,7 @@
 //     (mirror+merge would collide on Lace's structural Intent[1]).
 
 import type { ConnectedAPI } from '@midnight-ntwrk/dapp-connector-api'
-import { Transaction as LedgerV8Transaction } from '@midnight-ntwrk/ledger-v8'
+import { Transaction as LedgerV9Transaction } from '@midnightntwrk/ledger-v9'
 import { type NetworkId, setNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
 import { OfferFiles } from '@effectstream/mip-zswap-offer/mip5'
 import { fromHex, toHex } from '../hex'
@@ -75,7 +75,7 @@ async function balanceViaMirrorMerge(
     intentId: 1000,
     payFees: false,
   })
-  const takerTx = LedgerV8Transaction.deserialize('signature', 'proof', 'binding', fromHex(takerTxHex))
+  const takerTx = LedgerV9Transaction.deserialize('signature', 'proof', 'binding', fromHex(takerTxHex))
   const merged = makerTx.merge(takerTx)
   return toHex(merged.serialize())
 }
@@ -91,7 +91,7 @@ export async function buildSettlementTxHex(
 ): Promise<string> {
   setNetworkId(networkId as NetworkId)
   const rawBytes = OfferFiles.decode(offerBech32m.trim())
-  const makerTx = LedgerV8Transaction.deserialize('signature', 'proof', 'binding', rawBytes)
+  const makerTx = LedgerV9Transaction.deserialize('signature', 'proof', 'binding', rawBytes)
 
   const swap = pickSwapSegment(makerTx)
   const makerHasIntents = !!makerTx.intents && Array.from(makerTx.intents.keys() as Iterable<number>).length > 0

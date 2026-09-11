@@ -17,7 +17,7 @@ export async function midnightReadyTest(): Promise<void> {
   });
 
   await assert("Midnight indexer responds on 8088", async () => {
-    const res = await fetch("http://localhost:8088/api/v3/graphql", {
+    const res = await fetch("http://localhost:8088/api/v4/graphql", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: "{ __typename }" }),

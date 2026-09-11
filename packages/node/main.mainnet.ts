@@ -1,9 +1,9 @@
 // Side-effect import: registers the Midnight onchain-runtime wasm bundle.
-import "@midnight-ntwrk/onchain-runtime-v3";
+import "@midnightntwrk/onchain-runtime-v4";
 
 // Midnight ZSwap fix: swallow tryApply errors from already-spent inputs so the
 // sync node doesn't crash on historic state.
-import { ZswapChainState } from "@midnight-ntwrk/ledger-v8";
+import { ZswapChainState } from "@midnightntwrk/ledger-v9";
 
 const origTryApply = ZswapChainState.prototype.tryApply;
 ZswapChainState.prototype.tryApply = function (...args) {

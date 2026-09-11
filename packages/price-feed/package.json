@@ -14,12 +14,12 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@effectstream/utils": "0.103.1",
+    "@effectstream/utils": "0.200.2",
     "@zswap-da/database": "workspace:*",
     "pg": "^8.16.3"
   },
   "devDependencies": {
-    "@effectstream/db": "0.103.1",
+    "@effectstream/db": "0.200.2",
     "@types/pg": "^8.11.10"
   }
 }

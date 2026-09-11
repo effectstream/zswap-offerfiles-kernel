@@ -100,7 +100,7 @@ export const apiRouter: StartConfigApiRouter = async function (
   server: any,
   dbConn: any,
 ): Promise<void> {
-  // Per-IP request budget (default 60/min) — applied to every route in this
+  // Per-IP request budget (default 600/min) — applied to every route in this
   // router.
   //
   // `statusCode` is load-bearing, not decoration: @fastify/rate-limit THROWS
@@ -744,7 +744,7 @@ export const apiRouter: StartConfigApiRouter = async function (
   // Uses effectstream.effectstream_blocks for NTP and
   // effectstream.sync_protocol_pagination for parallel chains.
   // Chain tips are fetched from the Midnight indexer / Celestia RPC and cached 60 s.
-  // Exempt from the 60/min API budget — UIs poll this as a liveness probe.
+  // Exempt from the per-IP API budget — UIs poll this as a liveness probe.
   server.get("/v1/health/sync", { config: { rateLimit: false } }, async () => {
     return getSyncStatus(dbConn);
   });

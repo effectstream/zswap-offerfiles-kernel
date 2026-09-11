@@ -7,7 +7,7 @@ from memory. The backend will be **redeployed from zero** with these changes —
 is no compatibility window and no legacy fallback: the old API simply stops existing.
 
 Base URL: `http://<host>:9999`. All offer-related endpoints moved from `/api/*` to
-`/v1/*`. Rate limit: **60 requests/min per IP** across all routes → HTTP 429
+`/v1/*`. Rate limit: **600 requests/min per IP** (`API_RATE_LIMIT_MAX`) across all routes → HTTP 429
 `{ "error": "RATE_LIMITED", "reason": "..." }`. On 429, back off; do not retry-loop.
 
 ---

@@ -259,6 +259,8 @@ interface EncodedFrontier {
   capReasons: LadderTerminalCapReason[];
 }
 
+type FrontierCapReason = Exclude<LadderTerminalCapReason, "next-omitted-improvement">;
+
 const HEX64 = /^[0-9a-f]{64}$/i;
 
 const byOfferHash = (a: { offerHash: string }, b: { offerHash: string }): number =>
@@ -419,10 +421,9 @@ function encodePrefix(
   frontier: readonly CombinationState[],
   retainedCount: number,
   maxWirePoints: number,
-): EncodedFrontier | null {
+): EncodedFrontier | { failureReasons: LadderTerminalCapReason[] } {
   const retained = frontier.slice(0, retainedCount);
-  const final = retained[retained.length - 1];
-  if (final === undefined) return null;
+  const final = retained[retained.length - 1]!;
 
   const nominalTerminalInput = final.input * 10n;
   let terminalInput = nominalTerminalInput;
@@ -433,15 +434,12 @@ function encodePrefix(
   }
   const nextOmitted = frontier[retainedCount];
   if (nextOmitted !== undefined) {
-    capReasons.unshift("wire-point-cap");
     const beforeNext = nextOmitted.input - 1n;
     if (terminalInput > beforeNext) {
       terminalInput = beforeNext;
       capReasons.push("next-omitted-improvement");
     }
   }
-  if (terminalInput <= final.input) return null;
-
   const levels: PriceLevel[] = [];
   for (let index = 0; index < retained.length; index += 1) {
     const threshold = retained[index]!;
@@ -454,7 +452,14 @@ function encodePrefix(
     }
   }
   levels.push({ input: terminalInput.toString(), output: final.output.toString() });
-  if (levels.length > maxWirePoints) return null;
+  const failureReasons: LadderTerminalCapReason[] = [];
+  if (levels.length > maxWirePoints) failureReasons.push("wire-point-cap");
+  if (terminalInput <= final.input) {
+    failureReasons.push(final.input >= MAX_SETTLEMENT_AMOUNT
+      ? "settlement-amount-cap"
+      : "next-omitted-improvement");
+  }
+  if (failureReasons.length > 0) return { failureReasons };
 
   return {
     levels,
@@ -472,17 +477,33 @@ function encodePrefix(
 function longestEncodableFrontier(
   frontier: readonly CombinationState[],
   maxWirePoints: number,
-): EncodedFrontier | null {
+): { encoded: EncodedFrontier | null; truncationReasons: FrontierCapReason[] } {
   let best: EncodedFrontier | null = null;
+  const truncationReasons = new Set<FrontierCapReason>();
   // Every genuine threshold consumes at least one point and the terminal
   // consumes one more, so no longer prefix can fit. This also bounds encoding
   // work when the exact frontier itself is large.
   const mostThresholdsThatCanFit = Math.min(frontier.length, maxWirePoints - 1);
   for (let retained = 1; retained <= mostThresholdsThatCanFit; retained += 1) {
     const encoded = encodePrefix(frontier, retained, maxWirePoints);
-    if (encoded !== null) best = encoded;
+    if ("failureReasons" in encoded) {
+      for (const reason of encoded.failureReasons) {
+        // An adjacent omitted improvement may become encodable by retaining
+        // more thresholds. Only an actual resource cap explains truncation.
+        if (reason !== "next-omitted-improvement") truncationReasons.add(reason);
+      }
+    } else {
+      best = encoded;
+      truncationReasons.clear();
+    }
   }
-  return best;
+  if (frontier.length > mostThresholdsThatCanFit) {
+    truncationReasons.add("wire-point-cap");
+  }
+  if (best !== null) {
+    best.capReasons = [...new Set([...truncationReasons, ...best.capReasons])];
+  }
+  return { encoded: best, truncationReasons: [...truncationReasons] };
 }
 
 const excludedHash = (offer: LadderSourceOffer): string =>
@@ -693,12 +714,12 @@ export function deriveLadder(
       continue;
     }
 
-    const encoded = longestEncodableFrontier(frontier, limits.maxWirePointsPerPair);
+    const { encoded, truncationReasons } = longestEncodableFrontier(
+      frontier, limits.maxWirePointsPerPair,
+    );
     if (encoded === null) {
-      diagnostic.reason = frontier[0]!.input >= MAX_SETTLEMENT_AMOUNT
-        ? "settlement-amount-cap"
-        : "wire-point-cap";
-      addPairExclusions(excluded, bucket, diagnostic.reason);
+      diagnostic.reason = truncationReasons[0]!;
+      for (const reason of truncationReasons) addPairExclusions(excluded, bucket, reason);
       continue;
     }
 
@@ -741,7 +762,9 @@ export function deriveLadder(
       const used = new Set(encoded.combinations.flatMap((entry) => entry.offerHashes));
       for (const offer of bucket) {
         if (!used.has(offer.offerHash)) {
-          excluded.push({ offerHash: offer.offerHash, reason: "wire-point-cap" });
+          for (const reason of truncationReasons) {
+            excluded.push({ offerHash: offer.offerHash, reason });
+          }
         }
       }
     }

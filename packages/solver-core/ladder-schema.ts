@@ -5,8 +5,8 @@
 // an empty ladder while the node rejected it, and neither enforced that outputs
 // increase. Two copies of a protocol rule are two acceptance sets.
 //
-// A ladder is a cumulative (input, output) curve for ONE directed token pair,
-// read from the SOLVER's side: it receives `tokenIn` and pays `tokenOut`.
+// A ladder is a nondecreasing (input, output) staircase for ONE directed token
+// pair, read from the SOLVER's side: it receives `tokenIn` and pays `tokenOut`.
 
 export interface PriceLevel {
   input: string;
@@ -42,22 +42,19 @@ export type LadderRejection =
   | "malformed-rung"
   | "non-positive"
   | "input-not-ascending"
-  | "output-not-ascending"
-  | "not-concave";
+  | "output-decreasing";
 
 /**
  * Validate a ladder's rungs, returning null when they are acceptable.
  *
- * The rules are what make interpolation trustworthy:
+ * The rules preserve the exact staircase encoding:
  *   - non-empty, so a published pair always quotes something;
  *   - positive amounts;
- *   - strictly ascending input AND output, so more input never buys less and
- *     affordability is a prefix (which is what lets a publisher clip a ladder
- *     to its stock by truncation);
- *   - concave, i.e. a non-increasing marginal rate. Interpolating between two
- *     rungs is only CONSERVATIVE if the curve they sample is concave; on a
- *     convex ladder the chord sits above the curve and the quote would promise
- *     more than the solver can honour.
+ *   - strictly ascending input, matching the relay's admission grammar;
+ *   - nondecreasing output, so a larger budget never quotes less. Equal output
+ *     points delimit whole-offer plateaus and are required. A jump is encoded
+ *     between adjacent input base units, so concavity is neither required nor
+ *     meaningful for the canonical staircase.
  */
 export function rejectLevels(value: unknown): LadderRejection | null {
   if (!Array.isArray(value) || value.length === 0) return "empty";
@@ -73,17 +70,7 @@ export function rejectLevels(value: unknown): LadderRejection | null {
 
     const prev = value[i - 1] as PriceLevel;
     if (BigInt(prev.input) >= BigInt(r.input)) return "input-not-ascending";
-    if (BigInt(prev.output) >= BigInt(r.output)) return "output-not-ascending";
-    if (i === 1) continue;
-
-    // Concavity by cross-multiplication, so no division and no floats:
-    //   (out[i]-out[i-1]) / (in[i]-in[i-1])  <=  (out[i-1]-out[i-2]) / (in[i-1]-in[i-2])
-    const before = value[i - 2] as PriceLevel;
-    const dOutPrev = BigInt(prev.output) - BigInt(before.output);
-    const dInPrev = BigInt(prev.input) - BigInt(before.input);
-    const dOut = BigInt(r.output) - BigInt(prev.output);
-    const dIn = BigInt(r.input) - BigInt(prev.input);
-    if (dOut * dInPrev > dOutPrev * dIn) return "not-concave";
+    if (BigInt(prev.output) > BigInt(r.output)) return "output-decreasing";
   }
   return null;
 }

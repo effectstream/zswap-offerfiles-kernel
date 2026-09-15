@@ -41,7 +41,7 @@
 // a removal or a meaning change does.
 
 /** Bumped only by a removal or a semantic change, never by an additive field. */
-export const statusContractVersion = 1;
+export const statusContractVersion = 2;
 
 /** Canonical base-10 integer string. Amounts are BASE UNITS, never coins. */
 export type DecimalString = string;
@@ -259,20 +259,33 @@ export interface StatusRelay {
 
 // ── the last derived ladder push ────────────────────────────────────────────
 
-export interface StatusLadderRung {
+export interface StatusLadderCombination {
+  /** Exact input required by the selected complete maker files. */
   input: DecimalString;
+  /** Exact output supplied by the selected complete maker files. */
   output: DecimalString;
-  /** The maker offer whose WHOLE consumption closes this rung. */
-  offerHash: string;
+  /** Sorted full identities of the complete files in this winning set. */
+  offerHashes: string[];
 }
+
+export type StatusLadderTerminalCapReason =
+  | "wire-point-cap"
+  | "next-omitted-improvement"
+  | "settlement-amount-cap";
 
 export interface StatusLadderPairProvenance {
   tokenIn: string;
   tokenOut: string;
-  /** Rung order = consumption order = best marginal rate first. */
-  rungs: StatusLadderRung[];
-  /** Most tokenOut any interpolated size between rungs can require. */
-  residualBound: DecimalString;
+  /** Genuine improving thresholds and their exact complete-file witnesses.
+   *  Synthetic plateau endpoints never appear here. */
+  combinations: StatusLadderCombination[];
+  /** Actual inclusive end of the published input range. */
+  terminalInput: DecimalString;
+  /** Unrestricted 10x endpoint derived from the last genuine threshold. */
+  nominalTerminalInput: DecimalString;
+  /** Reasons the actual endpoint is below its nominal value. Empty when the
+   *  complete 10x plateau is published. */
+  capReasons: StatusLadderTerminalCapReason[];
 }
 
 export interface StatusLadderLevel {
@@ -289,10 +302,66 @@ export interface StatusLadderPair {
 export interface StatusLadderExclusion {
   offerHash: string;
   /** `LadderExclusionReason` verbatim: `multi-leg`, `non-shielded-leg`,
-   *  `unavailable`, `rung-cap`, `residual-budget`, `invalid-pair`, … */
+   *  `unavailable`, `pair-search-cap`, `wire-point-cap`, `invalid-pair`, … */
   reason: string;
   /** Present for `invalid-pair`: the schema's verdict. */
   detail?: string;
+}
+
+/** Exact bounded-search controls used for this derivation. Field names mirror
+ *  `LadderResourceLimits`; controls may lower but never raise the hard limits. */
+export interface StatusLadderResourceLimits {
+  maxSourceOffers: number;
+  maxVisitedSubsetsPerPair: number;
+  maxVisitedSubsetsTotal: number;
+  maxMakersPerCombination: number;
+  maxWirePointsPerPair: number;
+  maxPairs: number;
+}
+
+export type StatusLadderPairWithholdReason =
+  | "unsupported-pair"
+  | "minimum-output"
+  | "pair-search-cap"
+  | "global-search-cap"
+  | "wire-point-cap"
+  | "settlement-amount-cap"
+  | "pair-cap"
+  | "aborted"
+  | "abort-check-failed"
+  | "invalid-pair";
+
+export type StatusLadderDerivationStopReason =
+  | "source-offer-cap"
+  | "global-search-cap"
+  | "aborted"
+  | "abort-check-failed"
+  | "invalid-resource-limit";
+
+export interface StatusLadderPairDiagnostic {
+  tokenIn: string;
+  tokenOut: string;
+  status: "published" | "withheld";
+  reason: StatusLadderPairWithholdReason | null;
+  candidateOffers: number;
+  visitedSubsets: number;
+  storedExactInputs: number;
+  amountCappedSubsets: number;
+  frontierCombinations: number;
+  wirePoints: number;
+}
+
+export interface StatusLadderDerivationDiagnostics {
+  stopReason: StatusLadderDerivationStopReason | null;
+  invalidResourceLimit: {
+    field: string;
+    value: string | number | boolean | null;
+    maximum: number;
+  } | null;
+  sourceOffersScanned: number;
+  visitedSubsets: number;
+  peakStoredExactInputs: number;
+  pairs: StatusLadderPairDiagnostic[];
 }
 
 export interface StatusLadderPush {
@@ -300,16 +369,27 @@ export interface StatusLadderPush {
   /** Why this push ran: `tick`, `connect`, `manual`, `coalesced`. */
   cause: string;
   /** Non-null means this push is the fail-closed EMPTY withdrawal and the
-   *  string is why (`cache-not-current`). The page must say so explicitly
+   *  string is why (`cache-not-current`, `derivation-failed`,
+   *  `snapshot-stale`, or `withdrawn`). The page must say so explicitly
    *  rather than showing an empty ladder as "no liquidity". */
   withheld: string | null;
+  /** Bounded human-readable detail for a fail-closed runtime withdrawal. */
+  withheldReason: string | null;
   tokenIds: string[];
   maxParallelSwaps: number | null;
   levels: StatusLadderPair[];
   provenance: StatusLadderPairProvenance[];
   excluded: StatusLadderExclusion[];
+  /** Actual canonical resource limits and observed bounded-search work. */
+  limits: StatusLadderResourceLimits;
+  diagnostics: StatusLadderDerivationDiagnostics;
   pairs: number;
-  rungs: number;
+  /** Total protocol points in `levels`, including synthetic plateau points. */
+  wirePoints: number;
+  /** Genuine improving combinations across all published pairs. */
+  winningCombinations: number;
+  /** Distinct maker file identities across every winning combination. */
+  uniqueMakers: number;
 }
 
 export interface StatusLadder {
@@ -433,8 +513,13 @@ export interface StatusAdmission {
   expiryMarginSeconds: number;
   pushIntervalMs: number;
   maxParallelSwaps: number;
+  /** Protocol wire-point cap. The historical field name is retained so
+   *  launch/config callers do not silently substitute the maker-route cap. */
   maxRungsPerPair: number | null;
+  /** Protocol pair cap per price-levels frame. */
   maxPairs: number | null;
+  /** Complete maker files allowed in one selected winning route. */
+  maxMakersPerRoute: number;
   settleTtlMinutes: number | null;
 }
 

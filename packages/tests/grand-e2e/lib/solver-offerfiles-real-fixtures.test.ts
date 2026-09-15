@@ -244,7 +244,6 @@ describe("central solver recorder", () => {
       E1_SOLVER_SEED: "11".repeat(32),
       E1_SOLVER_API: "http://offer-files-backend:3000",
       E1_SOLVER_AUTH_TOKEN: "1234567890abcdef",
-      E1_SOLVER_LADDER_CONFIG: "/artifacts/ladder.json",
       E1_SOLVER_TELEMETRY_PATH: "/artifacts/telemetry.jsonl",
       E1_SOLVER_RUNTIME_PATH: "/artifacts/runtime.json",
       E1_SOLVER_RECORDER_URL: "http://telemetry-relay:8080/record",
@@ -261,6 +260,10 @@ describe("central solver recorder", () => {
       ...env,
       E1_SOLVER_RUNTIME_PATH: env.E1_SOLVER_TELEMETRY_PATH,
     })).toThrow("must be distinct");
+    expect(() => readRealSolverServiceConfig({
+      ...env,
+      E1_SOLVER_LADDER_CONFIG: "/artifacts/retired-ladder.json",
+    })).toThrow("E1_SOLVER_LADDER_CONFIG was removed");
   });
 
   test("serializes milestones and trusts only returned central sequences", async () => {
@@ -594,7 +597,6 @@ describe("real fixture lifecycle seams", () => {
           E1_TOKEN_B: "bb".repeat(32),
           E1_ACTOR_RESULT_PATH: join(directory, "actor.json"),
           E1_ACTOR_RUNTIME_PATH: join(directory, "runtime.json"),
-          E1_ACTOR_LADDER_PATH: join(directory, "ladder.json"),
           E1_ACTOR_PRE_SPENT_PATH: path,
         };
         if (actors.readRealActorConfig(env).preSpentPath !== path) {

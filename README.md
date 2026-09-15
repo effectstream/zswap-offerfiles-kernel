@@ -316,10 +316,9 @@ run the page against fixture data with no stack at all.
 ### What the solver supports (and what it does not)
 
 - **Midnight 1.x / ledger-v8 only**, single-leg **shielded** offers with two
-  distinct token colors and positive amounts, at most **8 makers** per job, plus
-  an optional shielded residual paid from solver inventory. Unshielded legs,
-  mixed value layers, multi-leg baskets and Midnight 2.x are out of scope and
-  are refused before admission, not partially supported.
+  distinct token colors and positive amounts, at most **8 complete maker
+  files** per job. Unshielded legs, mixed value layers, multi-leg baskets and
+  Midnight 2.x are refused before admission.
 - Maker offers are built `payFees:false`, so the maker's offer carries no fee
   payment: **the settling side pays**. The solver sizes and pays DUST for the
   settlement it submits, under the `SOLVER_DUST_*` admission budget. Sizing that
@@ -328,62 +327,39 @@ run the page against fixture data with no stack at all.
   The solver still needs NIGHT/DUST to pay the fee itself.
 - Published ladders are indicative data for the relay's own interpolation, not
   reservations. Job admission is re-decided at job time against the current
-  book, inventory and policy.
+  book and policy, and the exact winning files are claimed atomically.
 
-### Job semantics: lower demands settle, surplus stays with the solver
+### Whole-offer staircase pricing and settlement
 
-**Behavior change.** A dispatched job carries the taker's exact demand, which the
-reference relay allows to be *below* the solver's advertised interpolated
-output. The solver now accepts every job with
-`0 < amountOut <= interpolate(amountIn)`:
+For each directed pair, the solver examines the current eligible Offer Files and
+finds the maximum maker output supplied by an affordable compatible set of at
+most eight complete files. It publishes those improvements as a staircase:
+flat sections end one input base unit before the next improvement, and the last
+genuine threshold receives one fixed flat endpoint at **10x its input**. The
+64-point-per-pair and 64-pair-per-frame wire limits are separate from the
+eight-maker settlement limit. If exact search, numeric, freshness, or point
+limits cannot prove a safe curve, the affected pair is withheld or withdrawn.
 
-- the maker prefix is chosen exactly as before (largest whole-offer prefix whose
-  input fits `amountIn`);
-- if the prefix pays less tokenOut than the demand, the difference is a
-  **residual** the solver pays from inventory (`Stock`), reserved as before;
-- if the prefix pays more, the difference is **surplus that the solver keeps**,
-  together with any unspent tokenIn — matching the reference solver, which keeps
-  `dy - requiredOutput`.
+A dispatched job may request less output than the selected files supply and may
+provide more input than those files require. Every selected maker file executes
+unchanged and in full. The taker receives exactly its signed output; excess
+input and excess maker output go to the solver's shielded address. The solver
+never partially consumes an offer and never pays a swap-token shortfall from
+pre-existing inventory. Funded and empty swap-token wallets therefore produce
+the same prices and route choices. The solver still needs NIGHT/DUST for fees.
 
 Jobs above the advertised output are still refused, as are jobs outside the
 published ladder, non-positive demands, stale routes, disallowed pairs,
-below-minimum outputs and unaffordable residuals. Previously these lower demands
-were refused as `route_not_current`; deployments that relied on that refusal will
-now see them settle.
+below-minimum outputs, incompatible maker sets and routes that exceed resource
+limits.
 
-### The solver needs NO token inventory to quote whole-maker rungs
-
-**Availability change.** Sizing the settlement's DUST fee no longer touches the
-solver's coins: the taker's half is modelled by a *synthetic* transaction built
-from ledger primitives with the taker half's shape, because the DUST fee is a
-function of transaction structure only. So:
-
-- **every whole-maker rung is publishable and settleable by a solver holding
-  zero of both tokens.** The maker offer being consumed pays the rung; the
-  solver contributes nothing but the fee;
-- **tokenOut is needed only for *interior* sizes.** Publishing a second rung
-  opens the interpolated interval below it, and any size inside that interval is
-  served as "consume the whole prefix, then top up the difference from solver
-  inventory". A rung whose interval could demand a tokenOut residual larger than
-  available `Stock` is withheld, **and so is every rung above it**. With zero
-  tokenOut the solver therefore publishes each pair's first rung and no more;
-- `SOLVER_SUPPORTED_PAIRS` and `SOLVER_MIN_JOB_OUTPUT` bound publication as well
-  as admission (they previously bounded admission only), and are re-applied on
-  every reconnect;
-- inventory readiness republishes immediately on both edges, so a failed or
-  in-flight balance refresh withdraws residual-bounded rungs instead of
-  advertising them for up to one push interval.
-
-Withheld liquidity is reported once per change through the
-`ladder-budget-limited` / `ladder-budget-cleared` operator events, so a shrunk
-ladder is visible rather than silent.
-
-> Earlier builds also capped published rung inputs by the tokenIn the solver
-> could prove spendable — a solver holding no tokenIn published nothing for that
-> pair — because fee sizing spent the job's full `amountIn` out of the solver's
-> own wallet and reverted it. That cap is **gone**. Operators no longer need to
-> fund both sides of a pair; deployments that provisioned the solver with tokenIn
-> purely to make it quote can stop.
+> **Breaking pricing/configuration change.** The former cumulative-prefix,
+> inventory-funded interpolation, direct-fill and crossing/cycle generators are
+> removed. `SOLVER_LADDER_CONFIG`, manual `pairs[].levels`,
+> `SOLVER_ENABLE_PATH_B`, `SOLVER_ENABLE_CYCLES`, and
+> `SOLVER_ENABLE_RESIDUAL_TOPUPS` are invalid upgrade leftovers and fail startup
+> with migration guidance. Delete them; there is no ladder file or pricing-mode
+> replacement. Token aliases come from the live book's actual token colors.
 
 ### Fee sizing: `SOLVER_FEE_SIZING_TAKER_INPUTS`
 

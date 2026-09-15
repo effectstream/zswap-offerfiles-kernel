@@ -18,6 +18,7 @@ import {
   SOLVER_SEED,
 } from "./env.ts";
 import { runSolver } from "./src/run.ts";
+import { assertNoRetiredSolverPricingEnv } from "./src/launch.ts";
 import { startWithSignalOwnership } from "./src/startup-signals.ts";
 
 if (net.id !== "mainnet") {
@@ -41,6 +42,9 @@ if (!isSolverEnabled()) {
   console.log("[solver] SOLVER_ENABLED=false — exiting without starting");
   process.exit(0);
 }
+
+// Validate retired pricing settings before any wallet or network side effect.
+assertNoRetiredSolverPricingEnv();
 
 globalThis.WebSocket = WebSocket;
 setNetworkId(net.id as any);

@@ -27,8 +27,8 @@ The core stack keeps the existing chain and offer flow:
 - `relay`, `solver`, and `solver-frontend` provide intent intake, solving and
   monitoring.
 - `solver-provision` is a one-shot external-inventory check. It never funds a
-  wallet. It verifies prefunded NIGHT can produce usable DUST and writes a
-  ladder containing the two configured token IDs.
+  wallet or writes prices. It verifies prefunded NIGHT can produce usable DUST
+  and writes a factual balance receipt.
 - `maker-offer` is a disabled-by-default one-shot that posts one offer from an
   already funded maker wallet.
 
@@ -43,15 +43,13 @@ For solver provisioning set:
 
 ```dotenv
 SOLVER_PROVISION_ENABLED=true
-SOLVER_PROVISION_TOKEN_IN=<64-hex-token-id>
-SOLVER_PROVISION_TOKEN_OUT=<different-64-hex-token-id>
 ```
 
 `SOLVER_SEED` must already hold unshielded NIGHT. Provisioning fails unless its
 NIGHT is registered, or already registered, and the wallet reports usable DUST.
 The receipt records `inventorySource: "external"`, `dustReady: true`, measured
-balances, and the explicit pair. When provisioning is disabled, the service
-installs the checked-in ladder and exits successfully.
+balances, and `pricingSource: "live-offer-files-book"`. When provisioning is
+disabled, the service exits successfully without creating a pricing artifact.
 
 For the maker one-shot set `MAKER_OFFER_ENABLED=true`,
 `MAKER_OFFER_GIVE_TOKEN`, and `MAKER_OFFER_WANT_TOKEN`. The maker wallet must

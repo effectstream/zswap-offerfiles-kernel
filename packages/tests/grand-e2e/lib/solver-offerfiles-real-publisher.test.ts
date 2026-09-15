@@ -10,6 +10,7 @@ import { mip6NamespaceBytes } from "@zswap-da/offer-guard";
 import {
   createIdempotentPublisherCleanup,
   publishRealCelestiaBlob,
+  readAndValidateRealActorManifest,
   readRealPublisherConfig,
   realPublisherSignalExitCode,
   type RealPublisherConfig,
@@ -48,7 +49,7 @@ function actorManifest(rawOffer: Uint8Array): Record<string, unknown> {
     solver: { shielded: { [B]: solverB }, unshielded: {}, dust },
   });
   return {
-    schema: "zswap-offer-files-real-actors/v1",
+    schema: "zswap-offer-files-real-actors/v2",
     runId: "publisher-test",
     networkId: "undeployed",
     createdAt,
@@ -99,7 +100,6 @@ function actorManifest(rawOffer: Uint8Array): Record<string, unknown> {
       wants: [{ token: B, amount: "900", kind: "SHIELDED" }],
       expiresAt: "2026-08-15T12:30:00.000Z",
     },
-    ladder: { path: "/e1/ladder.json", sha256: "07".repeat(32) },
   };
 }
 
@@ -185,6 +185,24 @@ async function configFor(
 }
 
 describe("real direct-Celestia publisher", () => {
+  test("rejects a retired generated ladder in an actor JSON artifact", async () => {
+    const directory = await fixtureDirectory();
+    const stale = {
+      ...actorManifest(new Uint8Array([1, 2, 3, 4, 5])),
+      ladder: { path: "/artifacts/retired-ladder.json", sha256: "00".repeat(32) },
+    };
+    const manifestPath = await writeManifest(directory, stale);
+    const config = readRealPublisherConfig("offer", {
+      E1_RUN_ID: "publisher-test",
+      E1_ACTOR_RESULT_PATH: manifestPath,
+      E1_PUBLISHER_EVIDENCE_PATH: join(directory, "evidence.json"),
+      E1_CELESTIA_RPC_URL: "http://127.0.0.1:13001",
+    });
+    await expect(readAndValidateRealActorManifest(config)).rejects.toThrow(
+      /actor manifest keys must be exactly .*got .*ladder/,
+    );
+  });
+
   test("publishes the manifest's exact raw offer and independently verifies height/bytes/commitment", async () => {
     const directory = await fixtureDirectory();
     const expected = new Uint8Array([1, 2, 3, 4, 5]);

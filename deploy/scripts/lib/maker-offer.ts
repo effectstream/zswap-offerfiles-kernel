@@ -22,11 +22,9 @@
 //
 // Note the resulting direction: an offer GIVING A / WANTING B is filled by a
 // taker who pays B and receives A, so for the solver that pair is tokenIn=B,
-// tokenOut=A. Since 00006-R2 the solver needs NEITHER to quote and settle this
-// offer as a whole rung — fee sizing stopped spending tokenIn, and the maker
-// offer itself pays the rung. tokenOut buys only INTERPOLATED sizes between
-// rungs. Any swap inventory is supplied outside this deployment, which
-// 00006-V1's unfunded rerun is the control for.
+// tokenOut=A. The solver needs NEITHER token to quote and settle this complete
+// file: the maker supplies output, the taker supplies input, and the solver pays
+// only the fee. The 00006-V1 unfunded rerun remains the control for that fact.
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 

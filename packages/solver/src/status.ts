@@ -167,6 +167,7 @@ export interface StatusAdmissionInfo {
   maxParallelSwaps: number;
   maxRungsPerPair: number | null;
   maxPairs: number | null;
+  maxMakersPerRoute: number;
   settleTtlMinutes: number | null;
 }
 
@@ -276,6 +277,18 @@ function flattenDetail(
   return out;
 }
 
+function flattenDiagnosticValue(value: unknown): string | number | boolean | null {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") return value.toString();
+  if (value === undefined) return null;
+  try {
+    return String(value).slice(0, 512);
+  } catch {
+    return "[unserialisable]";
+  }
+}
+
 /**
  * Book offers, NEWEST FIRST, capped.
  *
@@ -336,30 +349,57 @@ function projectLadderPush(record: RelayLadderPushRecord): StatusLadderPush {
     tokenOut: pair.tokenOut,
     levels: pair.levels.map((level) => ({ input: level.input, output: level.output })),
   }));
+  const uniqueMakerHashes = new Set<string>();
+  let winningCombinations = 0;
+  const provenance = push.derived.provenance.map((pair) => ({
+    tokenIn: pair.tokenIn,
+    tokenOut: pair.tokenOut,
+    combinations: pair.combinations.map((combination) => {
+      winningCombinations += 1;
+      for (const offerHash of combination.offerHashes) uniqueMakerHashes.add(offerHash);
+      return {
+        input: combination.input,
+        output: combination.output,
+        offerHashes: [...combination.offerHashes],
+      };
+    }),
+    terminalInput: pair.terminalInput,
+    nominalTerminalInput: pair.nominalTerminalInput,
+    capReasons: [...pair.capReasons],
+  }));
   return {
     derivedAt: record.derivedAt,
     cause: record.cause,
     withheld: push.withheld,
+    withheldReason: push.withheldReason?.slice(0, 512) ?? null,
     tokenIds: [...push.capabilities.tokenIds],
     maxParallelSwaps: push.capabilities.maxParallelSwaps ?? null,
     levels,
-    provenance: push.derived.provenance.map((pair) => ({
-      tokenIn: pair.tokenIn,
-      tokenOut: pair.tokenOut,
-      rungs: pair.rungs.map((rung) => ({
-        input: rung.input,
-        output: rung.output,
-        offerHash: rung.offerHash,
-      })),
-      residualBound: pair.residualBound,
-    })),
+    provenance,
     excluded: push.derived.excluded.map((exclusion) => ({
       offerHash: exclusion.offerHash,
       reason: exclusion.reason,
       ...(exclusion.detail === undefined ? {} : { detail: String(exclusion.detail) }),
     })),
+    limits: { ...push.derived.limits },
+    diagnostics: {
+      stopReason: push.derived.diagnostics.stopReason,
+      invalidResourceLimit: push.derived.diagnostics.invalidResourceLimit === null
+        ? null
+        : {
+          field: push.derived.diagnostics.invalidResourceLimit.field,
+          value: flattenDiagnosticValue(push.derived.diagnostics.invalidResourceLimit.value),
+          maximum: push.derived.diagnostics.invalidResourceLimit.maximum,
+        },
+      sourceOffersScanned: push.derived.diagnostics.sourceOffersScanned,
+      visitedSubsets: push.derived.diagnostics.visitedSubsets,
+      peakStoredExactInputs: push.derived.diagnostics.peakStoredExactInputs,
+      pairs: push.derived.diagnostics.pairs.map((pair) => ({ ...pair })),
+    },
     pairs: levels.length,
-    rungs: levels.reduce((total, pair) => total + pair.levels.length, 0),
+    wirePoints: levels.reduce((total, pair) => total + pair.levels.length, 0),
+    winningCombinations,
+    uniqueMakers: uniqueMakerHashes.size,
   };
 }
 
@@ -615,6 +655,7 @@ export function createStatusCollector(deps: StatusCollectorDependencies): Status
         maxParallelSwaps: deps.admission.maxParallelSwaps,
         maxRungsPerPair: deps.admission.maxRungsPerPair,
         maxPairs: deps.admission.maxPairs,
+        maxMakersPerRoute: deps.admission.maxMakersPerRoute,
         settleTtlMinutes: deps.admission.settleTtlMinutes,
       })),
       listener: section<StatusListener>(() => {
@@ -682,7 +723,7 @@ export function createStatusCollector(deps: StatusCollectorDependencies): Status
       // once-a-second `push` above all) into the previous entry: the ring then
       // keeps one row per CHANGE and `count`/`lastAt` carry the repetition.
       // The detail is refreshed to the latest occurrence, so a folded `push`
-      // row still says how many pairs/rungs the newest push carried.
+      // row still says how many pairs/wire points the newest push carried.
       const previous = events.at(-1);
       if (
         previous !== undefined &&

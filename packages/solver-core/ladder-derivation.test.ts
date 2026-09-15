@@ -355,6 +355,10 @@ describe("wire and numeric bounds", () => {
       "wire-point-cap",
       "next-omitted-improvement",
     ]);
+    expect(derived.excluded).toEqual(book.slice(32).map((entry) => ({
+      offerHash: entry.offerHash,
+      reason: "wire-point-cap",
+    })));
     expect(relayQuote(derived.levels[0]!.levels, 3_299n)).toBe(32n);
     expect(relayQuote(derived.levels[0]!.levels, 3_300n)).toBeNull();
   });
@@ -401,6 +405,87 @@ describe("wire and numeric bounds", () => {
     expect(rejectLevels([{ input: wireU256.toString(), output: wireU256.toString() }])).toBeNull();
     expect(rejectLevels([{ input: (wireU256 + 1n).toString(), output: "1" }]))
       .toBe("malformed-rung");
+  });
+
+  test("numeric-only prefix fallback preserves its cause with the default wire limit", () => {
+    const derived = deriveLadder([
+      offer(2_320, 1n, 1n),
+      offer(2_321, MAX_SETTLEMENT_AMOUNT, 2n),
+    ], OPTIONS);
+    expect(derived.limits.maxWirePointsPerPair).toBe(64);
+    expect(derived.levels[0]!.levels).toEqual([
+      { input: "1", output: "1" },
+      { input: "10", output: "1" },
+    ]);
+    expect(derived.provenance[0]).toMatchObject({
+      combinations: [{ input: "1", output: "1", offerHashes: [hash(2_320)] }],
+      terminalInput: "10",
+      nominalTerminalInput: "10",
+      capReasons: ["settlement-amount-cap"],
+    });
+    expect(derived.excluded).toEqual([
+      { offerHash: hash(2_321), reason: "settlement-amount-cap" },
+    ]);
+    expect(relayQuote(derived.levels[0]!.levels, 10n)).toBe(1n);
+    expect(relayQuote(derived.levels[0]!.levels, 11n)).toBeNull();
+  });
+
+  test("numeric failure after adjacent omitted improvements remains a numeric withhold", () => {
+    const derived = deriveLadder([
+      offer(2_322, MAX_SETTLEMENT_AMOUNT - 1n, 1n),
+      offer(2_323, MAX_SETTLEMENT_AMOUNT, 2n),
+    ], OPTIONS);
+    expect(derived.levels).toEqual([]);
+    expect(derived.diagnostics.pairs[0]!.reason).toBe("settlement-amount-cap");
+    expect(derived.excluded).toEqual([
+      { offerHash: hash(2_322), reason: "settlement-amount-cap" },
+      { offerHash: hash(2_323), reason: "settlement-amount-cap" },
+    ]);
+  });
+
+  test("mixed prefix failure preserves both wire and numeric causes", () => {
+    const derived = deriveLadder([
+      offer(2_324, 1n, 1n),
+      offer(2_325, 5n, 2n),
+      offer(2_326, MAX_SETTLEMENT_AMOUNT, 3n),
+    ], {
+      ...OPTIONS,
+      resourceLimits: { maxMakersPerCombination: 1, maxWirePointsPerPair: 4 },
+    });
+    expect(derived.levels[0]!.levels).toEqual([
+      { input: "1", output: "1" },
+      { input: "4", output: "1" },
+      { input: "5", output: "2" },
+      { input: "50", output: "2" },
+    ]);
+    expect(derived.provenance[0]!.capReasons).toEqual([
+      "wire-point-cap", "settlement-amount-cap",
+    ]);
+    expect(derived.excluded).toEqual([
+      { offerHash: hash(2_326), reason: "settlement-amount-cap" },
+      { offerHash: hash(2_326), reason: "wire-point-cap" },
+    ]);
+  });
+
+  test("a numeric tail cap does not mislabel offers omitted only for wire capacity", () => {
+    const input = MAX_SETTLEMENT_AMOUNT / 10n + 1n;
+    const derived = deriveLadder([
+      offer(2_327, input, 1n),
+      offer(2_328, input + 10n, 2n),
+    ], {
+      ...OPTIONS,
+      resourceLimits: { maxMakersPerCombination: 1, maxWirePointsPerPair: 2 },
+    });
+    expect(derived.levels[0]!.levels).toEqual([
+      { input: input.toString(), output: "1" },
+      { input: (input + 9n).toString(), output: "1" },
+    ]);
+    expect(derived.provenance[0]!.capReasons).toEqual([
+      "wire-point-cap", "settlement-amount-cap", "next-omitted-improvement",
+    ]);
+    expect(derived.excluded).toEqual([
+      { offerHash: hash(2_328), reason: "wire-point-cap" },
+    ]);
   });
 
   test("prunes overflowing positive descendants but preserves smaller exact combinations", () => {

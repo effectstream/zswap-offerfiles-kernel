@@ -43,8 +43,8 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { mip6NamespaceBytes } from "@zswap-da/offer-guard";
 
-const ACTOR_SCHEMA = "zswap-offer-files-real-actors/v1";
-const SOLVER_SCHEMA = "zswap-offer-files-real-solver/v1";
+const ACTOR_SCHEMA = "zswap-offer-files-real-actors/v2";
+const SOLVER_SCHEMA = "zswap-offer-files-real-solver/v2";
 const PUBLICATION_SCHEMA = "zswap-offer-files-real-celestia-publication/v1";
 const EVIDENCE_SCHEMA = "zswap-offer-files-real-backend-settlement/v1";
 const HARD_MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -554,7 +554,7 @@ function parseActorArtifact(artifact: SealedJson, config: RealSettlementVerifier
   const root = recordAt(artifact.value, "actor artifact");
   exactKeys(
     root,
-    ["schema", "runId", "networkId", "createdAt", "actors", "tokens", "funding", "balances", "offer", "ladder"],
+    ["schema", "runId", "networkId", "createdAt", "actors", "tokens", "funding", "balances", "offer"],
     "actor artifact",
   );
   if (root["schema"] !== ACTOR_SCHEMA || root["runId"] !== config.runId) {
@@ -662,11 +662,6 @@ function parseActorArtifact(artifact: SealedJson, config: RealSettlementVerifier
     throw new Error("actor artifact dust balance evidence has the wrong contract");
   }
   canonicalDecimal(dustEvidence["before"], "actor artifact.balances.dustBalanceEvidence.before");
-  const ladder = recordAt(root["ladder"], "actor artifact.ladder");
-  exactKeys(ladder, ["path", "sha256"], "actor artifact.ladder");
-  requireAbsolutePath("actor artifact.ladder.path", ladder["path"] as string | undefined);
-  canonicalHex(ladder["sha256"], "actor artifact.ladder.sha256");
-
   const offer = recordAt(root["offer"], "actor artifact.offer");
   exactKeys(
     offer,
@@ -743,7 +738,7 @@ function parseSolverArtifact(
 ): SolverOracle {
   const root = recordAt(artifact.value, "solver artifact");
   const allowed = [
-    "schema", "runId", "networkId", "pid", "api", "ladderConfigPath", "telemetryPath",
+    "schema", "runId", "networkId", "pid", "api", "telemetryPath",
     "centralRecorderEnabled", "seedFingerprint", "startedAt", "state", "updatedAt",
     "submissionCount", "ready", "walletBoundaries", "stock", "lastSubmission",
     "lastSubmissionOutcome", "reason", "telemetryCount", "lastCentralSequence", "evidenceFailures",
@@ -773,7 +768,6 @@ function parseSolverArtifact(
   ) {
     throw new Error("solver artifact.api must be a credential-free HTTP(S) URL");
   }
-  requireAbsolutePath("solver artifact.ladderConfigPath", root["ladderConfigPath"] as string | undefined);
   requireAbsolutePath("solver artifact.telemetryPath", root["telemetryPath"] as string | undefined);
   canonicalIso(root["startedAt"], "solver artifact.startedAt");
   canonicalIso(root["updatedAt"], "solver artifact.updatedAt");
@@ -794,12 +788,7 @@ function parseSolverArtifact(
   );
 
   const boundaries = recordAt(root["walletBoundaries"], "solver artifact.walletBoundaries");
-  exactKeys(boundaries, ["features", "methods"], "solver artifact.walletBoundaries");
-  const features = recordAt(boundaries["features"], "solver artifact.walletBoundaries.features");
-  exactKeys(features, ["pathB", "residualTopUps", "cycles", "levelsPublication"], "solver artifact.walletBoundaries.features");
-  if (Object.values(features).some((value) => value !== false)) {
-    throw new Error("solver artifact unexpectedly enabled a gated feature");
-  }
+  exactKeys(boundaries, ["methods"], "solver artifact.walletBoundaries");
   const methods = recordAt(boundaries["methods"], "solver artifact.walletBoundaries.methods");
   exactKeys(
     methods,

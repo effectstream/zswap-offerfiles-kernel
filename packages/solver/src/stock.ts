@@ -2,12 +2,11 @@
 //
 // Two kinds of commitment, both released together when a fill reaches a
 // terminal outcome:
-//   - tokens the solver has promised to pay but has not yet spent on chain;
+//   - historical token payouts restored from persisted jobs;
 //   - offers (and the nullifiers they spend) a fill is already working on.
 //
-// The offer side is what makes double-filling structurally impossible: a Path A
-// candidate and a Path B set that share an offer can never both be admitted,
-// because the first one enqueued reserves it.
+// New jobs carry empty payout maps. Offer/nullifier claims prevent concurrent
+// jobs from consuming the same maker even when their winning combinations differ.
 
 import type { BookOffer } from "./book.ts";
 
@@ -15,7 +14,7 @@ import type { BookOffer } from "./book.ts";
 export interface Claim {
   offerHashes: string[];
   nullifiers: string[];
-  /** Token → amount the solver will pay out. */
+  /** Historical token payouts; empty for new whole-offer jobs. */
   payouts: Map<string, bigint>;
 }
 
@@ -125,29 +124,13 @@ export class Stock {
     }
   }
 
-  /** Tokens the solver holds or has committed — the set worth publishing a
-   *  ladder for. */
+  /** Tokens held or committed by historical jobs, for status and recovery. */
   tokens(): string[] {
     return [...new Set([...this.#balances.keys(), ...this.#reserved.keys()])];
   }
 
-  /**
-   * One snapshot of `available` for every token this Stock knows about — what
-   * publication is allowed to advertise as executable (spec 00005 FR-003).
-   *
-   * A snapshot, not a live view: the ladder derivation must be reproducible
-   * from its inputs, so the push loop takes one of these per push and the
-   * derivation never reads back into executor state. A token absent from the
-   * result means zero available, which is what the derivation assumes — so a
-   * refresh that emptied the balances withdraws every budget-bounded rung on
-   * the next push, exactly as it already withdraws residual authority.
-   *
-   * `deriveLadder` reads only a PAIR'S tokenOut entry from this: the residual
-   * payout. It read the tokenIn entry too until 00006-R2 removed that bound
-   * (spec 00006 FR-003) — fee sizing no longer spends tokenIn — so an empty
-   * snapshot no longer means "publish nothing", it means "whole-maker rungs
-   * only".
-   */
+  /** Detached availability snapshot for status and historical payout accounting.
+   * New whole-offer pricing never consumes wallet balances. */
   spendable(): Map<string, bigint> {
     const snapshot = new Map<string, bigint>();
     for (const token of this.tokens()) {

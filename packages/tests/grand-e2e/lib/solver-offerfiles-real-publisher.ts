@@ -47,7 +47,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { mip6NamespaceBytes } from "@zswap-da/offer-guard";
 
-const ACTOR_SCHEMA = "zswap-offer-files-real-actors/v1";
+const ACTOR_SCHEMA = "zswap-offer-files-real-actors/v2";
 const EVIDENCE_SCHEMA = "zswap-offer-files-real-celestia-publication/v1";
 const NIGHT = "0".repeat(64);
 const MAX_CONFIGURED_DEADLINE_MS = 10 * 60_000;
@@ -540,7 +540,7 @@ function validateActorManifestShape(
   const root = recordAt(decoded, "actor manifest");
   exactKeys(
     root,
-    ["schema", "runId", "networkId", "createdAt", "actors", "tokens", "funding", "balances", "offer", "ladder"],
+    ["schema", "runId", "networkId", "createdAt", "actors", "tokens", "funding", "balances", "offer"],
     "actor manifest",
   );
   if (root["schema"] !== ACTOR_SCHEMA || root["runId"] !== config.runId) {
@@ -781,11 +781,6 @@ function validateActorManifestShape(
   ) {
     throw new Error("actor manifest settlement balances are not derived from the exact A-to-B offer");
   }
-
-  const ladder = recordAt(root["ladder"], "actor manifest.ladder");
-  exactKeys(ladder, ["path", "sha256"], "actor manifest.ladder");
-  requireAbsolutePath("actor manifest.ladder.path", ladder["path"] as string | undefined);
-  canonicalHex(ladder["sha256"], "actor manifest.ladder.sha256", 64);
 
   return {
     schema: ACTOR_SCHEMA,

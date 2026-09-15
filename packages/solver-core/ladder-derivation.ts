@@ -1,88 +1,15 @@
-// Price-ladder derivation from the solver's Offer Files book cache.
+// Canonical whole-offer ladder derivation.
 //
-// This is the whole of FR-013/FR-014's derivation half (plan phase N3): pure,
-// clock-free, IO-free, and byte-reproducible from a seeded book. It does NOT
-// connect to the relay, push, or schedule anything — that is N4.
-//
-// WHAT A LADDER IS. One entry per DIRECTED token pair, read from the SOLVER's
-// side: it receives `tokenIn` and pays `tokenOut`. A maker offer that GIVES X
-// and WANTS Y therefore backs the pair `tokenIn = Y, tokenOut = X` and no
-// other. Rungs are CUMULATIVE totals as decimal strings, strictly ascending in
-// input; the relay quotes any size by linear interpolation between bracketing
-// rungs and refuses below the first or above the last (see `interpolateQuote`
-// in `relay-ws-contract.ts`, ported from the pinned relay).
-//
-// THE POLICY (user decision Q-R2-3, 2026-08-20 — the OPTIMAL ladder):
-//
-//   1. Take every crossable maker offer for the pair.
-//   2. Sort them BEST MARGINAL RATE FIRST — most `tokenOut` per `tokenIn`.
-//      This is mandatory, not cosmetic: it maximises every quoted prefix and
-//      it is what makes the curve CONCAVE, which is the assumption behind the
-//      relay's conservative interpolation. Any other order publishes dominated
-//      quotes and convex stretches the solver is still held to at job time.
-//   3. Emit one rung per whole-offer cumulative boundary — the maximal concave
-//      ladder. Every rung is therefore an EXACT whole-offer sum and needs no
-//      solver inventory at all.
-//   4. Margin/fee policy: NONE. Option B (a conservative sub-curve) was
-//      rejected; rungs are the book's exact sums. FR-013's "documented
-//      margin/fee policy" is discharged by this sentence.
-//
-// HONOURABILITY BETWEEN RUNGS. The relay interpolates and treats every
-// interpolated point as honourable, but zswap offer files are all-or-nothing.
-// Between rungs k and k+1 the chord's slope is exactly offer k+1's marginal
-// rate, so an interpolated size `x` is served as: consume offers 1..k WHOLE,
-// then trade the residual `x - input[k]` of `tokenIn` for
-// `floor(rate_{k+1} * (x - input[k]))` of `tokenOut` out of solver inventory —
-// i.e. the solver self-fills the partial offer at that offer's own price,
-// never worse. The residual payout is strictly less than one offer's `gives`.
-// If the inventory is not there at job time the job fails CLOSED with
-// `job-error` (N5 owns that assertion; see `deriveLadder`'s `residualBound` for
-// the number N5 checks against).
-//
-// EXECUTABILITY BUDGET (spec 00005 FR-003, finding P4-F03; spec 00006 FR-003).
-// Failing closed at job time is safe but dishonest: the relay keeps quoting a
-// rung the solver will always refuse, and the taker's job is the thing that
-// pays for the discovery. So `spendableInventory` lets the caller hand in what
-// the solver can actually move (`Stock.available`) and the ladder is TRUNCATED
-// at the first rung that is not executable. There is exactly ONE such budget:
-//
-//   * tokenOut (FR-003) — publishing a rung opens the interpolation interval
-//     below it, whose worst-case solver payout is
-//     `worstCaseIntervalResidual(offer)`. The FIRST rung opens no interval and
-//     so needs no inventory at all.
-//
-// THERE IS NO tokenIn BUDGET, and that is the whole of 00006 FR-003. 00005-R2
-// added one (`mirror-budget`, finding P4-F04): the executor's mandatory
-// fee-sizing MIRROR spent the job's FULL `amountIn` of tokenIn out of the solver
-// wallet, `interpolateQuote` caps a job's `amountIn` at the last published
-// rung's cumulative input, so the published rung list had to be capped by the
-// solver's own spendable tokenIn — and a solver holding no tokenIn published
-// NOTHING, however deep the maker book behind it was. 00006-R1 replaced the
-// mirror with a fabricated same-shape stand-in
-// (`@zswap-da/solver-core/fee-sizing`), so fee sizing spends no tokenIn at all
-// and that cap protected nothing. It is GONE: every whole-maker rung is
-// publishable by a solver with an empty token wallet. Only the tokenOut residual
-// above still withholds anything.
-//
-// The budget is per-rung, not aggregate across pairs or across concurrent jobs:
-// `Stock.reserve` decides and commits aggregate admission in one step at
-// execution, and remains the authority.
-//
-// DETERMINISM. No wall clock (`nowMs` is a parameter, as in `engine.ts`), no
-// randomness, no dependence on input order or on any Map's iteration order:
-// offers are totally ordered by content address before anything is grouped,
-// and pairs are emitted in lexicographic key order. Same cache state + same
-// `nowMs` ⇒ byte-identical frames.
-//
-// FAIL-CLOSED. Only the native shielded single-leg shape this solver can
-// actually settle enters derivation; every other shape is EXCLUDED with a
-// recorded reason rather than guessed at. A pair with nothing behind it is
-// omitted entirely — never published as an empty or padded ladder.
+// Each eligible maker file is indivisible. For every directed pair this module
+// exhaustively visits every compatible nonempty subset allowed by the maker
+// limit, retains the deterministic best witness at each exact input total, and
+// turns the running output maximum into a staircase the unchanged relay can
+// interpolate exactly. Incomplete searches publish nothing for the affected
+// pair. No solver inventory participates in either prices or witnesses.
 
 import {
   admissionPairKey,
   type JobAdmissionPolicy,
-  type SpendableInventory,
 } from "./admission-policy.ts";
 import {
   MAX_PAIRS_PER_PUSH,
@@ -102,12 +29,70 @@ import {
   type SolverCapabilitiesMessage,
 } from "./relay-ws-contract.ts";
 
-/** Ceiling `ladder-schema.ts` holds amounts to. A cumulative total past it is
- *  not representable on the wire, so the ladder is truncated there. */
-const MAX_U256 = (1n << 256n) - 1n;
+/** Ledger-v8 zswap coin values are u128 even though the relay wire accepts u256. */
+export const MAX_SETTLEMENT_AMOUNT = (1n << 128n) - 1n;
 
-/** The book projection derivation needs. `BookOffer` in the solver satisfies it
- *  structurally, so the pure core never imports the solver package. */
+export interface LadderResourceLimits {
+  maxSourceOffers: number;
+  maxVisitedSubsetsPerPair: number;
+  maxVisitedSubsetsTotal: number;
+  maxMakersPerCombination: number;
+  maxWirePointsPerPair: number;
+  maxPairs: number;
+}
+
+/** Measured defaults and absolute ceilings. Controls may only lower them. */
+export const HARD_LADDER_RESOURCE_LIMITS: Readonly<LadderResourceLimits> = Object.freeze({
+  maxSourceOffers: 4_096,
+  maxVisitedSubsetsPerPair: 100_000,
+  maxVisitedSubsetsTotal: 200_000,
+  maxMakersPerCombination: 8,
+  maxWirePointsPerPair: MAX_RUNGS_PER_PAIR,
+  maxPairs: MAX_PAIRS_PER_PUSH,
+});
+
+export const DEFAULT_LADDER_RESOURCE_LIMITS: Readonly<LadderResourceLimits> =
+  HARD_LADDER_RESOURCE_LIMITS;
+
+export type LadderResourceLimitControls = Partial<LadderResourceLimits>;
+export type LadderResourceLimitName = keyof LadderResourceLimits;
+
+export type LadderResourceLimitResolution =
+  | { ok: true; limits: LadderResourceLimits }
+  | {
+      ok: false;
+      field: LadderResourceLimitName;
+      value: unknown;
+      maximum: number;
+    };
+
+const RESOURCE_LIMIT_NAMES = [
+  "maxSourceOffers",
+  "maxVisitedSubsetsPerPair",
+  "maxVisitedSubsetsTotal",
+  "maxMakersPerCombination",
+  "maxWirePointsPerPair",
+  "maxPairs",
+] as const satisfies readonly LadderResourceLimitName[];
+
+/** Resolve lower resource controls without silently clamping unsafe values. */
+export function resolveLadderResourceLimits(
+  controls: Readonly<LadderResourceLimitControls> | undefined,
+): LadderResourceLimitResolution {
+  const limits = { ...DEFAULT_LADDER_RESOURCE_LIMITS };
+  if (controls === undefined) return { ok: true, limits };
+  for (const field of RESOURCE_LIMIT_NAMES) {
+    const value = controls[field];
+    if (value === undefined) continue;
+    const maximum = HARD_LADDER_RESOURCE_LIMITS[field];
+    if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+      return { ok: false, field, value, maximum };
+    }
+    limits[field] = value;
+  }
+  return { ok: true, limits };
+}
+
 export interface LadderSourceLeg {
   token: string;
   amount: bigint;
@@ -118,128 +103,160 @@ export interface LadderSourceOffer {
   offerHash: string;
   gives: readonly LadderSourceLeg[];
   wants: readonly LadderSourceLeg[];
-  /** Epoch ms. `null` means the source published no expiry — see `no-expiry`. */
   expiresAt: number | null;
   inputNullifiers: readonly string[];
 }
 
-/** Why an offer in the cache backs no published rung. Diagnostics are returned
- *  as DATA: this module calls no observer, so no untrusted callback can throw
- *  inside derivation (the R-37 containment property at this layer; the push
- *  loop's half belongs to N4). */
 export type LadderExclusionReason =
-  /** More than one leg on a side: no single directed price describes it. */
   | "multi-leg"
-  /** A leg this solver does not settle natively (FR-002 scope is SHIELDED). */
   | "non-shielded-leg"
   | "non-positive-amount"
   | "same-token"
   | "malformed-token"
   | "malformed-hash"
   | "malformed-nullifier"
-  /** No expiry at all. The API boundary already rejects these; publishing a
-   *  commitment against an unbounded row would have no safety margin. */
   | "no-expiry"
-  /** Inside the settlement safety margin — it cannot be honoured at job time. */
   | "expiring"
-  /** Caller-supplied: claimed by an in-flight fill, or otherwise spoken for. */
   | "unavailable"
-  /** R-07 aggregate budget: an input coin already backing a published rung. */
+  | "duplicate-offer"
   | "shared-coin"
-  /** Past `maxRungsPerPair`, or past the u256 ceiling on a cumulative total. */
-  | "rung-cap"
-  /** Past `maxPairs`. */
+  | "settlement-amount-cap"
+  | "source-offer-cap"
+  | "pair-search-cap"
+  | "global-search-cap"
+  | "wire-point-cap"
   | "pair-cap"
-  /** RF3 static policy excludes this directed pair. */
   | "unsupported-pair"
-  /** RF3 static policy has no minimum for the output token, or total depth
-   *  cannot reach that minimum. */
   | "minimum-output"
-  /** FR-003: opening this rung's interpolation interval could require more
-   *  tokenOut payout than the solver can currently reserve. The ladder stops
-   *  here — every later rung's cumulative sums assume this offer is consumed.
-   *
-   *  The ONLY inventory reason left. 00005-R2's `"mirror-budget"` (a tokenIn
-   *  bound for the fee-sizing mirror) was removed by 00006-R2 (FR-003) when
-   *  fee sizing stopped spending tokenIn; nothing produces that reason any
-   *  more, so it is gone from this union rather than left as dead grammar. */
-  | "residual-budget"
-  /** The assembled pair failed local wire validation and was dropped whole. */
+  | "aborted"
+  | "abort-check-failed"
   | "invalid-pair";
 
 export interface LadderExclusion {
   offerHash: string;
   reason: LadderExclusionReason;
-  /** Present for `invalid-pair`: the schema's verdict, for a loud test failure. */
   detail?: LadderRejection | "bad-tokens";
 }
 
-/** One published rung and the offer whose whole consumption closes it. */
-export interface LadderRungProvenance {
+export interface LadderCombinationProvenance {
+  /** Exact maker total, never a plateau endpoint. */
   input: string;
+  /** Exact maker total supplied by this witness. */
   output: string;
-  offerHash: string;
+  /** Sorted full content hashes; every file executes once and in full. */
+  offerHashes: string[];
 }
+
+export type LadderTerminalCapReason =
+  | "wire-point-cap"
+  | "next-omitted-improvement"
+  | "settlement-amount-cap";
 
 export interface LadderPairProvenance {
   tokenIn: string;
   tokenOut: string;
-  /** Rung order = consumption order = best marginal rate first. */
-  rungs: LadderRungProvenance[];
-  /** Largest single-offer `gives` on this pair: the most `tokenOut` inventory
-   *  any interpolated size between rungs can require. N5 checks against it. */
-  residualBound: string;
+  /** Genuine retained improving thresholds only; synthetic points are absent. */
+  combinations: LadderCombinationProvenance[];
+  /** Actual inclusive end of the published final plateau. */
+  terminalInput: string;
+  /** Ten times the final genuine combination input, before safety caps. */
+  nominalTerminalInput: string;
+  /** Empty only when terminalInput equals nominalTerminalInput. */
+  capReasons: LadderTerminalCapReason[];
+}
+
+export type LadderPairWithholdReason =
+  | "unsupported-pair"
+  | "minimum-output"
+  | "pair-search-cap"
+  | "global-search-cap"
+  | "wire-point-cap"
+  | "settlement-amount-cap"
+  | "pair-cap"
+  | "aborted"
+  | "abort-check-failed"
+  | "invalid-pair";
+
+export interface LadderPairDiagnostic {
+  tokenIn: string;
+  tokenOut: string;
+  status: "published" | "withheld";
+  reason: LadderPairWithholdReason | null;
+  candidateOffers: number;
+  visitedSubsets: number;
+  storedExactInputs: number;
+  amountCappedSubsets: number;
+  frontierCombinations: number;
+  wirePoints: number;
+}
+
+export type LadderDerivationStopReason =
+  | "source-offer-cap"
+  | "global-search-cap"
+  | "aborted"
+  | "abort-check-failed"
+  | "invalid-resource-limit";
+
+export interface LadderDerivationDiagnostics {
+  stopReason: LadderDerivationStopReason | null;
+  invalidResourceLimit: {
+    field: LadderResourceLimitName;
+    value: unknown;
+    maximum: number;
+  } | null;
+  sourceOffersScanned: number;
+  visitedSubsets: number;
+  peakStoredExactInputs: number;
+  pairs: LadderPairDiagnostic[];
 }
 
 export interface DeriveLadderOptions extends JobAdmissionPolicy {
-  /** Passed in, never read from the clock, so derivation stays reproducible. */
   nowMs: number;
-  /** Same margin the engine/executor enforce at dequeue (R-38). */
   expiryMarginSeconds: number;
-  /** Offers spoken for elsewhere (in-flight claims). Excluded as `unavailable`. */
   unavailableOfferHashes?: Iterable<string>;
-  /**
-   * FR-003: token → amount the solver can actually move right now
-   * (`Stock.available`), snapshotted by the caller once per push so derivation
-   * stays pure and reproducible.
-   *
-   * Read for the pair's **tokenOut only** — the residual payout. Since 00006-R2
-   * nothing here reads the tokenIn entry, so a snapshot with no tokenIn at all
-   * (an empty token wallet) publishes every whole-maker rung.
-   *
-   * `null`/absent is OPEN — no budget is enforced. That is deliberate and it is
-   * the only fail-open default here: it keeps this module's pre-existing
-   * contract for dry-run and for derivation tests, the LIVE push always
-   * supplies a snapshot, and the executor re-checks the residual against the
-   * same `Stock` before any wallet mutation. Publication is the
-   * availability-honesty layer; the executor is the safety layer.
-   */
-  spendableInventory?: SpendableInventory | null;
-  maxPairs?: number;
-  maxRungsPerPair?: number;
+  /** Lower-only controls. Invalid or raised controls withdraw the full result. */
+  resourceLimits?: Readonly<LadderResourceLimitControls>;
+  /** Checked before scanning, for each source offer, and every 256 subsets. */
+  shouldAbort?: () => boolean;
 }
 
 export interface DerivedLadder {
-  /** Publishable pairs, lexicographic by (tokenIn, tokenOut). Every entry has
-   *  passed BOTH the strict schema and the relay's own admission predicate. */
   levels: PriceLevelsPair[];
-  /** FR-013 capabilities: the union of tokens in publishable pairs, lowercase
-   *  and sorted. Derived from the same cache, never configured separately. */
   tokenIds: string[];
   provenance: LadderPairProvenance[];
-  /** Every cache offer that backs no rung, with its reason. Sorted. */
   excluded: LadderExclusion[];
+  limits: LadderResourceLimits;
+  diagnostics: LadderDerivationDiagnostics;
 }
 
 interface Crossable {
   offerHash: string;
-  /** What the taker pays and the solver receives = the maker's `wants`. */
   tokenIn: string;
-  /** What the solver pays and the taker receives = the maker's `gives`. */
   tokenOut: string;
   amountIn: bigint;
   amountOut: bigint;
   nullifiers: string[];
+}
+
+interface CombinationState {
+  input: bigint;
+  output: bigint;
+  offerHashes: string[];
+}
+
+interface SearchResult {
+  exact: Map<string, CombinationState>;
+  visitedSubsets: number;
+  amountCappedSubsets: number;
+  reason: "pair-search-cap" | "global-search-cap" | "aborted" | "abort-check-failed" | null;
+}
+
+interface EncodedFrontier {
+  levels: PriceLevel[];
+  combinations: LadderCombinationProvenance[];
+  terminalInput: bigint;
+  nominalTerminalInput: bigint;
+  capReasons: LadderTerminalCapReason[];
 }
 
 const HEX64 = /^[0-9a-f]{64}$/i;
@@ -247,53 +264,28 @@ const HEX64 = /^[0-9a-f]{64}$/i;
 const byOfferHash = (a: { offerHash: string }, b: { offerHash: string }): number =>
   a.offerHash < b.offerHash ? -1 : a.offerHash > b.offerHash ? 1 : 0;
 
-/**
- * Total order for consumption: BEST MARGINAL RATE FIRST, ties by content
- * address ascending.
- *
- * Rate is `amountOut / amountIn` (tokenOut per tokenIn) compared by
- * cross-multiplication, so there is no division and no float anywhere.
- *
- * THE TIE RULE, stated once and depended on everywhere: two offers at the same
- * marginal rate are ordered by ASCENDING `offerHash`. The content address is
- * the only totally-ordered, insertion-order-independent key the cache has, so
- * this is what makes the ladder byte-reproducible; any rate-preserving order
- * would be equally honourable (the boundaries differ, the frontier does not).
- */
-const byMarginalRateThenHash = (a: Crossable, b: Crossable): number => {
-  const left = a.amountOut * b.amountIn;
-  const right = b.amountOut * a.amountIn;
-  if (left > right) return -1;
-  if (left < right) return 1;
-  return byOfferHash(a, b);
+const compareHashes = (a: readonly string[], b: readonly string[]): number => {
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    const left = a[index]!;
+    const right = b[index]!;
+    if (left < right) return -1;
+    if (left > right) return 1;
+  }
+  return a.length - b.length;
 };
 
-/**
- * The most tokenOut inventory the solver can be asked to pay to honour ANY
- * interpolated size inside the interval that adding `offer` as the next rung
- * opens (FR-003).
- *
- * Derived from the relay's own arithmetic, not estimated. Between rungs `k` and
- * `k+1` the relay promises
- * `out[k] + floor((out[k+1] − out[k]) · (x − in[k]) / (in[k+1] − in[k]))`
- * (`interpolateQuote`), the maker prefix pays `out[k]`, and the largest
- * quotable interior size is `in[k+1] − 1`. Since `out[k+1] − out[k]` and
- * `in[k+1] − in[k]` are exactly this offer's own `amountOut`/`amountIn`, the
- * worst case collapses to a per-offer number, independent of where in the
- * ladder the offer sits. `amountIn === 1` yields 0: that offer opens no
- * interior size at all.
- *
- * NOT the same quantity as `LadderPairProvenance.residualBound`, which is the
- * loosest bound over a whole pair (the largest single `gives`) and is what the
- * executor re-checks a resolved route against.
- */
-export const worstCaseIntervalResidual = (
-  offer: { amountIn: bigint; amountOut: bigint },
-): bigint =>
-  offer.amountIn <= 0n ? 0n : (offer.amountOut * (offer.amountIn - 1n)) / offer.amountIn;
+const betterExactInputWitness = (
+  candidate: CombinationState,
+  incumbent: CombinationState,
+): boolean => {
+  if (candidate.output !== incumbent.output) return candidate.output > incumbent.output;
+  if (candidate.offerHashes.length !== incumbent.offerHashes.length) {
+    return candidate.offerHashes.length < incumbent.offerHashes.length;
+  }
+  return compareHashes(candidate.offerHashes, incumbent.offerHashes) < 0;
+};
 
-/** Reduce a cache offer to the one shape a directed ladder can describe, or say
- *  why it cannot. Unsupported shapes are excluded, never coerced. */
 function toCrossable(
   offer: LadderSourceOffer,
   options: DeriveLadderOptions,
@@ -311,18 +303,18 @@ function toCrossable(
   if (typeof want.token !== "string" || !HEX64.test(want.token)) return "malformed-token";
   if (typeof give.amount !== "bigint" || typeof want.amount !== "bigint") return "non-positive-amount";
   if (give.amount <= 0n || want.amount <= 0n) return "non-positive-amount";
+  if (give.amount > MAX_SETTLEMENT_AMOUNT || want.amount > MAX_SETTLEMENT_AMOUNT) {
+    return "settlement-amount-cap";
+  }
 
   const tokenOut = give.token.toLowerCase();
   const tokenIn = want.token.toLowerCase();
   if (tokenIn === tokenOut) return "same-token";
-
-  if (offer.inputNullifiers.some((n) => typeof n !== "string" || !HEX64.test(n))) {
+  if (offer.inputNullifiers.some((value) => typeof value !== "string" || !HEX64.test(value))) {
     return "malformed-nullifier";
   }
-  // An offer with no declared expiry cannot be held outside a settlement safety
-  // margin. `bookOfferFromApi` already refuses such rows; this is depth.
   if (offer.expiresAt === null) return "no-expiry";
-  if (options.nowMs >= offer.expiresAt - options.expiryMarginSeconds * 1000) return "expiring";
+  if (options.nowMs >= offer.expiresAt - options.expiryMarginSeconds * 1_000) return "expiring";
 
   return {
     offerHash,
@@ -330,60 +322,266 @@ function toCrossable(
     tokenOut,
     amountIn: want.amount,
     amountOut: give.amount,
-    nullifiers: [...new Set(offer.inputNullifiers.map((n) => n.toLowerCase()))].sort(),
+    nullifiers: [...new Set(offer.inputNullifiers.map((value) => value.toLowerCase()))].sort(),
   };
 }
 
-/**
- * Derive every publishable ladder and the capabilities that go with it.
- *
- * Pure. Same offers (in any order) + same options ⇒ byte-identical result.
- */
+const abortReason = (
+  shouldAbort: (() => boolean) | undefined,
+): "aborted" | "abort-check-failed" | null => {
+  if (shouldAbort === undefined) return null;
+  try {
+    return shouldAbort() ? "aborted" : null;
+  } catch {
+    return "abort-check-failed";
+  }
+};
+
+function enumeratePair(
+  bucket: readonly Crossable[],
+  limits: Readonly<LadderResourceLimits>,
+  diagnostics: LadderDerivationDiagnostics,
+  shouldAbort: (() => boolean) | undefined,
+): SearchResult {
+  const exact = new Map<string, CombinationState>();
+  let visitedSubsets = 0;
+  let amountCappedSubsets = 0;
+  let reason: SearchResult["reason"] = null;
+
+  const visit = (
+    start: number,
+    input: bigint,
+    output: bigint,
+    offerHashes: readonly string[],
+  ): void => {
+    for (let index = start; index < bucket.length && reason === null; index += 1) {
+      if (visitedSubsets >= limits.maxVisitedSubsetsPerPair) {
+        reason = "pair-search-cap";
+        return;
+      }
+      if (diagnostics.visitedSubsets >= limits.maxVisitedSubsetsTotal) {
+        reason = "global-search-cap";
+        return;
+      }
+
+      visitedSubsets += 1;
+      diagnostics.visitedSubsets += 1;
+      if ((diagnostics.visitedSubsets & 255) === 0) {
+        const stopped = abortReason(shouldAbort);
+        if (stopped !== null) {
+          reason = stopped;
+          return;
+        }
+      }
+
+      const candidate = bucket[index]!;
+      const nextInput = input + candidate.amountIn;
+      const nextOutput = output + candidate.amountOut;
+      if (nextInput > MAX_SETTLEMENT_AMOUNT || nextOutput > MAX_SETTLEMENT_AMOUNT) {
+        amountCappedSubsets += 1;
+        continue;
+      }
+
+      const nextHashes = [...offerHashes, candidate.offerHash];
+      const state: CombinationState = {
+        input: nextInput,
+        output: nextOutput,
+        offerHashes: nextHashes,
+      };
+      const key = nextInput.toString();
+      const incumbent = exact.get(key);
+      if (incumbent === undefined || betterExactInputWitness(state, incumbent)) exact.set(key, state);
+
+      if (nextHashes.length < limits.maxMakersPerCombination) {
+        visit(index + 1, nextInput, nextOutput, nextHashes);
+      }
+    }
+  };
+
+  visit(0, 0n, 0n, []);
+  return { exact, visitedSubsets, amountCappedSubsets, reason };
+}
+
+const bestOutputFrontier = (exact: ReadonlyMap<string, CombinationState>): CombinationState[] => {
+  const ordered = [...exact.values()].sort((a, b) =>
+    a.input < b.input ? -1 : a.input > b.input ? 1 : compareHashes(a.offerHashes, b.offerHashes));
+  const frontier: CombinationState[] = [];
+  let bestOutput = 0n;
+  for (const candidate of ordered) {
+    if (candidate.output <= bestOutput) continue;
+    frontier.push(candidate);
+    bestOutput = candidate.output;
+  }
+  return frontier;
+};
+
+function encodePrefix(
+  frontier: readonly CombinationState[],
+  retainedCount: number,
+  maxWirePoints: number,
+): EncodedFrontier | null {
+  const retained = frontier.slice(0, retainedCount);
+  const final = retained[retained.length - 1];
+  if (final === undefined) return null;
+
+  const nominalTerminalInput = final.input * 10n;
+  let terminalInput = nominalTerminalInput;
+  const capReasons: LadderTerminalCapReason[] = [];
+  if (terminalInput > MAX_SETTLEMENT_AMOUNT) {
+    terminalInput = MAX_SETTLEMENT_AMOUNT;
+    capReasons.push("settlement-amount-cap");
+  }
+  const nextOmitted = frontier[retainedCount];
+  if (nextOmitted !== undefined) {
+    capReasons.unshift("wire-point-cap");
+    const beforeNext = nextOmitted.input - 1n;
+    if (terminalInput > beforeNext) {
+      terminalInput = beforeNext;
+      capReasons.push("next-omitted-improvement");
+    }
+  }
+  if (terminalInput <= final.input) return null;
+
+  const levels: PriceLevel[] = [];
+  for (let index = 0; index < retained.length; index += 1) {
+    const threshold = retained[index]!;
+    levels.push({ input: threshold.input.toString(), output: threshold.output.toString() });
+    const next = retained[index + 1];
+    if (next === undefined) continue;
+    const plateauEnd = next.input - 1n;
+    if (plateauEnd > threshold.input) {
+      levels.push({ input: plateauEnd.toString(), output: threshold.output.toString() });
+    }
+  }
+  levels.push({ input: terminalInput.toString(), output: final.output.toString() });
+  if (levels.length > maxWirePoints) return null;
+
+  return {
+    levels,
+    combinations: retained.map((entry) => ({
+      input: entry.input.toString(),
+      output: entry.output.toString(),
+      offerHashes: [...entry.offerHashes],
+    })),
+    terminalInput,
+    nominalTerminalInput,
+    capReasons: [...new Set(capReasons)],
+  };
+}
+
+function longestEncodableFrontier(
+  frontier: readonly CombinationState[],
+  maxWirePoints: number,
+): EncodedFrontier | null {
+  let best: EncodedFrontier | null = null;
+  // Every genuine threshold consumes at least one point and the terminal
+  // consumes one more, so no longer prefix can fit. This also bounds encoding
+  // work when the exact frontier itself is large.
+  const mostThresholdsThatCanFit = Math.min(frontier.length, maxWirePoints - 1);
+  for (let retained = 1; retained <= mostThresholdsThatCanFit; retained += 1) {
+    const encoded = encodePrefix(frontier, retained, maxWirePoints);
+    if (encoded !== null) best = encoded;
+  }
+  return best;
+}
+
+const excludedHash = (offer: LadderSourceOffer): string =>
+  typeof offer.offerHash === "string" ? offer.offerHash.toLowerCase() : "";
+
+const addPairExclusions = (
+  excluded: LadderExclusion[],
+  bucket: readonly Crossable[],
+  reason: LadderExclusionReason,
+): void => {
+  for (const offer of bucket) excluded.push({ offerHash: offer.offerHash, reason });
+};
+
+const emptyDiagnostics = (): LadderDerivationDiagnostics => ({
+  stopReason: null,
+  invalidResourceLimit: null,
+  sourceOffersScanned: 0,
+  visitedSubsets: 0,
+  peakStoredExactInputs: 0,
+  pairs: [],
+});
+
+function emptyDerived(
+  limits: LadderResourceLimits,
+  diagnostics: LadderDerivationDiagnostics,
+  excluded: LadderExclusion[] = [],
+): DerivedLadder {
+  return { levels: [], tokenIds: [], provenance: [], excluded, limits, diagnostics };
+}
+
+/** Pure, deterministic, exact derivation under explicit finite resource bounds. */
 export function deriveLadder(
   offers: Iterable<LadderSourceOffer>,
   options: DeriveLadderOptions,
 ): DerivedLadder {
-  const maxPairs = options.maxPairs ?? MAX_PAIRS_PER_PUSH;
-  const maxRungs = options.maxRungsPerPair ?? MAX_RUNGS_PER_PAIR;
-  const unavailable = new Set(
-    [...(options.unavailableOfferHashes ?? [])].map((hash) => hash.toLowerCase()),
-  );
-
-  const excluded: LadderExclusion[] = [];
-  const crossable: Crossable[] = [];
-  for (const offer of offers) {
-    const reduced = toCrossable(offer, options, unavailable);
-    if (typeof reduced === "string") {
-      excluded.push({
-        offerHash: typeof offer.offerHash === "string" ? offer.offerHash.toLowerCase() : "",
-        reason: reduced,
-      });
-      continue;
-    }
-    crossable.push(reduced);
+  const resolved = resolveLadderResourceLimits(options.resourceLimits);
+  const diagnostics = emptyDiagnostics();
+  if (!resolved.ok) {
+    diagnostics.stopReason = "invalid-resource-limit";
+    diagnostics.invalidResourceLimit = {
+      field: resolved.field,
+      value: resolved.value,
+      maximum: resolved.maximum,
+    };
+    return emptyDerived({ ...DEFAULT_LADDER_RESOURCE_LIMITS }, diagnostics);
+  }
+  const limits = resolved.limits;
+  const initiallyAborted = abortReason(options.shouldAbort);
+  if (initiallyAborted !== null) {
+    diagnostics.stopReason = initiallyAborted;
+    return emptyDerived(limits, diagnostics);
   }
 
-  // R-07, the aggregate-budget property, at coin granularity.
-  //
-  // The finding was "aggregate levels overcommit SHARED output inventory". At
-  // the relay the sharing is not per-token stock — every rung is funded by the
-  // maker offer itself — it is the INPUT COIN: two offers that spend the same
-  // coin are conflicting views of it and at most one can ever settle, yet they
-  // can sit in different directed pairs and each publish full depth. Counting
-  // both would advertise liquidity that does not exist, on two pairs that each
-  // look locally honourable. So a coin backs at most ONE published rung across
-  // ALL pairs; the retained claimant is the lexicographically smallest content
-  // address. That choice is arbitrary but stable — comparing rates across
-  // different directed pairs is meaningless — and the conflict itself already
-  // means only one of them can settle. Every published pair is therefore
-  // independently honourable, and their SUM is honourable too.
-  //
-  // Upstream #47's marker dedup makes this rare at the backend, but the cache
-  // is not the backend: a resync race, or a node without that rule, can put
-  // both rows in front of derivation.
+  const unavailable = new Set(
+    [...(options.unavailableOfferHashes ?? [])].map((value) => value.toLowerCase()),
+  );
+  const excluded: LadderExclusion[] = [];
+  const crossable: Crossable[] = [];
+
+  for (const offer of offers) {
+    diagnostics.sourceOffersScanned += 1;
+    if (diagnostics.sourceOffersScanned > limits.maxSourceOffers) {
+      diagnostics.stopReason = "source-offer-cap";
+      excluded.push({ offerHash: excludedHash(offer), reason: "source-offer-cap" });
+      return emptyDerived(limits, diagnostics, excluded);
+    }
+    const stopped = abortReason(options.shouldAbort);
+    if (stopped !== null) {
+      diagnostics.stopReason = stopped;
+      excluded.push({ offerHash: excludedHash(offer), reason: stopped });
+      return emptyDerived(limits, diagnostics, excluded);
+    }
+    const reduced = toCrossable(offer, options, unavailable);
+    if (typeof reduced === "string") {
+      excluded.push({ offerHash: excludedHash(offer), reason: reduced });
+    } else {
+      crossable.push(reduced);
+    }
+  }
+
+  const hashCounts = new Map<string, number>();
+  for (const offer of crossable) {
+    hashCounts.set(offer.offerHash, (hashCounts.get(offer.offerHash) ?? 0) + 1);
+  }
+  const unique: Crossable[] = [];
+  for (const offer of [...crossable].sort(byOfferHash)) {
+    if ((hashCounts.get(offer.offerHash) ?? 0) > 1) {
+      excluded.push({ offerHash: offer.offerHash, reason: "duplicate-offer" });
+    } else {
+      unique.push(offer);
+    }
+  }
+
+  // Preserve the existing global shared-coin policy: the lowest full hash owns
+  // each source nullifier across every pair; conflicting later files are out of
+  // the eligible universe before pair optimization begins.
   const claimedCoins = new Set<string>();
   const retained: Crossable[] = [];
-  for (const offer of [...crossable].sort(byOfferHash)) {
+  for (const offer of unique) {
     if (offer.nullifiers.some((nullifier) => claimedCoins.has(nullifier))) {
       excluded.push({ offerHash: offer.offerHash, reason: "shared-coin" });
       continue;
@@ -396,158 +594,184 @@ export function deriveLadder(
   for (const offer of retained) {
     const key = pairKey(offer.tokenIn, offer.tokenOut);
     const bucket = byPair.get(key);
-    if (bucket) bucket.push(offer);
-    else byPair.set(key, [offer]);
+    if (bucket === undefined) byPair.set(key, [offer]);
+    else bucket.push(offer);
   }
 
-  const assembled: Array<{ pair: PriceLevelsPair; provenance: LadderPairProvenance }> = [];
-  // Sorted keys, so no Map iteration order reaches the output.
+  const levels: PriceLevelsPair[] = [];
+  const provenance: LadderPairProvenance[] = [];
+  let globalStop: "global-search-cap" | "aborted" | "abort-check-failed" | null = null;
+
   for (const key of [...byPair.keys()].sort()) {
-    const bucket = [...byPair.get(key)!].sort(byMarginalRateThenHash);
+    const bucket = [...byPair.get(key)!].sort(byOfferHash);
     const tokenIn = bucket[0]!.tokenIn;
     const tokenOut = bucket[0]!.tokenOut;
+    const diagnostic: LadderPairDiagnostic = {
+      tokenIn,
+      tokenOut,
+      status: "withheld",
+      reason: null,
+      candidateOffers: bucket.length,
+      visitedSubsets: 0,
+      storedExactInputs: 0,
+      amountCappedSubsets: 0,
+      frontierCombinations: 0,
+      wirePoints: 0,
+    };
+    diagnostics.pairs.push(diagnostic);
+
+    if (globalStop !== null) {
+      diagnostic.reason = globalStop;
+      addPairExclusions(excluded, bucket, globalStop);
+      continue;
+    }
+    if (levels.length >= limits.maxPairs) {
+      diagnostic.reason = "pair-cap";
+      addPairExclusions(excluded, bucket, "pair-cap");
+      continue;
+    }
     if (
       options.supportedPairs != null &&
       !options.supportedPairs.has(admissionPairKey(tokenIn, tokenOut))
     ) {
-      for (const offer of bucket) excluded.push({ offerHash: offer.offerHash, reason: "unsupported-pair" });
+      diagnostic.reason = "unsupported-pair";
+      addPairExclusions(excluded, bucket, "unsupported-pair");
       continue;
     }
-
-    // FR-003's executability budget. `null` is OPEN, and an absent token in a
-    // supplied snapshot is zero, not open: the snapshot is the complete view of
-    // what the solver can move. Only tokenOut is read — the tokenIn bound
-    // 00005-R2 added here was removed by 00006-R2 (FR-003).
-    const inventory = options.spendableInventory ?? null;
-    const residualBudget = inventory === null ? null : inventory.get(tokenOut) ?? 0n;
-
-    const levels: PriceLevel[] = [];
-    const rungs: LadderRungProvenance[] = [];
-    let cumulativeIn = 0n;
-    let cumulativeOut = 0n;
-    let residualBound = 0n;
-    /** Set by the first budget that stops the ladder. Every LATER offer is
-     *  excluded for the same reason: a rung's cumulative totals assume all
-     *  earlier offers are consumed, so a whole-offer concave ladder can be
-     *  truncated but never punctured. */
-    let truncatedBy: LadderExclusionReason | null = null;
-
-    for (const offer of bucket) {
-      if (truncatedBy !== null) {
-        excluded.push({ offerHash: offer.offerHash, reason: truncatedBy });
-        continue;
-      }
-      if (levels.length >= maxRungs) {
-        excluded.push({ offerHash: offer.offerHash, reason: "rung-cap" });
-        continue;
-      }
-      const nextIn = cumulativeIn + offer.amountIn;
-      const nextOut = cumulativeOut + offer.amountOut;
-      if (nextIn > MAX_U256 || nextOut > MAX_U256) {
-        // Not representable on the wire. A PREFIX of a concave ladder is still
-        // a concave ladder of exact whole-offer sums, so truncate rather than
-        // drop the pair.
-        excluded.push({ offerHash: offer.offerHash, reason: "rung-cap" });
-        continue;
-      }
-      // FR-003 (P4-F03). Only a rung with a predecessor opens an interpolation
-      // interval: below the first rung the relay quotes nothing, and AT it the
-      // quote is exactly that rung's output, so the first rung needs no
-      // inventory whatsoever (which is what keeps FR-001's retained-surplus
-      // path publishable by a solver holding no tokenOut at all).
-      if (levels.length > 0 && residualBudget !== null &&
-          worstCaseIntervalResidual(offer) > residualBudget) {
-        truncatedBy = "residual-budget";
-        excluded.push({ offerHash: offer.offerHash, reason: truncatedBy });
-        continue;
-      }
-      cumulativeIn = nextIn;
-      cumulativeOut = nextOut;
-      if (offer.amountOut > residualBound) residualBound = offer.amountOut;
-      const rung = { input: cumulativeIn.toString(), output: cumulativeOut.toString() };
-      levels.push(rung);
-      rungs.push({ ...rung, offerHash: offer.offerHash });
-    }
-
-    if (levels.length === 0) continue;
-    // NOTE (deliberate, FR-003): the budget check above runs BEFORE this
-    // minimum filter. When a minimum hides the low rungs the surviving first
-    // rung no longer needs its residual budget, so a rung can be truncated that
-    // the filtered ladder would not have needed. Conservative on purpose —
-    // re-deriving executability after an unrelated policy filter would couple
-    // the two.
     const minimum = options.minJobOutput?.get(tokenOut);
     if (options.minJobOutput != null && minimum === undefined) {
-      for (const rung of rungs) excluded.push({ offerHash: rung.offerHash, reason: "minimum-output" });
+      diagnostic.reason = "minimum-output";
+      addPairExclusions(excluded, bucket, "minimum-output");
       continue;
     }
-    const admittedLevels = minimum === undefined
-      ? levels
-      : levels.filter((level) => BigInt(level.output) >= minimum);
-    if (admittedLevels.length === 0) {
-      for (const rung of rungs) excluded.push({ offerHash: rung.offerHash, reason: "minimum-output" });
-      continue;
-    }
-    const pair: PriceLevelsPair = { tokenIn, tokenOut, levels: admittedLevels };
 
-    // Local frame validation, BEFORE anything can be pushed. A frame the relay
-    // rejects is discarded SILENTLY and the previous ladder stays live, so a
-    // malformed push freezes the solver stale instead of withdrawing it. Both
-    // predicates run: the strict schema (positive, ascending in BOTH columns,
-    // concave, distinct 64-hex colors) and the relay's own admission rule.
+    const stopped = abortReason(options.shouldAbort);
+    if (stopped !== null) {
+      globalStop = stopped;
+      diagnostics.stopReason = stopped;
+      diagnostic.reason = stopped;
+      addPairExclusions(excluded, bucket, stopped);
+      continue;
+    }
+
+    const search = enumeratePair(bucket, limits, diagnostics, options.shouldAbort);
+    diagnostic.visitedSubsets = search.visitedSubsets;
+    diagnostic.storedExactInputs = search.exact.size;
+    diagnostic.amountCappedSubsets = search.amountCappedSubsets;
+    diagnostics.peakStoredExactInputs = Math.max(
+      diagnostics.peakStoredExactInputs,
+      search.exact.size,
+    );
+    if (search.reason !== null) {
+      diagnostic.reason = search.reason;
+      addPairExclusions(excluded, bucket, search.reason);
+      if (search.reason !== "pair-search-cap") {
+        globalStop = search.reason;
+        diagnostics.stopReason = search.reason;
+      }
+      continue;
+    }
+
+    const stoppedAfterSearch = abortReason(options.shouldAbort);
+    if (stoppedAfterSearch !== null) {
+      globalStop = stoppedAfterSearch;
+      diagnostics.stopReason = stoppedAfterSearch;
+      diagnostic.reason = stoppedAfterSearch;
+      addPairExclusions(excluded, bucket, stoppedAfterSearch);
+      continue;
+    }
+
+    let frontier = bestOutputFrontier(search.exact);
+    if (minimum !== undefined) {
+      frontier = frontier.filter((entry) => entry.output >= minimum);
+    }
+    if (frontier.length === 0) {
+      diagnostic.reason = search.amountCappedSubsets > 0
+        ? "settlement-amount-cap"
+        : "minimum-output";
+      addPairExclusions(excluded, bucket, diagnostic.reason);
+      continue;
+    }
+
+    const encoded = longestEncodableFrontier(frontier, limits.maxWirePointsPerPair);
+    if (encoded === null) {
+      diagnostic.reason = frontier[0]!.input >= MAX_SETTLEMENT_AMOUNT
+        ? "settlement-amount-cap"
+        : "wire-point-cap";
+      addPairExclusions(excluded, bucket, diagnostic.reason);
+      continue;
+    }
+
+    const stoppedAfterEncoding = abortReason(options.shouldAbort);
+    if (stoppedAfterEncoding !== null) {
+      globalStop = stoppedAfterEncoding;
+      diagnostics.stopReason = stoppedAfterEncoding;
+      diagnostic.reason = stoppedAfterEncoding;
+      addPairExclusions(excluded, bucket, stoppedAfterEncoding);
+      continue;
+    }
+
+    const pair: PriceLevelsPair = { tokenIn, tokenOut, levels: encoded.levels };
     const rejection = rejectPair(pair);
     if (rejection !== null || !isPriceLevelsPair(pair)) {
-      for (const rung of rungs) {
+      diagnostic.reason = "invalid-pair";
+      for (const offer of bucket) {
         excluded.push({
-          offerHash: rung.offerHash,
+          offerHash: offer.offerHash,
           reason: "invalid-pair",
           ...(rejection === null ? {} : { detail: rejection }),
         });
       }
       continue;
     }
-    assembled.push({
-      pair,
-      provenance: { tokenIn, tokenOut, rungs, residualBound: residualBound.toString() },
-    });
-  }
 
-  const published = assembled.slice(0, maxPairs);
-  for (const dropped of assembled.slice(maxPairs)) {
-    for (const rung of dropped.provenance.rungs) {
-      excluded.push({ offerHash: rung.offerHash, reason: "pair-cap" });
+    levels.push(pair);
+    provenance.push({
+      tokenIn,
+      tokenOut,
+      combinations: encoded.combinations,
+      terminalInput: encoded.terminalInput.toString(),
+      nominalTerminalInput: encoded.nominalTerminalInput.toString(),
+      capReasons: encoded.capReasons,
+    });
+    diagnostic.status = "published";
+    diagnostic.frontierCombinations = encoded.combinations.length;
+    diagnostic.wirePoints = encoded.levels.length;
+    if (encoded.combinations.length < frontier.length) {
+      const used = new Set(encoded.combinations.flatMap((entry) => entry.offerHashes));
+      for (const offer of bucket) {
+        if (!used.has(offer.offerHash)) {
+          excluded.push({ offerHash: offer.offerHash, reason: "wire-point-cap" });
+        }
+      }
     }
   }
 
-  const tokenIds = [
-    ...new Set(published.flatMap(({ pair }) => [pair.tokenIn, pair.tokenOut])),
-  ].sort();
+  // Cancellation invalidates the whole snapshot, including completed pairs.
+  if (globalStop === "aborted" || globalStop === "abort-check-failed") {
+    for (const diagnostic of diagnostics.pairs) {
+      if (diagnostic.status !== "published") continue;
+      diagnostic.status = "withheld";
+      diagnostic.reason = globalStop;
+      diagnostic.frontierCombinations = 0;
+      diagnostic.wirePoints = 0;
+      addPairExclusions(
+        excluded,
+        byPair.get(pairKey(diagnostic.tokenIn, diagnostic.tokenOut))!,
+        globalStop,
+      );
+    }
+    levels.length = 0;
+    provenance.length = 0;
+  }
 
-  return {
-    levels: published.map(({ pair }) => pair),
-    tokenIds,
-    provenance: published.map(({ provenance }) => provenance),
-    excluded: excluded.sort(
-      (a, b) => byOfferHash(a, b) || (a.reason < b.reason ? -1 : a.reason > b.reason ? 1 : 0),
-    ),
-  };
+  const tokenIds = [...new Set(levels.flatMap((pair) => [pair.tokenIn, pair.tokenOut]))].sort();
+  excluded.sort((a, b) =>
+    byOfferHash(a, b) || (a.reason < b.reason ? -1 : a.reason > b.reason ? 1 : 0));
+  return { levels, tokenIds, provenance, excluded, limits, diagnostics };
 }
 
-/**
- * Build the `price-levels` frame, refusing to produce one the relay would
- * discard.
- *
- * This is the only constructor: a malformed frame is unrepresentable because
- * the builder throws instead of returning one. It re-parses its own output
- * through the relay's `parsePriceLevels`, so what it returns is exactly what
- * the relay admits — no frame reaches the socket on the strength of the
- * derivation's own reasoning alone.
- *
- * `{ levels: [] }` is legitimate and is the fail-closed WITHDRAWAL frame: an
- * empty publication removes the solver's pairs, which is what a cache that
- * cannot honour anything must send (and what N4 must send before a graceful
- * stop that keeps the socket open — R-41).
- */
+/** Build a frame only when both the strict local schema and relay admit it. */
 export function buildPriceLevelsFrame(pairs: readonly PriceLevelsPair[]): PriceLevelsMessage {
   for (const pair of pairs) {
     const rejection = rejectPair(pair);
@@ -562,7 +786,7 @@ export function buildPriceLevelsFrame(pairs: readonly PriceLevelsPair[]): PriceL
     levels: pairs.map((pair) => ({
       tokenIn: pair.tokenIn,
       tokenOut: pair.tokenOut,
-      levels: pair.levels.map((rung) => ({ input: rung.input, output: rung.output })),
+      levels: pair.levels.map((level) => ({ input: level.input, output: level.output })),
     })),
   };
   if (parsePriceLevels(frame) === null) {
@@ -571,19 +795,8 @@ export function buildPriceLevelsFrame(pairs: readonly PriceLevelsPair[]): PriceL
   return frame;
 }
 
-/** The explicit withdrawal frame. Named because "push an empty ladder" is a
- *  deliberate act — the relay has no version or tombstone concept, so this is
- *  the only way to retract without dropping the socket. */
 export const withdrawalPriceLevelsFrame = (): PriceLevelsMessage => buildPriceLevelsFrame([]);
 
-/**
- * Build the `solver-capabilities` frame, refusing malformed token ids.
- *
- * The relay keeps the token list only when EVERY id matches its 64-hex
- * grammar; a single bad id silently drops the whole registration. So this
- * throws rather than let that happen. `maxParallelSwaps` is included only when
- * it is a positive integer, matching the relay's own asymmetry.
- */
 export function buildSolverCapabilitiesFrame(
   tokenIds: readonly string[],
   maxParallelSwaps?: number,

@@ -98,9 +98,9 @@ test("an empty ladder is refused, not published as a pair that quotes nothing", 
   expect(rejectLevels([])).toBe("empty");
 });
 
-test("outputs must ascend — more input can never buy less", () => {
-  expect(rejectLevels(rungs(["100", "100"], ["200", "50"]))).toBe("output-not-ascending");
-  expect(rejectLevels(rungs(["100", "100"], ["200", "100"]))).toBe("output-not-ascending");
+test("outputs may stay flat but must never decrease", () => {
+  expect(rejectLevels(rungs(["100", "100"], ["200", "50"]))).toBe("output-decreasing");
+  expect(rejectLevels(rungs(["100", "100"], ["200", "100"]))).toBeNull();
 });
 
 test("zero and negative amounts are refused", () => {
@@ -108,11 +108,10 @@ test("zero and negative amounts are refused", () => {
   expect(rejectLevels(rungs(["100", "0"]))).toBe("non-positive");
 });
 
-test("a convex ladder is refused, because interpolating it would over-promise", () => {
-  // Rising marginal rate: the chord between rungs sits ABOVE the curve, so a
-  // quote taken from it promises more than the solver could honour.
-  expect(rejectLevels(rungs(["100", "100"], ["200", "150"], ["300", "260"]))).toBe("not-concave");
-  // Non-increasing marginal rate is fine.
+test("staircase jumps do not require concavity", () => {
+  // Canonical whole-offer staircases can have rising marginal jumps.
+  expect(rejectLevels(rungs(["100", "100"], ["200", "150"], ["300", "260"]))).toBeNull();
+  // Non-increasing marginal jumps are valid too.
   expect(rejectLevels(rungs(["100", "100"], ["200", "180"], ["300", "250"]))).toBeNull();
   // A straight line is the boundary case and is allowed.
   expect(rejectLevels(rungs(["100", "100"], ["200", "200"], ["300", "300"]))).toBeNull();
@@ -124,11 +123,4 @@ test("the rung count is bounded", () => {
     output: String((i + 1) * 90),
   }));
   expect(rejectLevels(many)).toBe("too-many-rungs");
-});
-
-test("the checked-in dev ladder satisfies the schema", async () => {
-  const { loadLadderConfig } = await import("./src/config.ts");
-  const { SOLVER_LADDER_CONFIG } = await import("./env.ts");
-  const { ladders } = await loadLadderConfig(SOLVER_LADDER_CONFIG);
-  for (const pair of ladders.pairs()) expect(rejectLevels(pair.levels)).toBeNull();
 });

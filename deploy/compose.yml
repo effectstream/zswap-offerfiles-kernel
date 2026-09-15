@@ -337,8 +337,8 @@ services:
   # ══ externally prefunded inventory checks (one-shots) ═══════════════════════
   #
   # These services never deploy or mint an asset. Operators first fund the
-  # configured wallets through the external issuer, then provide both 64-hex
-  # token IDs. The checks fail with the missing balance/token prerequisite.
+  # configured wallets through the external issuer. Pricing is derived later
+  # from the live Offer Files book, so provisioning accepts no price source.
 
   solver-provision:
     <<: [*kernel-image, *logging]
@@ -354,21 +354,18 @@ services:
     environment:
       <<: [*midnight-endpoints, *celestia-endpoints]
       SOLVER_PROVISION_ENABLED: ${SOLVER_PROVISION_ENABLED:-false}
-      SOLVER_PROVISION_TOKEN_IN: ${SOLVER_PROVISION_TOKEN_IN:-}
-      SOLVER_PROVISION_TOKEN_OUT: ${SOLVER_PROVISION_TOKEN_OUT:-}
       # Where the fee-only path writes its machine-readable receipt: the solver
       # wallet's balances as MEASURED by the only process entitled to open that
       # facade, at the moment provisioning finished and before the solver boots.
       # The E2E driver asserts on it — "no tokens were provisioned" has to be an
       # observation, not a configuration claim.
-      SOLVER_PROVISION_RECEIPT: ${SOLVER_PROVISION_RECEIPT:-/srv/solver-config/provision-receipt.json}
+      SOLVER_PROVISION_RECEIPT: ${SOLVER_PROVISION_RECEIPT:-/srv/solver-provision/provision-receipt.json}
       # Drives a wallet on this seed, which is why `solver` must wait for this
       # service to COMPLETE: two facades on one seed against one node force
       # each other's connection down.
       SOLVER_SEED: ${SOLVER_SEED:-0000000000000000000000000000000000000000000000000000000000000021}
-      SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-/srv/solver-config/ladders.dev.json}
     volumes:
-      - solver-config:/srv/solver-config
+      - solver-provision-state:/srv/solver-provision
 
   maker-offer:
     <<: [*kernel-image, *logging]
@@ -591,7 +588,7 @@ services:
         condition: service_healthy
       # NOT just ordering: solver-provision drives a wallet on SOLVER_SEED, and
       # two facades on one seed against one node force each other's connection
-      # down. It also writes the ladder config this service reads.
+      # down. It also records the solver's measured pre-start fee inventory.
       solver-provision:
         condition: service_completed_successfully
     environment:
@@ -666,12 +663,6 @@ services:
       SOLVER_DUST_MAX_PER_JOB: ${SOLVER_DUST_MAX_PER_JOB:-}
       SOLVER_DUST_MAX_PER_WINDOW: ${SOLVER_DUST_MAX_PER_WINDOW:-}
       SOLVER_DUST_WINDOW_MS: ${SOLVER_DUST_WINDOW_MS:-}
-      # The GENERATED ladder names explicit external token IDs. Provisioning
-      # writes it onto the shared volume so a checked-in ladder for another
-      # registry or network cannot be used silently. (Publication itself
-      # derives from the mirrored book and ignores this file — but the
-      # direct-fill engine's `ladders.maxPayout()` does not.)
-      SOLVER_LADDER_CONFIG: ${SOLVER_LADDER_CONFIG:-/srv/solver-config/ladders.dev.json}
     # NO PUBLISHED PORT FOR :9100, deliberately.
     #
     # The status snapshot is the solver's whole internal state. The monitor site
@@ -690,7 +681,6 @@ services:
     # ports:
     #   - "${BIND_ADDR:-127.0.0.1}:${HOST_SOLVER_STATUS_PORT:-19100}:9100"
     volumes:
-      - solver-config:/srv/solver-config:ro
       # Per-instance and chain-keyed: a journal that outlives the genesis it was
       # written against is worse than no journal, so this volume is torn down
       # together with the chain volumes (see deploy/down.sh).
@@ -872,7 +862,7 @@ services:
       # take it itself (two facades on one seed against one node force each
       # other's connection down).
       E2E_REQUIRE_UNFUNDED_SOLVER: ${E2E_REQUIRE_UNFUNDED_SOLVER:-false}
-      SOLVER_PROVISION_RECEIPT: ${SOLVER_PROVISION_RECEIPT:-/srv/solver-config/provision-receipt.json}
+      SOLVER_PROVISION_RECEIPT: ${SOLVER_PROVISION_RECEIPT:-/srv/solver-provision/provision-receipt.json}
       # Recorded into the driver's evidence next to the reserved-DUST amounts it
       # reads out of the journal — design-note §6 asks for the model that was in
       # force alongside the number it produced. Blank = the solver's default, 1.
@@ -880,9 +870,8 @@ services:
     volumes:
       - e2e-evidence:/var/lib/e2e
       - solver-journal:/var/lib/cow-solver
-      # Read-only: the driver asserts on the provisioning receipt, never writes
-      # it, and must not be able to touch the ladder config the solver reads.
-      - solver-config:/srv/solver-config:ro
+      # Read-only: the driver asserts on the provisioning receipt and never writes it.
+      - solver-provision-state:/srv/solver-provision:ro
 
 volumes:
   # The poster's coin journal (profile `poster`). Chain-keyed like the rest and
@@ -902,7 +891,6 @@ volumes:
   solver-journal:
   relay-wallet-cache:
   e2e-evidence:
-  # The ladder config generated from explicit token IDs, and the marker
-  # recording that prefunding was checked. Chain-keyed like the rest.
-  solver-config:
+  # The fee-provisioning receipt and marker. Chain-keyed like the rest.
+  solver-provision-state:
   maker-offer-state:

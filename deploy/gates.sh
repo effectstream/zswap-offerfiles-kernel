@@ -217,17 +217,23 @@ run_negative_gate solver-blank-strict-optionals \
     -e SOLVER_DUST_MAX_PER_JOB= -e SOLVER_DUST_MAX_PER_WINDOW= \
     -e SOLVER_DUST_WINDOW_MS= \
     -e SOLVER_SUPPORTED_PAIRS= -e SOLVER_MIN_JOB_OUTPUT= \
-    -e SOLVER_LADDER_CONFIG= \
     solver -c '. /usr/local/bin/entrypoint-common.sh; cd "${REPO_ROOT}"; exec bun run start.solver.ts'
 
-# G3g — (00007) a status listener can never come up open: with the port set
+# G3g — removed manual pricing fails before the solver can touch a wallet,
+# journal, backend or relay. It is not blank-normalized into a fallback.
+run_negative_gate solver-retired-ladder-config \
+  "SOLVER_LADDER_CONFIG was removed" \
+  "${SOLVER_RUN[@]}" -e SOLVER_LADDER_CONFIG=/tmp/retired-ladders.json \
+    solver run start.solver.ts
+
+# G3h — (00007) a status listener can never come up open: with the port set
 # (compose.yml sets it) a short bearer is one of the LISTED launch problems.
 run_negative_gate solver-short-status-token \
   "SOLVER_STATUS_AUTH_TOKEN must be at least 32 characters" \
   "${SOLVER_RUN[@]}" -e SOLVER_STATUS_AUTH_TOKEN=tooshort10 \
     -e SOLVER_FEE_SIZING_TAKER_INPUTS=1 solver run start.solver.ts
 
-# G3h — (00007) the monitor site's own fail-fast: the solver status URL is
+# G3i — (00007) the monitor site's own fail-fast: the solver status URL is
 # mandatory, and the site must refuse to start rather than render a page that
 # can never show the solver. Bypasses the entrypoint like the solver gates.
 run_negative_gate solver-frontend-missing-status-url \
@@ -235,7 +241,7 @@ run_negative_gate solver-frontend-missing-status-url \
   docker compose run --rm --no-deps --entrypoint bun \
     -e SOLVER_FRONTEND_SOLVER_STATUS_URL= solver-frontend run start.solver-frontend.ts
 
-# G3i — (00007) the site's aggregation property: with every mandatory boundary
+# G3j — (00007) the site's aggregation property: with every mandatory boundary
 # blank, ONE run reports all three (status URL, status token, kernel API).
 run_negative_gate solver-frontend-missing-everything \
   "solver-frontend configuration is invalid \(3 problems\)" \

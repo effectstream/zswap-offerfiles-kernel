@@ -129,7 +129,9 @@ async function main(): Promise<void> {
         sync.isCurrent() &&
         push.withheld === null &&
         push.derived.provenance.some((entry) =>
-          entry.rungs.some((rung) => rung.offerHash === targetOfferHash)
+          entry.combinations.some((combination) =>
+            combination.offerHashes.includes(targetOfferHash)
+          )
         ) &&
         relay.stats().pushes > initialPushes
       ) {

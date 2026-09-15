@@ -60,7 +60,7 @@ export const HELP = {
     source: "solver last push + book",
   },
   "tile-rungs": {
-    text: "Price levels on the wire. Whole = closes a maker offer; interior = needs solver tokenOut.",
+    text: "Protocol price points, with distinct maker files and winning complete-file sets counted separately.",
     source: "solver last push",
   },
   "tile-tokens": {
@@ -98,7 +98,7 @@ export const HELP = {
 
   // ── sections ──────────────────────────────────────────────────────────────
   "section-ladders": {
-    text: "Per pair: cumulative input → output, rate, whole or interior, and the maker offer each rung closes.",
+    text: "Per pair: genuine thresholds and synthetic plateau points beside each winning set's true maker totals.",
     source: "solver last push",
   },
   "section-exclusions": {

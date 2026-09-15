@@ -1,6 +1,6 @@
-// Inspect externally prefunded solver inventory, register existing NIGHT for
-// DUST, and write a ladder for two explicit token IDs. This script never funds,
-// transfers, deploys or mints anything.
+// Inspect externally prefunded solver fee inventory and register existing NIGHT
+// for DUST. Pricing comes only from the live Offer Files book; this script never
+// writes prices and never funds, transfers, deploys or mints anything.
 
 import { writeFileSync } from "node:fs";
 
@@ -30,19 +30,10 @@ function required(name: string): string {
 }
 
 const seed = required("SOLVER_SEED");
-const tokenIn = required("SOLVER_PROVISION_TOKEN_IN");
-const tokenOut = required("SOLVER_PROVISION_TOKEN_OUT");
-const ladderPath = process.env["SOLVER_LADDER_CONFIG"] ?? "/srv/solver-config/ladders.dev.json";
 const receiptPath =
-  process.env["SOLVER_PROVISION_RECEIPT"] ?? "/srv/solver-config/provision-receipt.json";
+  process.env["SOLVER_PROVISION_RECEIPT"] ?? "/srv/solver-provision/provision-receipt.json";
 
 if (!HEX_TOKEN.test(seed)) throw new Error("SOLVER_SEED must be a 64-hex seed");
-if (!HEX_TOKEN.test(tokenIn)) throw new Error("SOLVER_PROVISION_TOKEN_IN must be a 64-hex token ID");
-if (!HEX_TOKEN.test(tokenOut)) throw new Error("SOLVER_PROVISION_TOKEN_OUT must be a 64-hex token ID");
-if (tokenIn === tokenOut) throw new Error("SOLVER_PROVISION_TOKEN_IN and SOLVER_PROVISION_TOKEN_OUT must differ");
-if (tokenIn === NIGHT || tokenOut === NIGHT) {
-  throw new Error("solver pair token IDs must be shielded assets; native NIGHT is not a swap leg");
-}
 
 const solver = await buildWallet(seed);
 try {
@@ -59,30 +50,14 @@ try {
   log("verified usable DUST from externally prefunded NIGHT (new or existing registration)");
 
   const shielded = await shieldedBalances(solver);
-  const levels = [
-    { input: "1000", output: "1000" },
-    { input: "100000", output: "99000" },
-    { input: "1000000", output: "970000" },
-  ];
-  const config = {
-    tokens: { TOKEN_IN: tokenIn, TOKEN_OUT: tokenOut },
-    refPricesUsd: { TOKEN_IN: "1", TOKEN_OUT: "1" },
-    pairs: [
-      { tokenIn: "TOKEN_IN", tokenOut: "TOKEN_OUT", levels },
-      { tokenIn: "TOKEN_OUT", tokenOut: "TOKEN_IN", levels },
-    ],
-  };
-  writeFileSync(ladderPath, `${JSON.stringify(config, null, 2)}\n`);
-
   const receipt = {
     mode: "external-prefunded",
     script: "deploy/scripts/provision-solver-fees.ts",
     measuredAt: new Date().toISOString(),
     network: net.id,
     seedSuffix: seed.slice(-4),
-    tokenIn,
-    tokenOut,
     inventorySource: "external",
+    pricingSource: "live-offer-files-book",
     dustReady: dust.dustReady,
     nightPrefunded: true,
     nightBeforeDustRegistrationSpecks: night.toString(),
@@ -91,10 +66,9 @@ try {
     solverUnshielded: Object.fromEntries(
       Object.entries(await unshieldedBalances(solver)).map(([key, value]) => [key, String(value)]),
     ),
-    ladderConfig: ladderPath,
   };
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
-  log(`verified prefunded NIGHT=${night}; wrote ${ladderPath} and ${receiptPath}`);
+  log(`verified prefunded NIGHT=${night}; wrote ${receiptPath}`);
 } finally {
   await (solver.wallet as unknown as { stop?: () => Promise<void> }).stop?.().catch(() => undefined);
 }

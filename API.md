@@ -117,7 +117,7 @@ SOLVER_RELAY_HTTP_URL=https://relay/api/v1  # public relay HTTP base for durable
 SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer, >= 32 chars; backend exact-files is unauthenticated
 SOLVER_JOURNAL_PATH=/var/lib/cow-solver/operations.sqlite  # absolute, per-instance volume; :memory: refused
 
-SOLVER_DRY_RUN=true                      # mainnet default; mirrors and loads read-only inventory,
+SOLVER_DRY_RUN=true                      # mainnet default; mirrors the live Offer Files book,
                                         # syncs the REAL wallet, starts no relay jobs, mutates nothing
 SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
 SOLVER_ENABLED=true                      # "false" exits 0 without requiring the values above
@@ -1191,10 +1191,10 @@ solver depending on the kernel and relay rather than starting them.
 
 **Supported domain.** Midnight 2.x / ledger-v9 only. The solver settles offers
 that normalize to **one shielded give leg and one shielded want leg** with
-distinct token colors and positive amounts, at most **8 makers per job**, plus an
-optional shielded residual paid from its own inventory. Unshielded legs, mixed
-value layers, multi-leg baskets, and Midnight 2.x are refused before admission —
-they are out of scope, not partially supported.
+distinct token colors and positive amounts, using at most **8 complete maker
+files per job**. Unshielded legs, mixed value layers, multi-leg baskets, and
+Midnight 2.x are refused before admission. A maker file is never partially
+consumed.
 
 **Fees.** Maker offers are constructed with `payFees:false` (see
 [Encoding offers](#encoding-offers-swapoffer1)), so a maker's offer pays no fee
@@ -1210,47 +1210,44 @@ itself. See `SOLVER_FEE_SIZING_TAKER_INPUTS` below.
 
 **Quotes are indicative.** A published ladder is authenticated market data for
 the relay's interpolation, not a reservation: nothing is held, and admission is
-re-decided at job time against the current book, inventory and policy. The
-kernel's `GET /v1/quote` is a separate, `token_prices`-backed contract and is not
-replaced by solver data.
+re-decided at job time against the current book and policy. The kernel's
+`GET /v1/quote` is a separate, `token_prices`-backed contract and is not replaced
+by solver data.
 
 **A job's `amountOut` is the taker's exact demand, and may be below the quote.**
-The solver accepts any dispatched job with `0 < amountOut <= interpolate(amountIn)`
-for a published pair:
+For the job's input, the solver chooses the single advertised whole-file
+combination whose genuine threshold supports the demand. Every selected file
+executes unchanged and in full:
 
 | Case | Disposition |
 |---|---|
-| Maker prefix pays exactly the demand | Settles; no residual, no surplus. |
-| Prefix pays **less** than the demand | The difference is a **residual** paid from solver inventory, reserved before any wallet call. |
-| Prefix pays **more** than the demand | The difference is **surplus retained by the solver**, along with any unspent input — the same disposition the reference solver makes. |
-| `amountOut > interpolate(amountIn)` | Refused (unchanged). |
+| Selected files require exactly `amountIn` and supply exactly `amountOut` | Settles with no swap-token surplus. |
+| Selected files require less than `amountIn` | Excess taker input is paid to the solver's shielded address. |
+| Selected files supply more than `amountOut` | Excess maker output is paid to the solver's shielded address. |
+| Selected files supply less than `amountOut` | Refused; the solver never pays the shortfall from inventory. |
 
 Out-of-ladder sizes, non-positive demands, stale routes, disallowed pairs,
-below-minimum outputs, unaffordable residuals and DUST-budget violations remain
-refusals. Lower demands used to be refused as `route_not_current`; they now
-settle.
+below-minimum outputs, incompatible maker sets, exhausted resource limits and
+DUST-budget violations remain refusals.
 
-**Published liquidity is bounded by executability — on the output side only.**
-The solver withholds what it could not execute at the moment of publication:
+**Published liquidity comes only from the live Offer Files book.** For each
+directed pair, the solver searches all affordable compatible combinations of at
+most eight complete files and publishes every strict improvement in maximum
+maker output. Flat sections end one input base unit before the next improvement.
+The last genuine threshold has one fixed flat endpoint at 10 times its input;
+that synthetic point never creates maker liquidity. Search, numeric, freshness,
+64-wire-point and 64-pair limits fail closed by withholding or withdrawing the
+affected pair.
 
-- **whole-maker rungs need no inventory at all.** A rung is an exact whole-offer
-  cumulative total, paid by the maker offers it consumes, so **a solver holding
-  none of either token publishes and settles every pair's first rung**;
-- a rung whose interpolation interval could demand more residual tokenOut than
-  its inventory can pay is withheld, and so is every rung above it. This is what
-  tokenOut inventory buys: *interior* (interpolated) sizes;
-- `SOLVER_SUPPORTED_PAIRS` and `SOLVER_MIN_JOB_OUTPUT` bound publication as well
-  as admission, and are re-applied after every reconnect;
-- withheld liquidity is surfaced once per change as `ladder-budget-limited` /
-  `ladder-budget-cleared` operator events. Its `detail` carries
-  `residualBudgetOffers`; the `mirrorBudgetOffers` count an earlier build also
-  reported is gone with the bound it counted.
+Swap-token wallet balances do not affect published prices or route choice. The
+solver contributes empty swap-token input maps and needs only NIGHT/DUST for
+fees. Excess taker input and excess maker output are both explicit settlement
+outputs to the solver.
 
-Operators upgrading from an earlier build will see advertised depth **grow**: the
-tokenIn cap that suppressed a whole pair when the solver held none of its input
-token has been removed. Funding the solver with a pair's input token is no longer
-required or useful; funding it with the **output** token is what extends the
-published ladder past its first rung.
+**Breaking configuration change.** `SOLVER_LADDER_CONFIG`, manual
+`pairs[].levels`, `SOLVER_ENABLE_PATH_B`, `SOLVER_ENABLE_CYCLES`, and
+`SOLVER_ENABLE_RESIDUAL_TOPUPS` were removed. Their presence is an upgrade error;
+delete them instead of replacing them with another pricing source.
 
 **`SOLVER_FEE_SIZING_TAKER_INPUTS`** (optional; integer `[1, 64]`, default `1`).
 The relay dispatches a numeric job and merges the taker's own half, so the solver

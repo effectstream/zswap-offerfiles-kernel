@@ -107,7 +107,7 @@ const cacheOf = (book: Book): MutableCache => {
   };
 };
 
-const expectedPush = (cache: LadderCache, overrides: { maxPairs?: number } = {}) =>
+const expectedPush = (cache: LadderCache, overrides: { resourceLimits?: { maxPairs?: number } } = {}) =>
   deriveLadderPush(cache, {
     nowMs: NOW,
     expiryMarginSeconds: EXPIRY_MARGIN_SECONDS,
@@ -248,12 +248,12 @@ describe("relay client — against a raw RFC 6455 mock relay", () => {
     const connection = relay.connections[0]!;
     const rungs = (frame: Record<string, unknown>): number =>
       ((frame["levels"] as Array<{ levels: unknown[] }>)[0]?.levels.length ?? 0);
-    expect(rungs(connection.frames("price-levels")[0]!)).toBe(3);
+    expect(rungs(connection.frames("price-levels")[0]!)).toBe(10);
 
     book.upsert(bookOfferFromApi(row(O4, { token: A, amount: "40" }, { token: B, amount: "10" }))!);
 
     await waitUntil(
-      () => connection.frames("price-levels").some((frame) => rungs(frame) === 4),
+      () => connection.frames("price-levels").some((frame) => rungs(frame) === 14),
       "the changed book to reach the relay",
     );
     const latest = connection.frames("price-levels").at(-1)!;
@@ -707,6 +707,10 @@ class FakeSocket implements RelayWebSocketLike {
     for (const gate of this.#pending.splice(0)) gate.resolve();
   }
 
+  releaseNext(): void {
+    this.#pending.shift()?.resolve();
+  }
+
   close(): void {
     this.readyState = 3;
     this.onclose?.();
@@ -820,21 +824,14 @@ describe("relay client — push loop properties", () => {
     socket.release();
     await flushMicrotasks();
 
-    // Exactly two pushes for four requests, and the frames never interleave:
-    // one whole derivation at a time.
     expect(client.stats().pushes).toBe(2);
     expect(socket.types).toEqual([
-      "solver-capabilities",
-      "price-levels",
-      "solver-capabilities",
-      "price-levels",
+      "solver-capabilities", "price-levels", "solver-capabilities",
+      "solver-capabilities", "price-levels",
     ]);
-    const first = socket.frames[1]!;
-    const second = socket.frames[3]!;
-    expect((first["levels"] as Array<{ levels: unknown[] }>)[0]!.levels.length).toBe(3);
-    // Derived AFTER the ticks, not when the tick fired.
-    expect(second).toEqual(expectedPush(cache).priceLevels as unknown as Record<string, unknown>);
-    expect((second["levels"] as Array<{ levels: unknown[] }>)[0]!.levels.length).toBe(4);
+    expect(socket.frames[1]).toEqual({ type: "price-levels", levels: [] });
+    expect(socket.frames[4]).toEqual(expectedPush(cache).priceLevels as unknown as Record<string, unknown>);
+
   });
 
   test("R-07: a manual push while one is in flight resolves with the coalesced push", async () => {
@@ -895,7 +892,11 @@ describe("relay client — push loop properties", () => {
   });
 
   test("a send failure is contained and the loop recovers", async () => {
-    const { socket, clock, client, events } = harness(cacheOf(seed(CANONICAL_ROWS)));
+    const sockets: FakeSocket[] = [];
+    const { clock, client, events } = harness(cacheOf(seed(CANONICAL_ROWS)), {
+      createWebSocket: () => { const next = new FakeSocket(); sockets.push(next); return next; },
+    });
+    const socket = sockets[0]!;
     socket.failSends = true;
     socket.onopen!();
     await flushMicrotasks();
@@ -904,11 +905,17 @@ describe("relay client — push loop properties", () => {
     expect(events.some((event) => event.kind === "push-failed")).toBe(true);
 
     socket.failSends = false;
-    await clock.advance(1_000);
+    await flushMicrotasks();
+    await clock.advance(2_000);
+    expect(socket.readyState).toBe(3);
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.onopen!();
+    await flushMicrotasks();
+    await client.idle();
     expect(client.stats().pushes).toBe(1);
   });
 
-  test("a cache read that throws never reaches the socket", async () => {
+  test("a derivation exception sends an explicit empty withdrawal", async () => {
     let explode = true;
     const book = seed(CANONICAL_ROWS);
     const cache: LadderCache = {
@@ -922,16 +929,85 @@ describe("relay client — push loop properties", () => {
 
     socket.onopen!();
     await flushMicrotasks();
-    // Nothing may be published on the strength of a failed derivation: the
-    // relay would keep quoting the previous ladder either way, so silence is
-    // the only honest answer here.
-    expect(socket.sent).toEqual([]);
+    // Silence would leave a prior ladder live. Even on the first push the
+    // failure is represented by the same validated empty replacement.
+    expect(socket.frames).toEqual([
+      { type: "solver-capabilities", tokenIds: [], maxParallelSwaps: MAX_PARALLEL_SWAPS },
+      { type: "price-levels", levels: [] },
+    ]);
     expect(client.stats().pushFailures).toBe(1);
     expect(events.filter((event) => event.kind === "push-failed")[0]?.severity).toBe("error");
+    expect(client.lastPush()!.push.withheld).toBe("derivation-failed");
+    expect(client.lastPush()!.push.withheldReason).toContain("cache read exploded");
 
     explode = false;
     await clock.advance(1_000);
-    expect(client.stats().pushes).toBe(1);
+    expect(client.stats().pushes).toBe(2);
+  });
+
+  test("a previously nonempty ladder is withdrawn when the next derivation throws", async () => {
+    let explode = false;
+    const book = seed(CANONICAL_ROWS);
+    const cache: LadderCache = {
+      get book(): Book {
+        if (explode) throw new Error("later derivation exploded");
+        return book;
+      },
+      isCurrent: () => true,
+    };
+    const { socket, client } = harness(cache);
+    socket.onopen!();
+    await flushMicrotasks();
+    expect(wireRungs(socket.frames)).not.toEqual([]);
+
+    explode = true;
+    await client.push();
+    expect(socket.frames.slice(-2)).toEqual([
+      { type: "solver-capabilities", tokenIds: [], maxParallelSwaps: MAX_PARALLEL_SWAPS },
+      { type: "price-levels", levels: [] },
+    ]);
+    expect(client.lastPush()!.push.withheld).toBe("derivation-failed");
+    expect(client.lastPush()!.push.withheldReason).toContain("later derivation exploded");
+  });
+
+  test("a snapshot changed across the capabilities await never sends its stale levels", async () => {
+    const book = seed(CANONICAL_ROWS);
+    const cache = cacheOf(book);
+    const { socket, client } = harness(cache);
+    socket.onopen!();
+    await flushMicrotasks();
+    expect(socket.types).toEqual(["solver-capabilities", "price-levels"]);
+
+    socket.hold = true;
+    const pushing = client.push();
+    await flushMicrotasks();
+    expect(socket.types.at(-1)).toBe("solver-capabilities");
+    book.upsert(bookOfferFromApi(row(O4, { token: A, amount: "40" }, { token: B, amount: "10" }))!);
+
+    // Release only the stale capabilities write. The client revalidates before
+    // levels, withdraws the old quote-bearing state, then coalesces one fresh
+    // generation after the withdrawal completes.
+    socket.releaseNext();
+    await flushMicrotasks();
+    expect(socket.frames.at(-1)).toEqual({ type: "price-levels", levels: [] });
+    socket.release();
+    await pushing;
+
+    expect(socket.types.slice(2)).toEqual([
+      "solver-capabilities",
+      "price-levels",
+      "solver-capabilities",
+      "solver-capabilities",
+      "price-levels",
+    ]);
+    expect(socket.frames[3]).toEqual({ type: "price-levels", levels: [] });
+    expect(socket.frames[4]).toEqual({
+      type: "solver-capabilities",
+      tokenIds: [],
+      maxParallelSwaps: MAX_PARALLEL_SWAPS,
+    });
+    expect(client.lastPush()!.push.withheld).toBeNull();
+    expect(wireRungs(socket.frames)).toHaveLength(14);
   });
 
   test("Q-N3-1: a cap that drops real liquidity is a loud, non-repeating signal", async () => {
@@ -947,7 +1023,7 @@ describe("relay client — push loop properties", () => {
       ladder: {
         expiryMarginSeconds: EXPIRY_MARGIN_SECONDS,
         maxParallelSwaps: MAX_PARALLEL_SWAPS,
-        maxPairs: 1,
+        resourceLimits: { maxPairs: 1 },
       },
     });
 
@@ -956,7 +1032,7 @@ describe("relay client — push loop properties", () => {
     const truncated = events.filter((event) => event.kind === "ladder-truncated");
     expect(truncated.length).toBe(1);
     expect(truncated[0]!.severity).toBe("error");
-    expect(truncated[0]!.detail).toEqual({ pairCapOffers: 1, rungCapOffers: 0 });
+    expect(truncated[0]!.detail).toEqual({ pairCapOffers: 1, wirePointCapOffers: 0 });
     // The published frame really is short one pair — the signal is not
     // reporting something that did not happen.
     expect((socket.frames[1]!["levels"] as unknown[]).length).toBe(1);
@@ -1077,8 +1153,7 @@ describe("relay client — push loop properties", () => {
 // This is the layer P4-F02 actually broke. `run.ts` passed `supportedPairs`/
 // `minJobOutput` into `ladder:`, `RelayLadderOptions` did not declare them, and
 // `runPush` never forwarded them — so every test below that asserts on the
-// frames themselves is the regression test that finding needed, and the two
-// budget tests are the same property for inventory (F03/F04).
+// frames themselves is the regression test that finding needed.
 
 const policyLadder = (overrides: Record<string, unknown> = {}) => ({
   expiryMarginSeconds: EXPIRY_MARGIN_SECONDS,
@@ -1117,12 +1192,14 @@ describe("relay client — admission policy reaches the wire (FR-002)", () => {
 
     await waitUntil(() => pushesOn(relay) >= 1, "the first policy-bounded push");
     const connection = relay.connections[0]!;
-    // Rung outputs are 20 / 30 / 35, so the minimum hides the first one only.
-    // Before FR-002 the wire carried all three and the executor then refused the
-    // sub-minimum sizes the relay had already quoted.
+    // The minimum starts publication at the first qualifying complete combination.
     expect(wireRungs(connection.messages)).toEqual([
+      { input: "15", output: "25" },
+      { input: "19", output: "25" },
       { input: "20", output: "30" },
+      { input: "24", output: "30" },
       { input: "25", output: "35" },
+      { input: "250", output: "35" },
     ]);
     // And it is still a frame the real relay accepts, by its own predicate.
     expect(parsePriceLevels(lastFrame(connection.messages, "price-levels"))).not.toBeNull();
@@ -1165,7 +1242,11 @@ describe("relay client — admission policy reaches the wire (FR-002)", () => {
     });
     clients.push(client);
 
-    const bounded = [{ input: "20", output: "30" }, { input: "25", output: "35" }];
+    const bounded = [
+      { input: "15", output: "25" }, { input: "19", output: "25" },
+      { input: "20", output: "30" }, { input: "24", output: "30" },
+      { input: "25", output: "35" }, { input: "250", output: "35" },
+    ];
     sockets[0]!.onopen!();
     await flushMicrotasks();
     expect(wireRungs(sockets[0]!.frames)).toEqual(bounded);
@@ -1183,142 +1264,135 @@ describe("relay client — admission policy reaches the wire (FR-002)", () => {
   });
 });
 
-// RE-ENCODED at 00006-R2 (FR-003 / SC-002). This block was written against TWO
-// budgets: the tokenOut residual and a tokenIn bound for the fee-sizing mirror.
-// Fee sizing spends no tokenIn since 00006-R1, so the tokenIn bound is gone and
-// every matrix below is driven from a wallet holding NO tokenIn — which is the
-// availability claim FR-003 makes. The old tokenIn expectations are inverted in
-// place rather than dropped, so the change of verdict is pinned.
-describe("relay client — the executability budget is read per push (FR-003)", () => {
-  /** `Stock.available` as the push loop sees it: a function, so a test can move
-   *  inventory between two pushes exactly as a refresh or a reservation does. */
-  const movingInventory = (initial: Map<string, bigint>) => {
-    let current = initial;
-    return {
-      seam: () => current as ReadonlyMap<string, bigint>,
-      set: (next: Map<string, bigint>) => { current = next; },
-    };
-  };
-
-  test("a shrinking budget withdraws rungs on the NEXT push, and a recovery restores them", async () => {
-    const inventory = movingInventory(new Map([[A, 1_000n], [B, 1_000n]]));
-    const { socket, clock, client } = harness(cacheOf(seed(CANONICAL_ROWS)), {
-      ladder: policyLadder({ spendableInventory: inventory.seam }),
+describe("relay client — bounded search and snapshot lifecycle", () => {
+  test("cancellation during capabilities withdraws before any stale nonempty levels", async () => {
+    let cancelled = false;
+    const { socket, client } = harness(cacheOf(seed(CANONICAL_ROWS)), {
+      ladder: policyLadder({ shouldAbort: () => cancelled }),
     });
-
+    socket.hold = true;
     socket.onopen!();
     await flushMicrotasks();
-    expect(wireRungs(socket.frames)).toHaveLength(3);
-
-    // Inventory emptied — what an in-flight balance refresh does to Stock. The
-    // pair is B→A, so A is the residual budget and B is not read at all.
-    //
-    // WAS (00005-R2): `[]` rungs and `[]` tokens — an empty wallet withdrew
-    // EVERYTHING, because tokenIn also bounded publication. The whole-maker
-    // first rung now survives an empty wallet; only the interior rungs go.
-    inventory.set(new Map());
+    cancelled = true;
+    socket.release();
     await client.push();
-    expect(wireRungs(socket.frames)).toEqual([{ input: "10", output: "20" }]);
-    expect(wireTokens(socket.frames)).toEqual([A, B]);
-
-    // tokenOut ALONE restores the full ladder, with no tokenIn anywhere in the
-    // snapshot (SC-002). Was `[[A, 0n], [B, 1_000n]]` → one rung.
-    inventory.set(new Map([[A, 1_000n]]));
-    await client.push();
-    expect(wireRungs(socket.frames)).toHaveLength(3);
-
-    // Still the NEXT push that carries it, on the timer as well as on demand.
-    inventory.set(new Map([[A, 0n]]));
-    await clock.advance(1_000);
-    await client.idle();
-    expect(wireRungs(socket.frames)).toEqual([{ input: "10", output: "20" }]);
-    expect(client.stats().pushFailures).toBe(0);
+    expect(socket.frames.filter((frame) => frame.type === "price-levels")
+      .every((frame) => (frame.levels as unknown[]).length === 0)).toBe(true);
+    expect(client.lastPush()!.push.derived.diagnostics.stopReason).toBe("aborted");
   });
 
-  test("withheld liquidity is a LOUD operator signal, once per change, and its recovery too", async () => {
-    const inventory = movingInventory(new Map([[A, 1_000n], [B, 1_000n]]));
+  test("a retired socket's awaited capabilities cannot publish levels on its replacement", async () => {
+    const sockets: FakeSocket[] = [];
+    const cache = cacheOf(seed(CANONICAL_ROWS));
+    const { client, clock } = harness(cache, {
+      createWebSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+    });
+    const old = sockets[0]!;
+    old.hold = true;
+    old.onopen!();
+    await flushMicrotasks();
+    old.close();
+    await clock.advance(2_000);
+    const replacement = sockets[1]!;
+    replacement.onopen!();
+    cache.book.remove(O3);
+    old.release();
+    await client.push();
+    expect(old.types).toEqual(["solver-capabilities"]);
+    expect(replacement.types).toEqual(["solver-capabilities", "price-levels"]);
+    expect(replacement.frames[1]).toEqual(expectedPush(cache).priceLevels as unknown as Record<string, unknown>);
+  });
+
+  test("source cap withdraws before copying or serializing an oversized book", async () => {
+    const book = seed(CANONICAL_ROWS);
+    book.all = () => { throw new Error("unbounded copy attempted"); };
+    const { socket, client, events } = harness(cacheOf(book), {
+      ladder: policyLadder({ resourceLimits: { maxSourceOffers: 2 } }),
+    });
+    socket.onopen!();
+    await client.idle();
+    expect(wireRungs(socket.frames)).toEqual([]);
+    expect(client.lastPush()!.push.derived.diagnostics).toMatchObject({
+      stopReason: "source-offer-cap", sourceOffersScanned: 0,
+    });
+    expect(events.some((event) => event.kind === "ladder-resource-limited")).toBe(true);
+  });
+
+  test("resource withholding is reported once per change and clears on recovery", async () => {
     const book = seed(CANONICAL_ROWS);
     const { socket, client, events } = harness(cacheOf(book), {
-      ladder: policyLadder({ spendableInventory: inventory.seam }),
-    });
-    const budgetEvents = () => events.filter((event) =>
-      event.kind === "ladder-budget-limited" || event.kind === "ladder-budget-cleared");
-
-    socket.onopen!();
-    await flushMicrotasks();
-    // Nothing withheld: no signal at all, so the signal stays meaningful.
-    expect(budgetEvents()).toEqual([]);
-
-    // Zero tokenOut AND zero tokenIn — the uncapitalized solver. Was
-    // `[[A, 0n], [B, 1_000n]]`; the tokenIn entry made no difference then to the
-    // residual count and makes no difference at all now.
-    inventory.set(new Map([[A, 0n], [B, 0n]]));
-    await client.push();
-    // A withheld rung is invisible at the relay — takers simply stop being
-    // quoted — so this is reported at error severity with counts. One count
-    // since 00006-R2: `mirrorBudgetOffers` is gone from the detail.
-    expect(budgetEvents()).toHaveLength(1);
-    expect(budgetEvents()[0]!.kind).toBe("ladder-budget-limited");
-    expect(budgetEvents()[0]!.severity).toBe("error");
-    expect(budgetEvents()[0]!.detail).toEqual({ residualBudgetOffers: 2 });
-
-    // Change-triggered, not per-push: the loop runs once a second and an
-    // unconditional error per second is noise an operator learns to ignore.
-    await client.push();
-    expect(budgetEvents()).toHaveLength(1);
-
-    // A different COUNT is a change. The old step moved tokenIn to 24 and
-    // expected `{residual: 0, mirror: 1}`; tokenIn withholds nothing now, so the
-    // count is moved by DEEPENING the book instead — one more rate-1 offer past
-    // the truncation point.
-    book.upsert(bookOfferFromApi(row(O4, { token: A, amount: "1" }, { token: B, amount: "1" }))!);
-    await client.push();
-    expect(budgetEvents()).toHaveLength(2);
-    expect(budgetEvents()[1]!.kind).toBe("ladder-budget-limited");
-    expect(budgetEvents()[1]!.detail).toEqual({ residualBudgetOffers: 3 });
-
-    // Recovery is reported too, so a cleared limit is not left looking
-    // permanent — and it needs tokenOut only, no tokenIn at all.
-    inventory.set(new Map([[A, 1_000n]]));
-    await client.push();
-    expect(budgetEvents()).toHaveLength(3);
-    expect(budgetEvents()[2]!.kind).toBe("ladder-budget-cleared");
-    expect(budgetEvents()[2]!.severity).toBe("info");
-  });
-
-  test("the budget signal is separate from the cap signal: different cause, different remedy", async () => {
-    const { socket, events } = harness(cacheOf(seed([
-      ...CANONICAL_ROWS,
-      row(O4, { token: C, amount: "10" }, { token: A, amount: "10" }),
-    ])), {
-      ladder: policyLadder({
-        // Two pairs (B→A from the canonical book, A→C from the extra row) and
-        // room to publish one. The shortfall used to be tokenIn B short of the
-        // B→A tail; with that bound gone (00006-R2) it is tokenOut A at zero,
-        // which withholds the B→A interior rungs. Note the snapshot carries NO
-        // tokenIn for B at all and the pair is still publishable.
-        maxPairs: 1,
-        spendableInventory: () => new Map([[A, 0n], [C, 1_000n]]),
-      }),
+      ladder: policyLadder({ resourceLimits: { maxVisitedSubsetsPerPair: 1 } }),
     });
     socket.onopen!();
-    await flushMicrotasks();
-    // A configured ceiling and an inventory shortfall are both reported, each
-    // under its own kind: raising a limit and funding a wallet are not the same
-    // operator action.
-    const truncated = events.filter((event) => event.kind === "ladder-truncated");
-    const limited = events.filter((event) => event.kind === "ladder-budget-limited");
-    expect(truncated).toHaveLength(1);
-    expect(truncated[0]!.detail).toEqual({ pairCapOffers: 1, rungCapOffers: 0 });
-    expect(limited).toHaveLength(1);
-    expect(limited[0]!.detail).toEqual({ residualBudgetOffers: 2 });
+    await client.idle();
+    expect(wireRungs(socket.frames)).toEqual([]);
+    await client.push();
+    expect(events.filter((event) => event.kind === "ladder-resource-limited")).toHaveLength(1);
+    book.remove(O1);
+    book.remove(O2);
+    await client.push();
+    expect(wireRungs(socket.frames)).toHaveLength(2);
+    expect(events.some((event) => event.kind === "ladder-resource-cleared")).toBe(true);
   });
 
-  test("no inventory seam at all keeps the pre-budget behaviour (dry-run parity)", async () => {
-    const { socket } = harness(cacheOf(seed(CANONICAL_ROWS)), { ladder: policyLadder() });
+  test("reservation change during capabilities withdraws before replacing the witness", async () => {
+    const book = seed(CANONICAL_ROWS);
+    let unavailable: string[] = [];
+    const seen: LadderPush[] = [];
+    const { socket, client } = harness(cacheOf(book), {
+      ladder: policyLadder({ unavailableOfferHashes: () => unavailable }),
+      onPush: (push) => { seen.push(push); },
+    });
     socket.onopen!();
+    await client.idle();
+    socket.hold = true;
+    const pushing = client.push();
     await flushMicrotasks();
-    expect(wireRungs(socket.frames)).toHaveLength(3);
+    unavailable = [O3];
+    socket.releaseNext();
+    await flushMicrotasks();
+    expect(socket.frames.at(-1)).toEqual({ type: "price-levels", levels: [] });
+    socket.release();
+    await pushing;
+    expect(seen.some((push) => push.withheldReason?.includes("reservations changed"))).toBe(true);
+    expect(client.lastPush()!.push.derived.provenance[0]!.combinations.every(
+      (entry) => !entry.offerHashes.includes(O3))).toBe(true);
+  });
+
+  test("fresh time after synchronous computation catches expiry before first send", async () => {
+    const book = seed(CANONICAL_ROWS);
+    let reads = 0;
+    const seen: LadderPush[] = [];
+    const { socket, client } = harness(cacheOf(book), {
+      nowMs: () => ++reads === 1 ? NOW : Date.parse(EXPIRES) - EXPIRY_MARGIN_SECONDS * 1_000,
+      onPush: (push) => { seen.push(push); },
+    });
+    socket.onopen!();
+    await client.idle();
+    expect(socket.frames.filter((frame) => frame.type === "price-levels")
+      .every((frame) => (frame.levels as unknown[]).length === 0)).toBe(true);
+    expect(seen.some((push) => push.withheldReason?.includes("expiry margin"))).toBe(true);
+  });
+
+  test("failed derivation with a hung withdrawal closes its socket generation", async () => {
+    let explode = false;
+    const book = seed(CANONICAL_ROWS);
+    const cache: LadderCache = {
+      get book() { if (explode) throw new Error("derive failed"); return book; },
+      isCurrent: () => true,
+    };
+    const { socket, clock, client } = harness(cache);
+    socket.onopen!();
+    await client.idle();
+    explode = true;
+    socket.hold = true;
+    const pushing = client.push();
+    await flushMicrotasks();
+    await clock.advance(500);
+    await pushing;
+    expect(socket.readyState).toBe(3);
+    expect(client.lastPush()!.push.withheld).toBe("derivation-failed");
+    socket.release();
   });
 });
 
@@ -1341,7 +1415,7 @@ describe("relay client — the derived push is observable (00007 FR-004)", () =>
     const expected = expectedPush(cache);
     expect(seen[0]!.push.priceLevels).toEqual(expected.priceLevels);
     expect(seen[0]!.push.derived.provenance).toEqual(expected.derived.provenance);
-    expect(seen[0]!.push.derived.provenance[0]!.rungs.length).toBe(3);
+    expect(seen[0]!.push.derived.provenance[0]!.combinations.length).toBe(5);
     expect(seen[0]!.push.withheld).toBeNull();
 
     const record = client.lastPush();
@@ -1360,7 +1434,7 @@ describe("relay client — the derived push is observable (00007 FR-004)", () =>
     expect(seen.map((entry) => entry.cause)).toEqual(["connect", "manual"]);
   });
 
-  test("lastPush is null before the first derivation and after a failed one", async () => {
+  test("lastPush distinguishes never-derived from a transport failure", async () => {
     const cache = cacheOf(seed(CANONICAL_ROWS));
     const { socket, client } = harness(cache);
     // Nothing has been derived yet: the socket has not opened.

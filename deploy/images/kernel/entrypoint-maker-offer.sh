@@ -2,10 +2,8 @@
 # entrypoint-maker-offer.sh — seed the kernel order book with ONE real offer.
 #
 # The solver's ladder is derived from the mirrored Offer Files book
-# (`deriveLadder(cache.book.all(), …)`), not from its ladder config file. An
-# empty book therefore means an empty ladder no matter how well funded the
-# solver is — the second half of the silent trap described in
-# entrypoint-solver-provision.sh.
+# (`deriveLadder(cache.book.all(), …)`). An empty book therefore means an empty
+# ladder no matter how well funded the solver is.
 #
 # So that a plain `docker compose up` produces the stack the deployment claims
 # to produce — a solver quoting a real pair at the relay — this one-shot posts a

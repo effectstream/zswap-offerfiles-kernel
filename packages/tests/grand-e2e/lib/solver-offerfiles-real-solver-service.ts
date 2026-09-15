@@ -12,8 +12,7 @@
  *
  * Required environment:
  *   E1_RUN_ID, E1_SOLVER_SEED, E1_SOLVER_API, E1_SOLVER_AUTH_TOKEN,
- *   E1_SOLVER_LADDER_CONFIG, E1_SOLVER_TELEMETRY_PATH,
- *   E1_SOLVER_RUNTIME_PATH
+ *   E1_SOLVER_TELEMETRY_PATH, E1_SOLVER_RUNTIME_PATH
  * Optional central ordering evidence:
  *   E1_SOLVER_RECORDER_URL (the telemetry relay's exact /record URL),
  *   E1_SOLVER_RECORDER_TOKEN, E1_SOLVER_RECORDER_TIMEOUT_MS
@@ -53,7 +52,7 @@ import {
  * `stockSnapshot(hashes)` still produces those rows for any caller that knows
  * the hashes, and the terminal snapshot still records solver-wide token rows.
  */
-const SCHEMA = "zswap-offer-files-real-solver/v1";
+const SCHEMA = "zswap-offer-files-real-solver/v2";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -165,7 +164,6 @@ export interface RealSolverServiceConfig {
   authToken: string;
   relayUrl?: string;
   relayAuthToken?: string;
-  ladderConfigPath: string;
   telemetryPath: string;
   runtimePath: string;
   recorderUrl?: string;
@@ -200,10 +198,11 @@ export function readRealSolverServiceConfig(
   if (relayAuthToken !== undefined && (relayAuthToken.length < 32 || /\s/.test(relayAuthToken))) {
     throw new Error("E1_SOLVER_RELAY_AUTH_TOKEN must contain at least 32 non-whitespace characters");
   }
-  const ladderConfigPath = requireAbsolutePath(
-    "E1_SOLVER_LADDER_CONFIG",
-    env["E1_SOLVER_LADDER_CONFIG"],
-  );
+  if (env["E1_SOLVER_LADDER_CONFIG"] !== undefined) {
+    throw new Error(
+      "E1_SOLVER_LADDER_CONFIG was removed; the real solver derives pricing from the live Offer Files book",
+    );
+  }
   const telemetryPath = requireAbsolutePath(
     "E1_SOLVER_TELEMETRY_PATH",
     env["E1_SOLVER_TELEMETRY_PATH"],
@@ -212,8 +211,8 @@ export function readRealSolverServiceConfig(
     "E1_SOLVER_RUNTIME_PATH",
     env["E1_SOLVER_RUNTIME_PATH"],
   );
-  if (new Set([ladderConfigPath, telemetryPath, runtimePath]).size !== 3) {
-    throw new Error("solver ladder, telemetry, and runtime paths must be distinct");
+  if (telemetryPath === runtimePath) {
+    throw new Error("solver telemetry and runtime paths must be distinct");
   }
   return {
     runId: requireRunId(env["E1_RUN_ID"]),
@@ -224,7 +223,6 @@ export function readRealSolverServiceConfig(
       ? {}
       : { relayUrl: requireWsUrl("E1_SOLVER_RELAY_WS_URL", env["E1_SOLVER_RELAY_WS_URL"]) }),
     ...(relayAuthToken === undefined ? {} : { relayAuthToken }),
-    ladderConfigPath,
     telemetryPath,
     runtimePath,
     ...(recorderUrl ? { recorderUrl } : {}),
@@ -838,12 +836,6 @@ export const REAL_WALLET_BOUNDARIES = [
 export type RealWalletBoundaryName = typeof REAL_WALLET_BOUNDARIES[number];
 
 export interface RealWalletBoundarySnapshot {
-  features: {
-    pathB: false;
-    residualTopUps: false;
-    cycles: false;
-    levelsPublication: false;
-  };
   methods: Record<RealWalletBoundaryName, { available: boolean; calls: number }>;
 }
 
@@ -935,7 +927,6 @@ export async function startInstrumentedRealSolver(
     networkId: net.id,
     pid: process.pid,
     api: config.api,
-    ladderConfigPath: config.ladderConfigPath,
     telemetryPath: config.telemetryPath,
     centralRecorderEnabled: recorder.enabled,
     seedFingerprint: sha256(config.seed).slice(0, 16),
@@ -945,12 +936,12 @@ export async function startInstrumentedRealSolver(
   await telemetry.emit("service-starting", {
     networkId: net.id,
     api: config.api,
-    ladderConfigPath: config.ladderConfigPath,
+    pricingSource: "live-offer-files-book",
   });
   recorder.enqueue("service", "starting", {
     networkId: net.id,
     api: config.api,
-    ladderConfigPath: config.ladderConfigPath,
+    pricingSource: "live-offer-files-book",
   });
 
   const pendingEvidence = new Set<Promise<unknown>>();
@@ -997,12 +988,6 @@ export async function startInstrumentedRealSolver(
   let walletBoundaryEvidenceAbandoned = false;
 
   const walletBoundarySnapshot = (): RealWalletBoundarySnapshot => ({
-    features: {
-      pathB: false,
-      residualTopUps: false,
-      cycles: false,
-      levelsPublication: false,
-    },
     methods: Object.fromEntries(
       REAL_WALLET_BOUNDARIES.map((method) => [
         method,
@@ -1248,7 +1233,6 @@ export async function startInstrumentedRealSolver(
       api: config.api,
       seed: config.seed,
       dryRun: false,
-      ladderConfigPath: config.ladderConfigPath,
       ...(config.relayUrl ? { relayUrl: config.relayUrl } : {}),
       ...(config.relayAuthToken ? { relayAuthToken: config.relayAuthToken } : {}),
       startupTimeoutMs: config.startupTimeoutMs,

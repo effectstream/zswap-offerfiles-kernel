@@ -13,9 +13,8 @@
  *
  * Required environment:
  *   E1_RUN_ID, E1_USER_SEED, E1_SOLVER_SEED, E1_TOKEN_A, E1_TOKEN_B,
- *   E1_ACTOR_RESULT_PATH, E1_ACTOR_RUNTIME_PATH, E1_ACTOR_LADDER_PATH,
- *   E1_ACTOR_PRE_SPENT_PATH
- * verify-settlement uses E1_ACTOR_SETTLEMENT_PATH in place of the ladder path.
+ *   E1_ACTOR_RESULT_PATH, E1_ACTOR_RUNTIME_PATH, E1_ACTOR_PRE_SPENT_PATH
+ * verify-settlement additionally uses E1_ACTOR_SETTLEMENT_PATH.
  *
  * All paths must be absolute bind-mounted artifact paths. Seeds are accepted
  * only from the environment and are never written to an artifact.
@@ -52,7 +51,7 @@ import {
   type ValidateOpts,
 } from "@zswap-da/validator";
 
-const SCHEMA = "zswap-offer-files-real-actors/v1";
+const SCHEMA = "zswap-offer-files-real-actors/v2";
 const PRE_SPENT_SCHEMA = "zswap-offer-files-real-pre-spent-liveness/v1";
 const NIGHT = "0".repeat(64);
 const MAX_OFFER_BYTES = 1024 * 1024;
@@ -114,13 +113,6 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await rename(temporary, path);
-}
-
-async function atomicText(path: string, value: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temporary, value, { encoding: "utf8", mode: 0o600 });
   await rename(temporary, path);
 }
 
@@ -223,7 +215,6 @@ export interface RealActorConfig {
   genesisSeed: string;
   resultPath: string;
   runtimePath: string;
-  ladderPath: string;
   preSpentPath: string;
   tokenA: string;
   tokenB: string;
@@ -326,13 +317,12 @@ export function readRealActorConfig(
   }
   const resultPath = requireAbsolutePath("E1_ACTOR_RESULT_PATH", env["E1_ACTOR_RESULT_PATH"]);
   const runtimePath = requireAbsolutePath("E1_ACTOR_RUNTIME_PATH", env["E1_ACTOR_RUNTIME_PATH"]);
-  const ladderPath = requireAbsolutePath("E1_ACTOR_LADDER_PATH", env["E1_ACTOR_LADDER_PATH"]);
   const preSpentPath = requireAbsolutePath(
     "E1_ACTOR_PRE_SPENT_PATH",
     env["E1_ACTOR_PRE_SPENT_PATH"],
   );
-  if (new Set([resultPath, runtimePath, ladderPath, preSpentPath]).size !== 4) {
-    throw new Error("actor result, runtime, ladder, and pre-spent paths must be distinct");
+  if (new Set([resultPath, runtimePath, preSpentPath]).size !== 3) {
+    throw new Error("actor result, runtime, and pre-spent paths must be distinct");
   }
 
   return {
@@ -342,7 +332,6 @@ export function readRealActorConfig(
     genesisSeed,
     resultPath,
     runtimePath,
-    ladderPath,
     preSpentPath,
     tokenA,
     tokenB,
@@ -731,7 +720,6 @@ export interface RealActorManifest {
     };
   };
   offer: RealOfferOracle;
-  ladder: { path: string; sha256: string };
 }
 
 export interface RealSettlementActors {
@@ -1236,22 +1224,6 @@ export async function writeRealActorArtifacts(
   config: RealActorConfig,
   manifest: RealActorManifest,
 ): Promise<void> {
-  const ladder = {
-    tokens: { A: manifest.tokens.A, B: manifest.tokens.B },
-    refPricesUsd: { A: "1", B: "1" },
-    pairs: [
-      {
-        tokenIn: "A",
-        tokenOut: "B",
-        levels: [{ input: config.giveAmount.toString(), output: config.wantAmount.toString() }],
-      },
-    ],
-  };
-  const ladderSource = `${JSON.stringify(ladder, null, 2)}\n`;
-  if (sha256(ladderSource) !== manifest.ladder.sha256) {
-    throw new Error("ladder manifest hash does not match generated source");
-  }
-  await atomicText(config.ladderPath, ladderSource);
   await atomicJson(config.resultPath, manifest);
 }
 
@@ -1722,16 +1694,6 @@ export async function provisionRealActors(
       throw new Error("real A->B offer did not expose nullifier and commitment oracles");
     }
 
-    const ladderSource = `${JSON.stringify({
-      tokens: { A: tokenA, B: tokenB },
-      refPricesUsd: { A: "1", B: "1" },
-      pairs: [{
-        tokenIn: "A",
-        tokenOut: "B",
-        levels: [{ input: config.giveAmount.toString(), output: config.wantAmount.toString() }],
-      }],
-    }, null, 2)}\n`;
-
     const manifest: RealActorManifest = {
       schema: SCHEMA,
       runId: config.runId,
@@ -1784,7 +1746,6 @@ export async function provisionRealActors(
         wants: validation.wants,
         expiresAt: expiresAt.toISOString(),
       },
-      ladder: { path: config.ladderPath, sha256: sha256(ladderSource) },
     };
 
     // E1-Q7 evidence: occurrences and attempt counts land in the provisioner
@@ -1837,7 +1798,6 @@ async function runProvisionCli(): Promise<void> {
       state,
       updatedAt: nowIso(),
       resultPath: config.resultPath,
-      ladderPath: config.ladderPath,
       preSpentPath: config.preSpentPath,
       actors: {
         user: seedFingerprint(config.userSeed),

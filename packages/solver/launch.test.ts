@@ -9,9 +9,11 @@
  * resolver in isolation.
  */
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
+  assertNoRetiredSolverPricingOptions,
   describeSolverLaunchConfig,
   resolveSolverLaunchConfig,
   SolverLaunchConfigError,
@@ -32,7 +34,6 @@ const complete = (): Record<string, string> => ({
   SOLVER_RELAY_AUTH_TOKEN: TOKEN,
   SOLVER_JOURNAL_PATH: "/var/lib/cow-solver/operations.sqlite",
   SOLVER_SEED: REAL_SEED,
-  SOLVER_LADDER_CONFIG: "/etc/cow-solver/ladders.json",
 });
 
 const reader = (env: Record<string, string>) => (name: string): string | undefined => env[name];
@@ -87,7 +88,6 @@ describe("FR-005 solver launch configuration", () => {
       journal: { path: "/var/lib/cow-solver/operations.sqlite", allowMemory: false },
       seed: REAL_SEED,
       dryRun: false,
-      ladderConfigPath: "/etc/cow-solver/ladders.json",
       // 00006 FR-001: optional, but resolved and reported like everything else.
       feeSizingTakerInputs: 1,
       // 00007 FR-001: no SOLVER_STATUS_PORT means no listener at all. This
@@ -96,6 +96,11 @@ describe("FR-005 solver launch configuration", () => {
       status: null,
       warnings: [],
     });
+  });
+
+  test("the removed manual ladder artifact is absent and startup does not require it", () => {
+    expect(existsSync(resolve(import.meta.dir, "config/ladders.dev.json"))).toBe(false);
+    expect(resolveWith(complete()).warnings).toEqual([]);
   });
 
   // 00006 FR-001 / Q-R0-1 (option A). The knob is optional, so its DEFAULT must
@@ -141,17 +146,36 @@ describe("FR-005 solver launch configuration", () => {
     expect(banner).toContain("LIVE relay job execution");
     expect(banner).toContain("http://kernel:9999");
     expect(banner).toContain("relay token    : set (32 chars)");
+    expect(banner).toContain("pricing policy : live whole-offer combinations; fixed 10x terminal plateau");
     expect(banner).toContain("seed           : set (never logged)");
     expect(banner).not.toContain(REAL_SEED);
     expect(banner).not.toContain(TOKEN);
   });
 
-  test("an unset ladder file is a warning, not a refusal", () => {
-    const env = complete();
-    delete env["SOLVER_LADDER_CONFIG"];
-    const config = resolveWith(env);
-    expect(config.ladderConfigPath).toContain("ladders.dev.json");
-    expect(config.warnings.some((w) => w.includes("SOLVER_LADDER_CONFIG is unset"))).toBe(true);
+  test("removed manual pricing and mode selectors fail with migration guidance", () => {
+    for (const name of [
+      "SOLVER_LADDER_CONFIG",
+      "SOLVER_ENABLE_PATH_B",
+      "SOLVER_ENABLE_CYCLES",
+      "SOLVER_ENABLE_RESIDUAL_TOPUPS",
+    ]) {
+      const problems = problemsOf({
+        ...complete(),
+        [name]: name.endsWith("CONFIG") ? "/tmp/ladders.json" : "false",
+      });
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toContain(`${name} was removed`);
+      expect(problems[0]).toContain("whole-offer combination staircases");
+      expect(problems[0]).toContain("live Offer Files book");
+    }
+  });
+
+  test("the removed runSolver option fails for untyped callers", () => {
+    expect(() => assertNoRetiredSolverPricingOptions({
+      ladderConfigPath: "/tmp/retired-ladders.json",
+    })).toThrow(/ladderConfigPath was removed.*live Offer Files book/);
+    expect(() => assertNoRetiredSolverPricingOptions({ api: "http:\/\/kernel:9999" }))
+      .not.toThrow();
   });
 });
 
@@ -245,7 +269,6 @@ describe("FR-005 boundary grammars", () => {
       SOLVER_RELAY_AUTH_TOKEN: "short",
       SOLVER_JOURNAL_PATH: "relative.sqlite",
       SOLVER_SEED: DEV_SEED,
-      SOLVER_LADDER_CONFIG: "/etc/l.json",
     };
     const problems = problemsOf(malformed);
     for (const variable of [
@@ -391,6 +414,17 @@ describe("FR-005 the real entrypoint fails fast", () => {
     const { exitCode, stdout } = await run({ SOLVER_ENABLED: "false" });
     expect(exitCode).toBe(0);
     expect(stdout).toContain("SOLVER_ENABLED=false");
+  }, 60_000);
+
+  test("a retired ladder environment setting is rejected by the real entrypoint", async () => {
+    const { exitCode, stderr } = await run({
+      ...complete(),
+      SOLVER_LADDER_CONFIG: "/tmp/retired-ladders.json",
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("SOLVER_LADDER_CONFIG was removed");
+    expect(stderr).toContain("live Offer Files book");
+    expect(stderr).not.toContain("ENOENT");
   }, 60_000);
 });
 

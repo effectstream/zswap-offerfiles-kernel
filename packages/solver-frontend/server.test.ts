@@ -7,9 +7,14 @@
 // A `fetch` double proves none of those.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { statusContractVersion } from "@zswap-da/solver-core/status-contract";
 
 import { resolveFrontendConfig, type FrontendConfig } from "./env.ts";
-import { startFrontendServer, type FrontendServerHandle } from "./server.ts";
+import {
+  monitorContractVersion,
+  startFrontendServer,
+  type FrontendServerHandle,
+} from "./server.ts";
 import {
   buildStatusSnapshot,
   freePort,
@@ -108,13 +113,13 @@ describe("aggregation from three sources", () => {
     await stack.site.monitor.pollOnce();
 
     const snapshot = await snapshotOf(stack);
-    expect(snapshot.monitor.contractVersion).toBe(1);
+    expect(snapshot.monitor.contractVersion).toBe(monitorContractVersion);
     expect(typeof snapshot.now).toBe("number");
 
     // solver
     expect(snapshot.solver.state).toBe("reachable");
     expect(snapshot.solver.reachable).toBe(true);
-    expect(snapshot.solver.contractVersion).toBe(1);
+    expect(snapshot.solver.contractVersion).toBe(statusContractVersion);
     expect(snapshot.solver.snapshot.ladder.last.pairs).toBe(2);
     expect(snapshot.solver.host).toBe(new URL(stack.solver.url).host);
 
@@ -132,6 +137,22 @@ describe("aggregation from three sources", () => {
     // relay
     expect(snapshot.relay.configured).toBe(true);
     expect(snapshot.relay.tokens).toEqual([TKA, TKB]);
+  });
+
+  test("keeps an old status version observable but never interprets its payload", async () => {
+    const stack = await startStack();
+    await waitFor(() => stack.site.monitor.snapshot().solver.state === "reachable");
+    const old = buildStatusSnapshot() as any;
+    old.contractVersion = 1;
+    old.ladder.last.rungs = 999;
+    stack.solver.publish(old);
+
+    await waitFor(() => stack.site.monitor.snapshot().solver.contractVersion === 1);
+    const view = stack.site.monitor.snapshot().solver;
+    expect(view.state).toBe("reachable");
+    expect(view.expectedContractVersion).toBe(statusContractVersion);
+    expect(view.contractVersion).toBe(1);
+    expect(view.snapshot).toBeNull();
   });
 
   test("a kernel route that fails degrades to that section only", async () => {
@@ -381,7 +402,7 @@ describe("routes (FR-011)", () => {
     const text = new TextDecoder().decode(value);
     expect(text.startsWith("data: ")).toBe(true);
     const frame = JSON.parse(text.slice(6, text.indexOf("\n\n")));
-    expect(frame.monitor.contractVersion).toBe(1);
+    expect(frame.monitor.contractVersion).toBe(monitorContractVersion);
     expect(frame.solver.state).toBe("reachable");
     await reader.cancel();
   });

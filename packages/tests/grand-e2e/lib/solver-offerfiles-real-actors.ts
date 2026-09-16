@@ -162,7 +162,7 @@ function txIdentifiers(transaction: unknown): string[] {
 /**
  * The shielded input nullifiers a finalized transaction actually consumes.
  *
- * NOT `identifiers()`. ledger-v8's `Transaction::identifiers()`
+ * NOT `identifiers()`. ledger-v9's `Transaction::identifiers()`
  * (`structure.rs:1454`) returns the Pedersen VALUE commitments of inputs,
  * outputs and transients plus the intent binding commitments — a different
  * cryptographic domain from a nullifier, so a nullifier can never appear in

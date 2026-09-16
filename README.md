@@ -390,10 +390,10 @@ published ladder, non-positive demands, stale routes, disallowed pairs,
 below-minimum outputs, incompatible maker sets and routes that exceed resource
 limits.
 
-**Numeric boundary clarification.** The supported ledger-v8 exposed source legs,
+**Numeric boundary clarification.** The supported ledger-v9 exposed source legs,
 taker input/output and individual receipts are bounded by **M = `2^127-1`**;
 **U = `2^128-1`** is the coin-format maximum only. This corrects the prior u128
-settlement-bound assumption: pinned ledger-v8 8.1.0 source inspection and SDK
+settlement-bound assumption: pinned ledger-v9 1.0.0-rc.3 SDK
 probes show singleton delta clamping above M and signed merge overflow. Those
 construction probes do not establish on-chain settlement at the boundary. Gross
 gives/wants use exact bigint arithmetic and may exceed U; a safe maker merge

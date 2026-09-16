@@ -1002,7 +1002,7 @@ test("sorted physical identity uses the helper's distinct safe order for actual 
     const result = await h.executor.onSwap(swapJob("safe-order", D, A, "1", "2"));
     expect(result.type).toBe("swap-tx");
     // Exact-file identity stays sorted, while H3 cancels H1 before H2 adds the
-    // final A unit. H1+H2 would overflow ledger-v8's signed A delta.
+    // final A unit. H1+H2 would overflow ledger-v9's signed A delta.
     expect(h.exactRequests).toEqual([[H1, H2, H3]]);
     expect(h.dustBalanceInputs[0]![0]).toBe(`maker:${H1}+maker:${H3}+maker:${H2}`);
     expect(h.imbalanceReads.some((read) =>

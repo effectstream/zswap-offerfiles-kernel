@@ -434,7 +434,7 @@ export interface StatusLadderPush {
    *  dependencies without presenting alternatives as additive liquidity. */
   physicalDependencies: StatusLadderPhysicalDependency[];
   excluded: StatusLadderExclusion[];
-  /** Actual amount domains relevant to this ledger-v8 producer. Coin format is
+  /** Actual amount domains relevant to this ledger-v9 producer. Coin format is
    *  wider than the supported signed-delta/singleton-receipt amount. */
   amountBounds: {
     maxSettlementAmount: DecimalString;

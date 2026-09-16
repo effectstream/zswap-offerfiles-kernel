@@ -666,7 +666,7 @@ const receiptHalfNetMap = (receipts: readonly WholeOfferReceipt[]): Map<string, 
   new Map(receipts.map((receipt) => [receipt.token.toLowerCase(), -receipt.amount]));
 
 /** Inspect the real SDK object after each construction/merge. Exact bigint
- * planning is necessary but cannot detect ledger-v8's unchecked i128 wrap. */
+ * planning is necessary but cannot detect ledger-v9's unchecked i128 wrap. */
 function assertTransactionNet(
   transaction: unknown,
   expected: ReadonlyMap<string, bigint>,

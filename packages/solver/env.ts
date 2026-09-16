@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { isAbsolute } from "node:path";
 
 import { getEnv } from "@effectstream/utils/runtime";
@@ -31,16 +30,6 @@ export const ZSWAP_API = getEnv("ZSWAP_API") ?? "http://127.0.0.1:9999";
 export const SOLVER_RELAY_WS_URL = getEnv("SOLVER_RELAY_WS_URL") ?? "";
 export const SOLVER_RELAY_HTTP_URL = getEnv("SOLVER_RELAY_HTTP_URL") ?? "";
 export const SOLVER_RELAY_AUTH_TOKEN = getEnv("SOLVER_RELAY_AUTH_TOKEN") ?? "";
-
-/** Ladder file used when `SOLVER_LADDER_CONFIG` is unset. Exported so an
- * entrypoint can report the effective path from an injected environment reader
- * without going through this module's process-wide constant. */
-export const DEFAULT_SOLVER_LADDER_CONFIG =
-  // fileURLToPath, not URL.pathname: pathname percent-encodes, so a checkout
-  // under a directory with a space yields a path readFile cannot open.
-  fileURLToPath(new URL("./config/ladders.dev.json", import.meta.url));
-
-export const SOLVER_LADDER_CONFIG = getEnv("SOLVER_LADDER_CONFIG") ?? DEFAULT_SOLVER_LADDER_CONFIG;
 
 type EnvReader = (name: string) => string | undefined;
 

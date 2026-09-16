@@ -20,10 +20,10 @@ proxies a caller-chosen path to it.
 | Status pill | QUOTING / WITHDRAWN / DISCONNECTED / STARTING / DRY-RUN / SOLVER UNREACHABLE | the solver snapshot |
 | Health strip | six stages — kernel sync → book cache → inventory → journal & DUST → relay socket → published ladder — each with a one-line reason and a "since" | kernel `/v1/health/sync` + the solver snapshot |
 | Alarms | only what is wrong: unreachable, relay down, cache blocked, DUST window blocked, quarantined jobs, failed reverts, push failures, an empty relay token list, a degraded status section, a contract mismatch | derived |
-| Tiles | pairs, rungs (whole vs interior), tokens advertised, pushes, book size, jobs in flight, completed, quarantined, withdrawals observed, per-job DUST | solver + kernel + this service |
-| Published ladders | per directed pair: cumulative input → output, implied rate to 6 dp, whether a rung closes a **whole** maker offer or is **interior** liquidity served from solver inventory, and the maker hash | the solver's last derived push |
-| Not published | every book offer the derivation left out, with the solver's OWN `LadderExclusionReason` (`multi-leg`, `non-shielded-leg`, `unavailable`, `rung-cap`, `residual-budget`, `invalid-pair`, …) | the same push's exclusions |
-| Book | the kernel's offers beside the solver's mirror: cached or not, on the wire at which rung or excluded for which reason | kernel `/v1/offers` + solver |
+| Tiles | pairs, wire points, distinct maker files, winning sets, tokens advertised, pushes, book size, jobs in flight, completed, quarantined, withdrawals observed, per-job DUST | solver + kernel + this service |
+| Published ladders | per directed pair: wire input → quoted output, genuine threshold or synthetic plateau, direct/composed provenance, gross gives/wants and signed net by token, the solver receipts at that exact point, and every shared physical maker dependency | the solver's last derived push |
+| Not published | source-eligibility failures and route-specific withholding causes, labelled separately, including the exact discovery and safe-merge work used | the same push's exclusions and pair diagnostics |
+| Book | the kernel's offers beside the solver's mirror: cached or not, every winning set that reuses it, source exclusion versus another route's limitation | kernel `/v1/offers` + solver |
 | Jobs | the newest journal rows: state, offers, payout, receipt. **No transaction bytes** — the contract has no field for them | the solver's journal tail |
 | Inventory / DUST / Relay / Configuration / Events | balances, the rolling fee window, the relay's public token list, the launch settings as resolved (no secrets), and a merged log of solver diagnostics and this service's own observations | as labelled in each block's `?` |
 
@@ -43,6 +43,30 @@ marked as derived — never instead of them. Since 00024 that is every token the
 stack mints, so a registry row (or an older node) that states no `decimals` is
 read as **6**, not as "base units are coins". A colour with no registry row is
 shown as short hex, never hidden.
+
+**Status contract v3 is a breaking observability change.** Combination
+`input`/`output` are now the genuine net external amounts. Every winning
+combination carries required sorted `{token,gives,wants,net}` rows, where only
+`net` may be signed, plus exact-threshold receipts and sorted physical hashes.
+The snapshot also carries a bounded reverse index of shared physical files,
+the actual candidate-pair/discovery/safe-merge work and limits, and separate
+ledger-v8 settlement (`2^127-1`) and coin-format (`2^128-1`) maxima. A route is
+`direct` only when it has no intermediate row and no endpoint counterflow;
+otherwise it is `composed`, including two-token counterflow.
+
+The page derives receipts again for each wire point, so plateau overpayment and
+lower output demands are shown without changing the genuine maker threshold.
+Winning combinations are alternatives: shared maker files are counted once and
+their quote amounts are never presented as additive inventory. Status v2 is
+shown explicitly as old, future versions as unknown, and incompatible payloads
+are not interpreted. The monitor aggregation contract is v3 for the same
+breaking nested snapshot change.
+
+The loaded browser checks monitor and status versions against its own v3
+support at the shared polling/SSE entry. A rollback or mixed deployment clears
+incompatible data and displays a contract alarm until compatible snapshots
+resume. Missing, incomplete or inconsistent v3 token accounting makes receipts
+unknown; only validated accounting can produce a displayed `none`.
 
 ## Configuration
 

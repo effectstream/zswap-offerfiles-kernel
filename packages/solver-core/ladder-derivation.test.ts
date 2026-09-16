@@ -1,1027 +1,1291 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 
 import { admissionPairKey } from "./admission-policy.ts";
 import {
   buildPriceLevelsFrame,
   buildSolverCapabilitiesFrame,
+  DEFAULT_LADDER_RESOURCE_LIMITS,
   deriveLadder,
+  HARD_LADDER_RESOURCE_LIMITS,
+  MAX_SETTLEMENT_AMOUNT,
+  resolveLadderResourceLimits,
   withdrawalPriceLevelsFrame,
-  worstCaseIntervalResidual,
-  type LadderExclusionReason,
+  type DerivedLadder,
+  type LadderCombinationProvenance,
   type LadderSourceOffer,
 } from "./ladder-derivation.ts";
-import { rejectLevels } from "./ladder-schema.ts";
+import { interpolateQuote as schemaQuote, rejectLevels } from "./ladder-schema.ts";
 import {
-  interpolateQuote,
-  isPriceLevelsPair,
+  interpolateQuote as relayQuote,
   parsePriceLevels,
   parseSolverCapabilities,
 } from "./relay-ws-contract.ts";
 
-// Same two token ids as the frozen N0 wire fixture, so the derived frame and
-// the pinned one are directly comparable.
-const A = `01${"00".repeat(31)}`;
-const B = `02${"00".repeat(31)}`;
-const C = `03${"00".repeat(31)}`;
+const token = (value: number): string => value.toString(16).padStart(64, "0");
+const hash = (value: number): string => (10_000 + value).toString(16).padStart(64, "0");
+const nullifier = (value: number): string => (1_000_000 + value).toString(16).padStart(64, "0");
 
+const A = token(1);
+const B = token(2);
+const C = token(3);
+const D = token(4);
+const E = token(5);
 const NOW = 1_700_000_000_000;
-const MARGIN_SECONDS = 60;
-const FAR_FUTURE = NOW + 3_600_000;
+const OPTIONS = { nowMs: NOW, expiryMarginSeconds: 60 };
 
-const hash = (byte: string): string => byte.repeat(32);
-const O1 = hash("11");
-const O2 = hash("22");
-const O3 = hash("33");
-
-let nullifierSeed = 0;
-const nextNullifier = (): string => {
-  nullifierSeed += 1;
-  return nullifierSeed.toString(16).padStart(64, "0");
-};
-
-/** A native shielded single-leg maker offer: gives `outAmount` of `tokenOut`,
- *  wants `inAmount` of `tokenIn`. It backs the tokenIn→tokenOut ladder only. */
-const offer = (
-  offerHash: string,
-  tokenOut: string,
-  outAmount: bigint,
+const directTokenBalances = (
   tokenIn: string,
-  inAmount: bigint,
+  input: bigint,
+  tokenOut: string,
+  output: bigint,
+) => [
+  { token: tokenIn, gives: "0", wants: input.toString(), net: (-input).toString() },
+  { token: tokenOut, gives: output.toString(), wants: "0", net: output.toString() },
+].sort((left, right) => left.token < right.token ? -1 : left.token > right.token ? 1 : 0);
+
+const offer = (
+  id: number,
+  amountIn: bigint,
+  amountOut: bigint,
+  tokenIn = A,
+  tokenOut = B,
   overrides: Partial<LadderSourceOffer> = {},
 ): LadderSourceOffer => ({
-  offerHash,
-  gives: [{ token: tokenOut, amount: outAmount, kind: "SHIELDED" }],
-  wants: [{ token: tokenIn, amount: inAmount, kind: "SHIELDED" }],
-  expiresAt: FAR_FUTURE,
-  inputNullifiers: [nextNullifier()],
+  offerHash: hash(id),
+  gives: [{ token: tokenOut, amount: amountOut, kind: "SHIELDED" }],
+  wants: [{ token: tokenIn, amount: amountIn, kind: "SHIELDED" }],
+  expiresAt: NOW + 3_600_000,
+  inputNullifiers: [nullifier(id)],
   ...overrides,
 });
 
-const OPTIONS = { nowMs: NOW, expiryMarginSeconds: MARGIN_SECONDS };
+interface OracleOffer {
+  hash: string;
+  input: bigint;
+  output: bigint;
+}
 
-/**
- * The canonical worked example from plan question Q-R2-3 (user's book,
- * 2026-08-20): `-10A +10B`, `-5A +5B`, `-20A +10B`. All three GIVE A and WANT
- * B, so they back the B→A ladder only and A→B must be omitted entirely.
- */
-const CANONICAL_BOOK = (): LadderSourceOffer[] => [
-  offer(O1, A, 10n, B, 10n),
-  offer(O2, A, 5n, B, 5n),
-  offer(O3, A, 20n, B, 10n),
-];
+interface OracleResult {
+  input: bigint;
+  output: bigint;
+  hashes: string[];
+}
 
-describe("ladder derivation — the canonical provenance fixture", () => {
-  test("a seeded book derives exactly the Q-R2-3 rungs, and the unbacked direction is omitted", () => {
-    const derived = deriveLadder(CANONICAL_BOOK(), OPTIONS);
-
-    expect(derived.levels).toHaveLength(1);
-    const pair = derived.levels[0]!;
-    expect(pair.tokenIn).toBe(B);
-    expect(pair.tokenOut).toBe(A);
-    // {o3} → {o1} → {o2}: best marginal rate first (2 A/B, then the two 1 A/B
-    // offers ordered by the documented tie rule, ascending offerHash).
-    expect(pair.levels).toEqual([
-      { input: "10", output: "20" },
-      { input: "20", output: "30" },
-      { input: "25", output: "35" },
-    ]);
-    // Nothing gives B, so nothing backs A→B. Omitted, never published empty.
-    expect(derived.levels.some((entry) => entry.tokenIn === A)).toBe(false);
-    expect(derived.excluded).toEqual([]);
-  });
-
-  test("consumption order is best-marginal-rate-first, recorded rung by rung", () => {
-    const { provenance } = deriveLadder(CANONICAL_BOOK(), OPTIONS);
-    expect(provenance).toHaveLength(1);
-    expect(provenance[0]!.rungs).toEqual([
-      { input: "10", output: "20", offerHash: O3 },
-      { input: "20", output: "30", offerHash: O1 },
-      { input: "25", output: "35", offerHash: O2 },
-    ]);
-    // The most tokenOut any single offer pays: the ceiling on the inventory an
-    // interpolated between-rung size can need.
-    expect(provenance[0]!.residualBound).toBe("20");
-  });
-
-  test("capabilities come from the same cache: the union of published pairs' tokens", () => {
-    const { tokenIds } = deriveLadder(CANONICAL_BOOK(), OPTIONS);
-    expect(tokenIds).toEqual([A, B]);
-    expect(parseSolverCapabilities(buildSolverCapabilitiesFrame(tokenIds, 8))).toEqual({
-      type: "solver-capabilities",
-      tokenIds: [A, B],
-      maxParallelSwaps: 8,
-    });
-  });
-
-  test("a token whose only pair is omitted never reaches capabilities", () => {
-    // A multi-leg offer is the only thing mentioning C, and multi-leg offers
-    // cannot be described by a directed ladder.
-    const book = [
-      ...CANONICAL_BOOK(),
-      {
-        ...offer(hash("44"), C, 7n, B, 7n),
-        gives: [
-          { token: C, amount: 7n, kind: "SHIELDED" as const },
-          { token: A, amount: 1n, kind: "SHIELDED" as const },
-        ],
-      },
-    ];
-    const derived = deriveLadder(book, OPTIONS);
-    expect(derived.tokenIds).toEqual([A, B]);
-    expect(derived.excluded).toEqual([{ offerHash: hash("44"), reason: "multi-leg" }]);
-  });
-});
-
-describe("ladder derivation — determinism", () => {
-  test("byte-reproducible from the same cache state, in any input order", () => {
-    const permutations = [
-      [0, 1, 2],
-      [0, 2, 1],
-      [1, 0, 2],
-      [1, 2, 0],
-      [2, 0, 1],
-      [2, 1, 0],
-    ];
-    const rendered = permutations.map((order) => {
-      const book = CANONICAL_BOOK();
-      const derived = deriveLadder(
-        order.map((index) => book[index]!),
-        OPTIONS,
-      );
-      return JSON.stringify(buildPriceLevelsFrame(derived.levels));
-    });
-    expect(new Set(rendered).size).toBe(1);
-    // And the bytes themselves, so a future reordering of the emitter is caught.
-    expect(rendered[0]).toBe(
-      `{"type":"price-levels","levels":[{"tokenIn":"${B}","tokenOut":"${A}",` +
-        `"levels":[{"input":"10","output":"20"},{"input":"20","output":"30"},` +
-        `{"input":"25","output":"35"}]}]}`,
-    );
-  });
-
-  test("pairs and capabilities are emitted in sorted order, not insertion order", () => {
-    const book = [
-      offer(hash("aa"), C, 4n, B, 2n),
-      offer(hash("bb"), A, 4n, C, 2n),
-      offer(hash("cc"), B, 4n, A, 2n),
-    ];
-    const forward = deriveLadder(book, OPTIONS);
-    const reversed = deriveLadder([...book].reverse(), OPTIONS);
-    expect(forward.levels.map((pair) => [pair.tokenIn, pair.tokenOut])).toEqual([
-      [A, B],
-      [B, C],
-      [C, A],
-    ]);
-    expect(JSON.stringify(forward)).toBe(JSON.stringify(reversed));
-    expect(forward.tokenIds).toEqual([A, B, C]);
-  });
-
-  test("the tie rule is the ONLY thing that moves the boundaries, and both are honourable", () => {
-    // Same three offers, o1 and o2's content addresses swapped, so the tie
-    // resolves the other way: {o3} → {o2} → {o1}.
-    const swapped = [
-      offer(O2, A, 10n, B, 10n),
-      offer(O1, A, 5n, B, 5n),
-      offer(O3, A, 20n, B, 10n),
-    ];
-    const derived = deriveLadder(swapped, OPTIONS);
-    expect(derived.levels[0]!.levels).toEqual([
-      { input: "10", output: "20" },
-      { input: "15", output: "25" },
-      { input: "25", output: "35" },
-    ]);
-    // Different rungs, identical quotes: both are subsets of the same concave
-    // whole-offer frontier, which is why Q-R2-3 blesses either.
-    const canonical = deriveLadder(CANONICAL_BOOK(), OPTIONS).levels[0]!.levels;
-    for (let size = 10n; size <= 25n; size += 1n) {
-      expect(interpolateQuote(derived.levels[0]!.levels, size)).toBe(
-        interpolateQuote(canonical, size),
-      );
-    }
-  });
-});
-
-describe("ladder derivation — the frozen relay wire contract", () => {
-  const frozen = JSON.parse(
-    readFileSync(new URL("./fixtures/relay-ws/v1/price-levels.json", import.meta.url), "utf8"),
-  ) as unknown;
-
-  test("derived frames pass the relay's own admission predicates", () => {
-    const derived = deriveLadder(CANONICAL_BOOK(), OPTIONS);
-    const frame = buildPriceLevelsFrame(derived.levels);
-    expect(parsePriceLevels(frame)).toEqual(frame);
-    for (const pair of frame.levels) expect(isPriceLevelsPair(pair)).toBe(true);
-    // And the strict schema the solver shares with its own quoting code.
-    for (const pair of frame.levels) expect(rejectLevels(pair.levels)).toBeNull();
-  });
-
-  test("the derived ladder quotes exactly like the frozen fixture, everywhere", () => {
-    const parsedFrozen = parsePriceLevels(frozen);
-    expect(parsedFrozen).not.toBeNull();
-    const frozenLevels = parsedFrozen!.levels[0]!;
-    const derived = deriveLadder(CANONICAL_BOOK(), OPTIONS).levels[0]!;
-
-    expect(derived.tokenIn).toBe(frozenLevels.tokenIn);
-    expect(derived.tokenOut).toBe(frozenLevels.tokenOut);
-    // The fixture is the FRONTIER with both tie boundaries; the derivation
-    // publishes one consumption order's subset of it. Q-R2-3: any
-    // strictly-ascending subset of frontier points is equally valid, and here
-    // that claim is checked rather than argued — every size the relay will
-    // quote gets the same answer from both.
-    for (let size = 0n; size <= 40n; size += 1n) {
-      expect(interpolateQuote(derived.levels, size)).toBe(
-        interpolateQuote(frozenLevels.levels, size),
-      );
-    }
-  });
-
-  test("reproduces the N0 gate's pinned quote points", () => {
-    const levels = deriveLadder(CANONICAL_BOOK(), OPTIONS).levels[0]!.levels;
-    expect(interpolateQuote(levels, 10n)).toBe(20n);
-    expect(interpolateQuote(levels, 12n)).toBe(22n);
-    expect(interpolateQuote(levels, 15n)).toBe(25n);
-    expect(interpolateQuote(levels, 20n)).toBe(30n);
-    expect(interpolateQuote(levels, 25n)).toBe(35n);
-    // Outside the ladder the relay refuses: the first rung is the minimum
-    // trade and the last is the maximum.
-    expect(interpolateQuote(levels, 9n)).toBeNull();
-    expect(interpolateQuote(levels, 26n)).toBeNull();
-  });
-});
-
-describe("ladder derivation — honourability", () => {
-  /** Every rung is an exact whole-offer sum of a PREFIX of the consumption
-   *  order: no rung needs a single unit of solver inventory. */
-  const assertRungsAreWholeOfferSums = (
-    book: LadderSourceOffer[],
-    options = OPTIONS,
-  ): void => {
-    const derived = deriveLadder(book, options);
-    const byHash = new Map(book.map((entry) => [entry.offerHash.toLowerCase(), entry]));
-    for (const pair of derived.provenance) {
-      let cumulativeIn = 0n;
-      let cumulativeOut = 0n;
-      for (const rung of pair.rungs) {
-        const source = byHash.get(rung.offerHash)!;
-        cumulativeIn += source.wants[0]!.amount;
-        cumulativeOut += source.gives[0]!.amount;
-        expect(rung.input).toBe(cumulativeIn.toString());
-        expect(rung.output).toBe(cumulativeOut.toString());
-      }
-    }
-  };
-
-  test("every canonical rung is an exact whole-offer sum", () => {
-    assertRungsAreWholeOfferSums(CANONICAL_BOOK());
-  });
-
-  test("every rung of a many-offer, many-rate book is an exact whole-offer sum", () => {
-    const book = Array.from({ length: 12 }, (_, index) =>
-      offer(
-        hash((0x40 + index).toString(16)),
-        A,
-        BigInt(1_000 - index * 37),
-        B,
-        BigInt(100 + index),
-      ),
-    );
-    assertRungsAreWholeOfferSums(book);
-    const derived = deriveLadder(book, OPTIONS);
-    expect(derived.levels[0]!.levels).toHaveLength(12);
-    // Sorted best-marginal-rate-first ⇒ concave, which is the assumption
-    // behind the relay's interpolation. Proven, not assumed.
-    expect(rejectLevels(derived.levels[0]!.levels)).toBeNull();
-  });
-
-  test("between rungs the quote is a whole-offer prefix plus a residual at the NEXT offer's own rate", () => {
-    // Deliberately non-collinear: three different marginal rates.
-    const book = [
-      offer(hash("a1"), A, 30n, B, 10n),
-      offer(hash("a2"), A, 20n, B, 10n),
-      offer(hash("a3"), A, 10n, B, 10n),
-    ];
-    const derived = deriveLadder(book, OPTIONS);
-    const levels = derived.levels[0]!.levels;
-    expect(levels).toEqual([
-      { input: "10", output: "30" },
-      { input: "20", output: "50" },
-      { input: "30", output: "60" },
-    ]);
-
-    const residualBound = BigInt(derived.provenance[0]!.residualBound);
-    const first = BigInt(levels[0]!.input);
-    const last = BigInt(levels[levels.length - 1]!.input);
-    for (let size = first; size <= last; size += 1n) {
-      const quote = interpolateQuote(levels, size)!;
-      let index = 0;
-      while (index + 1 < levels.length && BigInt(levels[index + 1]!.input) <= size) index += 1;
-      const prefixIn = BigInt(levels[index]!.input);
-      const prefixOut = BigInt(levels[index]!.output);
-      if (prefixIn === size) {
-        // An exact rung: whole offers, zero inventory.
-        expect(quote).toBe(prefixOut);
-        continue;
-      }
-      const deltaIn = BigInt(levels[index + 1]!.input) - prefixIn;
-      const deltaOut = BigInt(levels[index + 1]!.output) - prefixOut;
-      const residualIn = size - prefixIn;
-      // The chord's slope IS the next offer's marginal rate, so the solver
-      // self-fills the partial offer at that offer's own price.
-      expect(quote).toBe(prefixOut + (deltaOut * residualIn) / deltaIn);
-      const residualOut = quote - prefixOut;
-      expect(residualOut).toBeGreaterThan(0n);
-      // Strictly less than one whole offer's payout, and never more than the
-      // published bound. That bound is what N5's job matrix checks solver
-      // inventory against; when it is not there the job fails CLOSED with
-      // `job-error` (N5 owns that assertion — see plan phase N5).
-      expect(residualOut).toBeLessThan(deltaOut);
-      expect(residualOut).toBeLessThanOrEqual(residualBound);
-    }
-  });
-
-  test("a size below the first rung is refused rather than served from inventory", () => {
-    // Q-R2-3's recorded consequence: `-5A +5B` alone could serve 5 B, but rate
-    // ordering — not size — fixes rung positions, so small trades are refused
-    // until an inventory-backed leading rung exists (deferred optimization).
-    const levels = deriveLadder(CANONICAL_BOOK(), OPTIONS).levels[0]!.levels;
-    expect(interpolateQuote(levels, 5n)).toBeNull();
-  });
-});
-
-describe("ladder derivation — fail closed", () => {
-  const reasonsFor = (book: LadderSourceOffer[]): string[] =>
-    deriveLadder(book, OPTIONS).excluded.map((entry) => entry.reason);
-
-  test("unsupported offer shapes are excluded, never guessed at", () => {
-    const base = offer(hash("55"), A, 10n, B, 10n);
-    // Typed by the reason union, not `string`: a renamed or mistyped reason
-    // must fail the gate here rather than silently assert nothing.
-    const cases: Array<[LadderExclusionReason, LadderSourceOffer]> = [
-      ["multi-leg", { ...base, wants: [...base.wants, { token: C, amount: 1n, kind: "SHIELDED" }] }],
-      ["non-shielded-leg", { ...base, gives: [{ token: A, amount: 10n, kind: "UNSHIELDED" }] }],
-      ["non-shielded-leg", { ...base, wants: [{ token: B, amount: 10n, kind: "UNSHIELDED" }] }],
-      ["non-positive-amount", { ...base, gives: [{ token: A, amount: 0n, kind: "SHIELDED" }] }],
-      ["non-positive-amount", { ...base, wants: [{ token: B, amount: -1n, kind: "SHIELDED" }] }],
-      ["same-token", { ...base, wants: [{ token: A, amount: 10n, kind: "SHIELDED" }] }],
-      ["malformed-token", { ...base, gives: [{ token: "not-a-color", amount: 10n, kind: "SHIELDED" }] }],
-      ["malformed-hash", { ...base, offerHash: "short" }],
-      ["malformed-nullifier", { ...base, inputNullifiers: ["nope"] }],
-      ["no-expiry", { ...base, expiresAt: null }],
-      // Inside the settlement safety margin: it cannot be honoured at job time.
-      ["expiring", { ...base, expiresAt: NOW + MARGIN_SECONDS * 1000 }],
-    ];
-    for (const [reason, entry] of cases) {
-      const derived = deriveLadder([entry], OPTIONS);
-      expect(derived.excluded.map((item) => item.reason)).toEqual([reason]);
-      expect(derived.levels).toEqual([]);
-      expect(derived.tokenIds).toEqual([]);
-    }
-    // One tick outside the margin is publishable — the boundary is the rule,
-    // not a rounding accident.
-    expect(
-      deriveLadder([{ ...base, expiresAt: NOW + MARGIN_SECONDS * 1000 + 1 }], OPTIONS).levels,
-    ).toHaveLength(1);
-  });
-
-  test("offers claimed by an in-flight fill are excluded", () => {
-    const derived = deriveLadder(CANONICAL_BOOK(), {
-      ...OPTIONS,
-      unavailableOfferHashes: [O3.toUpperCase()],
-    });
-    expect(reasonsFor(CANONICAL_BOOK())).toEqual([]);
-    expect(derived.excluded).toEqual([{ offerHash: O3, reason: "unavailable" }]);
-    // Without the best-rate offer the ladder is the remaining frontier, still
-    // exact whole-offer sums.
-    expect(derived.levels[0]!.levels).toEqual([
-      { input: "10", output: "10" },
-      { input: "15", output: "15" },
-    ]);
-  });
-
-  test("a cache with nothing publishable yields the empty withdrawal, not a padded ladder", () => {
-    const derived = deriveLadder(
-      [{ ...offer(hash("66"), A, 10n, B, 10n), expiresAt: NOW }],
-      OPTIONS,
-    );
-    expect(derived.levels).toEqual([]);
-    expect(derived.tokenIds).toEqual([]);
-    const frame = withdrawalPriceLevelsFrame();
-    expect(frame).toEqual({ type: "price-levels", levels: [] });
-    expect(parsePriceLevels(frame)).toEqual(frame);
-    expect(deriveLadder([], OPTIONS)).toEqual({
-      levels: [],
-      tokenIds: [],
-      provenance: [],
-      excluded: [],
-    });
-  });
-});
-
-describe("ladder derivation — R-07 aggregate budget over shared coins", () => {
-  test("one coin backs at most one published rung, across all pairs", () => {
-    // Two conflicting views of the same coin, in DIFFERENT directed pairs.
-    // Published independently, each pair looks honourable; together they
-    // advertise liquidity that can never both settle.
-    const coin = nextNullifier();
-    const toA = offer(hash("77"), A, 10n, B, 10n, { inputNullifiers: [coin] });
-    const toC = offer(hash("88"), C, 12n, B, 10n, { inputNullifiers: [coin] });
-
-    const derived = deriveLadder([toA, toC], OPTIONS);
-    expect(derived.levels).toHaveLength(1);
-    // The retained claimant is the smaller content address; stable, and the
-    // conflict already means only one of them can ever settle.
-    expect(derived.levels[0]!.tokenOut).toBe(A);
-    expect(derived.excluded).toEqual([{ offerHash: hash("88"), reason: "shared-coin" }]);
-    expect(derived.tokenIds).toEqual([A, B]);
-
-    // Order-independent: the same coin wins either way.
-    expect(JSON.stringify(deriveLadder([toC, toA], OPTIONS))).toBe(JSON.stringify(derived));
-  });
-
-  test("depth on one pair counts a shared coin once, not twice", () => {
-    const coin = nextNullifier();
-    const derived = deriveLadder(
-      [
-        offer(hash("91"), A, 10n, B, 10n, { inputNullifiers: [coin] }),
-        offer(hash("92"), A, 9n, B, 10n, { inputNullifiers: [coin] }),
-        offer(hash("93"), A, 8n, B, 10n),
-      ],
-      OPTIONS,
-    );
-    // Not 30 B deep: the conflicting pair is one coin, so the ladder stops at
-    // the two independent offers.
-    expect(derived.levels[0]!.levels).toEqual([
-      { input: "10", output: "10" },
-      { input: "20", output: "18" },
-    ]);
-    expect(derived.excluded).toEqual([{ offerHash: hash("92"), reason: "shared-coin" }]);
-  });
-
-  test("distinct coins are never treated as a conflict", () => {
-    const derived = deriveLadder(
-      [offer(hash("94"), A, 10n, B, 10n), offer(hash("95"), C, 12n, B, 10n)],
-      OPTIONS,
-    );
-    expect(derived.levels).toHaveLength(2);
-    expect(derived.excluded).toEqual([]);
-    expect(derived.tokenIds).toEqual([A, B, C]);
-  });
-});
-
-describe("ladder derivation — bounds", () => {
-  test("a pair deeper than the rung cap publishes its best-rate prefix", () => {
-    const book = Array.from({ length: 5 }, (_, index) =>
-      offer(hash((0xb0 + index).toString(16)), A, BigInt(50 - index), B, 10n),
-    );
-    const derived = deriveLadder(book, { ...OPTIONS, maxRungsPerPair: 3 });
-    expect(derived.levels[0]!.levels).toEqual([
-      { input: "10", output: "50" },
-      { input: "20", output: "99" },
-      { input: "30", output: "147" },
-    ]);
-    expect(rejectLevels(derived.levels[0]!.levels)).toBeNull();
-    expect(derived.excluded).toEqual([
-      { offerHash: hash("b3"), reason: "rung-cap" },
-      { offerHash: hash("b4"), reason: "rung-cap" },
-    ]);
-  });
-
-  test("pairs past the cap are dropped whole, with their offers accounted for", () => {
-    const derived = deriveLadder(
-      [
-        offer(hash("c1"), B, 4n, A, 2n),
-        offer(hash("c2"), C, 4n, B, 2n),
-        offer(hash("c3"), A, 4n, C, 2n),
-      ],
-      { ...OPTIONS, maxPairs: 2 },
-    );
-    expect(derived.levels.map((pair) => [pair.tokenIn, pair.tokenOut])).toEqual([
-      [A, B],
-      [B, C],
-    ]);
-    expect(derived.excluded).toEqual([{ offerHash: hash("c3"), reason: "pair-cap" }]);
-    // C survives in capabilities only because the SURVIVING B→C pair still
-    // pays it out — not because its own dropped pair was published.
-    expect(derived.tokenIds).toEqual([A, B, C]);
-  });
-
-  test("a cumulative total past the wire's u256 ceiling skips that offer, keeping the rest", () => {
-    const huge = (1n << 255n) + 7n;
-    const derived = deriveLadder(
-      [
-        offer(hash("d1"), A, huge, B, huge),
-        offer(hash("d2"), A, huge, B, huge),
-        offer(hash("d3"), A, 5n, B, 10n),
-      ],
-      OPTIONS,
-    );
-    // d1 and d2 are the same rate, so the tie rule takes d1 first; d2's
-    // cumulative total would not fit in the wire's u256 amount, so it is
-    // skipped — and derivation CONTINUES, because the offers are already in
-    // descending-rate order, so any subset of them is still concave and still
-    // a set of exact whole-offer sums.
-    expect(derived.levels[0]!.levels).toEqual([
-      { input: huge.toString(), output: huge.toString() },
-      { input: (huge + 10n).toString(), output: (huge + 5n).toString() },
-    ]);
-    expect(derived.excluded).toEqual([{ offerHash: hash("d2"), reason: "rung-cap" }]);
-    expect(rejectLevels(derived.levels[0]!.levels)).toBeNull();
-  });
-});
-
-describe("ladder derivation — the invariants hold over a generated corpus", () => {
-  /** Seeded mulberry32: a deterministic corpus, so a failure is reproducible
-   *  from the seed alone rather than being a flake nobody can re-run. (A plain
-   *  LCG was tried first and its low-order bits are periodic — `% 4` never
-   *  fired, and the shared-coin case silently went untested. Measured, then
-   *  replaced.) */
-  const mulberry32 = (seed: number) => {
-    let state = seed >>> 0;
-    return (bound: number): number => {
-      state = (state + 0x6d2b79f5) >>> 0;
-      let mixed = state;
-      mixed = Math.imul(mixed ^ (mixed >>> 15), mixed | 1);
-      mixed ^= mixed + Math.imul(mixed ^ (mixed >>> 7), mixed | 61);
-      return ((mixed ^ (mixed >>> 14)) >>> 0) % bound;
-    };
-  };
-
-  test("240 generated books: every emitted frame is admissible, honourable and order-independent", () => {
-    const next = mulberry32(20260820);
-    const tokens = [A, B, C];
-
-    for (let iteration = 0; iteration < 240; iteration += 1) {
-      const book: LadderSourceOffer[] = [];
-      const coins: string[] = [];
-      const count = 1 + next(12);
-      for (let index = 0; index < count; index += 1) {
-        // Most offers land on one hot pair, so ladders get deep enough for the
-        // ordering and concavity invariants to have something to say; the rest
-        // scatter, including the degenerate same-token shape.
-        const hot = next(10) < 7;
-        const outToken = hot ? A : tokens[next(3)]!;
-        const inToken = hot
-          ? B
-          : next(4) === 0
-            ? outToken
-            : tokens[(tokens.indexOf(outToken) + 1 + next(2)) % 3]!;
-        // Reuse an earlier coin sometimes, so the aggregate-budget rule is
-        // exercised rather than assumed absent.
-        const coin =
-          coins.length > 0 && next(4) === 0 ? coins[next(coins.length)]! : nextNullifier();
-        coins.push(coin);
-        const entry = offer(
-          `${iteration.toString(16).padStart(4, "0")}${index.toString(16).padStart(2, "0")}`.padEnd(64, "0"),
-          outToken,
-          BigInt(1 + next(1_000)),
-          inToken,
-          BigInt(1 + next(1_000)),
-          { inputNullifiers: [coin] },
-        );
-        // Sprinkle in the shapes derivation must refuse.
-        if (next(11) === 0) entry.gives = [{ token: outToken, amount: 5n, kind: "UNSHIELDED" }];
-        if (next(13) === 0) entry.expiresAt = NOW;
-        if (next(17) === 0) {
-          entry.gives = [
-            { token: outToken, amount: 5n, kind: "SHIELDED" },
-            { token: inToken, amount: 5n, kind: "SHIELDED" },
-          ];
-        }
-        book.push(entry);
-      }
-
-      const derived = deriveLadder(book, OPTIONS);
-      const byHash = new Map(book.map((entry) => [entry.offerHash, entry]));
-
-      // 1. Every emitted pair is admissible to the relay AND to the strict
-      //    schema, so no derivable book can produce a frame that the relay
-      //    would silently discard (which would freeze the previous ladder).
-      const frame = buildPriceLevelsFrame(derived.levels);
-      expect(parsePriceLevels(frame)).toEqual(frame);
-      for (const pair of derived.levels) expect(rejectLevels(pair.levels)).toBeNull();
-
-      // 2. Every rung is an exact whole-offer sum of a prefix of that pair's
-      //    consumption order, and the order is best-marginal-rate-first.
-      const publishedCoins = new Set<string>();
-      for (const pair of derived.provenance) {
-        let cumulativeIn = 0n;
-        let cumulativeOut = 0n;
-        let previousOut = 0n;
-        let previousIn = 0n;
-        for (const rung of pair.rungs) {
-          const source = byHash.get(rung.offerHash)!;
-          cumulativeIn += source.wants[0]!.amount;
-          cumulativeOut += source.gives[0]!.amount;
-          expect(rung.input).toBe(cumulativeIn.toString());
-          expect(rung.output).toBe(cumulativeOut.toString());
-          if (previousIn > 0n) {
-            // Rate non-increasing, by cross-multiplication.
-            expect(source.gives[0]!.amount * previousIn).toBeLessThanOrEqual(
-              previousOut * source.wants[0]!.amount,
-            );
-          }
-          previousIn = source.wants[0]!.amount;
-          previousOut = source.gives[0]!.amount;
-          // 3. R-07: one coin backs at most one published rung, across pairs.
-          for (const coin of source.inputNullifiers) {
-            expect(publishedCoins.has(coin)).toBe(false);
-            publishedCoins.add(coin);
-          }
-        }
-      }
-
-      // 4. Capabilities are exactly the union of published pairs' tokens.
-      expect(derived.tokenIds).toEqual(
-        [...new Set(derived.levels.flatMap((pair) => [pair.tokenIn, pair.tokenOut]))].sort(),
-      );
-
-      // 5. Order-independence: reversing the cache changes nothing.
-      expect(JSON.stringify(deriveLadder([...book].reverse(), OPTIONS))).toBe(
-        JSON.stringify(derived),
-      );
-    }
-  });
-});
-
-describe("ladder frames — malformed output is unrepresentable", () => {
-  const okPair = { tokenIn: B, tokenOut: A, levels: [{ input: "10", output: "20" }] };
-
-  test("the builder refuses every frame the relay would discard or the schema rejects", () => {
-    expect(() => buildPriceLevelsFrame([{ ...okPair, levels: [] }])).toThrow(/empty/);
-    expect(() =>
-      buildPriceLevelsFrame([
-        { ...okPair, levels: [{ input: "10", output: "20" }, { input: "10", output: "30" }] },
-      ]),
-    ).toThrow(/input-not-ascending/);
-    expect(() =>
-      buildPriceLevelsFrame([
-        { ...okPair, levels: [{ input: "10", output: "20" }, { input: "20", output: "20" }] },
-      ]),
-    ).toThrow(/output-not-ascending/);
-    // Convex: the relay's interpolation would promise more than the book holds.
-    expect(() =>
-      buildPriceLevelsFrame([
-        {
-          ...okPair,
-          levels: [
-            { input: "10", output: "10" },
-            { input: "20", output: "21" },
-            { input: "30", output: "33" },
-          ],
-        },
-      ]),
-    ).toThrow(/not-concave/);
-    expect(() => buildPriceLevelsFrame([{ ...okPair, tokenIn: A }])).toThrow(/bad-tokens/);
-    expect(() => buildPriceLevelsFrame([{ ...okPair, tokenOut: "zz" }])).toThrow(/bad-tokens/);
-    expect(() =>
-      buildPriceLevelsFrame([{ ...okPair, levels: [{ input: "1.5", output: "20" }] }]),
-    ).toThrow(/malformed-rung/);
-    expect(() =>
-      buildPriceLevelsFrame([{ ...okPair, levels: [{ input: "0", output: "20" }] }]),
-    ).toThrow(/non-positive/);
-  });
-
-  test("a built frame always round-trips through the relay's parser", () => {
-    const frame = buildPriceLevelsFrame([okPair]);
-    expect(parsePriceLevels(frame)).toEqual(frame);
-    // The builder copies rather than aliases, so a later caller mutation
-    // cannot retroactively invalidate a frame that was already validated.
-    okPair.levels[0]!.input = "0";
-    expect(frame.levels[0]!.levels[0]!.input).toBe("10");
-  });
-
-  test("capabilities refuse anything but the relay's 64-hex token grammar", () => {
-    expect(() => buildSolverCapabilitiesFrame(["nope"])).toThrow(/not a token id/);
-    expect(() => buildSolverCapabilitiesFrame([`${A}00`])).toThrow(/not a token id/);
-    // The relay applies `maxParallelSwaps` only when it is a positive integer,
-    // and registers the tokens regardless; the builder mirrors that rather
-    // than inventing a stricter rule.
-    expect(buildSolverCapabilitiesFrame([A], 0)).toEqual({
-      type: "solver-capabilities",
-      tokenIds: [A],
-    });
-    expect(buildSolverCapabilitiesFrame([A.toUpperCase()], 4)).toEqual({
-      type: "solver-capabilities",
-      tokenIds: [A],
-      maxParallelSwaps: 4,
-    });
-    expect(buildSolverCapabilitiesFrame([])).toEqual({
-      type: "solver-capabilities",
-      tokenIds: [],
-    });
-  });
-});
-
-// ── FR-003: only executable liquidity is published ──────────────────────────
-//
-// Finding P4-F03. Before this, derivation had no inventory input at all: it
-// published every interior rung regardless of whether the solver could pay the
-// residual tokenOut those rungs promise. That was discovered only AFTER a
-// taker's job had been routed, and the relay kept quoting the same unexecutable
-// rung afterwards.
-//
-// P4-F04 added a SECOND budget here — spendable tokenIn, for the fee-sizing
-// mirror a routed job forced the executor to build. 00006-R1 made fee sizing
-// capital-free and 00006-R2 removed that budget (spec 00006 FR-003); its tests
-// are re-encoded below as the controls for the behaviour that replaced it.
-
-/**
- * Strictly descending marginal rates 2 → 1 → 0.5, so the ladder is concave and
- * each offer's own worst-case interval residual is distinct:
- *
- *   O1  gives 20 A wants 10 B — rate 2,   cumulative (10, 20), worst 18
- *   O2  gives 10 A wants 10 B — rate 1,   cumulative (20, 30), worst 9
- *   O3  gives 20 A wants 40 B — rate 0.5, cumulative (60, 50), worst 19
- *
- * The pair is B→A: tokenIn = B, tokenOut = A (what a residual pays out). O1's 18
- * is never required — the first rung opens no interpolation interval.
- *
- * Every budget matrix below is driven with tokenIn EXHAUSTED (`[B, 0n]`) or
- * absent, which is 00006's operating mode: derivation reads only tokenOut, so a
- * solver with an empty token wallet still publishes every whole-maker rung.
- * 00005-R2 also read tokenIn here (`mirror-budget`); 00006-R2 removed that bound
- * (FR-003) and the block "NO tokenIn budget" below pins its absence.
- */
-const BUDGET_BOOK = (): LadderSourceOffer[] => [
-  offer(O1, A, 20n, B, 10n),
-  offer(O2, A, 10n, B, 10n),
-  offer(O3, A, 20n, B, 40n),
-];
-
-const publishedRungs = (
-  book: LadderSourceOffer[],
-  extra: Record<string, unknown> = {},
-): Array<[string, string]> => {
-  const derived = deriveLadder(book, { ...OPTIONS, ...extra });
-  return (derived.levels[0]?.levels ?? []).map((rung) => [rung.input, rung.output]);
+const compareHashes = (left: readonly string[], right: readonly string[]): number => {
+  for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
+    if (left[index]! < right[index]!) return -1;
+    if (left[index]! > right[index]!) return 1;
+  }
+  return left.length - right.length;
 };
 
-const exclusionsBy = (
-  book: LadderSourceOffer[],
-  extra: Record<string, unknown> = {},
-): Array<[string, string]> =>
-  deriveLadder(book, { ...OPTIONS, ...extra }).excluded.map(
-    (entry) => [entry.offerHash, entry.reason],
-  );
+/** Independent test oracle: bit-mask iteration, with no production recursion or frontier map. */
+const oracleBest = (
+  offers: readonly OracleOffer[],
+  budget: bigint,
+  maxMakers = 8,
+): OracleResult | null => {
+  if (offers.length > 20) throw new Error("oracle fixture too large");
+  let best: OracleResult | null = null;
+  const subsetCount = 2 ** offers.length;
+  for (let mask = 1; mask < subsetCount; mask += 1) {
+    const selected: OracleOffer[] = [];
+    for (let index = 0; index < offers.length; index += 1) {
+      if ((mask & 2 ** index) !== 0) selected.push(offers[index]!);
+    }
+    if (selected.length > maxMakers) continue;
+    const input = selected.reduce((sum, entry) => sum + entry.input, 0n);
+    const output = selected.reduce((sum, entry) => sum + entry.output, 0n);
+    if (input > budget || input > MAX_SETTLEMENT_AMOUNT || output > MAX_SETTLEMENT_AMOUNT) continue;
+    const hashes = selected.map((entry) => entry.hash).sort();
+    const candidate = { input, output, hashes };
+    if (
+      best === null ||
+      candidate.output > best.output ||
+      (candidate.output === best.output && candidate.input < best.input) ||
+      (candidate.output === best.output && candidate.input === best.input &&
+        candidate.hashes.length < best.hashes.length) ||
+      (candidate.output === best.output && candidate.input === best.input &&
+        candidate.hashes.length === best.hashes.length &&
+        compareHashes(candidate.hashes, best.hashes) < 0)
+    ) {
+      best = candidate;
+    }
+  }
+  return best;
+};
 
-const inventory = (entries: Array<[string, bigint]>): ReadonlyMap<string, bigint> =>
-  new Map(entries);
+const asOracleOffers = (book: readonly LadderSourceOffer[]): OracleOffer[] =>
+  book.map((entry) => ({
+    hash: entry.offerHash.toLowerCase(),
+    input: entry.wants[0]!.amount,
+    output: entry.gives[0]!.amount,
+  }));
 
-describe("ladder derivation — the residual tokenOut budget (FR-003)", () => {
-  test("the worst-case interval residual IS the relay's own arithmetic, not an estimate", () => {
-    const rungs = deriveLadder(BUDGET_BOOK(), OPTIONS).levels[0]!.levels;
-    const offers = [
-      { amountIn: 10n, amountOut: 20n },
-      { amountIn: 10n, amountOut: 10n },
-      { amountIn: 40n, amountOut: 20n },
+const selectedCombination = (
+  combinations: readonly LadderCombinationProvenance[],
+  input: bigint,
+): LadderCombinationProvenance | null => {
+  let selected: LadderCombinationProvenance | null = null;
+  for (const combination of combinations) {
+    if (BigInt(combination.input) > input) break;
+    selected = combination;
+  }
+  return selected;
+};
+
+const levelPair = (derived: DerivedLadder, tokenIn: string, tokenOut: string) =>
+  derived.levels.find((pair) => pair.tokenIn === tokenIn && pair.tokenOut === tokenOut);
+
+const pairProvenance = (derived: DerivedLadder, tokenIn: string, tokenOut: string) =>
+  derived.provenance.find((pair) => pair.tokenIn === tokenIn && pair.tokenOut === tokenOut);
+
+const assertExactOverPublishedRange = (
+  book: readonly LadderSourceOffer[],
+  derived: DerivedLadder,
+  maxMakers = 8,
+): void => {
+  expect(derived.levels).toHaveLength(1);
+  expect(derived.provenance).toHaveLength(1);
+  const pair = derived.levels[0]!;
+  const provenance = derived.provenance[0]!;
+  const first = BigInt(pair.levels[0]!.input);
+  const last = BigInt(pair.levels[pair.levels.length - 1]!.input);
+  const oracleOffers = asOracleOffers(book);
+  for (let input = first; input <= last; input += 1n) {
+    const expected = oracleBest(oracleOffers, input, maxMakers);
+    expect(expected).not.toBeNull();
+    expect(relayQuote(pair.levels, input)).toBe(expected!.output);
+    expect(schemaQuote(pair.levels, input)).toBe(expected!.output);
+    const witness = selectedCombination(provenance.combinations, input);
+    expect(witness).not.toBeNull();
+    expect(BigInt(witness!.input)).toBe(expected!.input);
+    expect(BigInt(witness!.output)).toBe(expected!.output);
+    expect(witness!.offerHashes).toEqual(expected!.hashes);
+  }
+  expect(relayQuote(pair.levels, first - 1n)).toBeNull();
+  expect(relayQuote(pair.levels, last + 1n)).toBeNull();
+};
+
+describe("whole-offer examples and provenance", () => {
+  test("reproduces the 14-point hard case and exact witness changes", () => {
+    const unit = 1_000_000n;
+    const book = [
+      offer(1, 10n * unit, 20n * unit),
+      offer(2, unit, unit),
+      offer(3, 150n * unit, 100n * unit),
     ];
-
-    for (let index = 1; index < rungs.length; index += 1) {
-      const low = rungs[index - 1]!;
-      const high = rungs[index]!;
-      // Scan every size the relay will quote while the maker prefix is still
-      // `low`. `high.input` itself is EXCLUDED on purpose: at that size the
-      // prefix becomes `high`, so the residual there is zero, not the whole
-      // offer's payout. That off-by-one is exactly why the closed form carries
-      // `amountIn - 1`.
-      let worst = 0n;
-      for (let size = BigInt(low.input); size < BigInt(high.input); size += 1n) {
-        const quoted = interpolateQuote(rungs, size)!;
-        const residual = quoted - BigInt(low.output);
-        if (residual > worst) worst = residual;
-      }
-      expect(worst, `${low.input}..${high.input}`)
-        .toBe(worstCaseIntervalResidual(offers[index]!));
+    const derived = deriveLadder(book, OPTIONS);
+    expect(derived.levels[0]!.levels).toEqual([
+      { input: "1000000", output: "1000000" },
+      { input: "9999999", output: "1000000" },
+      { input: "10000000", output: "20000000" },
+      { input: "10999999", output: "20000000" },
+      { input: "11000000", output: "21000000" },
+      { input: "149999999", output: "21000000" },
+      { input: "150000000", output: "100000000" },
+      { input: "150999999", output: "100000000" },
+      { input: "151000000", output: "101000000" },
+      { input: "159999999", output: "101000000" },
+      { input: "160000000", output: "120000000" },
+      { input: "160999999", output: "120000000" },
+      { input: "161000000", output: "121000000" },
+      { input: "1610000000", output: "121000000" },
+    ]);
+    const provenance = derived.provenance[0]!;
+    expect(provenance.terminalInput).toBe("1610000000");
+    expect(provenance.nominalTerminalInput).toBe("1610000000");
+    expect(provenance.capReasons).toEqual([]);
+    expect(selectedCombination(provenance.combinations, 160n * unit)!.offerHashes).toEqual([
+      hash(1),
+      hash(3),
+    ]);
+    const samples = [
+      [unit, unit],
+      [9_900_000n, unit],
+      [10n * unit, 20n * unit],
+      [11n * unit, 21n * unit],
+      [149_990_000n, 21n * unit],
+      [150n * unit, 100n * unit],
+      [151n * unit, 101n * unit],
+      [159_990_000n, 101n * unit],
+      [160n * unit, 120n * unit],
+      [161n * unit, 121n * unit],
+      [1_610n * unit, 121n * unit],
+    ] as const;
+    for (const [amountIn, expectedOutput] of samples) {
+      expect(relayQuote(derived.levels[0]!.levels, amountIn)).toBe(expectedOutput);
     }
-    // The two numbers the truncation matrix below is built on.
-    expect(worstCaseIntervalResidual(offers[1]!)).toBe(9n);
-    expect(worstCaseIntervalResidual(offers[2]!)).toBe(19n);
-    // An offer that admits no interior size needs no inventory at all.
-    expect(worstCaseIntervalResidual({ amountIn: 1n, amountOut: 1_000n })).toBe(0n);
+    expect(relayQuote(derived.levels[0]!.levels, 1_610n * unit + 1n)).toBeNull();
   });
 
-  test("a rung whose interval the solver cannot pay for is withheld, and truncates the ladder", () => {
-    // tokenIn EXHAUSTED throughout (00006-R2): the F03 matrix below is exactly
-    // the one 00005-R2 pinned, now proven from a wallet holding no tokenIn at
-    // all. Only the tokenOut column moves the verdict.
-    const noTokenIn = inventory([[B, 0n]]);
-    // Zero tokenOut: the FIRST rung still publishes. It opens no interpolation
-    // interval (below it the relay quotes nothing, at it the quote is exactly
-    // its own output), so FR-001's retained-surplus path stays advertised by a
-    // solver holding no tokenOut whatsoever.
-    expect(publishedRungs(BUDGET_BOOK(), {
-      spendableInventory: inventory([...noTokenIn, [A, 0n]]),
-    })).toEqual([["10", "20"]]);
-    // 8 < 9: same verdict at the boundary below.
-    expect(publishedRungs(BUDGET_BOOK(), {
-      spendableInventory: inventory([...noTokenIn, [A, 8n]]),
-    })).toEqual([["10", "20"]]);
-    // 9 affords O2's interval but not O3's 19.
-    expect(publishedRungs(BUDGET_BOOK(), {
-      spendableInventory: inventory([...noTokenIn, [A, 9n]]),
-    })).toEqual([["10", "20"], ["20", "30"]]);
-    expect(publishedRungs(BUDGET_BOOK(), {
-      spendableInventory: inventory([...noTokenIn, [A, 18n]]),
-    })).toEqual([["10", "20"], ["20", "30"]]);
-    // 19 affords the whole book — identical to the unbounded ladder.
-    expect(publishedRungs(BUDGET_BOOK(), {
-      spendableInventory: inventory([...noTokenIn, [A, 19n]]),
-    })).toEqual(publishedRungs(BUDGET_BOOK()));
+  test("maps maker gives/wants to the eight-point B-to-A staircase", () => {
+    const book = [
+      offer(11, 20n, 100n, B, A),
+      offer(12, 10n, 40n, B, A),
+      offer(13, 30n, 10n, B, A),
+    ];
+    const derived = deriveLadder(book, OPTIONS);
+    expect(derived.levels).toEqual([{
+      tokenIn: B,
+      tokenOut: A,
+      levels: [
+        { input: "10", output: "40" },
+        { input: "19", output: "40" },
+        { input: "20", output: "100" },
+        { input: "29", output: "100" },
+        { input: "30", output: "140" },
+        { input: "59", output: "140" },
+        { input: "60", output: "150" },
+        { input: "600", output: "150" },
+      ],
+    }]);
+    const provenance = derived.provenance[0]!;
+    expect(selectedCombination(provenance.combinations, 30n)!.offerHashes).toEqual([
+      hash(11),
+      hash(12),
+    ]);
+    expect(selectedCombination(provenance.combinations, 40n)!.offerHashes).toEqual([
+      hash(11),
+      hash(12),
+    ]);
+    expect(selectedCombination(provenance.combinations, 60n)!.offerHashes).toEqual([
+      hash(11),
+      hash(12),
+      hash(13),
+    ]);
+    for (const [input, output] of [[10n, 40n], [30n, 140n], [40n, 140n], [50n, 140n],
+      [60n, 150n], [160n, 150n], [600n, 150n]] as const) {
+      expect(relayQuote(derived.levels[0]!.levels, input)).toBe(output);
+    }
+    expect(derived.levels.some((pair) => pair.tokenIn === A && pair.tokenOut === B)).toBe(false);
+    expect(relayQuote(derived.levels[0]!.levels, 601n)).toBeNull();
   });
 
-  test("truncation is total: no rung above a withheld one is published either", () => {
-    // A rung's cumulative totals assume every earlier offer is consumed, so the
-    // ladder can be cut but never punctured. Both later offers are reported.
-    expect(exclusionsBy(BUDGET_BOOK(), {
-      spendableInventory: inventory([[A, 0n], [B, 0n]]),
-    })).toEqual([[O2, "residual-budget"], [O3, "residual-budget"]]);
-    expect(exclusionsBy(BUDGET_BOOK(), {
-      spendableInventory: inventory([[A, 9n], [B, 0n]]),
-    })).toEqual([[O3, "residual-budget"]]);
-    expect(exclusionsBy(BUDGET_BOOK(), {
-      spendableInventory: inventory([[A, 19n], [B, 0n]]),
-    })).toEqual([]);
+  test("single offers get one genuine threshold and exactly one 10x tail point", () => {
+    const derived = deriveLadder([offer(20, 3_000n, 5_000n)], OPTIONS);
+    expect(derived.levels[0]!.levels).toEqual([
+      { input: "3000", output: "5000" },
+      { input: "30000", output: "5000" },
+    ]);
+    expect(derived.provenance[0]!.combinations).toEqual([
+      {
+        input: "3000",
+        output: "5000",
+        offerHashes: [hash(20)],
+        tokenBalances: directTokenBalances(A, 3_000n, B, 5_000n),
+      },
+    ]);
   });
 
-  test("provenance and residualBound shrink with the ladder, so the executor's depth check follows", () => {
-    const { provenance } = deriveLadder(BUDGET_BOOK(), {
-      ...OPTIONS,
-      spendableInventory: inventory([[A, 9n], [B, 0n]]),
+  test("adjacent thresholds need no duplicate plateau endpoint", () => {
+    const derived = deriveLadder([offer(21, 1n, 1n), offer(22, 1n, 2n)], OPTIONS);
+    expect(derived.levels[0]!.levels).toEqual([
+      { input: "1", output: "2" },
+      { input: "2", output: "3" },
+      { input: "20", output: "3" },
+    ]);
+    expect(new Set(derived.levels[0]!.levels.map((entry) => entry.input)).size).toBe(3);
+  });
+});
+
+describe("cross-token exact composition", () => {
+  test("publishes the three required directions from one physical M1/M2/M3 book", () => {
+    const book = [
+      offer(501, 5n, 10n, B, A),
+      offer(502, 3n, 10n, B, A),
+      offer(503, 5n, 6n, D, B),
+    ];
+    const derived = deriveLadder(book, OPTIONS);
+    expect(derived.levels).toHaveLength(3);
+    expect(levelPair(derived, B, A)!.levels).toEqual([
+      { input: "3", output: "10" },
+      { input: "7", output: "10" },
+      { input: "8", output: "20" },
+      { input: "80", output: "20" },
+    ]);
+    expect(levelPair(derived, D, B)!.levels).toEqual([
+      { input: "5", output: "6" },
+      { input: "50", output: "6" },
+    ]);
+    expect(levelPair(derived, D, A)!.levels).toEqual([
+      { input: "5", output: "10" },
+      { input: "50", output: "10" },
+    ]);
+    const composed = pairProvenance(derived, D, A)!.combinations[0]!;
+    expect(composed.offerHashes).toEqual([hash(501), hash(503)]);
+    expect(composed.tokenBalances).toEqual([
+      { token: A, gives: "10", wants: "0", net: "10" },
+      { token: B, gives: "6", wants: "5", net: "1" },
+      { token: D, gives: "0", wants: "5", net: "-5" },
+    ]);
+    expect(relayQuote(levelPair(derived, D, A)!.levels, 5n)).toBe(10n);
+    expect(relayQuote(levelPair(derived, D, A)!.levels, 5n)).not.toBe(20n);
+  });
+
+  test("combines split funding and a direct leg without pruning deficit partial sets", () => {
+    const derived = deriveLadder([
+      offer(511, 2n, 4n, D, B),
+      offer(512, 3n, 2n, D, B),
+      offer(513, 6n, 10n, B, A),
+      offer(514, 2n, 4n, D, A),
+    ], OPTIONS);
+    const pair = levelPair(derived, D, A)!;
+    expect(relayQuote(pair.levels, 5n)).toBe(10n);
+    expect(relayQuote(pair.levels, 7n)).toBe(14n);
+    const witness = selectedCombination(pairProvenance(derived, D, A)!.combinations, 7n)!;
+    expect(witness.offerHashes).toEqual([hash(511), hash(512), hash(513), hash(514)]);
+    expect(witness.tokenBalances.find((row) => row.token === B)).toEqual({
+      token: B,
+      gives: "6",
+      wants: "6",
+      net: "0",
     });
-    expect(provenance[0]!.rungs.map((rung) => rung.offerHash)).toEqual([O1, O2]);
-    // 20 (O1's gives), not 20-then-O3's: a withheld rung cannot widen the bound
-    // the executor re-checks a resolved route against.
-    expect(provenance[0]!.residualBound).toBe("20");
+  });
+
+  test("maximizes taker output before surplus and preserves the hash tie", () => {
+    const better = deriveLadder([
+      offer(521, 3n, 10n, B, A),
+      offer(522, 5n, 6n, D, B),
+      offer(523, 6n, 11n, B, A),
+    ], OPTIONS);
+    expect(relayQuote(levelPair(better, D, A)!.levels, 5n)).toBe(11n);
+    expect(pairProvenance(better, D, A)!.combinations[0]!.offerHashes)
+      .toEqual([hash(522), hash(523)]);
+
+    const tie = deriveLadder([
+      offer(531, 5n, 10n, B, A),
+      offer(532, 3n, 10n, B, A),
+      offer(533, 5n, 6n, D, B),
+    ], OPTIONS);
+    expect(pairProvenance(tie, D, A)!.combinations[0]!.offerHashes)
+      .toEqual([hash(531), hash(533)]);
+    expect(pairProvenance(tie, D, A)!.combinations[0]!.tokenBalances)
+      .toContainEqual({ token: B, gives: "6", wants: "5", net: "1" });
+  });
+
+  test("uses net endpoint balances for a two-token counterflow cycle", () => {
+    const derived = deriveLadder([
+      offer(541, 5n, 10n, B, A),
+      offer(542, 1n, 3n, A, B),
+    ], OPTIONS);
+    expect(levelPair(derived, B, A)!.levels).toEqual([
+      { input: "2", output: "9" },
+      { input: "4", output: "9" },
+      { input: "5", output: "10" },
+      { input: "50", output: "10" },
+    ]);
+    expect(pairProvenance(derived, B, A)!.combinations[0]).toEqual({
+      input: "2",
+      output: "9",
+      offerHashes: [hash(541), hash(542)],
+      tokenBalances: [
+        { token: A, gives: "10", wants: "1", net: "9" },
+        { token: B, gives: "3", wants: "5", net: "-2" },
+      ],
+    });
+  });
+
+  test("retains a disconnected nonnegative cycle in the candidate universe", () => {
+    const derived = deriveLadder([
+      offer(551, 5n, 10n, D, A),
+      offer(552, 5n, 6n, C, B),
+      offer(553, 3n, 5n, B, C),
+    ], OPTIONS);
+    expect(relayQuote(levelPair(derived, D, B)!.levels, 5n)).toBe(3n);
+    const witness = pairProvenance(derived, D, B)!.combinations[0]!;
+    expect(witness.offerHashes).toEqual([hash(551), hash(552), hash(553)]);
+    expect(witness.tokenBalances).toEqual([
+      { token: A, gives: "10", wants: "0", net: "10" },
+      { token: B, gives: "6", wants: "3", net: "3" },
+      { token: C, gives: "5", wants: "5", net: "0" },
+      { token: D, gives: "0", wants: "5", net: "-5" },
+    ]);
+  });
+
+  test("finds an extreme safe order without exposing it as provenance order", () => {
+    const derived = deriveLadder([
+      offer(561, 1n, MAX_SETTLEMENT_AMOUNT, B, A),
+      offer(562, 1n, 1n, B, A),
+      offer(563, MAX_SETTLEMENT_AMOUNT, 2n, A, B),
+      offer(564, 1n, 1n, D, C),
+    ], OPTIONS);
+    const witness = pairProvenance(derived, D, A)!.combinations[0]!;
+    expect(witness.input).toBe("1");
+    expect(witness.output).toBe("1");
+    expect(witness.offerHashes).toEqual([hash(561), hash(562), hash(563), hash(564)]);
+    expect(derived.diagnostics.safeMergeOrderWork).toBeGreaterThan(0);
+    expect(derived.diagnostics.discoveryWork).toBeGreaterThanOrEqual(
+      derived.diagnostics.safeMergeOrderWork,
+    );
+  });
+
+  test("bounds streamed pair discovery and all auxiliary work", () => {
+    const candidateCapped = deriveLadder([
+      offer(571, 1n, 1n, A, B),
+      offer(572, 1n, 1n, C, D),
+    ], { ...OPTIONS, resourceLimits: { maxCandidatePairs: 1 } });
+    expect(candidateCapped.levels).toHaveLength(1);
+    expect(candidateCapped.diagnostics.stopReason).toBe("candidate-pair-cap");
+    expect(candidateCapped.diagnostics.candidatePairsExamined).toBe(1);
+
+    const discoveryCapped = deriveLadder([
+      offer(573, 1n, 1n, A, B),
+    ], { ...OPTIONS, resourceLimits: { maxDiscoveryWork: 16 } });
+    expect(discoveryCapped.levels).toEqual([]);
+    expect(discoveryCapped.diagnostics.stopReason).toBe("discovery-work-cap");
+    expect(discoveryCapped.diagnostics.discoveryWork).toBe(16);
+    expect(discoveryCapped.diagnostics.candidatePairsExamined).toBe(0);
+  });
+
+  test("supports three-hop chains and endpoint-only allowlists", () => {
+    const book = [
+      offer(581, 3n, 10n, B, A),
+      offer(582, 5n, 6n, D, B),
+      offer(583, 7n, 5n, E, D),
+    ];
+    const derived = deriveLadder(book, {
+      ...OPTIONS,
+      supportedPairs: new Set([admissionPairKey(E, A)]),
+    });
+    expect(derived.levels).toEqual([{
+      tokenIn: E,
+      tokenOut: A,
+      levels: [
+        { input: "7", output: "10" },
+        { input: "70", output: "10" },
+      ],
+    }]);
+    expect(pairProvenance(derived, E, A)!.combinations[0]!.tokenBalances).toEqual([
+      { token: A, gives: "10", wants: "0", net: "10" },
+      { token: B, gives: "6", wants: "3", net: "3" },
+      { token: D, gives: "5", wants: "5", net: "0" },
+      { token: E, gives: "0", wants: "7", net: "-7" },
+    ]);
+  });
+
+  test("rejects a one-unit intermediate deficit and accepts the balanced control", () => {
+    const deficit = deriveLadder([
+      offer(585, 6n, 10n, B, A),
+      offer(586, 5n, 5n, D, B),
+    ], OPTIONS);
+    expect(levelPair(deficit, D, A)).toBeUndefined();
+
+    const balanced = deriveLadder([
+      offer(587, 6n, 10n, B, A),
+      offer(588, 5n, 6n, D, B),
+    ], OPTIONS);
+    expect(relayQuote(levelPair(balanced, D, A)!.levels, 5n)).toBe(10n);
+    expect(pairProvenance(balanced, D, A)!.combinations[0]!.tokenBalances)
+      .toContainEqual({ token: B, gives: "6", wants: "6", net: "0" });
+  });
+
+  test("is insertion-order invariant for composed books", () => {
+    const book = [
+      offer(591, 3n, 10n, B, A),
+      offer(592, 5n, 6n, D, B),
+      offer(593, 7n, 5n, E, D),
+      offer(594, 2n, 4n, D, A),
+    ];
+    expect(JSON.stringify(deriveLadder([...book].reverse(), OPTIONS)))
+      .toBe(JSON.stringify(deriveLadder(book, OPTIONS)));
+  });
+
+  test("supports eight physical files and refuses a route requiring nine", () => {
+    const chainTokens = Array.from({ length: 10 }, (_, index) => token(100 + index));
+    const book = Array.from({ length: 9 }, (_, index) =>
+      offer(600 + index, 1n, 1n, chainTokens[index]!, chainTokens[index + 1]!));
+    const derived = deriveLadder(book, OPTIONS);
+    const eight = levelPair(derived, chainTokens[0]!, chainTokens[8]!);
+    expect(eight).toBeDefined();
+    expect(pairProvenance(derived, chainTokens[0]!, chainTokens[8]!)!.combinations[0]!.offerHashes)
+      .toHaveLength(8);
+    expect(levelPair(derived, chainTokens[0]!, chainTokens[9]!)).toBeUndefined();
+  });
+
+  test("withholds an extreme pair when only safe-order fallback budget is exhausted", () => {
+    const book = [
+      offer(611, 1n, MAX_SETTLEMENT_AMOUNT, B, A),
+      offer(612, 1n, 1n, B, A),
+      offer(613, MAX_SETTLEMENT_AMOUNT, 2n, A, B),
+      offer(614, 1n, 1n, D, C),
+    ];
+    const supportedPairs = new Set([admissionPairKey(D, A)]);
+    const baseline = deriveLadder(book, { ...OPTIONS, supportedPairs });
+    const targetIndex = baseline.diagnostics.pairs.findIndex((pair) =>
+      pair.tokenIn === D && pair.tokenOut === A
+    );
+    expect(targetIndex).toBeGreaterThanOrEqual(0);
+    const fromTarget = baseline.diagnostics.pairs
+      .slice(targetIndex)
+      .reduce((sum, pair) => sum + pair.discoveryWork, 0);
+    const target = baseline.diagnostics.pairs[targetIndex]!;
+    const budgetBeforeFallback = baseline.diagnostics.discoveryWork - fromTarget +
+      target.discoveryWork - target.safeMergeOrderWork;
+    const capped = deriveLadder(book, {
+      ...OPTIONS,
+      supportedPairs,
+      resourceLimits: { maxDiscoveryWork: budgetBeforeFallback },
+    });
+    expect(capped.diagnostics.stopReason).toBe("discovery-work-cap");
+    expect(levelPair(capped, D, A)).toBeUndefined();
   });
 });
 
-// ── 00006-R2 / FR-003 / SC-002: there is NO tokenIn budget ──────────────────
-//
-// RE-ENCODED, not deleted. This block used to be
-// `describe("ladder derivation — the fee-sizing tokenIn budget (FR-004)")` and
-// pinned the 00005-R2 cap: published rung inputs bounded by spendable tokenIn,
-// a solver holding no tokenIn publishing NOTHING for the pair, and an absent
-// token reading as zero for both budgets. The cap existed because the executor's
-// fee-sizing mirror spent the job's full `amountIn` of tokenIn; 00006-R1 replaced
-// the mirror with a fabricated stand-in that spends nothing, so 00006-R2 removed
-// the cap. Each of the three old assertions is inverted below into the control
-// for the behaviour that replaced it, so the change of verdict is pinned rather
-// than merely un-asserted.
-describe("ladder derivation — NO tokenIn budget (00006 FR-003 / SC-002)", () => {
-  test("tokenIn does not bound publication at ANY level, including none at all", () => {
-    // Was: 59 → two rungs, 19 → one rung, 9 → nothing. The tokenIn column is
-    // not read any more, so every one of these is the FULL ladder. `[B, 19n]`
-    // and `[B, 59n]` are kept verbatim from the old matrix so the inversion is
-    // visible on the same numbers.
-    const full = publishedRungs(BUDGET_BOOK());
-    expect(full).toEqual([["10", "20"], ["20", "30"], ["60", "50"]]);
-    for (const tokenIn of [0n, 9n, 19n, 59n, 60n, 1_000n]) {
-      expect(publishedRungs(BUDGET_BOOK(), {
-        spendableInventory: inventory([[A, 1_000n], [B, tokenIn]]),
-      }), String(tokenIn)).toEqual(full);
-      expect(exclusionsBy(BUDGET_BOOK(), {
-        spendableInventory: inventory([[A, 1_000n], [B, tokenIn]]),
-      }), String(tokenIn)).toEqual([]);
-    }
-    // tokenIn absent from the snapshot entirely — the empty token wallet 00006
-    // exists for — is the same full ladder, and reports nothing withheld.
-    expect(publishedRungs(BUDGET_BOOK(), {
-      spendableInventory: inventory([[A, 1_000n]]),
-    })).toEqual(full);
-    expect(exclusionsBy(BUDGET_BOOK(), {
-      spendableInventory: inventory([[A, 1_000n]]),
-    })).toEqual([]);
-  });
-
-  test("SC-002 zero tokenIn AND zero tokenOut publishes the whole-maker rung and no interior", () => {
-    // Was: `levels: []`, `tokenIds: []`, three `mirror-budget` exclusions — the
-    // solver with an empty wallet was unquotable. It is now quotable for exactly
-    // the depth it can honour with no inventory of any kind: the first rung is
-    // paid entirely by the maker offer it consumes and opens no interpolation
-    // interval, so it needs neither tokenIn nor tokenOut.
-    for (const snapshot of [inventory([]), inventory([[A, 0n], [B, 0n]])]) {
-      const derived = deriveLadder(BUDGET_BOOK(), { ...OPTIONS, spendableInventory: snapshot });
-      expect(derived.levels).toEqual([
-        { tokenIn: B, tokenOut: A, levels: [{ input: "10", output: "20" }] },
-      ]);
-      expect(derived.tokenIds).toEqual([A, B]);
-      // The rungs above it are withheld by the UNCHANGED F03 residual bound —
-      // publishing them would advertise interior sizes 11…19 the solver must
-      // then refuse. That is the one thing 00006-R2 deliberately did NOT lift.
-      expect(derived.excluded).toEqual([
-        { offerHash: O2, reason: "residual-budget" },
-        { offerHash: O3, reason: "residual-budget" },
-      ]);
-      expect(derived.provenance[0]!.rungs.map((rung) => rung.offerHash)).toEqual([O1]);
+describe("exact search and deterministic ties", () => {
+  test("matches an independent oracle over deterministic random books and insertion orders", () => {
+    let state = 0x00009c0;
+    const next = (maximum: number): number => {
+      state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+      return state % maximum;
+    };
+    for (let iteration = 0; iteration < 80; iteration += 1) {
+      const count = 1 + next(7);
+      const book = Array.from({ length: count }, (_, index) =>
+        offer(100 + iteration * 10 + index, BigInt(1 + next(7)), BigInt(1 + next(11))));
+      const forward = deriveLadder(book, OPTIONS);
+      const reversed = deriveLadder([...book].reverse(), OPTIONS);
+      expect(JSON.stringify(reversed)).toBe(JSON.stringify(forward));
+      assertExactOverPublishedRange(book, forward);
+      expect(parsePriceLevels(buildPriceLevelsFrame(forward.levels))).toEqual(
+        buildPriceLevelsFrame(forward.levels),
+      );
     }
   });
 
-  test("SC-002 zero tokenIn with tokenOut funded is byte-identical to the F03 matrix", () => {
-    // Acceptance 2 of US2: interior rungs are published up to the residual
-    // budget "exactly as R2 defined". Asserted as an EQUALITY over the whole
-    // tokenOut matrix rather than as prose: the tokenIn column cannot change any
-    // verdict, so a wallet with no tokenIn and one with 1000 of it derive the
-    // same bytes for every tokenOut level.
-    for (const tokenOut of [0n, 8n, 9n, 18n, 19n, 1_000n]) {
-      const withoutTokenIn = deriveLadder(BUDGET_BOOK(), {
+  test("uses lower input, then fewer files, then sorted hashes for equal output", () => {
+    const lowerInput = deriveLadder([offer(1_001, 2n, 10n), offer(1_002, 3n, 10n)], OPTIONS);
+    expect(selectedCombination(lowerInput.provenance[0]!.combinations, 3n)!.offerHashes)
+      .toEqual([hash(1_001)]);
+
+    const fewer = deriveLadder([
+      offer(1_011, 4n, 8n),
+      offer(1_012, 2n, 4n),
+      offer(1_013, 2n, 4n),
+    ], OPTIONS);
+    expect(fewer.provenance[0]!.combinations.find((entry) => entry.input === "4")).toEqual({
+      input: "4",
+      output: "8",
+      offerHashes: [hash(1_011)],
+      tokenBalances: directTokenBalances(A, 4n, B, 8n),
+    });
+
+    const lexical = deriveLadder([
+      offer(1_022, 1n, 1n),
+      offer(1_021, 1n, 1n),
+    ], OPTIONS);
+    expect(lexical.provenance[0]!.combinations[0]!.offerHashes).toEqual([hash(1_021)]);
+  });
+
+  test("keeps dominated files in the candidate universe when they improve a later set", () => {
+    const book = [
+      offer(1_031, 20n, 100n),
+      offer(1_032, 10n, 40n),
+      offer(1_033, 30n, 10n),
+    ];
+    const derived = deriveLadder(book, OPTIONS);
+    expect(derived.provenance[0]!.combinations.at(-1)).toEqual({
+      input: "60",
+      output: "150",
+      offerHashes: [hash(1_031), hash(1_032), hash(1_033)],
+      tokenBalances: directTokenBalances(A, 60n, B, 150n),
+    });
+    expect(derived.excluded.some((entry) => entry.offerHash === hash(1_033))).toBe(false);
+  });
+
+  test("distinguishes candidate count from the eight-maker witness limit", () => {
+    const book = Array.from({ length: 10 }, (_, index) =>
+      offer(1_100 + index, 1n, BigInt(index + 1)));
+    const derived = deriveLadder(book, OPTIONS);
+    const final = derived.provenance[0]!.combinations.at(-1)!;
+    expect(derived.diagnostics.pairs[0]!.candidateOffers).toBe(10);
+    expect(derived.diagnostics.pairs[0]!.visitedSubsets).toBe(1_012);
+    expect(final.offerHashes).toHaveLength(8);
+    expect(final.output).toBe("52");
+    expect(final.offerHashes).not.toContain(hash(1_100));
+    expect(final.offerHashes).not.toContain(hash(1_101));
+  });
+});
+
+describe("wire and numeric bounds", () => {
+  test("retains the longest safe frontier prefix under the 64-point cap", () => {
+    const book = Array.from({ length: 40 }, (_, index) =>
+      offer(2_000 + index, BigInt((index + 1) * 100), BigInt(index + 1)));
+    const derived = deriveLadder(book, {
+      ...OPTIONS,
+      resourceLimits: { maxMakersPerCombination: 1 },
+    });
+    expect(derived.levels[0]!.levels).toHaveLength(64);
+    expect(derived.provenance[0]!.combinations).toHaveLength(32);
+    expect(derived.provenance[0]!.terminalInput).toBe("3299");
+    expect(derived.provenance[0]!.nominalTerminalInput).toBe("32000");
+    expect(derived.provenance[0]!.capReasons).toEqual([
+      "wire-point-cap",
+      "next-omitted-improvement",
+    ]);
+    expect(derived.excluded).toEqual(book.slice(32).map((entry) => ({
+      offerHash: entry.offerHash,
+      reason: "wire-point-cap",
+    })));
+    expect(relayQuote(derived.levels[0]!.levels, 3_299n)).toBe(32n);
+    expect(relayQuote(derived.levels[0]!.levels, 3_300n)).toBeNull();
+  });
+
+  test("counts the terminal point: 63 adjacent genuine thresholds fit exactly", () => {
+    const book = Array.from({ length: 6 }, (_, index) => {
+      const amount = 1n << BigInt(index);
+      return offer(2_100 + index, amount, amount);
+    });
+    const derived = deriveLadder(book, OPTIONS);
+    expect(derived.provenance[0]!.combinations).toHaveLength(63);
+    expect(derived.levels[0]!.levels).toHaveLength(64);
+    expect(derived.levels[0]!.levels.at(-1)).toEqual({ input: "630", output: "63" });
+  });
+
+  test("withholds when adjacent omitted improvements leave no safe terminal", () => {
+    const book = Array.from({ length: 7 }, (_, index) => {
+      const amount = 1n << BigInt(index);
+      return offer(2_200 + index, amount, amount);
+    });
+    const derived = deriveLadder(book, OPTIONS);
+    expect(derived.levels).toEqual([]);
+    expect(derived.diagnostics.pairs[0]!.reason).toBe("wire-point-cap");
+  });
+
+  test("applies the supported ledger i128 ceiling while retaining u256 wire grammar", () => {
+    const cappedInput = MAX_SETTLEMENT_AMOUNT / 10n + 1n;
+    const capped = deriveLadder([offer(2_300, cappedInput, 1n)], OPTIONS);
+    expect(capped.provenance[0]!.terminalInput).toBe(MAX_SETTLEMENT_AMOUNT.toString());
+    expect(capped.provenance[0]!.nominalTerminalInput).toBe((cappedInput * 10n).toString());
+    expect(capped.provenance[0]!.capReasons).toEqual(["settlement-amount-cap"]);
+
+    const noTail = deriveLadder([offer(2_301, MAX_SETTLEMENT_AMOUNT, 1n)], OPTIONS);
+    expect(noTail.levels).toEqual([]);
+    expect(noTail.diagnostics.pairs[0]!.reason).toBe("settlement-amount-cap");
+
+    const tooLarge = deriveLadder([offer(2_302, MAX_SETTLEMENT_AMOUNT + 1n, 1n)], OPTIONS);
+    expect(tooLarge.levels).toEqual([]);
+    expect(tooLarge.excluded).toEqual([
+      { offerHash: hash(2_302), reason: "settlement-amount-cap" },
+    ]);
+
+    const wireU256 = (1n << 256n) - 1n;
+    expect(rejectLevels([{ input: wireU256.toString(), output: wireU256.toString() }])).toBeNull();
+    expect(rejectLevels([{ input: (wireU256 + 1n).toString(), output: "1" }]))
+      .toBe("malformed-rung");
+  });
+
+  test("numeric-only prefix fallback preserves its cause with the default wire limit", () => {
+    const derived = deriveLadder([
+      offer(2_320, 1n, 1n),
+      offer(2_321, MAX_SETTLEMENT_AMOUNT, 2n),
+    ], OPTIONS);
+    expect(derived.limits.maxWirePointsPerPair).toBe(64);
+    expect(derived.levels[0]!.levels).toEqual([
+      { input: "1", output: "1" },
+      { input: "10", output: "1" },
+    ]);
+    expect(derived.provenance[0]).toMatchObject({
+      combinations: [{ input: "1", output: "1", offerHashes: [hash(2_320)] }],
+      terminalInput: "10",
+      nominalTerminalInput: "10",
+      capReasons: ["settlement-amount-cap"],
+    });
+    expect(derived.excluded).toEqual([
+      { offerHash: hash(2_321), reason: "settlement-amount-cap" },
+    ]);
+    expect(relayQuote(derived.levels[0]!.levels, 10n)).toBe(1n);
+    expect(relayQuote(derived.levels[0]!.levels, 11n)).toBeNull();
+  });
+
+  test("numeric failure after adjacent omitted improvements remains a numeric withhold", () => {
+    const derived = deriveLadder([
+      offer(2_322, MAX_SETTLEMENT_AMOUNT - 1n, 1n),
+      offer(2_323, MAX_SETTLEMENT_AMOUNT, 2n),
+    ], OPTIONS);
+    expect(derived.levels).toEqual([]);
+    expect(derived.diagnostics.pairs[0]!.reason).toBe("settlement-amount-cap");
+    expect(derived.excluded).toEqual([
+      { offerHash: hash(2_322), reason: "settlement-amount-cap" },
+      { offerHash: hash(2_323), reason: "settlement-amount-cap" },
+    ]);
+  });
+
+  test("mixed prefix failure preserves both wire and numeric causes", () => {
+    const derived = deriveLadder([
+      offer(2_324, 1n, 1n),
+      offer(2_325, 5n, 2n),
+      offer(2_326, MAX_SETTLEMENT_AMOUNT, 3n),
+    ], {
+      ...OPTIONS,
+      resourceLimits: { maxMakersPerCombination: 1, maxWirePointsPerPair: 4 },
+    });
+    expect(derived.levels[0]!.levels).toEqual([
+      { input: "1", output: "1" },
+      { input: "4", output: "1" },
+      { input: "5", output: "2" },
+      { input: "50", output: "2" },
+    ]);
+    expect(derived.provenance[0]!.capReasons).toEqual([
+      "wire-point-cap", "settlement-amount-cap",
+    ]);
+    expect(derived.excluded).toEqual([
+      { offerHash: hash(2_326), reason: "settlement-amount-cap" },
+      { offerHash: hash(2_326), reason: "wire-point-cap" },
+    ]);
+  });
+
+  test("a numeric tail cap does not mislabel offers omitted only for wire capacity", () => {
+    const input = MAX_SETTLEMENT_AMOUNT / 10n + 1n;
+    const derived = deriveLadder([
+      offer(2_327, input, 1n),
+      offer(2_328, input + 10n, 2n),
+    ], {
+      ...OPTIONS,
+      resourceLimits: { maxMakersPerCombination: 1, maxWirePointsPerPair: 2 },
+    });
+    expect(derived.levels[0]!.levels).toEqual([
+      { input: input.toString(), output: "1" },
+      { input: (input + 9n).toString(), output: "1" },
+    ]);
+    expect(derived.provenance[0]!.capReasons).toEqual([
+      "wire-point-cap", "settlement-amount-cap", "next-omitted-improvement",
+    ]);
+    expect(derived.excluded).toEqual([
+      { offerHash: hash(2_328), reason: "wire-point-cap" },
+    ]);
+  });
+
+  test("prunes overflowing positive descendants but preserves smaller exact combinations", () => {
+    const half = MAX_SETTLEMENT_AMOUNT / 2n + 1n;
+    const derived = deriveLadder([
+      offer(2_310, half, 2n),
+      offer(2_311, half, 3n),
+      offer(2_312, 1n, 1n),
+    ], OPTIONS);
+    expect(derived.diagnostics.pairs[0]!.amountCappedSubsets).toBeGreaterThan(0);
+    expect(derived.provenance[0]!.combinations.some((entry) => entry.input === (half + 1n).toString()))
+      .toBe(true);
+  });
+
+  test("enforces the 64-pair cap independently from source and search limits", () => {
+    const book = Array.from({ length: 65 }, (_, index) =>
+      offer(2_400 + index, 1n, 1n, token(100 + index * 2), token(101 + index * 2)));
+    const derived = deriveLadder(book, OPTIONS);
+    expect(derived.levels).toHaveLength(64);
+    expect(derived.diagnostics.pairs).toHaveLength(65);
+    expect(derived.diagnostics.pairs.filter((entry) => entry.reason === "pair-cap")).toHaveLength(1);
+  });
+});
+
+describe("fail-closed limits and cancellation", () => {
+  const rejectedCycle = (): LadderSourceOffer[] => Array.from({ length: 4_096 }, (_, index) =>
+    offer(20_000 + index, 1n, 1n, token(200 + index % 64), token(200 + (index + 1) % 64)));
+  const unrelatedPolicy = () => new Set([admissionPairKey(token(9_000), token(9_001))]);
+
+  test("scans a rejected immutable universe once per reason and charges every offer", () => {
+    const book = rejectedCycle();
+    const options = { ...OPTIONS, supportedPairs: unrelatedPolicy() };
+    const first = deriveLadder(book, { ...options, resourceLimits: { maxCandidatePairs: 1 } });
+    const full = deriveLadder(book, options);
+    expect(full.diagnostics.stopReason).toBeNull();
+    expect(full.diagnostics.candidatePairsExamined).toBe(4_032);
+    expect(full.diagnostics.visitedSubsets).toBe(0);
+    expect(full.excluded).toEqual(book.map(({ offerHash }) => ({ offerHash, reason: "unsupported-pair" })));
+    expect(full.excluded).toEqual(first.excluded);
+    expect(full.diagnostics.pairs[0]!.discoveryWork).toBe(4_097);
+    expect(full.diagnostics.pairs.slice(1).every((pair) => pair.discoveryWork === 1)).toBe(true);
+    expect(full.diagnostics.discoveryWork - first.diagnostics.discoveryWork).toBe(4_031);
+
+    // Different reasons must still reach every file even though the universe
+    // is identical; deduplicating the scan must not erase diagnostic meaning.
+    const mixed = deriveLadder(book, {
+      ...OPTIONS,
+      supportedPairs: new Set([admissionPairKey(token(200), token(201))]),
+      minJobOutput: new Map(),
+    });
+    expect(mixed.excluded.filter((row) => row.reason === "minimum-output")).toHaveLength(4_096);
+    expect(mixed.excluded.filter((row) => row.reason === "unsupported-pair")).toHaveLength(4_096);
+    expect(mixed.diagnostics.discoveryWork).toBe(full.diagnostics.discoveryWork + 4_096);
+  });
+
+  test("stops a diagnostic scan exactly at a lower discovery limit", () => {
+    const book = rejectedCycle();
+    const options = { ...OPTIONS, supportedPairs: unrelatedPolicy() };
+    const first = deriveLadder(book, { ...options, resourceLimits: { maxCandidatePairs: 1 } });
+    const scanStart = first.diagnostics.discoveryWork - book.length;
+    const capped = deriveLadder(book, {
+      ...options,
+      resourceLimits: { maxDiscoveryWork: scanStart + 37 },
+    });
+    expect(capped.diagnostics.stopReason).toBe("discovery-work-cap");
+    expect(capped.diagnostics.discoveryWork).toBe(scanStart + 37);
+    expect(capped.diagnostics.candidatePairsExamined).toBe(1);
+    expect(capped.diagnostics.pairs[0]!.reason).toBe("discovery-work-cap");
+    expect(capped.excluded).toEqual(book.slice(0, 37).map(({ offerHash }) => ({
+      offerHash, reason: "unsupported-pair",
+    })));
+    expect(capped.levels).toEqual([]);
+  });
+
+  for (const failure of ["aborted", "abort-check-failed"] as const) {
+    test(`one-shot ${failure} inside an exclusion scan withdraws earlier proven pairs`, () => {
+      const book = [offer(25_000, 1n, 2n, A, B), ...Array.from({ length: 512 }, (_, index) =>
+        offer(25_001 + index, 1n, 1n, C, D))];
+      let scanningRejectedPair = false;
+      let fired = false;
+      class Policy extends Set<string> {
+        override has(pair: string): boolean {
+          if (pair === admissionPairKey(A, B)) return true;
+          scanningRejectedPair = true;
+          return false;
+        }
+      }
+      const result = deriveLadder(book, {
         ...OPTIONS,
-        spendableInventory: inventory([[A, tokenOut]]),
+        supportedPairs: new Policy(),
+        shouldAbort: () => {
+          if (!scanningRejectedPair || fired) return false;
+          fired = true;
+          if (failure === "abort-check-failed") throw new Error("cancel diagnostic scan");
+          return true;
+        },
       });
-      for (const tokenIn of [0n, 9n, 19n, 1_000n]) {
-        const withTokenIn = deriveLadder(BUDGET_BOOK(), {
-          ...OPTIONS,
-          spendableInventory: inventory([[A, tokenOut], [B, tokenIn]]),
+      expect(fired).toBe(true);
+      expect(result.diagnostics.stopReason).toBe(failure);
+      expect(result.diagnostics.candidatePairsExamined).toBe(2);
+      expect(result.diagnostics.pairs.every((pair) => pair.status === "withheld" && pair.reason === failure)).toBe(true);
+      expect(result.levels).toEqual([]);
+      expect(result.provenance).toEqual([]);
+      const scanned = result.excluded.filter((row) => row.reason === "unsupported-pair").length;
+      expect(scanned).toBeGreaterThan(0);
+      expect(scanned).toBeLessThan(256);
+      expect(result.excluded.filter((row) => row.reason === failure)).toHaveLength(book.length);
+      expect(result.diagnostics.discoveryWork).toBeLessThanOrEqual(result.limits.maxDiscoveryWork);
+    });
+  }
+
+  test("exports measured defaults and rejects raised, zero, fractional and unknown-runtime controls", () => {
+    expect(DEFAULT_LADDER_RESOURCE_LIMITS).toEqual({
+      maxSourceOffers: 4_096,
+      maxVisitedSubsetsPerPair: 100_000,
+      maxVisitedSubsetsTotal: 200_000,
+      maxMakersPerCombination: 8,
+      maxWirePointsPerPair: 64,
+      maxPairs: 64,
+      maxCandidatePairs: 4_096,
+      maxDiscoveryWork: 1_000_000,
+    });
+    expect(HARD_LADDER_RESOURCE_LIMITS).toEqual(DEFAULT_LADDER_RESOURCE_LIMITS);
+    expect(resolveLadderResourceLimits({ maxPairs: 3 })).toEqual({
+      ok: true,
+      limits: { ...DEFAULT_LADDER_RESOURCE_LIMITS, maxPairs: 3 },
+    });
+    for (const value of [0, 1.5, 65, Number.NaN]) {
+      const derived = deriveLadder([offer(3_000, 1n, 1n)], {
+        ...OPTIONS,
+        resourceLimits: { maxPairs: value },
+      });
+      expect(derived.levels).toEqual([]);
+      expect(derived.diagnostics.stopReason).toBe("invalid-resource-limit");
+      expect(derived.diagnostics.invalidResourceLimit!.field).toBe("maxPairs");
+    }
+  });
+
+  test("the source scan cap counts malformed offers and withdraws the full snapshot", () => {
+    const malformed = offer(3_010, 1n, 1n, A, B, { offerHash: "bad" });
+    const derived = deriveLadder([malformed, offer(3_011, 1n, 1n), offer(3_012, 1n, 1n)], {
+      ...OPTIONS,
+      resourceLimits: { maxSourceOffers: 2 },
+    });
+    expect(derived.levels).toEqual([]);
+    expect(derived.diagnostics.stopReason).toBe("source-offer-cap");
+    expect(derived.diagnostics.sourceOffersScanned).toBe(3);
+  });
+
+  test("pair search exhaustion withholds that pair without sorting a partial frontier", () => {
+    const derived = deriveLadder([
+      offer(3_020, 1n, 1n),
+      offer(3_021, 2n, 2n),
+      offer(3_022, 4n, 4n),
+    ], {
+      ...OPTIONS,
+      resourceLimits: { maxVisitedSubsetsPerPair: 3 },
+    });
+    expect(derived.levels).toEqual([]);
+    expect(derived.diagnostics.pairs[0]).toMatchObject({
+      status: "withheld",
+      reason: "pair-search-cap",
+      visitedSubsets: 3,
+    });
+  });
+
+  test("global exhaustion retains completed proven pairs and withholds the rest", () => {
+    const derived = deriveLadder([
+      offer(3_030, 1n, 1n, A, B),
+      ...Array.from({ length: 9 }, (_, index) => offer(3_031 + index, 1n, 1n, C, D)),
+    ], {
+      ...OPTIONS,
+      resourceLimits: { maxVisitedSubsetsTotal: 5 },
+    });
+    expect(derived.levels).toHaveLength(1);
+    expect(derived.diagnostics.stopReason).toBe("global-search-cap");
+    expect(derived.diagnostics.visitedSubsets).toBe(5);
+    expect(derived.diagnostics.pairs.map((entry) => entry.reason)).toEqual([
+      null,
+      "global-search-cap",
+    ]);
+    expect(derived.tokenIds).toEqual([A, B]);
+    expect(derived.provenance).toHaveLength(1);
+    expect(derived.diagnostics.pairs[0]).toMatchObject({ status: "published", wirePoints: 2 });
+  });
+
+  for (const failure of ["aborted", "abort-check-failed"] as const) {
+    test(`one-shot ${failure} before a later pair withdraws completed pairs`, () => {
+      const book = [
+        offer(3_080, 1n, 1n, A, B),
+        offer(3_090, 1n, 1n, C, D),
+      ];
+      expect(deriveLadder(book, OPTIONS).levels).toHaveLength(2);
+
+      let calls = 0;
+      const shouldAbort = (): boolean => {
+        calls += 1;
+        if (calls !== 7) return false;
+        if (failure === "abort-check-failed") throw new Error("supersession check failed");
+        return true;
+      };
+      const derived = deriveLadder(book, { ...OPTIONS, shouldAbort });
+      expect(derived.levels).toEqual([]);
+      expect(derived.tokenIds).toEqual([]);
+      expect(derived.provenance).toEqual([]);
+      expect(derived.diagnostics.stopReason).toBe(failure);
+      expect(derived.diagnostics.pairs).toHaveLength(2);
+      for (const pair of derived.diagnostics.pairs) {
+        expect(pair).toMatchObject({
+          status: "withheld",
+          reason: failure,
+          frontierCombinations: 0,
+          wirePoints: 0,
         });
-        expect(JSON.stringify(withTokenIn), `${tokenOut}/${tokenIn}`)
-          .toBe(JSON.stringify(withoutTokenIn));
+      }
+    });
+  }
+
+  test("abort checks cover initial scan, subset work, post-search and post-encoding", () => {
+    const immediately = deriveLadder([offer(3_040, 1n, 1n)], {
+      ...OPTIONS,
+      shouldAbort: () => true,
+    });
+    expect(immediately.diagnostics.stopReason).toBe("aborted");
+
+    let subsetCalls = 0;
+    const duringSubset = deriveLadder(
+      Array.from({ length: 9 }, (_, index) => offer(3_050 + index, 1n << BigInt(index), 1n)),
+      {
+        ...OPTIONS,
+        shouldAbort: () => ++subsetCalls >= 12,
+      },
+    );
+    expect(duringSubset.diagnostics.stopReason).toBe("aborted");
+    expect(duringSubset.diagnostics.visitedSubsets).toBe(256);
+
+    let postEncodingCalls = 0;
+    const afterEncoding = deriveLadder([offer(3_060, 1n, 1n)], {
+      ...OPTIONS,
+      shouldAbort: () => ++postEncodingCalls >= 5,
+    });
+    expect(postEncodingCalls).toBe(5);
+    expect(afterEncoding.levels).toEqual([]);
+    expect(afterEncoding.diagnostics.stopReason).toBe("aborted");
+  });
+
+  test("abort predicate exceptions fail closed", () => {
+    let calls = 0;
+    const derived = deriveLadder([offer(3_070, 1n, 1n)], {
+      ...OPTIONS,
+      shouldAbort: () => {
+        calls += 1;
+        if (calls === 4) throw new Error("supersession source failed");
+        return false;
+      },
+    });
+    expect(derived.levels).toEqual([]);
+    expect(derived.diagnostics.stopReason).toBe("abort-check-failed");
+  });
+});
+
+describe("eligibility and shared-coin policy", () => {
+  test("preserves every existing validity exclusion and rejects ambiguous identities", () => {
+    const shared = nullifier(9_999);
+    const duplicateA = offer(4_010, 1n, 1n, A, B, { inputNullifiers: [nullifier(4_010)] });
+    const duplicateB = offer(4_010, 2n, 2n, A, B, { inputNullifiers: [nullifier(4_011)] });
+    const book: LadderSourceOffer[] = [
+      { ...offer(4_001, 1n, 1n), gives: [
+        { token: B, amount: 1n, kind: "SHIELDED" },
+        { token: C, amount: 1n, kind: "SHIELDED" },
+      ] },
+      { ...offer(4_002, 1n, 1n), gives: [{ token: B, amount: 1n, kind: "UNSHIELDED" }] },
+      offer(4_003, 0n, 1n),
+      offer(4_004, 1n, 1n, A, A),
+      offer(4_005, 1n, 1n, A, "zz"),
+      offer(4_006, 1n, 1n, A, B, { offerHash: "zz" }),
+      offer(4_007, 1n, 1n, A, B, { inputNullifiers: ["zz"] }),
+      offer(4_008, 1n, 1n, A, B, { expiresAt: null }),
+      offer(4_009, 1n, 1n, A, B, { expiresAt: NOW + 60_000 }),
+      duplicateA,
+      duplicateB,
+      offer(4_012, 1n, 1n, A, B, { inputNullifiers: [shared] }),
+      offer(4_013, 2n, 3n, A, B, { inputNullifiers: [shared] }),
+      offer(4_014, MAX_SETTLEMENT_AMOUNT + 1n, 1n),
+      offer(4_015, 1n, 1n),
+    ];
+    const derived = deriveLadder(book, {
+      ...OPTIONS,
+      unavailableOfferHashes: [hash(4_015).toUpperCase()],
+    });
+    const reasons = new Set(derived.excluded.map((entry) => entry.reason));
+    for (const reason of [
+      "multi-leg",
+      "non-shielded-leg",
+      "non-positive-amount",
+      "same-token",
+      "malformed-token",
+      "malformed-hash",
+      "malformed-nullifier",
+      "no-expiry",
+      "expiring",
+      "duplicate-offer",
+      "shared-coin",
+      "settlement-amount-cap",
+      "unavailable",
+    ]) expect(reasons.has(reason as never)).toBe(true);
+    expect(derived.provenance[0]!.combinations.at(-1)!.offerHashes).toEqual([hash(4_012)]);
+  });
+
+  test("directed allowlist and output minimum filter the exact frontier", () => {
+    const book = [offer(4_100, 2n, 5n), offer(4_101, 3n, 5n)];
+    const unsupported = deriveLadder(book, {
+      ...OPTIONS,
+      supportedPairs: new Set([admissionPairKey(B, A)]),
+    });
+    expect(unsupported.levels).toEqual([]);
+    expect(unsupported.diagnostics.pairs[0]!.reason).toBe("unsupported-pair");
+
+    const missingMinimum = deriveLadder(book, { ...OPTIONS, minJobOutput: new Map([[C, 1n]]) });
+    expect(missingMinimum.levels).toEqual([]);
+    expect(missingMinimum.diagnostics.pairs[0]!.reason).toBe("minimum-output");
+
+    const admitted = deriveLadder(book, { ...OPTIONS, minJobOutput: new Map([[B, 8n]]) });
+    expect(admitted.provenance[0]!.combinations).toEqual([
+      {
+        input: "5",
+        output: "10",
+        offerHashes: [hash(4_100), hash(4_101)],
+        tokenBalances: directTokenBalances(A, 5n, B, 10n),
+      },
+    ]);
+    expect(admitted.levels[0]!.levels).toEqual([
+      { input: "5", output: "10" },
+      { input: "50", output: "10" },
+    ]);
+  });
+});
+
+describe("shared schema and frame builders", () => {
+  test("allows equal-output plateaus and convex jumps but rejects decreasing output", () => {
+    const staircase = [
+      { input: "1", output: "1" },
+      { input: "9", output: "1" },
+      { input: "10", output: "20" },
+    ];
+    expect(rejectLevels(staircase)).toBeNull();
+    expect(rejectLevels([
+      { input: "1", output: "1" },
+      { input: "2", output: "2" },
+      { input: "3", output: "100" },
+    ])).toBeNull();
+    expect(rejectLevels([
+      { input: "1", output: "2" },
+      { input: "2", output: "1" },
+    ])).toBe("output-decreasing");
+  });
+
+  test("preserves amount, positivity, input-order, token and size checks", () => {
+    expect(rejectLevels([])).toBe("empty");
+    expect(rejectLevels([{ input: "0", output: "1" }])).toBe("non-positive");
+    expect(rejectLevels([{ input: "1.5", output: "1" }])).toBe("malformed-rung");
+    expect(rejectLevels([{ input: "2", output: "1" }, { input: "2", output: "2" }]))
+      .toBe("input-not-ascending");
+    expect(rejectLevels(Array.from({ length: 65 }, (_, index) => ({
+      input: String(index + 1),
+      output: "1",
+    })))).toBe("too-many-rungs");
+    expect(() => buildPriceLevelsFrame([{ tokenIn: A, tokenOut: A, levels: [
+      { input: "1", output: "1" },
+    ] }])).toThrow(/bad-tokens/);
+  });
+
+  test("builders round-trip accepted frames, clone input, and emit withdrawals/capabilities", () => {
+    const pair = { tokenIn: A, tokenOut: B, levels: [
+      { input: "1", output: "1" },
+      { input: "10", output: "1" },
+    ] };
+    const frame = buildPriceLevelsFrame([pair]);
+    expect(parsePriceLevels(frame)).toEqual(frame);
+    pair.levels[0]!.input = "0";
+    expect(frame.levels[0]!.levels[0]!.input).toBe("1");
+    expect(withdrawalPriceLevelsFrame()).toEqual({ type: "price-levels", levels: [] });
+    expect(parseSolverCapabilities(buildSolverCapabilitiesFrame([B, A], 8))).toEqual({
+      type: "solver-capabilities",
+      tokenIds: [B, A],
+      maxParallelSwaps: 8,
+    });
+    expect(() => buildSolverCapabilitiesFrame(["bad"])).toThrow(/not a token id/);
+  });
+});
+
+describe("implemented work and state bounds", () => {
+  for (const shape of ["dense-cycle", "sixteen-token-cycle", "source-ceiling-chain"] as const) {
+    test(`R2 ${shape} completes the full default subset budget within 250ms`, () => {
+      const count = shape === "source-ceiling-chain" ? 4_096 : 20;
+      const cycleLength = shape === "dense-cycle" ? 4 : 16;
+      const book = Array.from({ length: count }, (_, index) => {
+        const from = shape === "source-ceiling-chain" ? index : index % cycleLength;
+        const to = shape === "source-ceiling-chain" ? index + 1 : (index + 1) % cycleLength;
+        const amount = shape === "source-ceiling-chain" ? 1n : BigInt(1 + Math.floor(index / cycleLength));
+        return offer(30_000 + index, amount, amount, token(200 + from), token(200 + to));
+      });
+      const started = performance.now();
+      const result = deriveLadder(book, OPTIONS);
+      const elapsedMs = performance.now() - started;
+      expect(result.diagnostics.sourceOffersScanned).toBe(count);
+      expect(result.diagnostics.visitedSubsets).toBe(200_000);
+      expect(result.diagnostics.stopReason).toBe("global-search-cap");
+      expect(result.levels).toEqual([]);
+      expect(result.diagnostics.discoveryWork).toBeLessThanOrEqual(1_000_000);
+      expect(elapsedMs).toBeLessThan(250);
+      console.log(`R2 ${shape}: ${elapsedMs.toFixed(2)}ms, ${result.diagnostics.visitedSubsets} visits, ${result.diagnostics.discoveryWork} discovery work`);
+    });
+  }
+
+  test("direct-only rejected markets do not multiply graph-sized search scratch", () => {
+    const count = 4_096;
+    const minimums = new Map<string, bigint>();
+    const book = Array.from({ length: count }, (_, index) => {
+      const tokenIn = token(10_000 + index * 2);
+      const tokenOut = token(10_001 + index * 2);
+      minimums.set(tokenOut, 2n);
+      return offer(40_000 + index, 1n, 1n, tokenIn, tokenOut);
+    });
+    const started = performance.now();
+    const result = deriveLadder(book, {
+      ...OPTIONS,
+      minJobOutput: minimums,
+      resourceLimits: { maxMakersPerCombination: 1 },
+    });
+    const elapsedMs = performance.now() - started;
+    expect(result.levels).toEqual([]);
+    expect(result.diagnostics.stopReason).toBe("discovery-work-cap");
+    expect(result.diagnostics.discoveryWork).toBe(1_000_000);
+    expect(result.diagnostics.visitedSubsets).toBe(result.diagnostics.candidatePairsExamined);
+    expect(result.diagnostics.visitedSubsets).toBeGreaterThan(0);
+    expect(result.diagnostics.visitedSubsets).toBeLessThan(count);
+    expect(elapsedMs).toBeLessThan(250);
+    console.log(
+      `CI direct-only rejection: ${elapsedMs.toFixed(2)}ms, ` +
+        `${result.diagnostics.candidatePairsExamined} pairs, ` +
+        `${result.diagnostics.discoveryWork} discovery work`,
+    );
+  });
+
+  test("dense cyclic discovery/search stays bounded with measured auxiliary work", () => {
+    const cycleTokens = [token(200), token(201), token(202), token(203)];
+    const book = Array.from({ length: 12 }, (_, index) => {
+      const amount = BigInt(1 + Math.floor(index / cycleTokens.length));
+      return offer(
+        4_900 + index,
+        amount,
+        amount,
+        cycleTokens[index % cycleTokens.length]!,
+        cycleTokens[(index + 1) % cycleTokens.length]!,
+      );
+    });
+    const heapBefore = process.memoryUsage().heapUsed;
+    const started = performance.now();
+    const derived = deriveLadder(book, OPTIONS);
+    const elapsedMs = performance.now() - started;
+    const heapDelta = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
+    expect(derived.diagnostics.stopReason).toBeNull();
+    expect(derived.diagnostics.candidatePairsExamined).toBe(12);
+    expect(derived.diagnostics.visitedSubsets).toBe(45_552);
+    expect(derived.diagnostics.discoveryWork).toBeGreaterThan(0);
+    expect(derived.diagnostics.discoveryWork).toBeLessThanOrEqual(
+      derived.limits.maxDiscoveryWork,
+    );
+    expect(derived.diagnostics.peakStoredExactInputs).toBeLessThanOrEqual(100_000);
+    expect(elapsedMs).toBeLessThan(250);
+    console.log(
+      `A4 dense-cycle: ${elapsedMs.toFixed(2)}ms, ${derived.diagnostics.visitedSubsets} visits, ` +
+        `${derived.diagnostics.discoveryWork} discovery, ${derived.diagnostics.safeMergeOrderWork} ` +
+        `safe-order, ${derived.diagnostics.peakStoredExactInputs} peak exact states, ` +
+        `${heapDelta} heap bytes delta`,
+    );
+  });
+
+  test("adversarial 39,202-state monotone frontier keeps encoding bounded", () => {
+    const book = Array.from({ length: 16 }, (_, index) => {
+      const amount = 1n << BigInt(index);
+      return offer(5_000 + index, amount, amount);
+    });
+    const heapBefore = process.memoryUsage().heapUsed;
+    const started = performance.now();
+    const derived = deriveLadder(book, OPTIONS);
+    const elapsedMs = performance.now() - started;
+    const heapDelta = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
+    expect(derived.diagnostics.visitedSubsets).toBe(39_202);
+    expect(derived.diagnostics.peakStoredExactInputs).toBe(39_202);
+    expect(derived.diagnostics.pairs[0]!.reason).toBe("wire-point-cap");
+    expect(elapsedMs).toBeLessThan(250);
+    console.log(
+      `A4 monotone-frontier: ${elapsedMs.toFixed(2)}ms, 39202 exact states, ` +
+        `${heapDelta} heap bytes delta`,
+    );
+  });
+
+  test("64-pair global-exhaustion refresh stops at 200,000 visits within 250ms", () => {
+    // Warm the recursive search and BigInt map paths before measuring production-parity work.
+    deriveLadder(Array.from({ length: 12 }, (_, index) => {
+      const amount = 1n << BigInt(index);
+      return offer(5_100 + index, amount, amount);
+    }), OPTIONS);
+
+    const book: LadderSourceOffer[] = [];
+    for (let pairIndex = 0; pairIndex < 64; pairIndex += 1) {
+      const tokenIn = token(10_000 + pairIndex * 2);
+      const tokenOut = token(10_001 + pairIndex * 2);
+      for (let offerIndex = 0; offerIndex < 20; offerIndex += 1) {
+        const amount = 1n << BigInt(offerIndex);
+        const id = 6_000 + pairIndex * 20 + offerIndex;
+        book.push(offer(id, amount, amount, tokenIn, tokenOut));
       }
     }
-  });
-
-  test("a tokenOut missing from the snapshot is still zero, never open", () => {
-    // Was "a token missing from the snapshot is zero, never open", covering both
-    // budgets. The property survives for the budget that survives: the snapshot
-    // is the complete view of what the solver can move, so an absent tokenOut
-    // must not read as "unconstrained" — that would restore exactly the
-    // fail-open publication F03 is about. What changed is the CONSEQUENCE: an
-    // absent token now truncates to the whole-maker rung instead of suppressing
-    // the pair.
-    expect(publishedRungs(BUDGET_BOOK(), { spendableInventory: inventory([]) }))
-      .toEqual([["10", "20"]]);
-    expect(publishedRungs(BUDGET_BOOK(), { spendableInventory: inventory([[B, 1_000n]]) }))
-      .toEqual([["10", "20"]]);
-    // Absent and explicit zero are the same thing, on the tokenOut side too.
-    expect(publishedRungs(BUDGET_BOOK(), { spendableInventory: inventory([[A, 0n]]) }))
-      .toEqual([["10", "20"]]);
-  });
-});
-
-describe("ladder derivation — the budget alongside the rest of the policy", () => {
-  test("no inventory at all is OPEN, which is what keeps dry-run publication unchanged", () => {
-    // The one fail-open default here, and it is deliberate: the live push always
-    // supplies a snapshot, and the executor re-checks the residual against the
-    // same Stock before any wallet mutation.
-    expect(publishedRungs(BUDGET_BOOK(), { spendableInventory: null }))
-      .toEqual(publishedRungs(BUDGET_BOOK()));
-    expect(publishedRungs(BUDGET_BOOK(), { spendableInventory: undefined }))
-      .toEqual(publishedRungs(BUDGET_BOOK()));
-  });
-
-  // RE-ENCODED from "the tighter of the two budgets wins, and the mirror is
-  // reported first". There is only one budget now (00006-R2), so what is left to
-  // pin is that the tokenIn column has no ordering effect either: the reason on
-  // a withheld offer is `residual-budget` whatever tokenIn says, where the old
-  // behaviour reported `mirror-budget` first for the same snapshots.
-  test("the residual budget is the only budget, and the only reason reported", () => {
-    // Was: three `mirror-budget` exclusions and an empty ladder.
-    expect(exclusionsBy(BUDGET_BOOK(), {
-      spendableInventory: inventory([[A, 0n], [B, 0n]]),
-    })).toEqual([[O2, "residual-budget"], [O3, "residual-budget"]]);
-    // Was: "mirror allows two rungs, residual allows all three ⇒ two". tokenIn
-    // 59 no longer stops O3, so the residual budget alone decides — all three.
-    expect(publishedRungs(BUDGET_BOOK(), {
-      spendableInventory: inventory([[A, 19n], [B, 59n]]),
-    })).toEqual([["10", "20"], ["20", "30"], ["60", "50"]]);
-    // Unchanged: residual allows one ⇒ one, whatever tokenIn holds.
-    expect(publishedRungs(BUDGET_BOOK(), {
-      spendableInventory: inventory([[A, 0n], [B, 1_000n]]),
-    })).toEqual([["10", "20"]]);
-  });
-
-  test("a budget-bounded ladder is still a frame the relay admits, and still reproducible", () => {
-    const options = { ...OPTIONS, spendableInventory: inventory([[A, 9n], [B, 0n]]) };
-    const derived = deriveLadder(BUDGET_BOOK(), options);
-    // Concavity and strict ascent survive truncation — a prefix of a concave
-    // whole-offer ladder is one.
-    expect(rejectLevels(derived.levels[0]!.levels)).toBeNull();
-    expect(isPriceLevelsPair(derived.levels[0]!)).toBe(true);
-    const frame = buildPriceLevelsFrame(derived.levels);
-    expect(parsePriceLevels(frame)).toEqual(frame);
-    // Same inputs in any order ⇒ byte-identical output; the budget is a plain
-    // snapshot, so nothing about it can leak iteration order.
-    const reversed = deriveLadder([...BUDGET_BOOK()].reverse(), options);
-    expect(JSON.stringify(reversed)).toBe(JSON.stringify(derived));
-  });
-
-  test("the budget composes with the pair allowlist and the output minimum", () => {
-    const options = {
-      ...OPTIONS,
-      spendableInventory: inventory([[A, 9n], [B, 0n]]),
-      supportedPairs: new Set([admissionPairKey(B, A)]),
-      minJobOutput: new Map([[A, 25n]]),
-    };
-    // Budget truncates to rungs {10,20} {20,30}; the minimum then hides the
-    // sub-25 rung, leaving one publishable quote. The budget runs FIRST
-    // (deliberately conservative — the surviving first rung no longer needs its
-    // residual, but re-deriving executability after an unrelated policy filter
-    // would couple the two).
-    expect(publishedRungs(BUDGET_BOOK(), options)).toEqual([["20", "30"]]);
-    // The allowlist is directed: the unbacked direction publishes nothing
-    // whatever the inventory says.
-    expect(publishedRungs(BUDGET_BOOK(), {
-      ...options,
-      supportedPairs: new Set([admissionPairKey(A, B)]),
-    })).toEqual([]);
+    const heapBefore = process.memoryUsage().heapUsed;
+    const started = performance.now();
+    const derived = deriveLadder(book, OPTIONS);
+    const elapsedMs = performance.now() - started;
+    const heapDelta = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
+    expect(derived.diagnostics.sourceOffersScanned).toBe(1_280);
+    expect(derived.diagnostics.visitedSubsets).toBe(200_000);
+    expect(derived.diagnostics.stopReason).toBe("global-search-cap");
+    expect(derived.diagnostics.peakStoredExactInputs).toBeLessThanOrEqual(100_000);
+    expect(derived.diagnostics.pairs).toHaveLength(3);
+    expect(elapsedMs).toBeLessThan(250);
+    console.log(
+      `A4 full-refresh: ${elapsedMs.toFixed(2)}ms, 200000 visits, ` +
+        `${derived.diagnostics.peakStoredExactInputs} peak exact states, ` +
+        `${derived.diagnostics.discoveryWork} discovery work, ${heapDelta} heap bytes delta`,
+    );
   });
 });

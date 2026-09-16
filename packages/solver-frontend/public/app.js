@@ -30,6 +30,7 @@ import {
   bookRows,
   clockLabel,
   configRows,
+  contractProblem,
   dustView,
   eventRows,
   exponential,
@@ -42,6 +43,7 @@ import {
   pillState,
   relayView,
   shortHex,
+  snapshotForPage,
   stageStates,
   swatch,
   tileValues,
@@ -282,7 +284,11 @@ function renderLadders(snapshot, registry) {
   const pairs = ladderPairs(snapshot, registry);
   const count = $("#ladders-count");
 
-  if (snapshot.solver.state !== "reachable") {
+  if (contractProblem(snapshot)) {
+    count.textContent = "incompatible contract";
+    host.append(emptyNode("Ladder provenance is unknown until compatible snapshots resume."));
+    return;
+  } else if (snapshot.solver.state !== "reachable") {
     count.textContent = "solver unreachable";
     host.append(emptyNode("The solver is not answering — the last ladder it published is below only if it was seen before it went away."));
     if (pairs.length === 0) return;
@@ -309,7 +315,9 @@ function renderLadders(snapshot, registry) {
         emptyNode(
           push.withheld === "withdrawn"
             ? "EMPTY BY DESIGN — the solver withdrew its quotes deliberately (graceful stop or explicit withdrawal). The relay is holding an empty ladder."
-            : `EMPTY BY DESIGN — this push is the fail-closed withdrawal (${push.withheld}). It is not an absence of liquidity; the solver refuses to quote from a cache it cannot trust.`,
+            : `EMPTY BY DESIGN — this push is the fail-closed withdrawal (${push.withheld}${
+              push.withheldReason ? `: ${push.withheldReason}` : ""
+            }). It is not an absence of liquidity; the canonical derivation was not safe to publish.`,
         ),
       );
       return;
@@ -334,27 +342,103 @@ function renderLadders(snapshot, registry) {
       el(
         "span",
         "meta",
-        `${pair.rungs.length} rung(s)` +
-          (pair.residualBound === null
-            ? ""
-            : ` · residual budget ${groupDigits(pair.residualBound)} ${pair.labelOut}`),
+        `${pair.points.length} wire point(s) · ${pair.winningCombinations} winning set(s) · ` +
+          `${pair.uniqueMakers} unique maker(s)` +
+          (pair.sharedMakers > 0
+            ? ` · ${pair.sharedMakers} shared physical dependency/dependencies`
+            : ""),
       ),
     );
+    if (pair.sharedMakers > 0) {
+      head.append(el(
+        "span",
+        "meta warn-text",
+        "Winning sets are alternatives that reuse physical files; their quoted amounts are not additive inventory.",
+      ));
+    }
+    if (pair.terminalInputView !== null) {
+      const constrained = pair.terminalInput !== pair.nominalTerminalInput;
+      head.append(el(
+        "span",
+        "meta",
+        `terminal ${pair.terminalInputView.base} ${pair.labelIn}` +
+          (constrained && pair.nominalTerminalInputView !== null
+            ? ` · nominal ${pair.nominalTerminalInputView.base}`
+            : "") +
+          (pair.capReasons.length > 0 ? ` · cap: ${pair.capReasons.join(", ")}` : ""),
+      ));
+    }
     block.append(head);
 
-    const rows = pair.rungs.map((rung) => {
-      const row = el("tr", "rung");
-      row.append(el("td", "mono", String(rung.index)));
-      row.append(amountCell(rung.inputView));
-      row.append(amountCell(rung.outputView));
-      row.append(el("td", "num", rung.rate ?? "—"));
+    const rows = pair.points.map((point) => {
+      const row = el("tr", "wire-point");
+      row.append(el("td", "mono", String(point.index)));
+      row.append(amountCell(point.inputView));
+      row.append(amountCell(point.outputView));
+      row.append(el("td", "num", point.rate ?? "—"));
       const kind = el("td");
-      kind.append(tagNode(rung.kind === "whole" ? "ok" : "acc", rung.kind));
+      kind.append(tagNode(
+        point.kind === "genuine" ? "ok" : "acc",
+        point.terminal && point.kind === "plateau" ? "terminal plateau" : point.kind,
+      ));
+      if (point.routeKind !== null) {
+        kind.append(document.createTextNode(" "), tagNode(
+          point.routeKind === "direct" ? null : "acc",
+          point.routeKind,
+        ));
+      }
       row.append(kind);
-      const closes = el("td");
-      if (rung.offerHash) closes.append(hexNode(rung.offerHash));
-      else closes.append(el("span", "muted", "solver inventory"));
-      row.append(closes);
+      row.append(
+        point.makerInputView === null
+          ? el("td", "muted", "missing provenance")
+          : amountCell(point.makerInputView),
+      );
+      row.append(
+        point.makerOutputView === null
+          ? el("td", "muted", "missing provenance")
+          : amountCell(point.makerOutputView),
+      );
+      const accounting = el("td", "mono accounting");
+      if (point.tokenBalances.length === 0) {
+        accounting.append(el("span", "muted", "missing provenance"));
+      } else {
+        for (const balance of point.tokenBalances) {
+          accounting.append(el(
+            "div",
+            null,
+            `${balance.label} · gives ${balance.givesView.base} · wants ${balance.wantsView.base} · ` +
+              `net ${balance.netView.base} · ${balance.role}`,
+          ));
+        }
+      }
+      row.append(accounting);
+      const receipts = el("td", "mono");
+      if (point.receiptError !== null) {
+        receipts.append(tagNode("bad", point.receiptError));
+      } else if (point.receipts.length === 0) {
+        receipts.append(el("span", "muted", "none"));
+      } else {
+        for (const receipt of point.receipts) {
+          receipts.append(el("div", null, `${receipt.view.base} ${receipt.label}`));
+        }
+      }
+      row.append(receipts);
+      const witnesses = el("td");
+      if (point.offerHashes.length === 0) {
+        witnesses.append(el("span", "muted", "missing provenance"));
+      } else {
+        point.dependencies.forEach((dependency, index) => {
+          if (index > 0) witnesses.append(document.createTextNode(" + "));
+          witnesses.append(hexNode(dependency.offerHash));
+          if (dependency.shared) {
+            witnesses.append(document.createTextNode(" "), tagNode(
+              "acc",
+              `shared: ${dependency.combinations} set(s), ${dependency.pairs.length} pair(s)`,
+            ));
+          }
+        });
+      }
+      row.append(witnesses);
       return row;
     });
     const scroll = el("div", "scroll");
@@ -366,7 +450,11 @@ function renderLadders(snapshot, registry) {
           { label: "Taker gets", numeric: true },
           { label: "Rate", numeric: true },
           { label: "Kind" },
-          { label: "Closes maker offer" },
+          { label: "True maker input", numeric: true },
+          { label: "True maker output", numeric: true },
+          { label: "Maker token contributions" },
+          { label: "Solver receipts at this point", numeric: true },
+          { label: "Winning complete files" },
         ],
         rows,
       ),
@@ -393,7 +481,7 @@ function renderExclusions(snapshot, registry) {
   }
   host.append(
     table(
-      [{ label: "Offer" }, { label: "Pair" }, { label: "Reason" }, { label: "Detail" }],
+      [{ label: "Offer" }, { label: "Pair" }, { label: "Scope / reason" }, { label: "Detail" }],
       rows.map((row) => {
         const tr = el("tr");
         const offer = el("td");
@@ -401,7 +489,7 @@ function renderExclusions(snapshot, registry) {
         tr.append(offer);
         tr.append(el("td", "mono", row.pair));
         const reason = el("td");
-        reason.append(tagNode(row.tone, row.reason));
+        reason.append(tagNode(row.tone, row.scope), el("div", "mono", row.reason));
         tr.append(reason);
         tr.append(el("td", "muted", row.detail));
         return tr;
@@ -483,8 +571,22 @@ function renderBook(snapshot, registry) {
         );
         tr.append(cacheCell);
         const wire = el("td");
-        if (row.rung !== null) wire.append(tagNode("ok", `rung ${row.rung}`));
-        else if (row.excludedReason !== null) wire.append(tagNode("warn", row.excludedReason));
+        if (row.winningSets.length > 0) {
+          wire.append(tagNode("ok", `set${row.winningSets.length === 1 ? "" : "s"} ${row.winningSets.join(", ")}`));
+          for (const reason of row.routeLimitReasons) {
+            wire.append(document.createTextNode(" "), tagNode("acc", `other route: ${reason}`));
+          }
+        }
+        else if (row.sourceExclusionReasons.length > 0) {
+          for (const reason of row.sourceExclusionReasons) {
+            wire.append(tagNode("warn", `source: ${reason}`), document.createTextNode(" "));
+          }
+        }
+        else if (row.routeLimitReasons.length > 0) {
+          for (const reason of row.routeLimitReasons) {
+            wire.append(tagNode("acc", `route: ${reason}`), document.createTextNode(" "));
+          }
+        }
         else wire.append(el("span", "muted", "—"));
         tr.append(wire);
         return tr;
@@ -738,6 +840,7 @@ function renderEvents(snapshot) {
 }
 
 function render(snapshot) {
+  snapshot = snapshotForPage(snapshot);
   latest = snapshot;
   receivedAt = Date.now();
   const registry = tokenRegistry(snapshot);

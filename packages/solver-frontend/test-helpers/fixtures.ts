@@ -14,10 +14,14 @@ import {
   statusContractVersion,
   type StatusSnapshot,
 } from "@zswap-da/solver-core/status-contract";
+import {
+  MAX_COIN_AMOUNT,
+  MAX_SETTLEMENT_AMOUNT,
+} from "@zswap-da/solver-core/whole-offer-balance";
 
 /** A 64-hex colour that still reads as itself in an 8-character prefix. */
 export const colour = (head: string): string =>
-  (head + "9d3c8a1f7b25e04c6a83fd19b40e7c52a6f381d0").slice(0, 64);
+  (head + "9d3c8a1f7b25e04c6a83fd19b40e7c52a6f381d0").padEnd(64, "0").slice(0, 64);
 
 export const TKA = colour("e7580bfc");
 export const TKB = colour("fda14e2e");
@@ -190,7 +194,7 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
               at: now - 800,
               kind: "push",
               severity: "info",
-              message: "pushed 2 pair(s), 3 rungs, 2 tokens",
+              message: "pushed 2 pair(s), 6 wire point(s), 2 tokens",
             },
           ],
           eventCap: 200,
@@ -204,6 +208,9 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
             derivedAt: now - 800,
             cause: "tick",
             withheld,
+            withheldReason: withheld === null || withheld === "withdrawn"
+              ? null
+              : "canonical derivation is not publishable",
             tokenIds: withheld === null ? [TKA, TKB] : [],
             maxParallelSwaps: 8,
             levels:
@@ -214,13 +221,18 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
                       tokenOut: TKB,
                       levels: [
                         { input: "750000", output: "500000" },
+                        { input: "1349999", output: "500000" },
                         { input: "1350000", output: "900000" },
+                        { input: "13500000", output: "900000" },
                       ],
                     },
                     {
                       tokenIn: TKB,
                       tokenOut: TKA,
-                      levels: [{ input: "400000", output: "560000" }],
+                      levels: [
+                        { input: "400000", output: "560000" },
+                        { input: "4000000", output: "560000" },
+                      ],
                     },
                   ]
                 : [],
@@ -230,19 +242,75 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
                     {
                       tokenIn: TKA,
                       tokenOut: TKB,
-                      rungs: [
-                        { input: "750000", output: "500000", offerHash: OFFER_A },
-                        { input: "1350000", output: "900000", offerHash: OFFER_B },
+                      combinations: [
+                        {
+                          kind: "direct",
+                          input: "750000",
+                          output: "500000",
+                          offerHashes: [OFFER_A],
+                          tokenBalances: [
+                            { token: TKA, gives: "0", wants: "750000", net: "-750000" },
+                            { token: TKB, gives: "500000", wants: "0", net: "500000" },
+                          ],
+                          receipts: [],
+                        },
+                        {
+                          kind: "direct",
+                          input: "1350000",
+                          output: "900000",
+                          offerHashes: [OFFER_A, OFFER_B],
+                          tokenBalances: [
+                            { token: TKA, gives: "0", wants: "1350000", net: "-1350000" },
+                            { token: TKB, gives: "900000", wants: "0", net: "900000" },
+                          ],
+                          receipts: [],
+                        },
                       ],
-                      residualBound: "100000",
+                      terminalInput: "13500000",
+                      nominalTerminalInput: "13500000",
+                      capReasons: [],
                     },
                     {
                       tokenIn: TKB,
                       tokenOut: TKA,
-                      rungs: [{ input: "400000", output: "560000", offerHash: OFFER_C }],
-                      residualBound: "0",
+                      combinations: [
+                        {
+                          kind: "direct",
+                          input: "400000",
+                          output: "560000",
+                          offerHashes: [OFFER_C],
+                          tokenBalances: [
+                            { token: TKA, gives: "560000", wants: "0", net: "560000" },
+                            { token: TKB, gives: "0", wants: "400000", net: "-400000" },
+                          ],
+                          receipts: [],
+                        },
+                      ],
+                      terminalInput: "4000000",
+                      nominalTerminalInput: "4000000",
+                      capReasons: [],
                     },
                   ]
+                : [],
+            physicalDependencies:
+              withheld === null
+                ? [
+                    {
+                      offerHash: OFFER_A,
+                      pairs: [{ tokenIn: TKA, tokenOut: TKB }],
+                      combinations: 2,
+                    },
+                    {
+                      offerHash: OFFER_C,
+                      pairs: [{ tokenIn: TKB, tokenOut: TKA }],
+                      combinations: 1,
+                    },
+                    {
+                      offerHash: OFFER_B,
+                      pairs: [{ tokenIn: TKA, tokenOut: TKB }],
+                      combinations: 1,
+                    },
+                  ].sort((left, right) => left.offerHash.localeCompare(right.offerHash))
                 : [],
             excluded: [
               { offerHash: OFFER_BASKET, reason: "multi-leg" },
@@ -253,8 +321,64 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
                 detail: "wants an UNSHIELDED leg",
               },
             ],
+            amountBounds: {
+              maxSettlementAmount: MAX_SETTLEMENT_AMOUNT.toString(),
+              maxCoinAmount: MAX_COIN_AMOUNT.toString(),
+            },
+            limits: {
+              maxSourceOffers: 4096,
+              maxVisitedSubsetsPerPair: 100000,
+              maxVisitedSubsetsTotal: 200000,
+              maxMakersPerCombination: 8,
+              maxWirePointsPerPair: 64,
+              maxPairs: 64,
+              maxCandidatePairs: 4096,
+              maxDiscoveryWork: 1000000,
+            },
+            diagnostics: {
+              stopReason: null,
+              invalidResourceLimit: null,
+              sourceOffersScanned: 4,
+              candidatePairsExamined: 2,
+              discoveryWork: 12,
+              safeMergeOrderWork: 0,
+              visitedSubsets: 4,
+              peakStoredExactInputs: 2,
+              pairs: [
+                {
+                  tokenIn: TKA,
+                  tokenOut: TKB,
+                  status: "published",
+                  reason: null,
+                  candidateOffers: 2,
+                  visitedSubsets: 3,
+                  storedExactInputs: 3,
+                  amountCappedSubsets: 0,
+                  frontierCombinations: 2,
+                  wirePoints: 4,
+                  discoveryWork: 7,
+                  safeMergeOrderWork: 0,
+                },
+                {
+                  tokenIn: TKB,
+                  tokenOut: TKA,
+                  status: "published",
+                  reason: null,
+                  candidateOffers: 1,
+                  visitedSubsets: 1,
+                  storedExactInputs: 1,
+                  amountCappedSubsets: 0,
+                  frontierCombinations: 1,
+                  wirePoints: 2,
+                  discoveryWork: 5,
+                  safeMergeOrderWork: 0,
+                },
+              ],
+            },
             pairs: withheld === null ? 2 : 0,
-            rungs: withheld === null ? 3 : 0,
+            wirePoints: withheld === null ? 6 : 0,
+            winningCombinations: withheld === null ? 3 : 0,
+            uniqueMakers: withheld === null ? 3 : 0,
           },
         },
     executor: dryRun
@@ -349,8 +473,9 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
       expiryMarginSeconds: 30,
       pushIntervalMs: 1000,
       maxParallelSwaps: 8,
-      maxRungsPerPair: null,
-      maxPairs: null,
+      maxRungsPerPair: 64,
+      maxPairs: 64,
+      maxMakersPerRoute: 8,
       settleTtlMinutes: 10,
     },
     listener: {
@@ -399,7 +524,7 @@ export function buildMonitorSnapshot(options: {
       uptimeMs: 60_000,
       pollMs: 4000,
       historyLimit: 500,
-      contractVersion: 1,
+      contractVersion: 3,
       withdrawals: options.withdrawals ?? 0,
       lastWithdrawalAt: null,
       lastWithdrawalMs: null,
@@ -526,7 +651,12 @@ export function startFakeSolver(options: {
     fetch(request: Request): Response {
       const url = new URL(request.url);
       if (url.pathname === "/health") {
-        return Response.json({ status: "ok", ready: true, mode: "live", contractVersion: 1 });
+        return Response.json({
+          status: "ok",
+          ready: true,
+          mode: "live",
+          contractVersion: statusContractVersion,
+        });
       }
       if (url.pathname.startsWith("/status/")) {
         if (request.headers.get("authorization") !== `Bearer ${options.token}`) {

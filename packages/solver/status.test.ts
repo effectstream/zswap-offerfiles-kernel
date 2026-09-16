@@ -36,7 +36,7 @@ import {
 } from "@zswap-da/solver-core/status-contract";
 
 import { Book, bookOfferFromApi } from "./src/book.ts";
-import { deriveLadderPush } from "./src/ladder-source.ts";
+import { buildWithheldLadderPush, deriveLadderPush } from "./src/ladder-source.ts";
 import { SolverOperationJournal } from "./src/operation-journal.ts";
 import type { RelayLadderPushRecord } from "./src/relay-client.ts";
 import { Stock } from "./src/stock.ts";
@@ -69,6 +69,7 @@ const N1 = "31".repeat(32);
 const N2 = "32".repeat(32);
 const H1 = "11".repeat(32);
 const H2 = "22".repeat(32);
+const H3 = "33".repeat(32);
 const TOKEN_A = "aa".repeat(32);
 
 const hash = (byte: string): string => byte.repeat(32);
@@ -93,7 +94,7 @@ const row = (
   }) as ApiZswap;
 
 /** `count` single-leg A→B offers, all at marginal rate 1.0 so the ladder's tie
- *  rule (ascending content address) fixes the rung order, and with strictly
+ *  rule (ascending content address) fixes the winning sets, and with strictly
  *  descending `firstSeenAt` so "newest first" is observable. */
 const offerIdAt = (index: number): string => index.toString(16).padStart(64, "0");
 
@@ -234,8 +235,9 @@ const baseDeps = (
     expiryMarginSeconds: 120,
     pushIntervalMs: 1_000,
     maxParallelSwaps: 8,
-    maxRungsPerPair: 20,
-    maxPairs: null,
+    maxRungsPerPair: 64,
+    maxPairs: 64,
+    maxMakersPerRoute: 8,
     settleTtlMinutes: 30,
   },
   sync: () => null,
@@ -283,6 +285,7 @@ describe("status collector — the snapshot's shape (FR-003)", () => {
     const { collector } = fixture();
     const snapshot = collector.snapshot();
 
+    expect(statusContractVersion).toBe(3);
     expect(snapshot.contractVersion).toBe(statusContractVersion);
     expect(snapshot.now).toBe(1_000);
 
@@ -325,11 +328,48 @@ describe("status collector — the snapshot's shape (FR-003)", () => {
     expect(ladder.last!.cause).toBe("tick");
     expect(ladder.last!.withheld).toBeNull();
     expect(ladder.last!.pairs).toBe(1);
-    expect(ladder.last!.rungs).toBe(3);
-    // The provenance names the maker offer that CLOSES each rung — the single
-    // most useful thing the page shows, and the reason FR-004 exists.
-    expect(ladder.last!.provenance[0]!.rungs[0]!.offerHash).toBe(offerIdAt(0));
-    expect(ladder.last!.provenance[0]!.residualBound).toBe("12");
+    expect(ladder.last!.wirePoints).toBe(10);
+    expect(ladder.last!.winningCombinations).toBe(7);
+    expect(ladder.last!.uniqueMakers).toBe(3);
+    // Provenance separates genuine complete-file witnesses from synthetic
+    // plateau points, and preserves true maker totals at the 10x terminal.
+    expect(ladder.last!.provenance[0]!.combinations[0]!.offerHashes).toEqual([offerIdAt(0)]);
+    expect(ladder.last!.provenance[0]!.combinations.at(-1)).toEqual({
+      kind: "direct",
+      input: "33",
+      output: "33",
+      offerHashes: [offerIdAt(0), offerIdAt(1), offerIdAt(2)],
+      tokenBalances: [
+        { token: A, gives: "33", wants: "0", net: "33" },
+        { token: B, gives: "0", wants: "33", net: "-33" },
+      ],
+      receipts: [],
+    });
+    expect(ladder.last!.provenance[0]!.terminalInput).toBe("330");
+    expect(ladder.last!.provenance[0]!.nominalTerminalInput).toBe("330");
+    expect(ladder.last!.provenance[0]!.capReasons).toEqual([]);
+    expect(ladder.last!.limits).toEqual({
+      maxSourceOffers: 4096,
+      maxVisitedSubsetsPerPair: 100000,
+      maxVisitedSubsetsTotal: 200000,
+      maxMakersPerCombination: 8,
+      maxWirePointsPerPair: 64,
+      maxPairs: 64,
+      maxCandidatePairs: 4096,
+      maxDiscoveryWork: 1000000,
+    });
+    expect(ladder.last!.amountBounds).toEqual({
+      maxSettlementAmount: ((1n << 127n) - 1n).toString(),
+      maxCoinAmount: ((1n << 128n) - 1n).toString(),
+    });
+    expect(ladder.last!.diagnostics).toMatchObject({
+      stopReason: null,
+      sourceOffersScanned: 3,
+      visitedSubsets: 7,
+    });
+    expect(typeof ladder.last!.diagnostics.candidatePairsExamined).toBe("number");
+    expect(typeof ladder.last!.diagnostics.discoveryWork).toBe("number");
+    expect(typeof ladder.last!.diagnostics.safeMergeOrderWork).toBe("number");
 
     const executor = ok(snapshot.executor);
     expect(executor.state).toBe("running");
@@ -344,6 +384,9 @@ describe("status collector — the snapshot's shape (FR-003)", () => {
       maxPerJob: "5000", maxPerWindow: "50000", windowMs: 3_600_000,
     });
     expect(admission.openGroups).toEqual([]);
+    expect(admission.maxRungsPerPair).toBe(64);
+    expect(admission.maxPairs).toBe(64);
+    expect(admission.maxMakersPerRoute).toBe(8);
 
     // The whole thing must serialise. A single bigint anywhere would throw.
     expect(() => JSON.stringify(snapshot)).not.toThrow();
@@ -406,8 +449,102 @@ describe("status collector — the snapshot's shape (FR-003)", () => {
     // The page must be able to say "this empty ladder IS the fail-closed
     // withdrawal", not "no liquidity".
     expect(ladder.last!.withheld).toBe("cache-not-current");
+    expect(ladder.last!.withheldReason).toBeNull();
     expect(ladder.last!.levels).toEqual([]);
     expect(ladder.last!.tokenIds).toEqual([]);
+  });
+
+  test("a derivation failure carries bounded operator detail without inventing liquidity", () => {
+    const record: RelayLadderPushRecord = {
+      push: buildWithheldLadderPush(
+        "derivation-failed",
+        8,
+        `subset search failed ${"x".repeat(600)}`,
+      ),
+      derivedAt: NOW,
+      cause: "tick",
+    };
+    const collector = createStatusCollector(baseDeps({ relay: () => relayOf(record) }));
+    const ladder = ok(collector.snapshot().ladder);
+    expect(ladder.last!.withheld).toBe("derivation-failed");
+    expect(ladder.last!.withheldReason).toStartWith("subset search failed");
+    expect(ladder.last!.withheldReason!.length).toBe(512);
+    expect(ladder.last!.levels).toEqual([]);
+    expect(ladder.last!.uniqueMakers).toBe(0);
+  });
+
+  test("composed provenance exposes exact receipts and shared physical dependencies", () => {
+    const record = pushRecordFor(seededBook());
+    record.push.derived.provenance = [
+      {
+        tokenIn: B,
+        tokenOut: A,
+        combinations: [
+          {
+            input: "2",
+            output: "9",
+            offerHashes: [H3],
+            tokenBalances: [
+              { token: A, gives: "10", wants: "1", net: "9" },
+              { token: B, gives: "3", wants: "5", net: "-2" },
+            ],
+          },
+          {
+            input: "5",
+            output: "10",
+            offerHashes: [H1, H2],
+            tokenBalances: [
+              { token: A, gives: "10", wants: "0", net: "10" },
+              { token: B, gives: "0", wants: "5", net: "-5" },
+              { token: TOKEN_A, gives: "6", wants: "3", net: "3" },
+            ],
+          },
+        ],
+        terminalInput: "50",
+        nominalTerminalInput: "50",
+        capReasons: [],
+      },
+      {
+        tokenIn: TOKEN_A,
+        tokenOut: A,
+        combinations: [{
+          input: "7",
+          output: "10",
+          offerHashes: [H2, H3],
+          tokenBalances: [
+            { token: A, gives: "10", wants: "0", net: "10" },
+            { token: B, gives: "6", wants: "3", net: "3" },
+            { token: TOKEN_A, gives: "0", wants: "7", net: "-7" },
+          ],
+        }],
+        terminalInput: "70",
+        nominalTerminalInput: "70",
+        capReasons: [],
+      },
+    ];
+    const collector = createStatusCollector(baseDeps({ relay: () => relayOf(record) }));
+    const push = ok(collector.snapshot().ladder).last!;
+
+    expect(push.provenance[0]!.combinations[0]).toMatchObject({
+      kind: "composed",
+      input: "2",
+      output: "9",
+      receipts: [],
+    });
+    expect(push.provenance[0]!.combinations[1]).toMatchObject({
+      kind: "composed",
+      input: "5",
+      output: "10",
+      receipts: [{ token: TOKEN_A, amount: "3" }],
+    });
+    expect(push.physicalDependencies.find((row) => row.offerHash === H2)).toEqual({
+      offerHash: H2,
+      combinations: 2,
+      pairs: [
+        { tokenIn: B, tokenOut: A },
+        { tokenIn: TOKEN_A, tokenOut: A },
+      ],
+    });
   });
 
   test("health() reports readiness and survives a throwing readiness probe", () => {
@@ -442,6 +579,36 @@ describe("status collector — bounded collection (FR-005)", () => {
     expect(section.offers[0]!.firstSeenAt).toBeGreaterThan(section.offers[1]!.firstSeenAt!);
   });
 
+  test("winning witness accounting survives the separate 500-offer book display cap", () => {
+    const largeBook = seededBook(STATUS_BOOK_OFFER_CAP + 25);
+    const oldWitnessBook = new Book();
+    const oldWitnessHash = offerIdAt(STATUS_BOOK_OFFER_CAP + 24);
+    oldWitnessBook.upsert(bookOfferFromApi(row(
+      oldWitnessHash,
+      { token: A, amount: "10" },
+      { token: B, amount: "5" },
+      new Date(NOW - (STATUS_BOOK_OFFER_CAP + 24) * 1_000).toISOString(),
+    ))!);
+    const collector = createStatusCollector(baseDeps({
+      sync: () => syncOf(largeBook),
+      relay: () => relayOf(pushRecordFor(oldWitnessBook)),
+    }));
+    const snapshot = collector.snapshot();
+    const book = ok(snapshot.book);
+    const push = ok(snapshot.ladder).last!;
+
+    expect(book.truncated).toBe(25);
+    expect(book.offers.some((offer) => offer.offerHash === oldWitnessHash)).toBe(false);
+    expect(push.provenance[0]!.combinations[0]).toMatchObject({
+      kind: "direct",
+      offerHashes: [oldWitnessHash],
+      tokenBalances: [
+        { token: A, gives: "10", wants: "0", net: "10" },
+        { token: B, gives: "0", wants: "5", net: "-5" },
+      ],
+    });
+  });
+
   test("consecutive identical events fold into one ring entry with a count", () => {
     const { collector } = fixture();
     // 500 once-a-second pushes: the shape a live solver actually produces.
@@ -450,7 +617,7 @@ describe("status collector — bounded collection (FR-005)", () => {
         kind: "push",
         severity: "info",
         message: "pushed 1 pair(s)",
-        detail: { pairs: 1, rungs: 1, tick: index },
+        detail: { pairs: 1, wirePoints: 1, tick: index },
       });
     }
     collector.recordRelayEvent({ kind: "disconnected", severity: "warn", message: "relay socket closed" });
@@ -520,6 +687,25 @@ describe("status collector — bounded collection (FR-005)", () => {
       withheld: null,
       amount: "42",
       nested: "[object Object]",
+    });
+    expect(() => JSON.stringify(collector.snapshot())).not.toThrow();
+  });
+
+  test("invalid resource-limit diagnostics remain JSON-safe", () => {
+    const book = seededBook();
+    const record = pushRecordFor(book);
+    record.push.derived.diagnostics.stopReason = "invalid-resource-limit";
+    record.push.derived.diagnostics.invalidResourceLimit = {
+      field: "maxSourceOffers",
+      value: 5_000n,
+      maximum: 4_096,
+    };
+    const collector = createStatusCollector(baseDeps({ relay: () => relayOf(record) }));
+    const ladder = ok(collector.snapshot().ladder);
+    expect(ladder.last!.diagnostics.invalidResourceLimit).toEqual({
+      field: "maxSourceOffers",
+      value: "5000",
+      maximum: 4_096,
     });
     expect(() => JSON.stringify(collector.snapshot())).not.toThrow();
   });

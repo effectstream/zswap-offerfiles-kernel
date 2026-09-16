@@ -10,21 +10,10 @@
 // which it only guarantees to be AT MOST the interpolated output of the
 // published ladder. A job is therefore admitted whenever
 // `0 < amountOut <= interpolateQuote(levels, amountIn)`; the taker is paid
-// exactly `amountOut` and the solver retains any surplus the whole-offer maker
-// prefix pays over it (the pinned reference solver keeps `dy - requiredOutput`
-// the same way). Demanding MORE than the published curve stays refused.
-//
-// SOLVENCY (P4-F03, FR-003). ONE inventory fact decides a job before any wallet
-// call happens, against live `Stock`: the residual tokenOut the solver would
-// PAY. Publication caps the advertised ladder by the same number
-// (`deriveLadder`'s `spendableInventory`), so this is the fail-closed depth check
-// for the gap between a push and a dispatch rather than the only guard — but it
-// remains the only guard when the publication budget is left open.
-//
-// The solver needs NO tokenIn inventory. 00005-R2 also bounded a job (and
-// publication) by the solver's spendable tokenIn, because fee sizing spent it;
-// 00006-R2 removed both (FR-003) once 00006-R1 made fee sizing capital-free. See
-// the note in `resolveSwapJobRoute` where that guard used to stand.
+// exactly `amountOut`. The canonical affordable whole-offer combination funds
+// that payout, and the solver receives any input and output surplus. New jobs
+// reserve only offer hashes and nullifiers; they never spend swap-token stock.
+// Publication and admission share the same exact search and resource limits.
 //
 // CAPITAL-FREE FEE SIZING (00006 FR-001/FR-002). Fee sizing used to open with a
 // MIRROR: `initSwap` selecting the taker's full `amountIn` of tokenIn out of the
@@ -64,8 +53,20 @@ import {
 } from "@zswap-da/solver-core/exact-files-contract";
 import {
   deriveLadder,
+  MAX_SETTLEMENT_AMOUNT,
+  resolveLadderResourceLimits,
+  type LadderResourceLimitControls,
   type LadderPairProvenance,
 } from "@zswap-da/solver-core/ladder-derivation";
+import {
+  accountWholeOfferBalances,
+  buildWholeOfferReceipts,
+  findSafeWholeOfferMergeOrder,
+  MAX_SAFE_MERGE_ORDER_WORK,
+  serializeWholeOfferTokenBalances,
+  type WholeOfferReceipt,
+  type WholeOfferTokenBalance,
+} from "@zswap-da/solver-core/whole-offer-balance";
 import {
   interpolateQuote,
   type JobErrorMessage,
@@ -120,7 +121,6 @@ export const JOB_DUST_WINDOW = "dust_window_exhausted";
 export const JOB_DUST_ESTIMATE = "dust_estimate_unavailable";
 
 const HEX64 = /^[0-9a-f]{64}$/i;
-const MAX_U256 = (1n << 256n) - 1n;
 
 const toHex = (bytes: Uint8Array): string =>
   Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
@@ -305,6 +305,7 @@ export interface SwapJobExecutorOptions extends JobAdmissionPolicy {
    * `@zswap-da/solver-core/fee-sizing`.
    */
   modelledTakerInputs?: number;
+  resourceLimits?: Readonly<LadderResourceLimitControls>;
   api?: string;
   /** Explicit relay HTTP authority. Never derived from the websocket URL. */
   relayHttpUrl: string;
@@ -367,32 +368,18 @@ export interface SwapJobExecutorHandle {
   stats: () => SwapJobExecutorStats;
 }
 
-/**
- * What the current derivation says one job settles as.
- *
- * The relay dispatches the taker's EXACT demand, which may be anywhere in
- * `0 < amountOut <= interpolateQuote(levels, amountIn)` (reference
- * `relay-ws.ts` solverAcceptsPrice + `router/jobId.ts` sendSwap). The maker
- * prefix is whole-offer only, so the difference between the prefix and the job
- * lands on the solver in one of two directions, never both:
- *
- *   `residualOut` — tokenOut the solver PAYS out of its own inventory because
- *                   the taker's demand sits above the prefix payout. Reserved
- *                   against `Stock` and bounded by the published
- *                   `residualBound`.
- *   `surplusOut`  — tokenOut the maker prefix pays OVER the taker's demand and
- *                   the solver therefore RETAINS. Inflow only: no Stock
- *                   reservation exists or is needed (`Stock` budgets payouts).
- *
- * `residualIn` is the tokenIn the taker paid above the prefix's wants and the
- * solver likewise retains; the makers' wants are always funded by the taker,
- * since the prefix is chosen with `input <= amountIn`.
- */
+/** Exact maker witness and every value received by the solver for one new job.
+ * Receipts are outputs, never inventory obligations. Journal recovery reads
+ * its persisted claims/artifacts independently of this new-admission route. */
 interface ResolvedRoute {
+  /** Sorted physical identity used by claims, journals, and exact-file reads. */
   offers: BookOffer[];
-  residualIn: bigint;
-  residualOut: bigint;
-  surplusOut: bigint;
+  /** Exact canonical maker accounting reconstructed from the current book. */
+  tokenBalances: WholeOfferTokenBalance[];
+  /** Sorted positive per-token solver outputs; zero balances are absent. */
+  receipts: WholeOfferReceipt[];
+  /** Deterministic numeric-safe order used only for actual SDK merges. */
+  mergeOrder: string[];
   claim: Claim;
 }
 
@@ -472,8 +459,8 @@ const requireCanonicalJob = (job: SwapMessage): void => {
   }
   const amountIn = BigInt(job.amountIn);
   const amountOut = BigInt(job.amountOut);
-  if (amountIn <= 0n || amountOut <= 0n || amountIn > MAX_U256 || amountOut > MAX_U256) {
-    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "amount is outside the ledger-v8 u256 domain");
+  if (amountIn <= 0n || amountOut <= 0n || amountIn > MAX_SETTLEMENT_AMOUNT || amountOut > MAX_SETTLEMENT_AMOUNT) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "amount is outside the supported ledger-v8 signed-delta settlement domain");
   }
 };
 
@@ -499,6 +486,9 @@ export function resolveSwapJobRoute(
     nowMs: number;
     expiryMarginSeconds: number;
     unavailableOfferHashes: Iterable<string>;
+    resourceLimits?: Readonly<LadderResourceLimitControls>;
+    freshNowMs?: () => number;
+    shouldAbort?: () => boolean;
   },
 ): ResolvedRoute {
   requireCanonicalJob(job);
@@ -513,19 +503,31 @@ export function resolveSwapJobRoute(
     throw new JobRefusal(JOB_MIN_OUTPUT);
   }
 
-  // Deliberately derived WITHOUT `spendableInventory`: the publication budget
-  // (FR-003) shapes what the solver advertises, but a job already in hand must
-  // be judged against the whole current book and then against live `Stock`
-  // below. Deriving with a budget here would turn an inventory dip into
-  // `route_not_current` ("the ladder moved"), hiding a solvency refusal behind
-  // a staleness one.
-  const derived = deriveLadder(cache.book.all(), {
+  const limits = resolveLadderResourceLimits(options.resourceLimits);
+  if (!limits.ok || cache.book.size > limits.limits.maxSourceOffers) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "canonical derivation source/resource bound exceeded");
+  }
+  const sourceOffers = cache.book.all();
+  const derived = deriveLadder(sourceOffers, {
     nowMs: options.nowMs,
     expiryMarginSeconds: options.expiryMarginSeconds,
     unavailableOfferHashes: options.unavailableOfferHashes,
-    maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
+    resourceLimits: limits.limits,
+    shouldAbort: () => !cache.isCurrent() || options.shouldAbort?.() === true,
     ...forwardAdmissionPolicy(options),
   });
+  // Read currentness and elapsed expiry again after synchronous computation.
+  const freshNow = options.freshNowMs?.() ?? options.nowMs;
+  if (!cache.isCurrent() || options.shouldAbort?.() === true) {
+    throw new JobRefusal(JOB_CACHE_NOT_CURRENT);
+  }
+  if (cache.book.size !== sourceOffers.length || sourceOffers.some((offer) =>
+    cache.book.get(offer.offerHash) !== offer ||
+    (offer.expiresAt !== null &&
+      offer.expiresAt - options.expiryMarginSeconds * 1_000 > options.nowMs &&
+      offer.expiresAt - options.expiryMarginSeconds * 1_000 <= freshNow))) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "book changed or expired during derivation");
+  }
   const pair = matchingPair(derived.levels, derived.provenance, job);
   if (pair === null) throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "directed pair is absent");
 
@@ -545,76 +547,78 @@ export function resolveSwapJobRoute(
     throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, `current output is ${quoted}`);
   }
 
-  const selected = pair.provenance.rungs.filter((rung) => BigInt(rung.input) <= amountIn);
-  if (selected.length === 0) {
-    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "size is below the first whole offer");
+  const witness = pair.provenance.combinations.findLast((entry) => BigInt(entry.input) <= amountIn);
+  if (witness === undefined || witness.offerHashes.length === 0 ||
+    witness.offerHashes.length > MAX_EXACT_FILES_PER_READ ||
+    witness.offerHashes.length > derived.limits.maxMakersPerCombination ||
+    new Set(witness.offerHashes).size !== witness.offerHashes.length) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "missing or invalid complete-offer witness");
   }
-  if (selected.length > MAX_EXACT_FILES_PER_READ) {
-    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "route exceeds the exact-files batch bound");
-  }
-  const prefix = selected[selected.length - 1]!;
-  const residualIn = amountIn - BigInt(prefix.input);
-  // Signed by construction: positive means the demand sits ABOVE what the whole
-  // maker prefix pays (solver tops it up from inventory), non-positive means the
-  // prefix pays at or over the demand (solver retains the difference).
-  const delta = amountOut - BigInt(prefix.output);
-  const residualOut = delta > 0n ? delta : 0n;
-  const surplusOut = delta > 0n ? 0n : -delta;
-  // The one still-illegal combination, and it is an assertion of a derivation
-  // invariant rather than a policy: `interpolateQuote` returns exactly
-  // `rung.output` when `amountIn` equals that rung's input, so `residualIn == 0`
-  // forces `quoted == prefix.output` and hence `amountOut <= prefix.output`.
-  // A payout obligation with nothing left of the taker's input to fund the
-  // makers with therefore cannot arise from a current ladder; if it ever does,
-  // the derivation and this router disagree and the job must fail closed.
-  if (residualIn < 0n || (residualIn === 0n && residualOut > 0n)) {
-    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "route residual is inconsistent");
-  }
-  // Depth only: `residualOut < out[k+1] - out[k] <= residualBound` already
-  // follows from `amountOut <= quoted` on a concave ladder.
-  if (residualOut > BigInt(pair.provenance.residualBound)) {
-    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "route residual exceeds its published bound");
-  }
-
-  const offers = selected.map((rung) => {
-    const offer = cache.book.get(rung.offerHash);
+  const offers = [...witness.offerHashes].sort().map((hash) => {
+    const offer = cache.book.get(hash);
     if (offer === undefined) throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "route offer disappeared");
     return snapshotOffer(offer);
   });
-  // Only the payout direction consumes budget. `surplusOut` and `residualIn` are
-  // value the solver RECEIVES, so they are deliberately absent from the claim:
-  // reserving them would block unrelated jobs against inventory the solver is
-  // not spending, and `Stock.reserve` refuses non-positive payout entries.
-  const payouts = new Map<string, bigint>();
-  if (residualOut > 0n) payouts.set(tokenOut, residualOut);
-  const claim = claimFor(offers, payouts);
-  if (residualOut > stock.available(tokenOut)) {
-    throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "residual solver inventory is insufficient");
+  for (const offer of offers) {
+    const give = offer.gives[0];
+    const want = offer.wants[0];
+    if (offer.gives.length !== 1 || offer.wants.length !== 1 ||
+      give?.kind !== "SHIELDED" || want?.kind !== "SHIELDED" ||
+      give.amount <= 0n || want.amount <= 0n) {
+      throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "maker terms no longer match the witness");
+    }
   }
-  // NO tokenIn CHECK HERE, deliberately (00006 FR-003).
-  //
-  // 00005-R2 added one for P4-F04: `buildHalf` opened with a mandatory
-  // fee-sizing MIRROR that called `initSwap({shielded: {[tokenIn]: amountIn}}, …)`,
-  // selecting real coins for the taker's FULL input out of the solver's own
-  // wallet and reverting them immediately, so an unfundable job failed half-way
-  // through a wallet mutation and an uncertain revert sent it to
-  // `WalletMutationUncertain` quarantine, stranding the claim and a slot. The
-  // guard refused such a job with `JOB_ROUTE_UNAVAILABLE` before any wallet call.
-  //
-  // 00006-R1 removed the mirror (FR-001): fee sizing models the taker half with
-  // a fabricated transaction and spends no tokenIn at all, so there is no
-  // tokenIn mutation left to protect and no tokenIn inventory the solver needs
-  // in order to quote. 00006-R2 removed the guard and its publication
-  // counterpart in `deriveLadder` together (FR-003) — keeping either would keep
-  // an uncapitalized solver unquotable for a mechanism that no longer exists.
-  //
-  // The residual check above is what remains, and it is the one that was ever a
-  // solvency fact: `residualOut` is tokenOut the solver actually PAYS. It stays
-  // as F03's defense in depth for the window between a push and a dispatch.
+
+  let tokenBalances: WholeOfferTokenBalance[];
+  try {
+    tokenBalances = accountWholeOfferBalances(offers);
+  } catch (error) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, `invalid maker accounting: ${errorMessage(error)}`);
+  }
+  if (
+    JSON.stringify(serializeWholeOfferTokenBalances(tokenBalances)) !==
+      JSON.stringify(witness.tokenBalances)
+  ) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "current maker accounting differs from the witness");
+  }
+  const receiptResult = buildWholeOfferReceipts(tokenBalances, {
+    tokenIn,
+    tokenOut,
+    input: amountIn,
+    output: amountOut,
+  });
+  if (!receiptResult.ok ||
+    receiptResult.requiredInput !== BigInt(witness.input) ||
+    receiptResult.availableOutput !== BigInt(witness.output) ||
+    receiptResult.availableOutput !== quoted) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "complete maker totals do not back the exact job");
+  }
+
+  const mergeOrder = findSafeWholeOfferMergeOrder(
+    offers.map((offer) => ({
+      offerHash: offer.offerHash,
+      gives: offer.gives,
+      wants: offer.wants,
+    })),
+    {
+      maxSources: derived.limits.maxMakersPerCombination,
+      maxWork: Math.min(MAX_SAFE_MERGE_ORDER_WORK, derived.limits.maxDiscoveryWork),
+    },
+  );
+  if (!mergeOrder.ok) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, `maker merge order is unavailable: ${mergeOrder.reason}`);
+  }
+  const claim = claimFor(offers, new Map());
   if (!stock.reserve(claim)) {
-    throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "route is already claimed or inventory changed");
+    throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "route is already claimed");
   }
-  return { offers, residualIn, residualOut, surplusOut, claim };
+  return {
+    offers,
+    tokenBalances,
+    receipts: receiptResult.receipts,
+    mergeOrder: mergeOrder.offerHashes,
+    claim,
+  };
 }
 
 const canonicalAmount = (value: string | bigint): bigint => BigInt(value);
@@ -649,6 +653,41 @@ const aggregateTokenImbalances = (imbalances: Imbalance[]): Map<string, bigint> 
   for (const [token, amount] of result) if (amount === 0n) result.delete(token);
   return result;
 };
+
+const balanceNetMap = (
+  balances: Iterable<Pick<WholeOfferTokenBalance, "token" | "net">>,
+): Map<string, bigint> => new Map(
+  [...balances]
+    .filter((balance) => balance.net !== 0n)
+    .map((balance) => [balance.token.toLowerCase(), balance.net]),
+);
+
+const receiptHalfNetMap = (receipts: readonly WholeOfferReceipt[]): Map<string, bigint> =>
+  new Map(receipts.map((receipt) => [receipt.token.toLowerCase(), -receipt.amount]));
+
+/** Inspect the real SDK object after each construction/merge. Exact bigint
+ * planning is necessary but cannot detect ledger-v8's unchecked i128 wrap. */
+function assertTransactionNet(
+  transaction: unknown,
+  expected: ReadonlyMap<string, bigint>,
+  readImbalances: typeof tokenImbalances,
+  refusalReason: string,
+  label: string,
+): void {
+  let actual: Map<string, bigint>;
+  try {
+    actual = aggregateTokenImbalances(readImbalances(transaction as FinalizedTransaction));
+  } catch (error) {
+    throw new JobRefusal(refusalReason, `${label} could not be inspected: ${errorMessage(error)}`);
+  }
+  const outsideDomain = [...actual, ...expected].find(([, amount]) =>
+    amount < -MAX_SETTLEMENT_AMOUNT || amount > MAX_SETTLEMENT_AMOUNT
+  );
+  if (outsideDomain !== undefined || actual.size !== expected.size ||
+    [...expected].some(([token, amount]) => actual.get(token) !== amount)) {
+    throw new JobRefusal(refusalReason, `${label} has an unexpected shielded delta vector`);
+  }
+}
 
 /**
  * The half handed to the relay must be exactly the numeric inverse of the job:
@@ -1287,7 +1326,12 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, "response does not match the requested route");
     }
 
-    const transactions: FinalizedTransaction[] = [];
+    const transactions = new Map<string, FinalizedTransaction>();
+    const exactSources: Array<{
+      offerHash: string;
+      gives: Array<{ token: string; amount: bigint }>;
+      wants: Array<{ token: string; amount: bigint }>;
+    }> = [];
     for (let index = 0; index < route.offers.length; index += 1) {
       const cached = route.offers[index]!;
       const exact = response.files[index]!;
@@ -1324,9 +1368,65 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       if (!exactSemanticsMatch(cached, semantics)) {
         throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, cached.offerHash);
       }
-      transactions.push(transaction);
+      const exactSource = {
+        offerHash: cached.offerHash,
+        gives: semantics.gives.map((leg) => ({
+          token: leg.token,
+          amount: canonicalAmount(leg.amount),
+        })),
+        wants: semantics.wants.map((leg) => ({
+          token: leg.token,
+          amount: canonicalAmount(leg.amount),
+        })),
+      };
+      const sourceBalances = accountWholeOfferBalances([exactSource]);
+      assertTransactionNet(
+        transaction,
+        balanceNetMap(sourceBalances),
+        dependencies.tokenImbalances,
+        JOB_EXACT_FILE_MISMATCH,
+        `exact maker ${cached.offerHash}`,
+      );
+      exactSources.push(exactSource);
+      transactions.set(cached.offerHash, transaction);
     }
-    return transactions;
+
+    const exactBalances = accountWholeOfferBalances(exactSources);
+    if (
+      JSON.stringify(serializeWholeOfferTokenBalances(exactBalances)) !==
+        JSON.stringify(serializeWholeOfferTokenBalances(route.tokenBalances))
+    ) {
+      throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, "exact maker accounting changed");
+    }
+    const exactOrder = findSafeWholeOfferMergeOrder(exactSources);
+    if (!exactOrder.ok ||
+      JSON.stringify(exactOrder.offerHashes) !== JSON.stringify(route.mergeOrder)) {
+      throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, "exact maker merge order changed");
+    }
+    return route.mergeOrder.map((offerHash) => {
+      const transaction = transactions.get(offerHash);
+      if (transaction === undefined) {
+        throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, `missing exact maker ${offerHash}`);
+      }
+      return transaction;
+    });
+  };
+
+  const assertRouteCurrent = (route: ResolvedRoute): void => {
+    if (!options.cache.isCurrent()) throw new JobRefusal(JOB_CACHE_NOT_CURRENT);
+    const cutoff = now() + options.expiryMarginSeconds * 1_000;
+    for (const selected of route.offers) {
+      const current = options.cache.book.get(selected.offerHash);
+      if (current === undefined || current.expiresAt !== selected.expiresAt ||
+          (selected.expiresAt !== null && selected.expiresAt <= cutoff) ||
+          !exactSemanticsMatch(selected, {
+            gives: current.gives.map((leg) => ({ ...leg, amount: leg.amount.toString() })),
+            wants: current.wants.map((leg) => ({ ...leg, amount: leg.amount.toString() })),
+            nullifiers: current.inputNullifiers,
+          })) {
+        throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "selected maker changed or entered the expiry margin");
+      }
+    }
   };
 
   const buildHalf = async (
@@ -1338,11 +1438,28 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     const ttlExpiresAt = record.ttlExpiresAt;
     const ttl = new Date(ttlExpiresAt);
     const receiverAddress = await options.wallet.shielded.getAddress();
+    assertRouteCurrent(route);
     const walletTransactions: FinalizedTransaction[] = [];
     const finalized: Array<{ key: string; sourceKey: string; transaction: FinalizedTransaction }> = [];
     const pendingUnproven: Array<{ key: string; transaction: unknown }> = [];
+    const transferPendingToFinalized = (
+      sourceKey: string,
+      key: string,
+      transaction: FinalizedTransaction,
+    ): void => {
+      const pendingIndex = pendingUnproven.findIndex((entry) => entry.key === sourceKey);
+      if (pendingIndex < 0) {
+        throw new JobRefusal(JOB_WALLET_FAILED, `missing pending artifact for ${sourceKey}`);
+      }
+      // The finalized artifact is already durable at this point. Update local
+      // cleanup ownership without an await: catch must see exactly one form of
+      // the wallet mutation and can never double-revert raw + finalized forms.
+      finalized.push({ key, sourceKey, transaction });
+      pendingUnproven.splice(pendingIndex, 1);
+    };
 
     try {
+      assertRouteCurrent(route);
       // FR-001. Fee sizing needs the taker's half too, and the DUST fee depends
       // on the merged transaction's STRUCTURE only — not on any coin's value,
       // token type or owner. So the taker half is modelled by a FABRICATED
@@ -1368,55 +1485,89 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         }),
       );
 
-      // The solver's own balancing leg: everything the whole-offer maker prefix
-      // does not already move. What the solver KEEPS is expressed as an output
-      // to its own shielded address (the imbalance convention is inputs minus
-      // outputs), so a leg that only keeps value has no inputs at all — a
-      // legitimate unbalanced zswap half that the maker offers balance on merge.
-      //
-      //   residualOut > 0 → pay tokenOut from inventory (demand above prefix)
-      //   surplusOut  > 0 → keep tokenOut over the demand (demand at/below it)
-      //   residualIn  > 0 → keep the tokenIn paid above the prefix's wants
-      //
-      // At most one of residualOut/surplusOut is positive, and residualOut > 0
-      // implies residualIn > 0 (see `resolveSwapJobRoute`), so the outputs list
-      // is empty only when the prefix already equals the job exactly — the
-      // historic exact-rung path, which needs no leg at all.
-      //
-      // Journal identity stays `RESIDUAL_BUILD` / `:residual` in BOTH directions
-      // on purpose: `restoreRecoveryTargets` pairs the unproven leg with its
-      // finalized contribution by that key suffix, so a sign-dependent label
-      // would mis-pair rows written before an upgrade.
-      const legOutputs = [
-        ...(route.residualIn > 0n
-          ? [{ type: job.tokenIn.toLowerCase(), amount: route.residualIn, receiverAddress }]
-          : []),
-        ...(route.surplusOut > 0n
-          ? [{ type: job.tokenOut.toLowerCase(), amount: route.surplusOut, receiverAddress }]
-          : []),
-      ];
+      // Complete makers fund the exact taker payout. This leg receives every
+      // positive endpoint/intermediate receipt with no swap-token wallet input.
+      // Keep RESIDUAL_BUILD/:residual journal identities so historical wallet
+      // artifacts recover using their original pairing and commitments.
+      const legOutputs = route.receipts.map((receipt) => ({
+        type: receipt.token,
+        amount: receipt.amount,
+        receiverAddress,
+      }));
       if (legOutputs.length > 0) {
         const residualKey = prepareMutation(record, "RESIDUAL_BUILD", "residual");
         const residual = await options.wallet.initSwap(
-          route.residualOut > 0n
-            ? { shielded: { [job.tokenOut.toLowerCase()]: route.residualOut } }
-            : { shielded: {} },
+          { shielded: {} },
           [{ type: "shielded", outputs: legOutputs }],
           options.keys,
           { ttl, payFees: false },
         );
         applyArtifact(residualKey, "UNPROVEN_TRANSACTION", dependencies.serializeUnproven(residual.transaction));
+        pendingUnproven.push({ key: residualKey, transaction: residual.transaction });
+        assertRouteCurrent(route);
+        assertTransactionNet(
+          residual.transaction,
+          receiptHalfNetMap(route.receipts),
+          dependencies.tokenImbalances,
+          JOB_WALLET_FAILED,
+          "unproven residual receipt half",
+        );
         const finalizedKey = prepareMutation(record, "FINALIZED_CONTRIBUTION", "residual");
         const residualFinal = await options.wallet.finalizeTransaction(residual.transaction);
         applyArtifact(finalizedKey, "FINALIZED_TRANSACTION", dependencies.serializeFinalized(residualFinal));
+        transferPendingToFinalized(residualKey, finalizedKey, residualFinal);
+        assertRouteCurrent(route);
+        assertTransactionNet(
+          residualFinal,
+          receiptHalfNetMap(route.receipts),
+          dependencies.tokenImbalances,
+          JOB_WALLET_FAILED,
+          "finalized residual receipt half",
+        );
         walletTransactions.push(residualFinal);
-        finalized.push({ key: finalizedKey, sourceKey: residualKey, transaction: residualFinal });
       }
 
-      const base = dependencies.mergeFinalized([
-        ...offerTransactions,
-        ...walletTransactions,
-      ]);
+      const offersByHash = new Map(route.offers.map((offer) => [offer.offerHash, offer]));
+      let base: FinalizedTransaction | undefined;
+      const prefixOffers: BookOffer[] = [];
+      for (let index = 0; index < route.mergeOrder.length; index += 1) {
+        const offerHash = route.mergeOrder[index]!;
+        const source = offersByHash.get(offerHash);
+        const transaction = offerTransactions[index];
+        if (source === undefined || transaction === undefined) {
+          throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, "safe maker merge inputs are incomplete");
+        }
+        prefixOffers.push(source);
+        base = base === undefined
+          ? transaction
+          : dependencies.mergeFinalized([base, transaction]);
+        assertTransactionNet(
+          base,
+          balanceNetMap(accountWholeOfferBalances(prefixOffers)),
+          dependencies.tokenImbalances,
+          JOB_WALLET_FAILED,
+          `maker merge prefix ${index + 1}`,
+        );
+      }
+      if (base === undefined) {
+        throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "maker witness is empty");
+      }
+      for (const receiptTransaction of walletTransactions) {
+        base = dependencies.mergeFinalized([base, receiptTransaction]);
+      }
+      const expectedBase = balanceNetMap(route.tokenBalances);
+      for (const receipt of route.receipts) {
+        const next = (expectedBase.get(receipt.token) ?? 0n) - receipt.amount;
+        if (next === 0n) expectedBase.delete(receipt.token);
+        else expectedBase.set(receipt.token, next);
+      }
+      assertTransactionNet(
+        base,
+        expectedBase,
+        dependencies.tokenImbalances,
+        JOB_WALLET_FAILED,
+        "maker and receipt half",
+      );
       const dustKey = prepareMutation(record, "DUST_BALANCE", "fees");
       const dustTransaction = await options.wallet.dust.balanceTransactions(
         options.keys.dustSecretKey,
@@ -1425,6 +1576,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       );
       applyArtifact(dustKey, "UNPROVEN_TRANSACTION", dependencies.serializeUnproven(dustTransaction));
       pendingUnproven.push({ key: dustKey, transaction: dustTransaction });
+      assertRouteCurrent(route);
       if (options.dustAdmission != null) {
         const amount = estimateDustAmount(dustTransaction, dependencies.tokenImbalances);
         const reserved = journal.reserveDust({
@@ -1446,13 +1598,14 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       const finalizedDustKey = prepareMutation(record, "FINALIZED_CONTRIBUTION", "dust");
       const finalizedDust = await options.wallet.finalizeTransaction(dustTransaction);
       applyArtifact(finalizedDustKey, "FINALIZED_TRANSACTION", dependencies.serializeFinalized(finalizedDust));
-      pendingUnproven.splice(0, pendingUnproven.length);
+      transferPendingToFinalized(dustKey, finalizedDustKey, finalizedDust);
+      assertRouteCurrent(route);
       walletTransactions.push(finalizedDust);
-      finalized.push({ key: finalizedDustKey, sourceKey: dustKey, transaction: finalizedDust });
 
       const walletTransaction = dependencies.mergeFinalized(walletTransactions);
       const relayTransaction = dependencies.mergeFinalized([base, finalizedDust]);
       assertInverseHalf(job, relayTransaction, dependencies.tokenImbalances);
+      assertRouteCurrent(route);
       return { relayTransaction, walletTransaction, ttlExpiresAt };
     } catch (error) {
       // Any locally finalized contribution must be rolled back before a
@@ -1583,6 +1736,9 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         nowMs: now(),
         expiryMarginSeconds: options.expiryMarginSeconds,
         unavailableOfferHashes: unavailableOfferHashes(),
+        ...(options.resourceLimits === undefined ? {} : { resourceLimits: options.resourceLimits }),
+        freshNowMs: now,
+        shouldAbort: () => stopped,
         ...forwardAdmissionPolicy(options),
       });
     } catch (error) {
@@ -1625,7 +1781,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
 
     try {
       const exactTransactions = await readAndReconstruct(route);
-      if (!options.cache.isCurrent()) throw new JobRefusal(JOB_CACHE_NOT_CURRENT);
+      assertRouteCurrent(route);
       const walletWork = buildHalf(job, route, exactTransactions, record);
       let built: BuiltHalf;
       try {

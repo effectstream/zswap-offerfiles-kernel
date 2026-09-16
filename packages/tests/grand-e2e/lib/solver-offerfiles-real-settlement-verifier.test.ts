@@ -77,7 +77,7 @@ function balanceSnapshot(userA: string, solverB: string, dust: string): Record<s
 
 function actorArtifact(): Record<string, unknown> {
   return {
-    schema: "zswap-offer-files-real-actors/v1",
+    schema: "zswap-offer-files-real-actors/v2",
     runId: RUN_ID,
     networkId: "undeployed",
     createdAt: CREATED_AT,
@@ -128,7 +128,6 @@ function actorArtifact(): Record<string, unknown> {
       wants: [{ token: B, amount: "900", kind: "SHIELDED" }],
       expiresAt: "2026-08-15T12:30:00.000Z",
     },
-    ladder: { path: "/inputs/actor/ladder.json", sha256: "07".repeat(32) },
   };
 }
 
@@ -144,12 +143,11 @@ const walletMethods = (): Record<string, unknown> => ({
 
 function solverArtifact(offerHash: string): Record<string, unknown> {
   return {
-    schema: "zswap-offer-files-real-solver/v1",
+    schema: "zswap-offer-files-real-solver/v2",
     runId: RUN_ID,
     networkId: "undeployed",
     pid: 42,
     api: "http://offer-files-backend:3000",
-    ladderConfigPath: "/inputs/actor/ladder.json",
     telemetryPath: "/inputs/solver/solver-telemetry.jsonl",
     centralRecorderEnabled: true,
     seedFingerprint: "33".repeat(8),
@@ -159,12 +157,6 @@ function solverArtifact(offerHash: string): Record<string, unknown> {
     submissionCount: 1,
     ready: false,
     walletBoundaries: {
-      features: {
-        pathB: false,
-        residualTopUps: false,
-        cycles: false,
-        levelsPublication: false,
-      },
       methods: walletMethods(),
     },
     stock: {
@@ -206,7 +198,7 @@ function publicationArtifact(actorSha: string, actor: Record<string, any>): Reco
     mode: "offer",
     recordedAt: "2026-08-15T12:01:00.000Z",
     actorManifest: {
-      schema: "zswap-offer-files-real-actors/v1",
+      schema: "zswap-offer-files-real-actors/v2",
       sha256: actorSha,
       networkId: "undeployed",
       createdAt: CREATED_AT,

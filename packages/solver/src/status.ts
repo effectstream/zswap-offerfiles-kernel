@@ -72,6 +72,10 @@ import {
   type StatusRelayEvent,
   type StatusSnapshot,
 } from "@zswap-da/solver-core/status-contract";
+import {
+  MAX_COIN_AMOUNT,
+  MAX_SETTLEMENT_AMOUNT,
+} from "@zswap-da/solver-core/whole-offer-balance";
 
 import type { BookOffer } from "./book.ts";
 import type { BackendCurrentnessState } from "./book-sync.ts";
@@ -167,6 +171,7 @@ export interface StatusAdmissionInfo {
   maxParallelSwaps: number;
   maxRungsPerPair: number | null;
   maxPairs: number | null;
+  maxMakersPerRoute: number;
   settleTtlMinutes: number | null;
 }
 
@@ -276,6 +281,18 @@ function flattenDetail(
   return out;
 }
 
+function flattenDiagnosticValue(value: unknown): string | number | boolean | null {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") return value.toString();
+  if (value === undefined) return null;
+  try {
+    return String(value).slice(0, 512);
+  } catch {
+    return "[unserialisable]";
+  }
+}
+
 /**
  * Book offers, NEWEST FIRST, capped.
  *
@@ -336,30 +353,111 @@ function projectLadderPush(record: RelayLadderPushRecord): StatusLadderPush {
     tokenOut: pair.tokenOut,
     levels: pair.levels.map((level) => ({ input: level.input, output: level.output })),
   }));
+  const uniqueMakerHashes = new Set<string>();
+  let winningCombinations = 0;
+  const provenance = push.derived.provenance.map((pair) => ({
+    tokenIn: pair.tokenIn,
+    tokenOut: pair.tokenOut,
+    combinations: pair.combinations.map((combination) => {
+      winningCombinations += 1;
+      for (const offerHash of combination.offerHashes) uniqueMakerHashes.add(offerHash);
+      const tokenBalances = combination.tokenBalances.map((balance) => ({ ...balance }));
+      const input = BigInt(combination.input);
+      const output = BigInt(combination.output);
+      const receipts = tokenBalances.flatMap((balance) => {
+        let amount = BigInt(balance.net);
+        if (balance.token === pair.tokenIn) amount += input;
+        if (balance.token === pair.tokenOut) amount -= output;
+        return amount > 0n ? [{ token: balance.token, amount: amount.toString() }] : [];
+      });
+      const inputBalance = tokenBalances.find((balance) => balance.token === pair.tokenIn);
+      const outputBalance = tokenBalances.find((balance) => balance.token === pair.tokenOut);
+      const direct = tokenBalances.every(
+        (balance) => balance.token === pair.tokenIn || balance.token === pair.tokenOut,
+      ) && inputBalance?.gives === "0" && outputBalance?.wants === "0";
+      return {
+        kind: direct ? "direct" as const : "composed" as const,
+        input: combination.input,
+        output: combination.output,
+        offerHashes: [...combination.offerHashes],
+        tokenBalances,
+        receipts,
+      };
+    }),
+    terminalInput: pair.terminalInput,
+    nominalTerminalInput: pair.nominalTerminalInput,
+    capReasons: [...pair.capReasons],
+  }));
+  const dependencyIndex = new Map<string, {
+    combinations: number;
+    pairs: Map<string, { tokenIn: string; tokenOut: string }>;
+  }>();
+  for (const pair of provenance) {
+    const pairKey = `${pair.tokenIn}|${pair.tokenOut}`;
+    for (const combination of pair.combinations) {
+      for (const offerHash of combination.offerHashes) {
+        const dependency = dependencyIndex.get(offerHash) ?? {
+          combinations: 0,
+          pairs: new Map<string, { tokenIn: string; tokenOut: string }>(),
+        };
+        dependency.combinations += 1;
+        dependency.pairs.set(pairKey, { tokenIn: pair.tokenIn, tokenOut: pair.tokenOut });
+        dependencyIndex.set(offerHash, dependency);
+      }
+    }
+  }
+  const physicalDependencies = [...dependencyIndex.entries()]
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([offerHash, dependency]) => ({
+      offerHash,
+      combinations: dependency.combinations,
+      pairs: [...dependency.pairs.values()].sort((left, right) =>
+        left.tokenIn === right.tokenIn
+          ? (left.tokenOut < right.tokenOut ? -1 : left.tokenOut > right.tokenOut ? 1 : 0)
+          : (left.tokenIn < right.tokenIn ? -1 : 1)
+      ),
+    }));
   return {
     derivedAt: record.derivedAt,
     cause: record.cause,
     withheld: push.withheld,
+    withheldReason: push.withheldReason?.slice(0, 512) ?? null,
     tokenIds: [...push.capabilities.tokenIds],
     maxParallelSwaps: push.capabilities.maxParallelSwaps ?? null,
     levels,
-    provenance: push.derived.provenance.map((pair) => ({
-      tokenIn: pair.tokenIn,
-      tokenOut: pair.tokenOut,
-      rungs: pair.rungs.map((rung) => ({
-        input: rung.input,
-        output: rung.output,
-        offerHash: rung.offerHash,
-      })),
-      residualBound: pair.residualBound,
-    })),
+    provenance,
+    physicalDependencies,
     excluded: push.derived.excluded.map((exclusion) => ({
       offerHash: exclusion.offerHash,
       reason: exclusion.reason,
       ...(exclusion.detail === undefined ? {} : { detail: String(exclusion.detail) }),
     })),
+    amountBounds: {
+      maxSettlementAmount: MAX_SETTLEMENT_AMOUNT.toString(),
+      maxCoinAmount: MAX_COIN_AMOUNT.toString(),
+    },
+    limits: { ...push.derived.limits },
+    diagnostics: {
+      stopReason: push.derived.diagnostics.stopReason,
+      invalidResourceLimit: push.derived.diagnostics.invalidResourceLimit === null
+        ? null
+        : {
+          field: push.derived.diagnostics.invalidResourceLimit.field,
+          value: flattenDiagnosticValue(push.derived.diagnostics.invalidResourceLimit.value),
+          maximum: push.derived.diagnostics.invalidResourceLimit.maximum,
+        },
+      sourceOffersScanned: push.derived.diagnostics.sourceOffersScanned,
+      candidatePairsExamined: push.derived.diagnostics.candidatePairsExamined,
+      discoveryWork: push.derived.diagnostics.discoveryWork,
+      safeMergeOrderWork: push.derived.diagnostics.safeMergeOrderWork,
+      visitedSubsets: push.derived.diagnostics.visitedSubsets,
+      peakStoredExactInputs: push.derived.diagnostics.peakStoredExactInputs,
+      pairs: push.derived.diagnostics.pairs.map((pair) => ({ ...pair })),
+    },
     pairs: levels.length,
-    rungs: levels.reduce((total, pair) => total + pair.levels.length, 0),
+    wirePoints: levels.reduce((total, pair) => total + pair.levels.length, 0),
+    winningCombinations,
+    uniqueMakers: uniqueMakerHashes.size,
   };
 }
 
@@ -615,6 +713,7 @@ export function createStatusCollector(deps: StatusCollectorDependencies): Status
         maxParallelSwaps: deps.admission.maxParallelSwaps,
         maxRungsPerPair: deps.admission.maxRungsPerPair,
         maxPairs: deps.admission.maxPairs,
+        maxMakersPerRoute: deps.admission.maxMakersPerRoute,
         settleTtlMinutes: deps.admission.settleTtlMinutes,
       })),
       listener: section<StatusListener>(() => {
@@ -682,7 +781,7 @@ export function createStatusCollector(deps: StatusCollectorDependencies): Status
       // once-a-second `push` above all) into the previous entry: the ring then
       // keeps one row per CHANGE and `count`/`lastAt` carry the repetition.
       // The detail is refreshed to the latest occurrence, so a folded `push`
-      // row still says how many pairs/rungs the newest push carried.
+      // row still says how many pairs/wire points the newest push carried.
       const previous = events.at(-1);
       if (
         previous !== undefined &&

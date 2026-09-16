@@ -46,13 +46,13 @@
 import {
   forwardAdmissionPolicy,
   type JobAdmissionPolicy,
-  type SpendableInventory,
 } from "@zswap-da/solver-core/admission-policy";
 import {
   buildSolverCapabilitiesFrame,
+  resolveLadderResourceLimits,
   withdrawalPriceLevelsFrame,
   type LadderExclusion,
-  type LadderExclusionReason,
+  type LadderResourceLimitControls,
 } from "@zswap-da/solver-core/ladder-derivation";
 import {
   parseJobError,
@@ -64,7 +64,12 @@ import {
   type SolverToRelayMessage,
 } from "@zswap-da/solver-core/relay-ws-contract";
 
-import { deriveLadderPush, type LadderCache, type LadderPush } from "./ladder-source.ts";
+import {
+  buildWithheldLadderPush,
+  deriveLadderPush,
+  type LadderCache,
+  type LadderPush,
+} from "./ladder-source.ts";
 
 /** WHATWG `WebSocket.readyState` OPEN. Declared rather than imported so this
  *  module needs no DOM lib and can be driven by an explicit test double. */
@@ -152,8 +157,8 @@ export type RelayClientEventKind =
   | "cache-current"
   | "ladder-truncated"
   | "ladder-truncation-cleared"
-  | "ladder-budget-limited"
-  | "ladder-budget-cleared"
+  | "ladder-resource-limited"
+  | "ladder-resource-cleared"
   | "job-refused"
   | "message-refused"
   | "withdrawn"
@@ -188,17 +193,14 @@ export interface RelayLadderOptions extends JobAdmissionPolicy {
   expiryMarginSeconds: number;
   /** Advertised capacity. N5 is what actually enforces it (FR-019). */
   maxParallelSwaps?: number;
-  maxPairs?: number;
-  maxRungsPerPair?: number;
+  resourceLimits?: Readonly<LadderResourceLimitControls>;
   /** Read per push, so an in-flight claim taken between two pushes is honoured
    *  by the next one. A function, not a snapshot, precisely because the loop
    *  outlives any single view of executor state. */
   unavailableOfferHashes?: () => Iterable<string>;
-  /** FR-003: `Stock.available` per token, read per push for the same reason — a
-   *  balance refresh or a new reservation between two pushes must change what
-   *  the next one advertises. Only the pair's tokenOut is read (the residual
-   *  payout); since 00006-R2 nothing bounds publication by tokenIn. */
-  spendableInventory?: () => SpendableInventory;
+  /** Optional runtime cancellation/supersession predicate composed with cache
+   * currentness by the canonical source. */
+  shouldAbort?: () => boolean;
 }
 
 type RelaySwapTerminalMessage = Extract<
@@ -319,61 +321,128 @@ const isOpen = (socket: RelayWebSocketLike | null): socket is RelayWebSocketLike
 /** Caps that dropped real liquidity, as counts — Q-N3-1 option D's input. */
 interface TruncationSignal {
   pairCapOffers: number;
-  rungCapOffers: number;
+  wirePointCapOffers: number;
 }
 
 const truncationOf = (excluded: readonly LadderExclusion[]): TruncationSignal => {
   let pairCapOffers = 0;
-  let rungCapOffers = 0;
+  let wirePointCapOffers = 0;
   for (const exclusion of excluded) {
     if (exclusion.reason === "pair-cap") pairCapOffers += 1;
-    else if (exclusion.reason === "rung-cap") rungCapOffers += 1;
+    else if (exclusion.reason === "wire-point-cap") wirePointCapOffers += 1;
   }
-  return { pairCapOffers, rungCapOffers };
+  return { pairCapOffers, wirePointCapOffers };
 };
 
 const truncates = (signal: TruncationSignal): boolean =>
-  signal.pairCapOffers > 0 || signal.rungCapOffers > 0;
+  signal.pairCapOffers > 0 || signal.wirePointCapOffers > 0;
 
 const sameTruncation = (a: TruncationSignal, b: TruncationSignal): boolean =>
-  a.pairCapOffers === b.pairCapOffers && a.rungCapOffers === b.rungCapOffers;
+  a.pairCapOffers === b.pairCapOffers && a.wirePointCapOffers === b.wirePointCapOffers;
 
-/**
- * Rungs withheld because the solver could not EXECUTE them (FR-003), as counts.
- *
- * Reported separately from the cap signal above, not folded into it: a cap is a
- * configured ceiling and this is inventory, so the operator's remedy is
- * different (fund the wallet / free a reservation, not raise a limit). It is
- * every bit as loud, because withheld liquidity is invisible at the relay —
- * takers simply stop being quoted.
- *
- * ONE count since 00006-R2. 00005-R2 also reported `mirrorBudgetOffers`, the
- * rungs withheld because the solver could not spend the tokenIn the fee-sizing
- * mirror needed; fee sizing spends no tokenIn any more, so that bound and its
- * count are gone (FR-003). The event kinds are unchanged, so an operator's
- * alerting on `ladder-budget-limited` / `ladder-budget-cleared` still fires —
- * only the `detail` object lost a field that is now always 0.
- */
-interface BudgetSignal {
-  residualBudgetOffers: number;
+interface ResourceSignal {
+  stopReason: LadderPush["derived"]["diagnostics"]["stopReason"];
+  withheldPairs: number;
+  candidatePairsExamined: number;
+  discoveryWork: number;
+  safeMergeOrderWork: number;
 }
 
-const countExcluded = (
-  excluded: readonly LadderExclusion[],
-  reason: LadderExclusionReason,
-): number => excluded.reduce((total, entry) => total + (entry.reason === reason ? 1 : 0), 0);
-
-const budgetOf = (excluded: readonly LadderExclusion[]): BudgetSignal => ({
-  residualBudgetOffers: countExcluded(excluded, "residual-budget"),
+const resourceSignalOf = (push: LadderPush): ResourceSignal => ({
+  stopReason: push.derived.diagnostics.stopReason,
+  withheldPairs: push.derived.diagnostics.pairs.filter((pair) =>
+    pair.status === "withheld" && [
+      "pair-search-cap",
+      "global-search-cap",
+      "source-offer-cap",
+      "candidate-pair-cap",
+      "discovery-work-cap",
+      "unsafe-merge-order",
+      "merge-order-work-cap",
+      "aborted",
+      "abort-check-failed",
+      "invalid-resource-limit",
+    ].includes(pair.reason ?? push.derived.diagnostics.stopReason ?? "")).length,
+  candidatePairsExamined: push.derived.diagnostics.candidatePairsExamined,
+  discoveryWork: push.derived.diagnostics.discoveryWork,
+  safeMergeOrderWork: push.derived.diagnostics.safeMergeOrderWork,
 });
 
-const limitsLiquidity = (signal: BudgetSignal): boolean => signal.residualBudgetOffers > 0;
+const resourceLimited = (signal: ResourceSignal): boolean =>
+  signal.stopReason !== null || signal.withheldPairs > 0;
 
-const sameBudget = (a: BudgetSignal, b: BudgetSignal): boolean =>
-  a.residualBudgetOffers === b.residualBudgetOffers;
+const sameResourceSignal = (left: ResourceSignal, right: ResourceSignal): boolean =>
+  left.stopReason === right.stopReason &&
+  left.withheldPairs === right.withheldPairs &&
+  left.candidatePairsExamined === right.candidatePairsExamined &&
+  left.discoveryWork === right.discoveryWork &&
+  left.safeMergeOrderWork === right.safeMergeOrderWork;
 
 const rungCount = (push: LadderPush): number =>
   push.priceLevels.levels.reduce((total, pair) => total + pair.levels.length, 0);
+
+interface LadderSourceSnapshot {
+  signature: string;
+  unavailable: string;
+  /** First instant at which an offer that was time-eligible for this
+   * derivation enters the settlement expiry margin. */
+  validUntilMs: number | null;
+}
+
+/** Capture every economic/currentness input that can change a derivation.
+ * `Book` mutations are synchronous, so comparing this token after each await
+ * detects a changed snapshot without adding an asynchronous lock to the pure
+ * bounded search. Blob hydration and first-seen metadata are intentionally
+ * absent: neither changes price, compatibility, or exact-file identity. */
+const captureLadderSourceSnapshot = (
+  cache: LadderCache,
+  nowMs: number,
+  expiryMarginSeconds: number,
+  maxSourceOffers: number,
+  unavailableOfferHashes: Iterable<string>,
+): LadderSourceSnapshot => {
+  if (cache.book.size > maxSourceOffers) throw new Error("source-offer-cap");
+  const marginMs = expiryMarginSeconds * 1_000;
+  let validUntilMs: number | null = null;
+  const rows = cache.book.all().map((offer) => {
+    if (offer.expiresAt !== null) {
+      const deadline = offer.expiresAt - marginMs;
+      if (deadline > nowMs && (validUntilMs === null || deadline < validUntilMs)) {
+        validUntilMs = deadline;
+      }
+    }
+    return [
+      offer.offerHash.toLowerCase(),
+      offer.gives.map((leg) => [leg.kind, leg.token.toLowerCase(), leg.amount.toString()]),
+      offer.wants.map((leg) => [leg.kind, leg.token.toLowerCase(), leg.amount.toString()]),
+      offer.expiresAt,
+      [...offer.inputNullifiers].map((value) => value.toLowerCase()).sort(),
+    ] as const;
+  });
+  rows.sort((left, right) => left[0].localeCompare(right[0]));
+  return {
+    signature: JSON.stringify(rows), validUntilMs,
+    unavailable: JSON.stringify([...new Set([...unavailableOfferHashes].map((hash) => hash.toLowerCase()))].sort()),
+  };
+};
+
+const sourceSnapshotFailure = (
+  cache: LadderCache,
+  expected: LadderSourceSnapshot,
+  nowMs: number,
+  expiryMarginSeconds: number,
+  maxSourceOffers: number,
+  unavailableOfferHashes: Iterable<string>,
+): string | null => {
+  if (!cache.isCurrent()) return "book cache is no longer current";
+  const current = captureLadderSourceSnapshot(cache, nowMs, expiryMarginSeconds, maxSourceOffers, unavailableOfferHashes);
+  if (current.signature !== expected.signature) return "book snapshot changed during publication";
+  if (current.unavailable !== expected.unavailable) return "offer reservations changed during publication";
+  if (expected.validUntilMs !== null && nowMs >= expected.validUntilMs) {
+    return "an offer entered the settlement expiry margin during publication";
+  }
+  return null;
+};
 
 function requirePositiveInteger(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -419,8 +488,14 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   const terminalChains = new Map<string, Promise<void>>();
   const terminalTasks = new Set<Promise<void>>();
   let queued = false;
-  let lastTruncation: TruncationSignal = { pairCapOffers: 0, rungCapOffers: 0 };
-  let lastBudget: BudgetSignal = { residualBudgetOffers: 0 };
+  let lastTruncation: TruncationSignal = { pairCapOffers: 0, wirePointCapOffers: 0 };
+  let lastResource: ResourceSignal = {
+    stopReason: null,
+    withheldPairs: 0,
+    candidatePairsExamined: 0,
+    discoveryWork: 0,
+    safeMergeOrderWork: 0,
+  };
   let lastCurrent: boolean | null = null;
   let lastPushRecord: RelayLadderPushRecord | null = null;
 
@@ -501,12 +576,6 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     return null;
   };
 
-  const send = async (frame: SolverToRelayMessage): Promise<void> => {
-    const target = socket;
-    if (!isOpen(target)) throw new Error(`relay socket is not open for ${frame.type}`);
-    await target.send(JSON.stringify(frame));
-  };
-
   /** A job response belongs to the socket that delivered that job. Sending a
    * late proof on a replacement socket after a mid-job drop could attach it to
    * a relay generation that never owned the intent. The wallet-side executor
@@ -521,61 +590,195 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     await expectedSocket.send(JSON.stringify(frame));
   };
 
+  const closeSocketGeneration = (expectedSocket: RelayWebSocketLike, reason: string): void => {
+    if (socket !== expectedSocket) return;
+    try {
+      expectedSocket.close();
+    } catch {
+      // The generation is detached below even if the transport cannot close.
+    }
+    if (socket === expectedSocket) handleClosed(reason);
+  };
+
+  /** Send and retain a validated empty pair on one socket generation. Levels
+   * go first when a capabilities frame may already have yielded, because the
+   * old ladder is the quote-bearing state that must disappear immediately. */
+  const withdrawFailedPush = async (
+    expectedSocket: RelayWebSocketLike,
+    withheld: "derivation-failed" | "snapshot-stale",
+    reason: string,
+    derivedAt: number,
+    cause: string,
+    levelsFirst: boolean,
+  ): Promise<void> => {
+    if (socket !== expectedSocket || retired) return;
+    const empty = buildWithheldLadderPush(
+      withheld,
+      options.ladder.maxParallelSwaps,
+      reason,
+    );
+    recordPush(empty, derivedAt, cause);
+    try {
+      const sent = await bounded((async () => {
+        if (levelsFirst) {
+          await sendOn(expectedSocket, empty.priceLevels);
+          await sendOn(expectedSocket, empty.capabilities);
+        } else {
+          await sendOn(expectedSocket, empty.capabilities);
+          await sendOn(expectedSocket, empty.priceLevels);
+        }
+      })(), withdrawTimeoutMs, "failed-derivation withdrawal");
+      if (!sent) throw new Error("failed-derivation withdrawal did not complete");
+      stats.pushes += 1;
+      emit("push", "warn", "published an explicit empty ladder after a failed derivation", {
+        cause,
+        withheld,
+        reason,
+        pairs: 0,
+        rungs: 0,
+        tokenIds: 0,
+      });
+    } catch (error) {
+      emit("push-failed", "error", `could not withdraw the failed derivation: ${String(error)}`, {
+        cause,
+        withheld,
+        reason,
+      });
+      closeSocketGeneration(expectedSocket, "failed derivation could not be withdrawn");
+    }
+  };
+
   /** One complete push: derive fresh, then send the pair in a fixed order.
    *  Capabilities first, so a relay that has just forgotten us knows our
    *  tokens before the ladder that prices them arrives. */
   const runPush = async (cause: string): Promise<void> => {
     if (retired || !isOpen(socket)) return;
+    const pushSocket = socket;
     // Hoisted so the retained record names the exact clock value the frames are
     // reproducible from. Reading `now()` twice would make the record a
     // near-miss instead of the derivation's own input.
     const derivedAt = now();
+    let sourceSnapshot: LadderSourceSnapshot | null = null;
     let push: LadderPush;
     try {
+      const limits = resolveLadderResourceLimits(options.ladder.resourceLimits);
+      const unavailable = [...(options.ladder.unavailableOfferHashes?.() ?? [])];
+      if (limits.ok && options.cache.isCurrent() && options.cache.book.size <= limits.limits.maxSourceOffers) {
+        sourceSnapshot = captureLadderSourceSnapshot(
+          options.cache, derivedAt, options.ladder.expiryMarginSeconds,
+          limits.limits.maxSourceOffers, unavailable,
+        );
+      }
       push = deriveLadderPush(options.cache, {
         nowMs: derivedAt,
         expiryMarginSeconds: options.ladder.expiryMarginSeconds,
         ...(options.ladder.maxParallelSwaps === undefined
           ? {}
           : { maxParallelSwaps: options.ladder.maxParallelSwaps }),
-        ...(options.ladder.maxPairs === undefined ? {} : { maxPairs: options.ladder.maxPairs }),
-        ...(options.ladder.maxRungsPerPair === undefined
+        ...(options.ladder.resourceLimits === undefined
           ? {}
-          : { maxRungsPerPair: options.ladder.maxRungsPerPair }),
-        ...(options.ladder.unavailableOfferHashes === undefined
-          ? {}
-          : { unavailableOfferHashes: options.ladder.unavailableOfferHashes() }),
+          : { resourceLimits: options.ladder.resourceLimits }),
+        unavailableOfferHashes: unavailable,
         // FR-002: forward the ENTIRE policy in one hop. The per-field spread
         // that used to live here is what dropped `supportedPairs`/
         // `minJobOutput` between config and the wire (P4-F02).
         ...forwardAdmissionPolicy(options.ladder),
-        // FR-003: read the executability budget per push, like the claim set
-        // above.
-        ...(options.ladder.spendableInventory === undefined
+        ...(options.ladder.shouldAbort === undefined
           ? {}
-          : { spendableInventory: options.ladder.spendableInventory() }),
+          : { shouldAbort: options.ladder.shouldAbort }),
       });
     } catch (error) {
-      // A frame the builders refuse is NEVER sent: the relay discards a bad
-      // frame silently and would keep quoting the previous ladder.
+      // Silence would keep the previous ladder live. Withdraw it explicitly;
+      // if that cannot complete on this generation, close the generation so
+      // the relay drops all of its state.
       stats.pushFailures += 1;
-      emit("push-failed", "error", `could not derive a ladder to push: ${String(error)}`, {
+      const reason = String(error);
+      emit("push-failed", "error", `could not derive a ladder to push: ${reason}`, { cause });
+      await withdrawFailedPush(
+        pushSocket,
+        "derivation-failed",
+        reason,
+        derivedAt,
         cause,
-      });
+        false,
+      );
       return;
+    }
+
+    if (push.withheld === null && sourceSnapshot !== null) {
+      let staleReason: string | null;
+      try {
+        if (options.ladder.shouldAbort?.()) throw new Error("publication aborted after derivation");
+        staleReason = sourceSnapshotFailure(
+          options.cache,
+          sourceSnapshot,
+          now(),
+          options.ladder.expiryMarginSeconds,
+          push.derived.limits.maxSourceOffers,
+          options.ladder.unavailableOfferHashes?.() ?? [],
+        );
+      } catch (error) {
+        staleReason = `could not revalidate the derived snapshot: ${String(error)}`;
+      }
+      if (staleReason !== null) {
+        stats.pushFailures += 1;
+        emit("push-failed", "error", `withholding stale derivation: ${staleReason}`, { cause });
+        await withdrawFailedPush(
+          pushSocket,
+          "snapshot-stale",
+          staleReason,
+          derivedAt,
+          cause,
+          false,
+        );
+        queued = true;
+        return;
+      }
     }
 
     recordPush(push, derivedAt, cause);
     reportCurrentness(push);
     reportTruncation(push.derived.excluded);
-    reportBudgetLimits(push.derived.excluded);
+    reportResourceLimits(push);
 
     try {
-      await send(push.capabilities);
-      await send(push.priceLevels);
+      await sendOn(pushSocket, push.capabilities);
+      if (socket !== pushSocket || retired) return;
+      if (push.withheld === null && sourceSnapshot !== null) {
+        let staleReason: string | null;
+        try {
+          if (options.ladder.shouldAbort?.()) throw new Error("publication aborted after capabilities");
+          staleReason = sourceSnapshotFailure(
+            options.cache,
+            sourceSnapshot,
+            now(),
+            options.ladder.expiryMarginSeconds,
+            push.derived.limits.maxSourceOffers,
+            options.ladder.unavailableOfferHashes?.() ?? [],
+          );
+        } catch (error) {
+          staleReason = `could not revalidate the derived snapshot after capabilities: ${String(error)}`;
+        }
+        if (staleReason !== null) {
+          stats.pushFailures += 1;
+          emit("push-failed", "error", `withholding stale derivation: ${staleReason}`, { cause });
+          await withdrawFailedPush(
+            pushSocket,
+            "snapshot-stale",
+            staleReason,
+            derivedAt,
+            cause,
+            true,
+          );
+          queued = true;
+          return;
+        }
+      }
+      await sendOn(pushSocket, push.priceLevels);
     } catch (error) {
       stats.pushFailures += 1;
       emit("push-failed", "warn", `push failed on the wire: ${String(error)}`, { cause });
+      closeSocketGeneration(pushSocket, "ladder publication failed");
       return;
     }
 
@@ -626,8 +829,11 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         "ladder-truncated",
         "error",
         `publication caps dropped real liquidity: ${signal.pairCapOffers} offer(s) past ` +
-          `maxPairs, ${signal.rungCapOffers} past maxRungsPerPair`,
-        { pairCapOffers: signal.pairCapOffers, rungCapOffers: signal.rungCapOffers },
+          `maxPairs, ${signal.wirePointCapOffers} past maxWirePointsPerPair`,
+        {
+          pairCapOffers: signal.pairCapOffers,
+          wirePointCapOffers: signal.wirePointCapOffers,
+        },
       );
     } else if (wasTruncating) {
       emit(
@@ -638,32 +844,32 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     }
   };
 
-  /**
-   * FR-003's operator half: liquidity the solver OWNS but withheld because it
-   * could not execute it.
-   *
-   * Change-triggered like the cap signal, and at error severity, because the
-   * relay shows nothing at all when a rung is withheld — the failure mode is a
-   * solver that looks healthy and quotes nothing. Recovery is reported too.
-   */
-  const reportBudgetLimits = (excluded: readonly LadderExclusion[]): void => {
-    const signal = budgetOf(excluded);
-    if (sameBudget(signal, lastBudget)) return;
-    const wasLimiting = limitsLiquidity(lastBudget);
-    lastBudget = signal;
-    if (limitsLiquidity(signal)) {
+  /** Exact search exhaustion/cancellation is observable and never silently
+   * replaced by another pricing method. */
+  const reportResourceLimits = (push: LadderPush): void => {
+    const signal = resourceSignalOf(push);
+    if (sameResourceSignal(signal, lastResource)) return;
+    const wasLimiting = resourceLimited(lastResource);
+    lastResource = signal;
+    if (resourceLimited(signal)) {
       emit(
-        "ladder-budget-limited",
+        "ladder-resource-limited",
         "error",
-        `solver inventory withheld real liquidity: ${signal.residualBudgetOffers} offer(s) ` +
-          "past the residual tokenOut budget",
-        { residualBudgetOffers: signal.residualBudgetOffers },
+        `canonical derivation withheld ${signal.withheldPairs} pair(s)` +
+          (signal.stopReason === null ? "" : ` (${signal.stopReason})`),
+        {
+          stopReason: signal.stopReason,
+          withheldPairs: signal.withheldPairs,
+          candidatePairsExamined: signal.candidatePairsExamined,
+          discoveryWork: signal.discoveryWork,
+          safeMergeOrderWork: signal.safeMergeOrderWork,
+        },
       );
     } else if (wasLimiting) {
       emit(
-        "ladder-budget-cleared",
+        "ladder-resource-cleared",
         "info",
-        "solver inventory no longer withholds any offer",
+        "canonical derivation resource limits no longer withhold a pair",
       );
     }
   };
@@ -943,12 +1149,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   const recordWithdrawal = (): void => {
     try {
       recordPush(
-        {
-          capabilities: buildSolverCapabilitiesFrame([], options.ladder.maxParallelSwaps),
-          priceLevels: withdrawalPriceLevelsFrame(),
-          derived: { levels: [], tokenIds: [], provenance: [], excluded: [] },
-          withheld: "withdrawn",
-        },
+        buildWithheldLadderPush("withdrawn", options.ladder.maxParallelSwaps),
         now(),
         "withdraw",
       );
@@ -974,9 +1175,10 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     }
     // Levels first: quoting needs a live ladder, so this is the frame that
     // stops quotes. Capabilities second, so `GET /tokens` empties too.
+    const withdrawSocket = socket;
     const work = (async () => {
-      await send(withdrawalPriceLevelsFrame());
-      await send(buildSolverCapabilitiesFrame([], options.ladder.maxParallelSwaps));
+      await sendOn(withdrawSocket, withdrawalPriceLevelsFrame());
+      await sendOn(withdrawSocket, buildSolverCapabilitiesFrame([], options.ladder.maxParallelSwaps));
     })();
     const sent = await bounded(work, withdrawTimeoutMs, "withdrawal");
     stats.withdrawn = sent;

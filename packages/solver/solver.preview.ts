@@ -10,6 +10,7 @@ import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import { isSolverEnabled } from "./env.ts";
+import { assertNoRetiredSolverPricingEnv } from "./src/launch.ts";
 import { runSolver } from "./src/run.ts";
 import { startWithSignalOwnership } from "./src/startup-signals.ts";
 
@@ -21,6 +22,9 @@ if (!isSolverEnabled()) {
   console.log("[solver] SOLVER_ENABLED=false — exiting without starting");
   process.exit(0);
 }
+
+// Validate retired pricing settings before any wallet, network, or journal side effect.
+assertNoRetiredSolverPricingEnv();
 
 globalThis.WebSocket = WebSocket;
 setNetworkId(net.id as any);

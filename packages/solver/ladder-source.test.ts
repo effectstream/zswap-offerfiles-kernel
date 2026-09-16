@@ -11,6 +11,7 @@ import { deriveLadderPush, type LadderCache } from "./src/ladder-source.ts";
 // comparable with the pinned relay contract.
 const A = `01${"00".repeat(31)}`;
 const B = `02${"00".repeat(31)}`;
+const C = `03${"00".repeat(31)}`;
 
 const NOW = Date.parse("2026-06-01T12:00:00.000Z");
 const EXPIRES = "2026-06-01T13:00:00.000Z";
@@ -52,218 +53,136 @@ const seed = (rows: ApiZswap[]): Book => {
 
 const cache = (book: Book, current = true): LadderCache => ({ book, isCurrent: () => current });
 
-describe("ladder source — the cache is the only input", () => {
-  test("RF3 pair allowlist and output minimum deterministically constrain publication", () => {
-    const allowed = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
-      ...OPTIONS,
-      supportedPairs: new Set([`${B}->${A}`]),
-      minJobOutput: new Map([[A, 25n]]),
-    });
-    expect(allowed.priceLevels.levels[0]!.levels).toEqual([
-      { input: "20", output: "30" },
-      { input: "25", output: "35" },
-    ]);
-    // Hidden sub-minimum rungs remain in provenance because they are whole
-    // offers backing the first admitted cumulative quote.
-    expect(allowed.derived.provenance[0]!.rungs).toHaveLength(3);
 
-    const unsupported = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
-      ...OPTIONS,
-      supportedPairs: new Set([`${A}->${B}`]),
-    });
-    expect(unsupported.priceLevels.levels).toEqual([]);
-    expect(unsupported.derived.excluded.map(({ reason }) => reason)).toEqual([
-      "unsupported-pair", "unsupported-pair", "unsupported-pair",
-    ]);
-
-    const missingMinimum = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
-      ...OPTIONS,
-      minJobOutput: new Map(),
-    });
-    expect(missingMinimum.priceLevels.levels).toEqual([]);
-    expect(missingMinimum.derived.excluded.map(({ reason }) => reason)).toEqual([
-      "minimum-output", "minimum-output", "minimum-output",
-    ]);
-  });
-
-  // RE-ENCODED at 00006-R2 (FR-003 / SC-002). Was "FR-003/FR-004 executability
-  // budgets reach the derivation through the push", with a tokenIn matrix
-  // (`[B, 24n]` → two rungs, `[B, 9n]` → nothing, one `mirror-budget` reason).
-  // The tokenIn bound is gone — fee sizing spends no tokenIn — so the same
-  // snapshots now publish the full ladder, and the tokenOut half is asserted
-  // unchanged from a wallet that holds NO tokenIn at all.
-  test("FR-003 the tokenOut budget reaches the derivation through the push, and tokenIn does not", () => {
-    // The canonical book backs B→A, so tokenIn = B and tokenOut = A (what a
-    // residual pays). Worst-case interval residuals are 9 (rung 2) and 4
-    // (rung 3); cumulative inputs are 10/20/25.
-    const rungs = (spendableInventory: ReadonlyMap<string, bigint>) =>
-      deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, spendableInventory })
-        .priceLevels.levels[0]?.levels ?? [];
-
-    // No tokenOut inventory still publishes the first rung: it opens no
-    // interpolation interval, so FR-001's retained-surplus path stays quotable.
-    // Asserted with tokenIn EXHAUSTED, which is 00006's operating mode.
-    expect(rungs(new Map([[A, 0n], [B, 0n]]))).toEqual([{ input: "10", output: "20" }]);
-    expect(rungs(new Map([[A, 9n], [B, 0n]]))).toHaveLength(3);
-    // The old tokenIn matrix, inverted: 24 used to cap the ladder at the second
-    // rung and 9 used to suppress the pair entirely. Neither bounds anything now.
-    expect(rungs(new Map([[A, 1_000n], [B, 24n]]))).toHaveLength(3);
-    expect(rungs(new Map([[A, 1_000n], [B, 9n]]))).toHaveLength(3);
-    // SC-002: a wallet with NO tokenIn key at all publishes the full ladder.
-    expect(rungs(new Map([[A, 1_000n]]))).toHaveLength(3);
-    // Absent is OPEN — the pre-budget contract, which dry-run still relies on.
-    expect(deriveLadderPush(cache(seed(CANONICAL_ROWS)), OPTIONS)
-      .priceLevels.levels[0]!.levels).toHaveLength(3);
-
-    // A withheld rung is reported as DATA, so the push loop can turn it into a
-    // loud operator signal rather than a silent trim. Truncation is total: the
-    // rung after a withheld one carries the same reason, because a whole-offer
-    // cumulative ladder can be cut but not punctured.
-    const reasonsFor = (spendableInventory: ReadonlyMap<string, bigint>) =>
-      deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, spendableInventory })
-        .derived.excluded.map(({ reason }) => reason);
-    expect(reasonsFor(new Map([[A, 0n], [B, 0n]])))
-      .toEqual(["residual-budget", "residual-budget"]);
-    // Was `["mirror-budget"]`: nothing is withheld for a tokenIn reason.
-    expect(reasonsFor(new Map([[A, 1_000n], [B, 24n]]))).toEqual([]);
-    // SC-002, the uncapitalized solver end to end through the push: the
-    // whole-maker rung publishes, the interior rungs are withheld by F03 alone.
-    const empty = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
-      ...OPTIONS,
-      spendableInventory: new Map(),
-    });
-    expect(empty.withheld).toBeNull();
-    expect(empty.priceLevels.levels[0]!.levels).toEqual([{ input: "10", output: "20" }]);
-    expect(empty.capabilities.tokenIds).toEqual([A, B]);
-    expect(empty.derived.excluded.map(({ reason }) => reason))
-      .toEqual(["residual-budget", "residual-budget"]);
-  });
-
-  test("a seeded book pushes exactly the canonical ladder and its capabilities", () => {
+const FULL = [
+  { input: "5", output: "5" }, { input: "9", output: "5" },
+  { input: "10", output: "20" }, { input: "14", output: "20" },
+  { input: "15", output: "25" }, { input: "19", output: "25" },
+  { input: "20", output: "30" }, { input: "24", output: "30" },
+  { input: "25", output: "35" }, { input: "250", output: "35" },
+];
+describe("whole-offer ladder source", () => {
+  test("publishes the staircase, winning witnesses and terminal with validated frames", () => {
     const push = deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, maxParallelSwaps: 8 });
-
     expect(push.withheld).toBeNull();
-    expect(push.priceLevels.levels).toEqual([
-      {
-        tokenIn: B,
-        tokenOut: A,
-        levels: [
-          { input: "10", output: "20" },
-          { input: "20", output: "30" },
-          { input: "25", output: "35" },
-        ],
-      },
-    ]);
-    expect(push.capabilities).toEqual({
-      type: "solver-capabilities",
-      tokenIds: [A, B],
-      maxParallelSwaps: 8,
-    });
-    // Both frames are what the relay itself would admit.
+    expect(push.priceLevels.levels).toEqual([{ tokenIn: B, tokenOut: A, levels: FULL }]);
+    expect(push.capabilities).toEqual({ type: "solver-capabilities", tokenIds: [A, B], maxParallelSwaps: 8 });
     expect(parsePriceLevels(push.priceLevels)).toEqual(push.priceLevels);
     expect(parseSolverCapabilities(push.capabilities)).toEqual(push.capabilities);
+    expect(push.derived.provenance[0]!.combinations.map(({ tokenBalances: _, ...entry }) => entry)).toEqual([
+      { input: "5", output: "5", offerHashes: [O2] },
+      { input: "10", output: "20", offerHashes: [O3] },
+      { input: "15", output: "25", offerHashes: [O2, O3] },
+      { input: "20", output: "30", offerHashes: [O1, O3] },
+      { input: "25", output: "35", offerHashes: [O1, O2, O3] },
+    ]);
+    expect(push.derived.provenance[0]!.combinations[0]!.tokenBalances).toEqual([
+      { token: A, gives: "5", wants: "0", net: "5" },
+      { token: B, gives: "0", wants: "5", net: "-5" },
+    ]);
   });
-
-  test("byte-reproducible from the same cache state, whatever order it was built in", () => {
-    const forward = deriveLadderPush(cache(seed(CANONICAL_ROWS)), OPTIONS);
-    const reverse = deriveLadderPush(cache(seed([...CANONICAL_ROWS].reverse())), OPTIONS);
-    expect(JSON.stringify(forward.priceLevels)).toBe(JSON.stringify(reverse.priceLevels));
-    expect(JSON.stringify(forward.capabilities)).toBe(JSON.stringify(reverse.capabilities));
-  });
-
-  test("the derived ladder loads into the engine's own LadderBook and quotes identically", () => {
-    const push = deriveLadderPush(cache(seed(CANONICAL_ROWS)), OPTIONS);
-    // `ladder.ts`/`ladder-schema` were retained by N1 for exactly this: one
-    // rung/interpolation vocabulary, so what the solver publishes and what it
-    // prices against cannot drift apart.
-    const ladders = LadderBook.fromPairs(push.priceLevels.levels);
-    for (const size of [10n, 12n, 15n, 20n, 25n]) {
-      expect(ladders.maxPayout(B, A, size)).toBe(
-        interpolateQuote(push.priceLevels.levels[0]!.levels, size),
-      );
+  test("forwards admission policy and retains only admitted thresholds", () => {
+    const allowed = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
+      ...OPTIONS, supportedPairs: new Set([`${B}->${A}`]), minJobOutput: new Map([[A, 25n]]),
+    });
+    expect(allowed.priceLevels.levels[0]!.levels).toEqual(FULL.slice(4));
+    expect(allowed.derived.provenance[0]!.combinations).toHaveLength(3);
+    for (const policy of [{ supportedPairs: new Set([`${A}->${B}`]) }, { minJobOutput: new Map<string, bigint>() }]) {
+      expect(deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, ...policy }).priceLevels.levels).toEqual([]);
     }
-    expect(ladders.maxPayout(B, A, 12n)).toBe(22n);
-    expect(ladders.maxPayout(A, B, 12n)).toBeNull();
   });
-});
-
-describe("ladder source — book changes and fail-closed withholding", () => {
-  test("a consumed offer is gone from the very next derivation (FR-014 cadence)", () => {
+  test("order independent and relay interpolation evaluates constant plateaus", () => {
+    const push = deriveLadderPush(cache(seed(CANONICAL_ROWS)), OPTIONS);
+    expect(push).toEqual(deriveLadderPush(cache(seed([...CANONICAL_ROWS].reverse())), OPTIONS));
+    const ladders = LadderBook.fromPairs(push.priceLevels.levels);
+    for (const [input, output] of [[5n, 5n], [9n, 5n], [10n, 20n], [12n, 20n], [15n, 25n], [250n, 35n]]) {
+      expect(ladders.maxPayout(B, A, input)).toBe(output);
+      expect(interpolateQuote(push.priceLevels.levels[0]!.levels, input)).toBe(output);
+    }
+    expect(ladders.maxPayout(B, A, 251n)).toBeNull();
+  });
+  test("deletion and reservations replace witnesses on the next derivation", () => {
     const book = seed(CANONICAL_ROWS);
-    expect(deriveLadderPush(cache(book), OPTIONS).priceLevels.levels[0]!.levels).toHaveLength(3);
-
-    // The mirror applies `offer_consumed` by nullifier; the best-rate rung
-    // disappears with it.
-    expect(book.removeByNullifier(O3)).toEqual([O3]);
-    const after = deriveLadderPush(cache(book), OPTIONS);
-    expect(after.priceLevels.levels[0]!.levels).toEqual([
-      { input: "10", output: "10" },
-      { input: "15", output: "15" },
+    const reserved = deriveLadderPush(cache(book), { ...OPTIONS, unavailableOfferHashes: [O3] });
+    expect(reserved.derived.provenance[0]!.combinations.map(({ tokenBalances: _, ...entry }) => entry)).toEqual([
+      { input: "5", output: "5", offerHashes: [O2] },
+      { input: "10", output: "10", offerHashes: [O1] },
+      { input: "15", output: "15", offerHashes: [O1, O2] },
     ]);
-    expect(after.derived.provenance[0]!.rungs.map((rung) => rung.offerHash)).toEqual([O1, O2]);
+    expect(reserved.derived.excluded).toEqual([{ offerHash: O3, reason: "unavailable" }]);
+    book.removeByNullifier(O3);
+    expect(deriveLadderPush(cache(book), OPTIONS).priceLevels).toEqual(reserved.priceLevels);
   });
-
-  test("an emptied book withdraws instead of publishing a stale ladder", () => {
-    const book = seed(CANONICAL_ROWS);
-    for (const offerHash of [O1, O2, O3]) book.remove(offerHash);
-    const push = deriveLadderPush(cache(book), OPTIONS);
-    expect(push.withheld).toBeNull();
-    expect(push.priceLevels).toEqual({ type: "price-levels", levels: [] });
-    expect(push.capabilities.tokenIds).toEqual([]);
-  });
-
-  test("a cache that is not current publishes nothing at all (FR-005, downstream half)", () => {
-    const book = seed(CANONICAL_ROWS);
-    const push = deriveLadderPush(cache(book, false), { ...OPTIONS, maxParallelSwaps: 8 });
-
-    expect(push.withheld).toBe("cache-not-current");
-    // Not silence: the relay has no version or tombstone concept, so a stale
-    // ladder would keep quoting. Withholding IS the explicit empty push.
-    expect(push.priceLevels).toEqual({ type: "price-levels", levels: [] });
-    expect(push.capabilities).toEqual({
-      type: "solver-capabilities",
-      tokenIds: [],
-      maxParallelSwaps: 8,
+  test("empty, stale, expiring and aborted books withdraw with diagnostics", () => {
+    expect(deriveLadderPush(cache(seed([])), OPTIONS).priceLevels.levels).toEqual([]);
+    const stale = deriveLadderPush(cache(seed(CANONICAL_ROWS), false), OPTIONS);
+    expect(stale.withheld).toBe("cache-not-current");
+    expect(stale.capabilities.tokenIds).toEqual([]);
+    expect(stale.derived.diagnostics).toMatchObject({
+      candidatePairsExamined: 0,
+      discoveryWork: 0,
+      safeMergeOrderWork: 0,
     });
-    expect(push.derived.levels).toEqual([]);
-    expect(parsePriceLevels(push.priceLevels)).toEqual(push.priceLevels);
-    // The book itself is untouched — currentness gates publication, not the
-    // cache, so it recovers without a resnapshot.
-    expect(book.size).toBe(3);
-    expect(deriveLadderPush(cache(book), OPTIONS).priceLevels.levels).toHaveLength(1);
+    const expired = deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, nowMs: Date.parse(EXPIRES) - 60_000 });
+    expect(expired.priceLevels.levels).toEqual([]);
+    expect(expired.derived.excluded.every((entry) => entry.reason === "expiring")).toBe(true);
+    const aborted = deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, shouldAbort: () => true });
+    expect(aborted.withheld).toBe("derivation-failed");
+    expect(aborted.derived.diagnostics.stopReason).toBe("aborted");
   });
-
-  test("offers claimed by an in-flight fill do not back a published rung", () => {
-    // The claim set comes from `Stock` at push time (N4 wires it); derivation
-    // stays pure and takes it as a parameter.
-    const push = deriveLadderPush(cache(seed(CANONICAL_ROWS)), {
-      ...OPTIONS,
-      unavailableOfferHashes: [O3],
-    });
-    expect(push.priceLevels.levels[0]!.levels).toEqual([
-      { input: "10", output: "10" },
-      { input: "15", output: "15" },
-    ]);
-    expect(push.derived.excluded).toEqual([{ offerHash: O3, reason: "unavailable" }]);
-  });
-
-  test("an offer inside the expiry margin stops backing rungs before it dies", () => {
+  test("source limit is enforced before any full copy, including lower controls", () => {
     const book = seed(CANONICAL_ROWS);
-    const justInsideMargin = Date.parse(EXPIRES) - 60_000;
-    const push = deriveLadderPush(cache(book), {
-      nowMs: justInsideMargin,
-      expiryMarginSeconds: 60,
-    });
+    book.all = () => { throw new Error("overlimit books must not be copied"); };
+    const push = deriveLadderPush(cache(book), { ...OPTIONS, resourceLimits: { maxSourceOffers: 2 } });
     expect(push.priceLevels.levels).toEqual([]);
-    expect(push.derived.excluded.map((entry) => entry.reason)).toEqual([
-      "expiring",
-      "expiring",
-      "expiring",
-    ]);
-    // One millisecond earlier they are all still publishable.
-    expect(
-      deriveLadderPush(cache(book), { nowMs: justInsideMargin - 1, expiryMarginSeconds: 60 })
-        .priceLevels.levels[0]!.levels,
-    ).toHaveLength(3);
+    expect(push.withheldReason).toBe("source-offer-cap");
+    expect(push.derived.diagnostics).toMatchObject({ stopReason: "source-offer-cap", sourceOffersScanned: 0 });
+    expect(push.derived.limits.maxSourceOffers).toBe(2);
+  });
+  test("search limits withhold unproved pairs; invalid limits never read the source", () => {
+    const book = seed(CANONICAL_ROWS);
+    const limited = deriveLadderPush(cache(book), { ...OPTIONS, resourceLimits: { maxVisitedSubsetsPerPair: 1 } });
+    expect(limited.priceLevels.levels).toEqual([]);
+    expect(limited.derived.diagnostics.pairs[0]!.reason).toBe("pair-search-cap");
+    book.all = () => { throw new Error("invalid controls must not read the book"); };
+    const invalid = deriveLadderPush(cache(book), { ...OPTIONS, resourceLimits: { maxWirePointsPerPair: 65 } });
+    expect(invalid.derived.diagnostics.stopReason).toBe("invalid-resource-limit");
+  });
+  test("candidate-pair and discovery controls produce explicit empty diagnostics", () => {
+    const book = new Book();
+    book.upsert({
+      offerHash: O1,
+      gives: [{ token: A, amount: 10n, kind: "SHIELDED" }],
+      wants: [{ token: B, amount: 5n, kind: "SHIELDED" }],
+      expiresAt: Date.parse(EXPIRES),
+      firstSeenAt: NOW,
+      inputNullifiers: [O1],
+    });
+    book.upsert({
+      offerHash: O2,
+      gives: [{ token: C, amount: 7n, kind: "SHIELDED" }],
+      wants: [{ token: A, amount: 4n, kind: "SHIELDED" }],
+      expiresAt: Date.parse(EXPIRES),
+      firstSeenAt: NOW,
+      inputNullifiers: [O2],
+    });
+    const candidateLimited = deriveLadderPush(cache(book), {
+      ...OPTIONS,
+      resourceLimits: { maxCandidatePairs: 1 },
+    });
+    // A global candidate cap may preserve an independently completed first
+    // pair while withholding the unexamined remainder.
+    expect(candidateLimited.withheld).toBeNull();
+    expect(candidateLimited.derived.diagnostics.stopReason).toBe("candidate-pair-cap");
+    expect(candidateLimited.derived.diagnostics.candidatePairsExamined).toBe(1);
+    expect(candidateLimited.priceLevels.levels).toHaveLength(1);
+
+    const discoveryLimited = deriveLadderPush(cache(book), {
+      ...OPTIONS,
+      resourceLimits: { maxDiscoveryWork: 1 },
+    });
+    expect(discoveryLimited.withheld).toBe("derivation-failed");
+    expect(discoveryLimited.derived.diagnostics.stopReason).toBe("discovery-work-cap");
+    expect(discoveryLimited.derived.diagnostics.discoveryWork).toBe(1);
   });
 });

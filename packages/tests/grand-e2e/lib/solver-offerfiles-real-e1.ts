@@ -986,7 +986,6 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
       E1_SOURCE_INVENTORY_AMOUNT: "\${E1_SOURCE_INVENTORY_AMOUNT:-1000000}"
       E1_ACTOR_RESULT_PATH: /outputs/actor/actor-manifest.json
       E1_ACTOR_RUNTIME_PATH: /outputs/actor/actor-runtime.json
-      E1_ACTOR_LADDER_PATH: /outputs/actor/solver-ladder.json
       E1_ACTOR_PRE_SPENT_PATH: /outputs/actor/pre-spent-liveness.json
       E1_OFFER_TTL_MS: "28800000"
       E1_SYNC_TIMEOUT_MS: "300000"
@@ -1084,8 +1083,7 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
       E1_SOLVER_SEED: "\${E1_SOLVER_SEED:?E1_SOLVER_SEED must be set}"
       E1_SOLVER_API: http://backend-proxy:8080
       E1_SOLVER_AUTH_TOKEN: "\${E1_ACTIVE_SOLVER_TOKEN:?E1_ACTIVE_SOLVER_TOKEN must be set}"
-${input.includeN6Services ? "      E1_SOLVER_RELAY_WS_URL: ws://relay-fixture:9001\n      E1_SOLVER_RELAY_AUTH_TOKEN: ${N6_RELAY_AUTH_TOKEN:?N6_RELAY_AUTH_TOKEN must be set}\n" : ""}      E1_SOLVER_LADDER_CONFIG: /inputs/actor/solver-ladder.json
-      E1_SOLVER_TELEMETRY_PATH: /outputs/solver/solver-telemetry.jsonl
+${input.includeN6Services ? "      E1_SOLVER_RELAY_WS_URL: ws://relay-fixture:9001\n      E1_SOLVER_RELAY_AUTH_TOKEN: ${N6_RELAY_AUTH_TOKEN:?N6_RELAY_AUTH_TOKEN must be set}\n" : ""}      E1_SOLVER_TELEMETRY_PATH: /outputs/solver/solver-telemetry.jsonl
       E1_SOLVER_RUNTIME_PATH: /outputs/solver/solver-runtime.json
       E1_SOLVER_RECORDER_URL: http://telemetry-relay:8080/record
       E1_SOLVER_RECORDER_TOKEN: "\${E1_ACTIVE_RECORDER_TOKEN:?E1_ACTIVE_RECORDER_TOKEN must be set}"
@@ -1099,9 +1097,6 @@ ${input.includeN6Services ? "      E1_SOLVER_RELAY_WS_URL: ws://relay-fixture:90
       SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS: "500"
       SOLVER_BACKEND_HEALTH_MAX_AGE_MS: "5000"
       SOLVER_STATUS_POLL_MS: "500"
-      SOLVER_ENABLE_PATH_B: "false"
-      SOLVER_ENABLE_CYCLES: "false"
-      SOLVER_ENABLE_RESIDUAL_TOPUPS: "false"
       SOLVER_DRY_RUN: "false"
     volumes:
       - type: bind

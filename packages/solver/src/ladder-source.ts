@@ -16,13 +16,16 @@
 import {
   forwardAdmissionPolicy,
   type JobAdmissionPolicy,
-  type SpendableInventory,
 } from "@zswap-da/solver-core/admission-policy";
 import {
   buildPriceLevelsFrame,
   buildSolverCapabilitiesFrame,
+  DEFAULT_LADDER_RESOURCE_LIMITS,
   deriveLadder,
+  resolveLadderResourceLimits,
   type DerivedLadder,
+  type LadderResourceLimitControls,
+  type LadderResourceLimits,
 } from "@zswap-da/solver-core/ladder-derivation";
 import type {
   PriceLevelsMessage,
@@ -45,15 +48,11 @@ export interface LadderPushOptions extends JobAdmissionPolicy {
   /** Offers claimed by an in-flight fill, from `Stock`. Kept as a parameter so
    *  derivation stays pure and this file stays free of executor state. */
   unavailableOfferHashes?: Iterable<string>;
-  /** FR-003: what the solver can actually move (`Stock.available`), so
-   *  publication cannot advertise a rung it would refuse. Same reason it is a
-   *  parameter: no executor or wallet state reaches this file. Read for the
-   *  pair's tokenOut only — 00006-R2 removed the tokenIn bound (FR-003), so a
-   *  solver with an empty token wallet still publishes its whole-maker rungs. */
-  spendableInventory?: SpendableInventory | null;
   maxParallelSwaps?: number;
-  maxPairs?: number;
-  maxRungsPerPair?: number;
+  /** Lower-only controls for the canonical exact search and wire encoding. */
+  resourceLimits?: Readonly<LadderResourceLimitControls>;
+  /** Optional caller cancellation/supersession check. */
+  shouldAbort?: () => boolean;
 }
 
 export interface LadderPush {
@@ -64,24 +63,61 @@ export interface LadderPush {
    * Null when the push carries the cache's real ladders; otherwise why it is
    * an empty withdrawal instead.
    *
-   * `deriveLadderPush` produces only `"cache-not-current"` — the fail-closed
-   * withdrawal below. `"withdrawn"` exists for the R-41 EXPLICIT withdrawal
-   * frame, which is assembled by the relay client rather than derived here, and
-   * is in this union so that the last-push record a status observer reads
-   * (00007 FR-004) can say which of the two an empty pair was. Every consumer
-   * that only asks "are these the real ladders" keeps testing `=== null`.
+   * Failed search and runtime freshness checks produce explicit empty frames
+   * with a diagnostic cause. `withdrawn` identifies an explicit retirement.
    */
-  withheld: "cache-not-current" | "withdrawn" | null;
+  withheld:
+    | "cache-not-current"
+    | "derivation-failed"
+    | "snapshot-stale"
+    | "withdrawn"
+    | null;
+  /** Human-readable cause for a fail-closed runtime withdrawal. This is data
+   *  for status/diagnostics only; no caller may use it to choose another
+   *  ladder policy. */
+  withheldReason?: string;
 }
 
 /** A fresh object every time: a shared frozen singleton would put one caller's
  *  mutation into every other caller's push. */
-const nothingDerived = (): DerivedLadder => ({
+const nothingDerived = (
+  limits: Readonly<LadderResourceLimits> = DEFAULT_LADDER_RESOURCE_LIMITS,
+): DerivedLadder => ({
   levels: [],
   tokenIds: [],
   provenance: [],
   excluded: [],
+  limits: { ...limits },
+  diagnostics: {
+    stopReason: null,
+    invalidResourceLimit: null,
+    sourceOffersScanned: 0,
+    candidatePairsExamined: 0,
+    discoveryWork: 0,
+    safeMergeOrderWork: 0,
+    visitedSubsets: 0,
+    peakStoredExactInputs: 0,
+    pairs: [],
+  },
 });
+
+/** Build the validated empty frame pair used when runtime safety checks cannot
+ * publish a real derivation. Keeping this beside `deriveLadderPush` makes every
+ * fail-closed path use the same frame builders as ordinary publication. */
+export function buildWithheldLadderPush(
+  withheld: Exclude<LadderPush["withheld"], null>,
+  maxParallelSwaps?: number,
+  withheldReason?: string,
+  limits?: Readonly<LadderResourceLimits>,
+): LadderPush {
+  return {
+    capabilities: buildSolverCapabilitiesFrame([], maxParallelSwaps),
+    priceLevels: buildPriceLevelsFrame([]),
+    derived: nothingDerived(limits),
+    withheld,
+    ...(withheldReason === undefined ? {} : { withheldReason }),
+  };
+}
 
 /**
  * Derive the pair of frames the relay client should send for the cache's
@@ -95,15 +131,20 @@ const nothingDerived = (): DerivedLadder => ({
  */
 export function deriveLadderPush(cache: LadderCache, options: LadderPushOptions): LadderPush {
   if (!cache.isCurrent()) {
-    return {
-      capabilities: buildSolverCapabilitiesFrame([], options.maxParallelSwaps),
-      priceLevels: buildPriceLevelsFrame([]),
-      derived: nothingDerived(),
-      withheld: "cache-not-current",
-    };
+    return buildWithheldLadderPush("cache-not-current", options.maxParallelSwaps);
   }
 
-  const derived = deriveLadder(cache.book.all(), {
+  const resolved = resolveLadderResourceLimits(options.resourceLimits);
+  // Book.size is O(1). Reject before all() copies an unbounded source or a
+  // publication snapshot serializes it. No source was scanned on this path.
+  if (resolved.ok && cache.book.size > resolved.limits.maxSourceOffers) {
+    const empty = buildWithheldLadderPush(
+      "derivation-failed", options.maxParallelSwaps, "source-offer-cap", resolved.limits,
+    );
+    empty.derived.diagnostics.stopReason = "source-offer-cap";
+    return empty;
+  }
+  const derived = deriveLadder(resolved.ok ? cache.book.all() : [], {
     nowMs: options.nowMs,
     expiryMarginSeconds: options.expiryMarginSeconds,
     ...(options.unavailableOfferHashes === undefined
@@ -112,17 +153,17 @@ export function deriveLadderPush(cache: LadderCache, options: LadderPushOptions)
     // FR-002: the whole policy in one hop. Never a field-by-field spread —
     // that is precisely how P4-F02 dropped `supportedPairs`/`minJobOutput`.
     ...forwardAdmissionPolicy(options),
-    ...(options.spendableInventory === undefined
-      ? {}
-      : { spendableInventory: options.spendableInventory }),
-    ...(options.maxPairs === undefined ? {} : { maxPairs: options.maxPairs }),
-    ...(options.maxRungsPerPair === undefined ? {} : { maxRungsPerPair: options.maxRungsPerPair }),
+    ...(options.resourceLimits === undefined ? {} : { resourceLimits: options.resourceLimits }),
+    shouldAbort: () => !cache.isCurrent() || options.shouldAbort?.() === true,
   });
 
   return {
     capabilities: buildSolverCapabilitiesFrame(derived.tokenIds, options.maxParallelSwaps),
     priceLevels: buildPriceLevelsFrame(derived.levels),
     derived,
-    withheld: null,
+    withheld: derived.levels.length === 0 && derived.diagnostics.stopReason !== null
+      ? "derivation-failed" : null,
+    ...(derived.levels.length === 0 && derived.diagnostics.stopReason !== null
+      ? { withheldReason: derived.diagnostics.stopReason } : {}),
   };
 }

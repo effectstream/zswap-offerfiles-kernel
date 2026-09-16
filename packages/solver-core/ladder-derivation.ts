@@ -29,7 +29,7 @@ import {
   type SolverCapabilitiesMessage,
 } from "./relay-ws-contract.ts";
 
-/** Ledger-v8 zswap coin values are u128 even though the relay wire accepts u256. */
+/** Ledger-v9 zswap coin values are u128 even though the relay wire accepts u256. */
 export const MAX_SETTLEMENT_AMOUNT = (1n << 128n) - 1n;
 
 export interface LadderResourceLimits {

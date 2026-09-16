@@ -349,13 +349,25 @@ describe("alarms (FR-012)", () => {
 
   test("a status contract mismatch is explicit and its payload is not interpreted", () => {
     const snapshot = buildMonitorSnapshot();
-    (snapshot as any).solver.contractVersion = 1;
+    (snapshot as any).solver.contractVersion = 2;
     (snapshot as any).solver.snapshot = null;
     const list = alarms(snapshot);
     expect(list[0].key).toBe("contract");
-    expect(list[0].message).toContain("v1");
+    expect(list[0].message).toContain("older status contract v2");
     expect(list[0].message).toContain("not rendered");
     expect(ladderPairs(snapshot, registryOf(snapshot))).toEqual([]);
+  });
+
+  test("an unknown newer or missing status version is named explicitly", () => {
+    const future = buildMonitorSnapshot();
+    (future as any).solver.contractVersion = 4;
+    (future as any).solver.snapshot = null;
+    expect(alarms(future)[0].message).toContain("unknown newer status contract v4");
+
+    const missing = buildMonitorSnapshot();
+    (missing as any).solver.contractVersion = 0;
+    (missing as any).solver.snapshot = null;
+    expect(alarms(missing)[0].message).toContain("does not report a valid status contract version");
   });
 
   test("a degraded solver section is reported rather than silently missing", () => {
@@ -451,6 +463,43 @@ describe("ladders and admission (User Story 2)", () => {
       makerOutput: "900000",
     });
     expect(points[3].offerHashes).toHaveLength(2);
+    expect(points[1].receipts).toMatchObject([
+      { token: TKA, amount: "599999", label: "TKA" },
+    ]);
+  });
+
+  test("shows endpoint counterflow as composed and computes multi-token receipts per point", () => {
+    const status = buildStatusSnapshot();
+    const combinations = (status.ladder as any).last.provenance[0].combinations;
+    combinations[0].kind = "composed";
+    combinations[0].tokenBalances = [
+      { token: TKA, gives: "100", wants: "750100", net: "-750000" },
+      { token: TKB, gives: "500100", wants: "100", net: "500000" },
+    ];
+    const intermediate = "ab".repeat(32);
+    combinations[1].kind = "composed";
+    combinations[1].tokenBalances.push({
+      token: intermediate,
+      gives: "300",
+      wants: "100",
+      net: "200",
+    });
+    combinations[1].receipts = [{ token: intermediate, amount: "200" }];
+
+    const snapshot = buildMonitorSnapshot({ status });
+    const pair = ladderPairs(snapshot, registryOf(snapshot))[0];
+    expect(pair.sharedMakers).toBe(1);
+    expect(pair.points[0].routeKind).toBe("composed");
+    expect(pair.points[0].tokenBalances).toHaveLength(2);
+    expect(pair.points[2].routeKind).toBe("composed");
+    expect(pair.points[2].receipts).toMatchObject([
+      { token: intermediate, amount: "200" },
+    ]);
+    expect(pair.points[3].receipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ token: TKA, amount: "12150000" }),
+      expect.objectContaining({ token: intermediate, amount: "200" }),
+    ]));
+    expect(pair.points[0].dependencies[0]).toMatchObject({ shared: true, combinations: 2 });
   });
 
   test("a shortened terminal reports every cap reason and keeps the real witness", () => {
@@ -504,6 +553,10 @@ describe("ladders and admission (User Story 2)", () => {
       "global-search-cap",
       "wire-point-cap",
       "pair-cap",
+      "candidate-pair-cap",
+      "discovery-work-cap",
+      "unsafe-merge-order",
+      "merge-order-work-cap",
       "minimum-output",
       "aborted",
       "abort-check-failed",
@@ -531,6 +584,21 @@ describe("book, jobs, inventory, DUST, relay, config, events", () => {
     expect(rows[0]).toMatchObject({ inCache: true, winningSets: [1, 2], excludedReason: null });
     expect(rows[1]).toMatchObject({ inCache: true, winningSets: [], excludedReason: "multi-leg" });
     expect(rows[0].gives[0].label).toBe("TKB");
+  });
+
+  test("a published physical file remains used when another route is limited", () => {
+    const status = buildStatusSnapshot();
+    const winningHash = (status.book as any).offers[0].offerHash;
+    (status.ladder as any).last.excluded.push({
+      offerHash: winningHash,
+      reason: "unsupported-pair",
+    });
+    const row = bookRows(buildMonitorSnapshot({ status }), registryOf(buildMonitorSnapshot({ status })))[0];
+
+    expect(row.winningSets).toEqual([1, 2]);
+    expect(row.excludedReason).toBeNull();
+    expect(row.sourceExclusionReasons).toEqual([]);
+    expect(row.routeLimitReasons).toEqual(["unsupported-pair"]);
   });
 
   test("cache membership is UNKNOWN, not `out`, while the solver is unreachable", () => {
@@ -599,6 +667,11 @@ describe("book, jobs, inventory, DUST, relay, config, events", () => {
     expect(flat).toContain("source offers / derivation: 4 / 4096");
     expect(flat).toContain("visited subsets / pair cap: 100000");
     expect(flat).toContain("visited subsets / derivation: 4 / 200000");
+    expect(flat).toContain("candidate pairs / derivation: 2 / 4096");
+    expect(flat).toContain("discovery work / derivation: 12 / 1000000");
+    expect(flat).toContain("safe merge order work: 0");
+    expect(flat).toContain("max supported settlement amount: 170141183460469231731687303715884105727");
+    expect(flat).toContain("coin format maximum: 340282366920938463463374607431768211455");
     expect(flat).not.toContain("seed");
   });
 

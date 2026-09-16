@@ -263,6 +263,8 @@ interface Crossable {
   offerHash: string;
   tokenIn: string;
   tokenOut: string;
+  tokenInIndex: number;
+  tokenOutIndex: number;
   amountIn: bigint;
   amountOut: bigint;
   nullifiers: string[];
@@ -289,6 +291,14 @@ interface SearchResult {
     | "aborted"
     | "abort-check-failed"
     | null;
+}
+
+interface PairSearchScratch {
+  gives: Array<bigint | undefined>;
+  wants: Array<bigint | undefined>;
+  nets: Array<bigint | undefined>;
+  activeTokenIndices: number[];
+  selected: Crossable[];
 }
 
 interface DiscoveryBudget {
@@ -370,6 +380,8 @@ function toCrossable(
     offerHash,
     tokenIn,
     tokenOut,
+    tokenInIndex: -1,
+    tokenOutIndex: -1,
     amountIn: want.amount,
     amountOut: give.amount,
     nullifiers: [...new Set(offer.inputNullifiers.map((value) => value.toLowerCase()))].sort(),
@@ -391,6 +403,10 @@ function enumeratePair(
   bucket: readonly Crossable[],
   tokenIn: string,
   tokenOut: string,
+  tokenInIndex: number,
+  tokenOutIndex: number,
+  tokenAt: readonly string[],
+  scratch: PairSearchScratch,
   limits: Readonly<LadderResourceLimits>,
   diagnostics: LadderDerivationDiagnostics,
   shouldAbort: (() => boolean) | undefined,
@@ -405,42 +421,13 @@ function enumeratePair(
   const directBucket = bucket.every((entry) =>
     entry.tokenIn === tokenIn && entry.tokenOut === tokenOut
   );
-
-  const addBalance = (
-    next: Map<string, WholeOfferTokenBalance>,
-    candidate: Crossable,
-  ): Map<string, WholeOfferTokenBalance> => {
-    const input = next.get(candidate.tokenIn) ?? {
-      token: candidate.tokenIn,
-      gives: 0n,
-      wants: 0n,
-      net: 0n,
-    };
-    next.set(candidate.tokenIn, {
-      token: input.token,
-      gives: input.gives,
-      wants: input.wants + candidate.amountIn,
-      net: input.net - candidate.amountIn,
-    });
-    const output = next.get(candidate.tokenOut) ?? {
-      token: candidate.tokenOut,
-      gives: 0n,
-      wants: 0n,
-      net: 0n,
-    };
-    next.set(candidate.tokenOut, {
-      token: output.token,
-      gives: output.gives + candidate.amountOut,
-      wants: output.wants,
-      net: output.net + candidate.amountOut,
-    });
-    return next;
-  };
+  const { gives, wants, nets, activeTokenIndices, selected } = scratch;
+  if (activeTokenIndices.length !== 0 || selected.length !== 0) {
+    throw new Error("pair search scratch is not empty");
+  }
 
   const visit = (
     start: number,
-    balances: Map<string, WholeOfferTokenBalance>,
-    selected: readonly Crossable[],
     directInput: bigint,
     directOutput: bigint,
     sortedPrefixSafe: boolean,
@@ -475,51 +462,64 @@ function enumeratePair(
           // so both magnitudes can only increase in descendants.
           continue;
         }
-        const nextSelected = [...selected, candidate];
-        const state: CombinationState = {
-          input: nextInput,
-          output: nextOutput,
-          offerHashes: nextSelected.map((entry) => entry.offerHash),
-          tokenBalances: [
-            { token: tokenIn, gives: 0n, wants: nextInput, net: -nextInput },
-            { token: tokenOut, gives: nextOutput, wants: 0n, net: nextOutput },
-          ].sort((left, right) => left.token < right.token ? -1 : left.token > right.token ? 1 : 0),
-        };
-        const key = state.input.toString();
-        const incumbent = exact.get(key);
-        if (incumbent === undefined || betterExactInputWitness(state, incumbent)) exact.set(key, state);
-        if (nextSelected.length < limits.maxMakersPerCombination) {
-          visit(index + 1, balances, nextSelected, nextInput, nextOutput, true);
+        selected.push(candidate);
+        try {
+          const state: CombinationState = {
+            input: nextInput,
+            output: nextOutput,
+            offerHashes: selected.map((entry) => entry.offerHash),
+            tokenBalances: [
+              { token: tokenIn, gives: 0n, wants: nextInput, net: -nextInput },
+              { token: tokenOut, gives: nextOutput, wants: 0n, net: nextOutput },
+            ].sort((left, right) => left.token < right.token ? -1 : left.token > right.token ? 1 : 0),
+          };
+          const key = state.input.toString();
+          const incumbent = exact.get(key);
+          if (incumbent === undefined || betterExactInputWitness(state, incumbent)) exact.set(key, state);
+          if (selected.length < limits.maxMakersPerCombination) {
+            visit(index + 1, nextInput, nextOutput, true);
+          }
+        } finally {
+          selected.pop();
         }
         continue;
       }
 
-      // The depth is at most eight. Reuse its map rather than allocating a
-      // 16-row copy for every visited subset; rows themselves stay immutable
-      // so winning provenance can safely retain references after rollback.
-      const previousInput = balances.get(candidate.tokenIn);
-      const previousOutput = balances.get(candidate.tokenOut);
+      // DFS depth is at most eight. Reuse the selected stack and graph-indexed
+      // bigint balance vectors; a winning state materializes its own rows.
+      const candidateInputIndex = candidate.tokenInIndex;
+      const candidateOutputIndex = candidate.tokenOutIndex;
+      const inputWasAbsent = (gives[candidateInputIndex] ?? 0n) === 0n &&
+        (wants[candidateInputIndex] ?? 0n) === 0n;
+      const outputWasAbsent = (gives[candidateOutputIndex] ?? 0n) === 0n &&
+        (wants[candidateOutputIndex] ?? 0n) === 0n;
+      if (inputWasAbsent) activeTokenIndices.push(candidateInputIndex);
+      if (outputWasAbsent) activeTokenIndices.push(candidateOutputIndex);
+      wants[candidateInputIndex] = (wants[candidateInputIndex] ?? 0n) + candidate.amountIn;
+      nets[candidateInputIndex] = (nets[candidateInputIndex] ?? 0n) - candidate.amountIn;
+      gives[candidateOutputIndex] = (gives[candidateOutputIndex] ?? 0n) + candidate.amountOut;
+      nets[candidateOutputIndex] = (nets[candidateOutputIndex] ?? 0n) + candidate.amountOut;
+      selected.push(candidate);
       try {
-        const nextBalances = addBalance(balances, candidate);
-        const nextSelected = [...selected, candidate];
         // Crossable terms were validated and canonicalized once at eligibility.
         // Only these two rows change when extending the sorted physical prefix.
-        const changedInput = nextBalances.get(candidate.tokenIn)!.net;
-        const changedOutput = nextBalances.get(candidate.tokenOut)!.net;
+        const changedInput = nets[candidateInputIndex]!;
+        const changedOutput = nets[candidateOutputIndex]!;
         const nextSortedPrefixSafe = sortedPrefixSafe &&
           changedInput >= -MAX_SETTLEMENT_AMOUNT && changedInput <= MAX_SETTLEMENT_AMOUNT &&
           changedOutput >= -MAX_SETTLEMENT_AMOUNT && changedOutput <= MAX_SETTLEMENT_AMOUNT;
-        const inputNet = nextBalances.get(tokenIn)?.net ?? 0n;
-        const outputNet = nextBalances.get(tokenOut)?.net ?? 0n;
+        const inputNet = nets[tokenInIndex] ?? 0n;
+        const outputNet = nets[tokenOutIndex] ?? 0n;
         let additionalDeficit = false;
         let amountCapped = false;
         if (inputNet < 0n && outputNet > 0n) {
-          for (const row of nextBalances.values()) {
-            if (row.token !== tokenIn && row.net < 0n) {
+          for (const index of activeTokenIndices) {
+            const net = nets[index] ?? 0n;
+            if (index !== tokenInIndex && net < 0n) {
               additionalDeficit = true;
               break;
             }
-            if (row.net < -MAX_SETTLEMENT_AMOUNT || row.net > MAX_SETTLEMENT_AMOUNT) {
+            if (net < -MAX_SETTLEMENT_AMOUNT || net > MAX_SETTLEMENT_AMOUNT) {
               amountCapped = true;
             }
           }
@@ -536,7 +536,7 @@ function enumeratePair(
           const mergeOrder = nextSortedPrefixSafe
             ? { ok: true as const, work: 0 }
             : findSafeWholeOfferMergeOrder(
-              nextSelected.map((entry) => ({
+              selected.map((entry) => ({
                 offerHash: entry.offerHash,
                 gives: [{ token: entry.tokenOut, amount: entry.amountOut }],
                 wants: [{ token: entry.tokenIn, amount: entry.amountIn }],
@@ -558,7 +558,7 @@ function enumeratePair(
             const state: CombinationState = {
               input: -inputNet,
               output: outputNet,
-              offerHashes: nextSelected.map((entry) => entry.offerHash),
+              offerHashes: selected.map((entry) => entry.offerHash),
               tokenBalances: [],
             };
             const key = state.input.toString();
@@ -566,8 +566,12 @@ function enumeratePair(
             if (incumbent === undefined || betterExactInputWitness(state, incumbent)) {
               // Rows are already exact, unique and canonical. Materialize their
               // sorted provenance only when this safe witness enters the map.
-              state.tokenBalances = [...nextBalances.values()].sort((a, b) =>
-                a.token < b.token ? -1 : a.token > b.token ? 1 : 0);
+              state.tokenBalances = activeTokenIndices.map((index) => ({
+                token: tokenAt[index]!,
+                gives: gives[index] ?? 0n,
+                wants: wants[index] ?? 0n,
+                net: nets[index] ?? 0n,
+              })).sort((a, b) => a.token < b.token ? -1 : a.token > b.token ? 1 : 0);
               exact.set(key, state);
             }
           } else if (mergeOrder.reason === "unsafe-merge-order") {
@@ -590,19 +594,34 @@ function enumeratePair(
 
         // Never prune an unbalanced or numerically out-of-range partial set: a
         // later physical maker can repair its deficits and signed net amounts.
-        if (nextSelected.length < limits.maxMakersPerCombination) {
-          visit(index + 1, nextBalances, nextSelected, 0n, 0n, nextSortedPrefixSafe);
+        if (selected.length < limits.maxMakersPerCombination) {
+          visit(index + 1, 0n, 0n, nextSortedPrefixSafe);
         }
       } finally {
-        if (previousInput === undefined) balances.delete(candidate.tokenIn);
-        else balances.set(candidate.tokenIn, previousInput);
-        if (previousOutput === undefined) balances.delete(candidate.tokenOut);
-        else balances.set(candidate.tokenOut, previousOutput);
+        selected.pop();
+        if (outputWasAbsent) {
+          gives[candidateOutputIndex] = undefined;
+          nets[candidateOutputIndex] = undefined;
+          const removed = activeTokenIndices.pop();
+          if (removed !== candidateOutputIndex) throw new Error("balance stack corruption");
+        } else {
+          gives[candidateOutputIndex] = gives[candidateOutputIndex]! - candidate.amountOut;
+          nets[candidateOutputIndex] = nets[candidateOutputIndex]! - candidate.amountOut;
+        }
+        if (inputWasAbsent) {
+          wants[candidateInputIndex] = undefined;
+          nets[candidateInputIndex] = undefined;
+          const removed = activeTokenIndices.pop();
+          if (removed !== candidateInputIndex) throw new Error("balance stack corruption");
+        } else {
+          wants[candidateInputIndex] = wants[candidateInputIndex]! - candidate.amountIn;
+          nets[candidateInputIndex] = nets[candidateInputIndex]! + candidate.amountIn;
+        }
       }
     }
   };
 
-  visit(0, new Map(), [], 0n, 0n, true);
+  visit(0, 0n, 0n, true);
   return {
     exact,
     visitedSubsets,
@@ -780,6 +799,8 @@ interface DiscoveryComponent {
 interface DiscoveryGraph {
   componentByToken: Map<string, DiscoveryComponent>;
   components: DiscoveryComponent[];
+  indexByToken: Map<string, number>;
+  tokenAt: string[];
 }
 
 const chargeDeterministicSort = (
@@ -883,6 +904,8 @@ function buildDiscoveryGraph(
     if (stopped !== null) return { reason: stopped };
     const input = indexByToken.get(offer.tokenIn)!;
     const output = indexByToken.get(offer.tokenOut)!;
+    offer.tokenInIndex = input;
+    offer.tokenOutIndex = output;
     outgoing[input]!.push(output);
     indegree[output]! += 1;
   }
@@ -923,7 +946,7 @@ function buildDiscoveryGraph(
     component.tokens.sort();
     for (const token of component.tokens) componentByToken.set(token, component);
   }
-  return { componentByToken, components };
+  return { componentByToken, components, indexByToken, tokenAt };
 }
 
 /** Pure, deterministic, exact derivation under explicit finite resource bounds. */
@@ -1116,6 +1139,15 @@ export function deriveLadder(
     }
     wantedTokens.sort();
     const universeCache = new Map<number, { offers: Crossable[]; outputs: string[] }>();
+    // Pair searches run sequentially. Populate graph-indexed balance slots only
+    // for composed branches and reuse them after exact DFS rollback.
+    const searchScratch: PairSearchScratch = {
+      gives: [],
+      wants: [],
+      nets: [],
+      activeTokenIndices: [],
+      selected: [],
+    };
 
     const universeFor = (
       inputComponent: DiscoveryComponent,
@@ -1229,6 +1261,10 @@ export function deriveLadder(
             bucket,
             tokenIn,
             tokenOut,
+            graph.indexByToken.get(tokenIn)!,
+            graph.indexByToken.get(tokenOut)!,
+            graph.tokenAt,
+            searchScratch,
             limits,
             diagnostics,
             options.shouldAbort,

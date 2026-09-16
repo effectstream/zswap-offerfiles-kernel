@@ -29,8 +29,9 @@ import {
   type SolverCapabilitiesMessage,
 } from "./relay-ws-contract.ts";
 
-/** Ledger-v9 zswap coin values are u128 even though the relay wire accepts u256. */
-export const MAX_SETTLEMENT_AMOUNT = (1n << 128n) - 1n;
+/** Largest positive ledger-v9 zswap delta. Coins are u128 and the relay wire
+ * accepts u256, but merged transaction imbalances and receipts are signed i128. */
+export const MAX_SETTLEMENT_AMOUNT = (1n << 127n) - 1n;
 
 export interface LadderResourceLimits {
   maxSourceOffers: number;

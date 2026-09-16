@@ -1620,12 +1620,14 @@ test("maker deletion during exact read and expiry during address read cause zero
   await expired.executor.stop();
 });
 
-test("u128 terminal cap keeps surplus buildable and rejects u256-only inputs", () => {
-  const cost = MAX_SETTLEMENT_AMOUNT / 2n;
-  const sources = [offer(H1, N1, cost, 10n)];
+test("signed-delta terminal cap keeps receipts buildable and rejects M+1 jobs", () => {
+  const cost = MAX_SETTLEMENT_AMOUNT / 10n + 1n;
+  const sources = [offer(H1, N1, cost, MAX_SETTLEMENT_AMOUNT)];
   const { route } = routeFor(MAX_SETTLEMENT_AMOUNT.toString(), "1", { offers: sources, balances: {} });
   expect(route.surplusIn).toBe(MAX_SETTLEMENT_AMOUNT - cost);
-  expect(route.surplusOut).toBe(9n);
+  expect(route.surplusOut).toBe(MAX_SETTLEMENT_AMOUNT - 1n);
   expect(refusalReason(() => routeFor((MAX_SETTLEMENT_AMOUNT + 1n).toString(), "1", { offers: sources })))
+    .toBe(JOB_ROUTE_NOT_CURRENT);
+  expect(refusalReason(() => routeFor("1", (MAX_SETTLEMENT_AMOUNT + 1n).toString(), { offers: sources })))
     .toBe(JOB_ROUTE_NOT_CURRENT);
 });

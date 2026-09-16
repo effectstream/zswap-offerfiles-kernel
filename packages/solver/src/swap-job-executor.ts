@@ -446,7 +446,7 @@ const requireCanonicalJob = (job: SwapMessage): void => {
   const amountIn = BigInt(job.amountIn);
   const amountOut = BigInt(job.amountOut);
   if (amountIn <= 0n || amountOut <= 0n || amountIn > MAX_SETTLEMENT_AMOUNT || amountOut > MAX_SETTLEMENT_AMOUNT) {
-    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "amount is outside the supported ledger-v9 u128 settlement domain");
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "amount exceeds the positive ledger-v9 signed-delta domain");
   }
 };
 

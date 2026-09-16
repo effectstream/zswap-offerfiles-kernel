@@ -72,6 +72,10 @@ import {
   type StatusRelayEvent,
   type StatusSnapshot,
 } from "@zswap-da/solver-core/status-contract";
+import {
+  MAX_COIN_AMOUNT,
+  MAX_SETTLEMENT_AMOUNT,
+} from "@zswap-da/solver-core/whole-offer-balance";
 
 import type { BookOffer } from "./book.ts";
 import type { BackendCurrentnessState } from "./book-sync.ts";
@@ -357,16 +361,62 @@ function projectLadderPush(record: RelayLadderPushRecord): StatusLadderPush {
     combinations: pair.combinations.map((combination) => {
       winningCombinations += 1;
       for (const offerHash of combination.offerHashes) uniqueMakerHashes.add(offerHash);
+      const tokenBalances = combination.tokenBalances.map((balance) => ({ ...balance }));
+      const input = BigInt(combination.input);
+      const output = BigInt(combination.output);
+      const receipts = tokenBalances.flatMap((balance) => {
+        let amount = BigInt(balance.net);
+        if (balance.token === pair.tokenIn) amount += input;
+        if (balance.token === pair.tokenOut) amount -= output;
+        return amount > 0n ? [{ token: balance.token, amount: amount.toString() }] : [];
+      });
+      const inputBalance = tokenBalances.find((balance) => balance.token === pair.tokenIn);
+      const outputBalance = tokenBalances.find((balance) => balance.token === pair.tokenOut);
+      const direct = tokenBalances.every(
+        (balance) => balance.token === pair.tokenIn || balance.token === pair.tokenOut,
+      ) && inputBalance?.gives === "0" && outputBalance?.wants === "0";
       return {
+        kind: direct ? "direct" as const : "composed" as const,
         input: combination.input,
         output: combination.output,
         offerHashes: [...combination.offerHashes],
+        tokenBalances,
+        receipts,
       };
     }),
     terminalInput: pair.terminalInput,
     nominalTerminalInput: pair.nominalTerminalInput,
     capReasons: [...pair.capReasons],
   }));
+  const dependencyIndex = new Map<string, {
+    combinations: number;
+    pairs: Map<string, { tokenIn: string; tokenOut: string }>;
+  }>();
+  for (const pair of provenance) {
+    const pairKey = `${pair.tokenIn}|${pair.tokenOut}`;
+    for (const combination of pair.combinations) {
+      for (const offerHash of combination.offerHashes) {
+        const dependency = dependencyIndex.get(offerHash) ?? {
+          combinations: 0,
+          pairs: new Map<string, { tokenIn: string; tokenOut: string }>(),
+        };
+        dependency.combinations += 1;
+        dependency.pairs.set(pairKey, { tokenIn: pair.tokenIn, tokenOut: pair.tokenOut });
+        dependencyIndex.set(offerHash, dependency);
+      }
+    }
+  }
+  const physicalDependencies = [...dependencyIndex.entries()]
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([offerHash, dependency]) => ({
+      offerHash,
+      combinations: dependency.combinations,
+      pairs: [...dependency.pairs.values()].sort((left, right) =>
+        left.tokenIn === right.tokenIn
+          ? (left.tokenOut < right.tokenOut ? -1 : left.tokenOut > right.tokenOut ? 1 : 0)
+          : (left.tokenIn < right.tokenIn ? -1 : 1)
+      ),
+    }));
   return {
     derivedAt: record.derivedAt,
     cause: record.cause,
@@ -376,11 +426,16 @@ function projectLadderPush(record: RelayLadderPushRecord): StatusLadderPush {
     maxParallelSwaps: push.capabilities.maxParallelSwaps ?? null,
     levels,
     provenance,
+    physicalDependencies,
     excluded: push.derived.excluded.map((exclusion) => ({
       offerHash: exclusion.offerHash,
       reason: exclusion.reason,
       ...(exclusion.detail === undefined ? {} : { detail: String(exclusion.detail) }),
     })),
+    amountBounds: {
+      maxSettlementAmount: MAX_SETTLEMENT_AMOUNT.toString(),
+      maxCoinAmount: MAX_COIN_AMOUNT.toString(),
+    },
     limits: { ...push.derived.limits },
     diagnostics: {
       stopReason: push.derived.diagnostics.stopReason,
@@ -392,6 +447,9 @@ function projectLadderPush(record: RelayLadderPushRecord): StatusLadderPush {
           maximum: push.derived.diagnostics.invalidResourceLimit.maximum,
         },
       sourceOffersScanned: push.derived.diagnostics.sourceOffersScanned,
+      candidatePairsExamined: push.derived.diagnostics.candidatePairsExamined,
+      discoveryWork: push.derived.diagnostics.discoveryWork,
+      safeMergeOrderWork: push.derived.diagnostics.safeMergeOrderWork,
       visitedSubsets: push.derived.diagnostics.visitedSubsets,
       peakStoredExactInputs: push.derived.diagnostics.peakStoredExactInputs,
       pairs: push.derived.diagnostics.pairs.map((pair) => ({ ...pair })),

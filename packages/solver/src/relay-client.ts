@@ -343,6 +343,9 @@ const sameTruncation = (a: TruncationSignal, b: TruncationSignal): boolean =>
 interface ResourceSignal {
   stopReason: LadderPush["derived"]["diagnostics"]["stopReason"];
   withheldPairs: number;
+  candidatePairsExamined: number;
+  discoveryWork: number;
+  safeMergeOrderWork: number;
 }
 
 const resourceSignalOf = (push: LadderPush): ResourceSignal => ({
@@ -352,17 +355,28 @@ const resourceSignalOf = (push: LadderPush): ResourceSignal => ({
       "pair-search-cap",
       "global-search-cap",
       "source-offer-cap",
+      "candidate-pair-cap",
+      "discovery-work-cap",
+      "unsafe-merge-order",
+      "merge-order-work-cap",
       "aborted",
       "abort-check-failed",
       "invalid-resource-limit",
     ].includes(pair.reason ?? push.derived.diagnostics.stopReason ?? "")).length,
+  candidatePairsExamined: push.derived.diagnostics.candidatePairsExamined,
+  discoveryWork: push.derived.diagnostics.discoveryWork,
+  safeMergeOrderWork: push.derived.diagnostics.safeMergeOrderWork,
 });
 
 const resourceLimited = (signal: ResourceSignal): boolean =>
   signal.stopReason !== null || signal.withheldPairs > 0;
 
 const sameResourceSignal = (left: ResourceSignal, right: ResourceSignal): boolean =>
-  left.stopReason === right.stopReason && left.withheldPairs === right.withheldPairs;
+  left.stopReason === right.stopReason &&
+  left.withheldPairs === right.withheldPairs &&
+  left.candidatePairsExamined === right.candidatePairsExamined &&
+  left.discoveryWork === right.discoveryWork &&
+  left.safeMergeOrderWork === right.safeMergeOrderWork;
 
 const rungCount = (push: LadderPush): number =>
   push.priceLevels.levels.reduce((total, pair) => total + pair.levels.length, 0);
@@ -475,7 +489,13 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   const terminalTasks = new Set<Promise<void>>();
   let queued = false;
   let lastTruncation: TruncationSignal = { pairCapOffers: 0, wirePointCapOffers: 0 };
-  let lastResource: ResourceSignal = { stopReason: null, withheldPairs: 0 };
+  let lastResource: ResourceSignal = {
+    stopReason: null,
+    withheldPairs: 0,
+    candidatePairsExamined: 0,
+    discoveryWork: 0,
+    safeMergeOrderWork: 0,
+  };
   let lastCurrent: boolean | null = null;
   let lastPushRecord: RelayLadderPushRecord | null = null;
 
@@ -837,7 +857,13 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         "error",
         `canonical derivation withheld ${signal.withheldPairs} pair(s)` +
           (signal.stopReason === null ? "" : ` (${signal.stopReason})`),
-        { stopReason: signal.stopReason, withheldPairs: signal.withheldPairs },
+        {
+          stopReason: signal.stopReason,
+          withheldPairs: signal.withheldPairs,
+          candidatePairsExamined: signal.candidatePairsExamined,
+          discoveryWork: signal.discoveryWork,
+          safeMergeOrderWork: signal.safeMergeOrderWork,
+        },
       );
     } else if (wasLimiting) {
       emit(

@@ -41,10 +41,13 @@
 // a removal or a meaning change does.
 
 /** Bumped only by a removal or a semantic change, never by an additive field. */
-export const statusContractVersion = 2;
+export const statusContractVersion = 3;
 
-/** Canonical base-10 integer string. Amounts are BASE UNITS, never coins. */
+/** Canonical nonnegative base-10 integer string. Amounts are BASE UNITS, never coins. */
 export type DecimalString = string;
+
+/** Canonical signed base-10 integer string. Used only for net token accounting. */
+export type SignedDecimalString = string;
 
 /** Epoch milliseconds. The snapshot carries the solver's own `now` so a page
  *  can compute "N s ago" without trusting the browser clock (FR-013). */
@@ -260,12 +263,47 @@ export interface StatusRelay {
 // ── the last derived ladder push ────────────────────────────────────────────
 
 export interface StatusLadderCombination {
-  /** Exact input required by the selected complete maker files. */
+  /** `direct` has only the two external endpoint rows and no maker counterflow
+   *  (`input.gives = 0`, `output.wants = 0`). `composed` also covers endpoint-
+   *  only counterflow and retained zero-net intermediate rows. */
+  kind: "direct" | "composed";
+  /** Genuine net external input required by the selected complete maker files. */
   input: DecimalString;
-  /** Exact output supplied by the selected complete maker files. */
+  /** Genuine net external output supplied by the selected complete maker files. */
   output: DecimalString;
   /** Sorted full identities of the complete files in this winning set. */
   offerHashes: string[];
+  /** Gross maker contributions and signed net supply, sorted by token. Rows
+   *  retain zero-net intermediates, so composed provenance is reproducible
+   *  without consulting the separately capped book display. */
+  tokenBalances: StatusLadderTokenBalance[];
+  /** Positive solver receipts at this genuine input/output threshold. Endpoint
+   *  remainders for a plateau input or lower taker demand are point-specific
+   *  and are derived by the consumer from `tokenBalances`. */
+  receipts: StatusLadderReceipt[];
+}
+
+export interface StatusLadderTokenBalance {
+  token: string;
+  gives: DecimalString;
+  wants: DecimalString;
+  /** Maker net supply (`gives - wants`), and the only signed amount here. */
+  net: SignedDecimalString;
+}
+
+export interface StatusLadderReceipt {
+  token: string;
+  amount: DecimalString;
+}
+
+export interface StatusLadderPhysicalDependency {
+  /** One physical maker file; virtual alternatives never get synthetic IDs. */
+  offerHash: string;
+  /** Directed published pairs with a winning alternative that uses the file. */
+  pairs: Array<{ tokenIn: string; tokenOut: string }>;
+  /** Number of genuine winning combinations that reuse this same file. These
+   *  alternatives are not independently spendable inventory. */
+  combinations: number;
 }
 
 export type StatusLadderTerminalCapReason =
@@ -317,6 +355,8 @@ export interface StatusLadderResourceLimits {
   maxMakersPerCombination: number;
   maxWirePointsPerPair: number;
   maxPairs: number;
+  maxCandidatePairs: number;
+  maxDiscoveryWork: number;
 }
 
 export type StatusLadderPairWithholdReason =
@@ -327,6 +367,10 @@ export type StatusLadderPairWithholdReason =
   | "wire-point-cap"
   | "settlement-amount-cap"
   | "pair-cap"
+  | "candidate-pair-cap"
+  | "discovery-work-cap"
+  | "unsafe-merge-order"
+  | "merge-order-work-cap"
   | "aborted"
   | "abort-check-failed"
   | "invalid-pair";
@@ -334,6 +378,8 @@ export type StatusLadderPairWithholdReason =
 export type StatusLadderDerivationStopReason =
   | "source-offer-cap"
   | "global-search-cap"
+  | "candidate-pair-cap"
+  | "discovery-work-cap"
   | "aborted"
   | "abort-check-failed"
   | "invalid-resource-limit";
@@ -349,6 +395,8 @@ export interface StatusLadderPairDiagnostic {
   amountCappedSubsets: number;
   frontierCombinations: number;
   wirePoints: number;
+  discoveryWork: number;
+  safeMergeOrderWork: number;
 }
 
 export interface StatusLadderDerivationDiagnostics {
@@ -359,6 +407,9 @@ export interface StatusLadderDerivationDiagnostics {
     maximum: number;
   } | null;
   sourceOffersScanned: number;
+  candidatePairsExamined: number;
+  discoveryWork: number;
+  safeMergeOrderWork: number;
   visitedSubsets: number;
   peakStoredExactInputs: number;
   pairs: StatusLadderPairDiagnostic[];
@@ -379,7 +430,16 @@ export interface StatusLadderPush {
   maxParallelSwaps: number | null;
   levels: StatusLadderPair[];
   provenance: StatusLadderPairProvenance[];
+  /** Bounded reverse index over provenance. It exposes shared physical
+   *  dependencies without presenting alternatives as additive liquidity. */
+  physicalDependencies: StatusLadderPhysicalDependency[];
   excluded: StatusLadderExclusion[];
+  /** Actual amount domains relevant to this ledger-v8 producer. Coin format is
+   *  wider than the supported signed-delta/singleton-receipt amount. */
+  amountBounds: {
+    maxSettlementAmount: DecimalString;
+    maxCoinAmount: DecimalString;
+  };
   /** Actual canonical resource limits and observed bounded-search work. */
   limits: StatusLadderResourceLimits;
   diagnostics: StatusLadderDerivationDiagnostics;

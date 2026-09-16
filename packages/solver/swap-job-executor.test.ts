@@ -43,6 +43,8 @@ import {
 
 const A = "aa".repeat(32);
 const B = "bb".repeat(32);
+const D = "dd".repeat(32);
+const E = "ee".repeat(32);
 const H1 = "11".repeat(32);
 const H2 = "22".repeat(32);
 const H3 = "44".repeat(32);
@@ -79,6 +81,22 @@ const offer = (
   inputNullifiers: [nullifier],
 });
 
+const makerOffer = (
+  offerHash: string,
+  nullifier: string,
+  givesToken: string,
+  givesAmount: bigint,
+  wantsToken: string,
+  wantsAmount: bigint,
+): BookOffer => ({
+  offerHash,
+  gives: [{ token: givesToken, amount: givesAmount, kind: "SHIELDED" }],
+  wants: [{ token: wantsToken, amount: wantsAmount, kind: "SHIELDED" }],
+  expiresAt: Date.now() + 3_600_000,
+  firstSeenAt: Date.now(),
+  inputNullifiers: [nullifier],
+});
+
 const job = (jobId = "job-1", amountIn = "10", amountOut = "20"): SwapMessage => ({
   type: "swap",
   jobId,
@@ -87,6 +105,14 @@ const job = (jobId = "job-1", amountIn = "10", amountOut = "20"): SwapMessage =>
   amountIn,
   amountOut,
 });
+
+const swapJob = (
+  jobId: string,
+  tokenIn: string,
+  tokenOut: string,
+  amountIn: string,
+  amountOut: string,
+): SwapMessage => ({ type: "swap", jobId, tokenIn, tokenOut, amountIn, amountOut });
 
 const semantics = (source: BookOffer): ExactOfferSemantics => ({
   gives: source.gives.map((leg) => ({ ...leg, amount: leg.amount.toString() })),
@@ -157,6 +183,12 @@ function harness(options: {
   refuseTokenInSelection?: boolean;
   /** Fail the stand-in builder, to prove a fee-sizing failure needs no cleanup. */
   standInFailure?: string;
+  /** Return a malformed receive-only residual so the new SDK-delta check fails. */
+  invalidResidualDelta?: boolean;
+  /** Preserve the raw residual but corrupt its finalized replacement. */
+  invalidFinalizedResidualDelta?: boolean;
+  /** Advance beyond maker expiry inside one wallet await to exercise ownership transfer. */
+  expireDuring?: "init-swap" | "finalize-residual" | "dust-balance" | "finalize-dust";
   /** 00006 FR-001 / Q-R0-1. How many taker zswap inputs fee sizing models. */
   modelledTakerInputs?: number;
   /** Overridable so the startup assertion can be driven directly. */
@@ -212,6 +244,7 @@ function harness(options: {
       balanceTransactions: async (_dustSecretKey, transactions) => {
         calls.push("dust-balance");
         dustBalanceInputs.push((transactions as FakeTx[]).map((entry) => entry.label));
+        if (options.expireDuring === "dust-balance") now += 4_000_000;
         return fakeTx("dust-unproven", options.dustAmount === null ? [] : [
           { seg: 0, tag: "dust", raw: "dust", amount: options.dustAmount ?? 1n },
         ]);
@@ -234,20 +267,34 @@ function harness(options: {
           seg: 0, tag: "shielded" as const, raw: token, amount,
         })),
         ...(outputs as Array<{ outputs: Array<{ type: string; amount: bigint }> }>)
-          .flatMap((group) => group.outputs.map((output) => ({
+          .flatMap((group) => group.outputs.map((output, index) => ({
             seg: 0, tag: "shielded" as const, raw: output.type, amount: -output.amount,
+            ...(options.invalidResidualDelta && index === 0
+              ? { amount: -(output.amount + 1n) }
+              : {}),
           }))),
       ];
       // `initSwap` now has exactly one caller: the solver's own balancing leg.
       const label = "residual";
       legs.push({ label, inputs: { ...shielded }, outputs: rows.filter((row) => row.amount < 0n) });
       calls.push(label);
+      if (options.expireDuring === "init-swap") now += 4_000_000;
       return { transaction: fakeTx(label, rows) };
     },
     finalizeTransaction: async (transaction: any) => {
       calls.push(`finalize:${transaction.label}`);
+      if (options.expireDuring === "finalize-residual" && transaction.label === "residual") {
+        now += 4_000_000;
+      }
+      if (options.expireDuring === "finalize-dust" && transaction.label === "dust-unproven") {
+        now += 4_000_000;
+      }
       return transaction.label === "residual"
-        ? fakeTx("residual-final", transaction.rows) as any
+        ? fakeTx("residual-final", options.invalidFinalizedResidualDelta
+          ? transaction.rows.map((row: Imbalance, index: number) => index === 0
+            ? { ...row, amount: row.amount - 1n }
+            : row)
+          : transaction.rows) as any
         : fakeTx("dust-final", [{ seg: 0, tag: "dust", raw: "dust", amount: 1n }]) as any;
     },
     revertTransaction: async (transaction: any) => {
@@ -357,7 +404,12 @@ function harness(options: {
       },
       mergeFinalized: merge as any,
       tokenImbalances: ((transaction: FakeTx) => {
-        if (options.failImbalance) throw new Error("imbalance inspection failed");
+        // Exact maker inspection is now an admission boundary of its own. The
+        // legacy failure fixtures target the later wallet/merged-half check,
+        // after a mutation exists and rollback/quarantine behavior matters.
+        if (options.failImbalance && !/^maker:[^+]+$/.test(transaction.label)) {
+          throw new Error("imbalance inspection failed");
+        }
         imbalanceReads.push({ label: transaction.label, rows: transaction.rows });
         return transaction.rows;
       }) as any,
@@ -519,6 +571,11 @@ const refusalReason = (body: () => unknown): string => {
   return "no-refusal";
 };
 
+const receiptAmount = (
+  route: ReturnType<typeof resolveSwapJobRoute>,
+  token: string,
+): bigint => route.receipts.find((receipt) => receipt.token === token)?.amount ?? 0n;
+
 test("each admitted demand selects the maximum affordable witness and exact surpluses", () => {
   const matrix: Array<[string, string, string[], bigint, bigint]> = [
     ["15", "30", [H1], 5n, 0n], ["15", "25", [H1], 5n, 5n],
@@ -530,8 +587,8 @@ test("each admitted demand selects the maximum affordable witness and exact surp
   for (const [amountIn, amountOut, hashes, surplusIn, surplusOut] of matrix) {
     const { route, stock } = routeFor(amountIn, amountOut);
     expect(route.offers.map((source) => source.offerHash)).toEqual(hashes);
-    expect(route.surplusIn).toBe(surplusIn);
-    expect(route.surplusOut).toBe(surplusOut);
+    expect(receiptAmount(route, A)).toBe(surplusIn);
+    expect(receiptAmount(route, B)).toBe(surplusOut);
     expect(route.offers.reduce((sum, source) => sum + source.wants[0]!.amount, 0n) + surplusIn).toBe(BigInt(amountIn));
     expect(route.offers.reduce((sum, source) => sum + source.gives[0]!.amount, 0n) - surplusOut).toBe(BigInt(amountOut));
     expect([...route.claim.payouts]).toEqual([]);
@@ -561,7 +618,7 @@ test("FR-001 above-advertised, out-of-ladder, and non-positive demands stay refu
   // bound, so admission policy still applies to the newly accepted shapes.
   const minimum = new Map([[B, 30n]]);
   expect(refusalReason(() => routeFor("15", "25", { minJobOutput: minimum }))).toBe(JOB_MIN_OUTPUT);
-  expect(routeFor("15", "30", { minJobOutput: minimum }).route.surplusOut).toBe(0n);
+  expect(receiptAmount(routeFor("15", "30", { minJobOutput: minimum }).route, B)).toBe(0n);
 });
 
 // R2/FR-004 amendment REVERTED at 00006-R2. 00005-R2 had to weaken this test to
@@ -573,8 +630,8 @@ test("one-unit maker shortfall refuses both funded and empty wallets", () => {
   for (const balances of [{}, { [A]: 1_000n, [B]: 1_000n }]) {
     expect(refusalReason(() => routeFor("15", "31", { balances }))).toBe(JOB_ROUTE_NOT_CURRENT);
     const { route } = routeFor("15", "25", { balances });
-    expect(route.surplusIn).toBe(5n);
-    expect(route.surplusOut).toBe(5n);
+    expect(receiptAmount(route, A)).toBe(5n);
+    expect(receiptAmount(route, B)).toBe(5n);
     expect([...route.claim.payouts]).toEqual([]);
   }
 });
@@ -668,6 +725,294 @@ test("FR-001 a lowered exact rung and the minimum positive demand both settle", 
   });
   expect(minimum.executor.stats()).toMatchObject({ completed: 1, quarantined: 0 });
   await minimum.executor.stop();
+});
+
+const composedOffers = (): BookOffer[] => [
+  makerOffer(H1, N1, A, 10n, B, 3n),
+  makerOffer(H2, N2, B, 6n, D, 5n),
+];
+
+test("composed witness settles an intermediate-only receipt from an empty swap wallet", async () => {
+  const h = harness({ offers: composedOffers(), balances: {}, status: "consumed" });
+  try {
+    const result = await h.executor.onSwap(swapJob("composed-exact", D, A, "5", "10"));
+    expect(result.type).toBe("swap-tx");
+    expect(h.exactRequests).toEqual([[H1, H2]]);
+    expect(h.legs).toEqual([{
+      label: "residual",
+      inputs: {},
+      outputs: [{ seg: 0, tag: "shielded", raw: B, amount: -3n }],
+    }]);
+    expect(netImbalance(h.imbalanceReads.at(-1)!.rows)).toEqual([[A, 10n], [D, -5n]]);
+    expect(h.journal.list().every((row) => Object.keys(row.claim.payouts).length === 0)).toBe(true);
+    await h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "composed-exact", txId: RELAY_TX });
+    expect(h.executor.stats()).toMatchObject({ completed: 1, quarantined: 0 });
+  } finally {
+    await h.executor.stop();
+  }
+});
+
+test("invalid residual delta is durably captured and raw-reverted before refusal", async () => {
+  const h = harness({ offers: composedOffers(), balances: {}, invalidResidualDelta: true });
+  try {
+    expect(await h.executor.onSwap(swapJob("bad-residual", D, A, "5", "10"))).toEqual({
+      type: "job-error",
+      jobId: "bad-residual",
+      reason: JOB_WALLET_FAILED,
+    });
+    expect(h.calls).toContain("revert-unproven:residual");
+    expect(h.journal.list().find((row) => row.operationKind === "RESIDUAL_BUILD"))
+      .toMatchObject({ lifecycleState: "REVERTED", walletArtifactKind: "UNPROVEN_TRANSACTION" });
+    expect(h.journal.list().some((row) => row.lifecycleState === "QUARANTINED")).toBe(false);
+    expect(h.stock.isClaimed({ offerHashes: [H1, H2], nullifiers: [N1, N2] })).toBe(false);
+  } finally {
+    await h.executor.stop();
+  }
+});
+
+test("expiry during residual init captures and raw-reverts the returned artifact", async () => {
+  const h = harness({ offers: composedOffers(), balances: {}, expireDuring: "init-swap" });
+  try {
+    expect(await h.executor.onSwap(swapJob("expire-init", D, A, "5", "10"))).toEqual({
+      type: "job-error",
+      jobId: "expire-init",
+      reason: JOB_ROUTE_NOT_CURRENT,
+    });
+    expect(h.calls).toContain("revert-unproven:residual");
+    expect(h.journal.list().find((row) => row.operationKind === "RESIDUAL_BUILD"))
+      .toMatchObject({ lifecycleState: "REVERTED", walletArtifactKind: "UNPROVEN_TRANSACTION" });
+    expect(h.reverts).toEqual([]);
+  } finally {
+    await h.executor.stop();
+  }
+});
+
+test("expiry during residual finalize transfers cleanup to the durable finalized artifact", async () => {
+  const h = harness({ offers: composedOffers(), balances: {}, expireDuring: "finalize-residual" });
+  try {
+    expect(await h.executor.onSwap(swapJob("expire-finalize", D, A, "5", "10"))).toEqual({
+      type: "job-error",
+      jobId: "expire-finalize",
+      reason: JOB_ROUTE_NOT_CURRENT,
+    });
+    expect(h.calls).not.toContain("revert-unproven:residual");
+    expect(h.reverts.map((transaction: any) => transaction.label)).toEqual(["residual-final"]);
+    expect(h.journal.list().filter((row) =>
+      row.operationKind === "RESIDUAL_BUILD" ||
+      (row.operationKind === "FINALIZED_CONTRIBUTION" && row.operationKey.endsWith(":residual"))
+    ).map((row) => [row.operationKind, row.lifecycleState])).toEqual([
+      ["RESIDUAL_BUILD", "REVERTED"],
+      ["FINALIZED_CONTRIBUTION", "REVERTED"],
+    ]);
+  } finally {
+    await h.executor.stop();
+  }
+});
+
+test("invalid finalized residual delta rolls back only the durably tracked finalized artifact", async () => {
+  const h = harness({
+    offers: composedOffers(),
+    balances: {},
+    invalidFinalizedResidualDelta: true,
+  });
+  try {
+    expect(await h.executor.onSwap(swapJob("bad-finalized-residual", D, A, "5", "10"))).toEqual({
+      type: "job-error",
+      jobId: "bad-finalized-residual",
+      reason: JOB_WALLET_FAILED,
+    });
+    expect(h.calls).not.toContain("revert-unproven:residual");
+    expect(h.reverts.map((transaction: any) => transaction.label)).toEqual(["residual-final"]);
+    expect(h.journal.list().filter((row) =>
+      row.operationKind === "RESIDUAL_BUILD" ||
+      (row.operationKind === "FINALIZED_CONTRIBUTION" && row.operationKey.endsWith(":residual"))
+    ).map((row) => [row.operationKind, row.lifecycleState])).toEqual([
+      ["RESIDUAL_BUILD", "REVERTED"],
+      ["FINALIZED_CONTRIBUTION", "REVERTED"],
+    ]);
+    expect(h.journal.list().some((row) => row.lifecycleState === "QUARANTINED")).toBe(false);
+  } finally {
+    await h.executor.stop();
+  }
+});
+
+test("expiry during DUST init/finalize always reverts the captured artifact form", async () => {
+  for (const expireDuring of ["dust-balance", "finalize-dust"] as const) {
+    const h = harness({ expireDuring });
+    try {
+      expect(await h.executor.onSwap(job(`expire-${expireDuring}`))).toEqual({
+        type: "job-error",
+        jobId: `expire-${expireDuring}`,
+        reason: JOB_ROUTE_NOT_CURRENT,
+      });
+      if (expireDuring === "dust-balance") {
+        expect(h.calls).toContain("revert-unproven:dust-unproven");
+        expect(h.reverts).toEqual([]);
+      } else {
+        expect(h.calls).not.toContain("revert-unproven:dust-unproven");
+        expect(h.reverts.map((transaction: any) => transaction.label)).toEqual(["dust-final"]);
+      }
+      expect(h.journal.list().some((row) => row.lifecycleState === "QUARANTINED")).toBe(false);
+    } finally {
+      await h.executor.stop();
+    }
+  }
+});
+
+test("composed lowered demand aggregates sorted endpoint and intermediate receipts", async () => {
+  const h = harness({ offers: composedOffers(), balances: {}, status: "consumed" });
+  try {
+    const result = await h.executor.onSwap(swapJob("composed-surplus", D, A, "16", "9"));
+    expect(result.type).toBe("swap-tx");
+    expect(h.legs[0]).toEqual({
+      label: "residual",
+      inputs: {},
+      outputs: [
+        { seg: 0, tag: "shielded", raw: A, amount: -1n },
+        { seg: 0, tag: "shielded", raw: B, amount: -3n },
+        { seg: 0, tag: "shielded", raw: D, amount: -11n },
+      ],
+    });
+    expect(netImbalance(h.imbalanceReads.at(-1)!.rows)).toEqual([[A, 9n], [D, -16n]]);
+  } finally {
+    await h.executor.stop();
+  }
+});
+
+test("three makers retain four positive token receipts through one residual artifact", async () => {
+  const sources = [
+    ...composedOffers(),
+    makerOffer(H3, N3, D, 6n, E, 7n),
+  ];
+  const h = harness({ offers: sources, balances: {}, status: "consumed" });
+  try {
+    const result = await h.executor.onSwap(swapJob("four-receipts", E, A, "8", "9"));
+    expect(result.type).toBe("swap-tx");
+    expect(h.exactRequests).toEqual([[H1, H2, H3]]);
+    expect(h.legs[0]).toEqual({
+      label: "residual",
+      inputs: {},
+      outputs: [
+        { seg: 0, tag: "shielded", raw: A, amount: -1n },
+        { seg: 0, tag: "shielded", raw: B, amount: -3n },
+        { seg: 0, tag: "shielded", raw: D, amount: -1n },
+        { seg: 0, tag: "shielded", raw: E, amount: -1n },
+      ],
+    });
+    expect(netImbalance(h.imbalanceReads.at(-1)!.rows)).toEqual([[A, 9n], [E, -8n]]);
+    expect(h.journal.list().filter((row) => row.operationKind === "RESIDUAL_BUILD")).toHaveLength(1);
+  } finally {
+    await h.executor.stop();
+  }
+});
+
+test("balanced intermediate creates no zero receipt output", async () => {
+  const sources = [
+    makerOffer(H1, N1, A, 10n, B, 6n),
+    makerOffer(H2, N2, B, 6n, D, 5n),
+  ];
+  const h = harness({ offers: sources, balances: {}, status: "consumed" });
+  try {
+    expect((await h.executor.onSwap(swapJob("balanced-intermediate", D, A, "5", "10"))).type)
+      .toBe("swap-tx");
+    expect(h.legs).toEqual([]);
+    expect(netImbalance(h.imbalanceReads.at(-1)!.rows)).toEqual([[A, 10n], [D, -5n]]);
+  } finally {
+    await h.executor.stop();
+  }
+});
+
+test("16 B to 40 A retains 6 B and leaves the next whole maker untouched", async () => {
+  const sources = [
+    makerOffer(H1, N1, A, 40n, B, 10n),
+    makerOffer(H2, N2, A, 100n, B, 20n),
+  ];
+  const h = harness({ offers: sources, balances: {}, status: "consumed" });
+  try {
+    expect((await h.executor.onSwap(swapJob("sixteen-b", B, A, "16", "40"))).type)
+      .toBe("swap-tx");
+    expect(h.exactRequests).toEqual([[H1]]);
+    expect(h.legs[0]!.outputs).toEqual([
+      { seg: 0, tag: "shielded", raw: B, amount: -6n },
+    ]);
+    await h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "sixteen-b", txId: RELAY_TX });
+    expect(h.book.get(H1)).toBeUndefined();
+    expect(h.book.get(H2)).toBeDefined();
+  } finally {
+    await h.executor.stop();
+  }
+});
+
+test("one-base-unit intermediate deficit refuses with empty or funded solver inventory", () => {
+  const sources = [
+    makerOffer(H1, N1, A, 10n, B, 6n),
+    makerOffer(H2, N2, B, 5n, D, 5n),
+  ];
+  for (const balances of [{}, { [B]: 1_000n }]) {
+    const book = new Book();
+    sources.forEach((source) => book.upsert(source));
+    const stock = new Stock();
+    stock.setBalances(balances);
+    expect(refusalReason(() => resolveSwapJobRoute(
+      swapJob("deficit", D, A, "5", "10"),
+      { book, isCurrent: () => true },
+      stock,
+      { nowMs: Date.now(), expiryMarginSeconds: 120, unavailableOfferHashes: [] },
+    ))).toBe(JOB_ROUTE_NOT_CURRENT);
+    expect(stock.reserved(B)).toBe(0n);
+  }
+});
+
+test("direct and composed admissions sharing a physical maker cannot both reserve it", () => {
+  const sources = composedOffers();
+  const book = new Book();
+  sources.forEach((source) => book.upsert(source));
+  const stock = new Stock();
+  stock.setBalances({});
+  const composed = resolveSwapJobRoute(
+    swapJob("composed-race", D, A, "5", "10"),
+    { book, isCurrent: () => true },
+    stock,
+    { nowMs: Date.now(), expiryMarginSeconds: 120, unavailableOfferHashes: [] },
+  );
+  expect(composed.claim.offerHashes).toEqual([H1, H2]);
+  expect(refusalReason(() => resolveSwapJobRoute(
+    swapJob("direct-race", D, B, "5", "6"),
+    { book, isCurrent: () => true },
+    stock,
+    { nowMs: Date.now(), expiryMarginSeconds: 120, unavailableOfferHashes: [] },
+  ))).toBe(JOB_ROUTE_UNAVAILABLE);
+  stock.release(composed.claim);
+  expect(resolveSwapJobRoute(
+    swapJob("direct-after-release", D, B, "5", "6"),
+    { book, isCurrent: () => true },
+    stock,
+    { nowMs: Date.now(), expiryMarginSeconds: 120, unavailableOfferHashes: [] },
+  ).offers.map((source) => source.offerHash)).toEqual([H2]);
+});
+
+test("sorted physical identity uses the helper's distinct safe order for actual maker merges", async () => {
+  const sources = [
+    makerOffer(H1, N1, A, MAX_SETTLEMENT_AMOUNT, B, MAX_SETTLEMENT_AMOUNT),
+    makerOffer(H2, N2, A, 1n, D, 1n),
+    makerOffer(H3, N3, B, MAX_SETTLEMENT_AMOUNT, A, MAX_SETTLEMENT_AMOUNT - 1n),
+  ];
+  const h = harness({ offers: sources, balances: {}, status: "consumed" });
+  try {
+    const result = await h.executor.onSwap(swapJob("safe-order", D, A, "1", "2"));
+    expect(result.type).toBe("swap-tx");
+    // Exact-file identity stays sorted, while H3 cancels H1 before H2 adds the
+    // final A unit. H1+H2 would overflow ledger-v8's signed A delta.
+    expect(h.exactRequests).toEqual([[H1, H2, H3]]);
+    expect(h.dustBalanceInputs[0]![0]).toBe(`maker:${H1}+maker:${H3}+maker:${H2}`);
+    expect(h.imbalanceReads.some((read) =>
+      read.label === `maker:${H1}+maker:${H3}` &&
+      JSON.stringify(netImbalance(read.rows), (_, value) =>
+        typeof value === "bigint" ? value.toString() : value) === JSON.stringify([[A, "1"]])
+    )).toBe(true);
+  } finally {
+    await h.executor.stop();
+  }
 });
 
 test("lowered demand above the maker maximum refuses before wallet mutation", async () => {
@@ -1378,7 +1723,7 @@ test("FR-003 a job whose tokenIn the solver does not hold SETTLES (SC-002)", asy
   const zeroTokenIn = { [A]: 0n, [B]: 1_000n };
   for (const balances of [{ [A]: 14n, [B]: 1_000n }, zeroTokenIn]) {
     const resolved = routeFor("15", "25", { balances });
-    expect(resolved.route.surplusOut).toBe(5n);
+    expect(receiptAmount(resolved.route, B)).toBe(5n);
     expect([...resolved.route.claim.payouts]).toEqual([]);
     expect(resolved.stock.reserved(A)).toBe(0n);
   }
@@ -1386,9 +1731,7 @@ test("FR-003 a job whose tokenIn the solver does not hold SETTLES (SC-002)", asy
   // which is the "byte-for-byte" half of FR-003: nothing else moved.
   const funded = routeFor("15", "25", { balances: { [A]: 1_000n, [B]: 1_000n } });
   const unfunded = routeFor("15", "25", { balances: zeroTokenIn });
-  for (const key of ["surplusIn", "surplusOut"] as const) {
-    expect(unfunded.route[key], key).toBe(funded.route[key]);
-  }
+  expect(unfunded.route.receipts).toEqual(funded.route.receipts);
   expect(unfunded.route.offers.map((source) => source.offerHash))
     .toEqual(funded.route.offers.map((source) => source.offerHash));
 
@@ -1433,7 +1776,7 @@ test("FR-003 no reservation or balance on the tokenIn side can refuse a job", ()
   // One resolve per size: a second one would refuse "already claimed", which is
   // the offer-reservation property and not this test's subject.
   const fifteen = resolve("15");
-  expect(fifteen.surplusIn).toBe(5n);
+  expect(receiptAmount(fifteen, A)).toBe(5n);
   expect([...fifteen.claim.payouts]).toEqual([]);
   // The tokenIn reservation is untouched by the route: only a payout reserves.
   expect(stock.reserved(A)).toBe(6n);
@@ -1452,9 +1795,9 @@ test("publication and admission share the complete staircase and range", () => {
     { input: "30", output: "60" }, { input: "300", output: "60" },
   ]);
   for (const balances of [{}, { [A]: 1_000n, [B]: 1_000n }]) {
-    expect(routeFor("19", "30", { balances }).route.surplusIn).toBe(9n);
+    expect(receiptAmount(routeFor("19", "30", { balances }).route, A)).toBe(9n);
     expect(refusalReason(() => routeFor("19", "31", { balances }))).toBe(JOB_ROUTE_NOT_CURRENT);
-    expect(routeFor("300", "60", { balances }).route.surplusIn).toBe(270n);
+    expect(receiptAmount(routeFor("300", "60", { balances }).route, A)).toBe(270n);
     expect(refusalReason(() => routeFor("301", "1", { balances }))).toBe(JOB_ROUTE_NOT_CURRENT);
   }
 });
@@ -1620,12 +1963,12 @@ test("maker deletion during exact read and expiry during address read cause zero
   await expired.executor.stop();
 });
 
-test("u128 terminal cap keeps surplus buildable and rejects u256-only inputs", () => {
+test("signed-delta terminal cap keeps surplus buildable and rejects larger inputs", () => {
   const cost = MAX_SETTLEMENT_AMOUNT / 2n;
   const sources = [offer(H1, N1, cost, 10n)];
   const { route } = routeFor(MAX_SETTLEMENT_AMOUNT.toString(), "1", { offers: sources, balances: {} });
-  expect(route.surplusIn).toBe(MAX_SETTLEMENT_AMOUNT - cost);
-  expect(route.surplusOut).toBe(9n);
+  expect(receiptAmount(route, A)).toBe(MAX_SETTLEMENT_AMOUNT - cost);
+  expect(receiptAmount(route, B)).toBe(9n);
   expect(refusalReason(() => routeFor((MAX_SETTLEMENT_AMOUNT + 1n).toString(), "1", { offers: sources })))
     .toBe(JOB_ROUTE_NOT_CURRENT);
 });

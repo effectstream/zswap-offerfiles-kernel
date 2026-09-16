@@ -14,6 +14,10 @@ import {
   statusContractVersion,
   type StatusSnapshot,
 } from "@zswap-da/solver-core/status-contract";
+import {
+  MAX_COIN_AMOUNT,
+  MAX_SETTLEMENT_AMOUNT,
+} from "@zswap-da/solver-core/whole-offer-balance";
 
 /** A 64-hex colour that still reads as itself in an 8-character prefix. */
 export const colour = (head: string): string =>
@@ -239,8 +243,28 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
                       tokenIn: TKA,
                       tokenOut: TKB,
                       combinations: [
-                        { input: "750000", output: "500000", offerHashes: [OFFER_A] },
-                        { input: "1350000", output: "900000", offerHashes: [OFFER_A, OFFER_B] },
+                        {
+                          kind: "direct",
+                          input: "750000",
+                          output: "500000",
+                          offerHashes: [OFFER_A],
+                          tokenBalances: [
+                            { token: TKA, gives: "0", wants: "750000", net: "-750000" },
+                            { token: TKB, gives: "500000", wants: "0", net: "500000" },
+                          ],
+                          receipts: [],
+                        },
+                        {
+                          kind: "direct",
+                          input: "1350000",
+                          output: "900000",
+                          offerHashes: [OFFER_A, OFFER_B],
+                          tokenBalances: [
+                            { token: TKA, gives: "0", wants: "1350000", net: "-1350000" },
+                            { token: TKB, gives: "900000", wants: "0", net: "900000" },
+                          ],
+                          receipts: [],
+                        },
                       ],
                       terminalInput: "13500000",
                       nominalTerminalInput: "13500000",
@@ -250,13 +274,43 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
                       tokenIn: TKB,
                       tokenOut: TKA,
                       combinations: [
-                        { input: "400000", output: "560000", offerHashes: [OFFER_C] },
+                        {
+                          kind: "direct",
+                          input: "400000",
+                          output: "560000",
+                          offerHashes: [OFFER_C],
+                          tokenBalances: [
+                            { token: TKA, gives: "560000", wants: "0", net: "560000" },
+                            { token: TKB, gives: "0", wants: "400000", net: "-400000" },
+                          ],
+                          receipts: [],
+                        },
                       ],
                       terminalInput: "4000000",
                       nominalTerminalInput: "4000000",
                       capReasons: [],
                     },
                   ]
+                : [],
+            physicalDependencies:
+              withheld === null
+                ? [
+                    {
+                      offerHash: OFFER_A,
+                      pairs: [{ tokenIn: TKA, tokenOut: TKB }],
+                      combinations: 2,
+                    },
+                    {
+                      offerHash: OFFER_C,
+                      pairs: [{ tokenIn: TKB, tokenOut: TKA }],
+                      combinations: 1,
+                    },
+                    {
+                      offerHash: OFFER_B,
+                      pairs: [{ tokenIn: TKA, tokenOut: TKB }],
+                      combinations: 1,
+                    },
+                  ].sort((left, right) => left.offerHash.localeCompare(right.offerHash))
                 : [],
             excluded: [
               { offerHash: OFFER_BASKET, reason: "multi-leg" },
@@ -267,6 +321,10 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
                 detail: "wants an UNSHIELDED leg",
               },
             ],
+            amountBounds: {
+              maxSettlementAmount: MAX_SETTLEMENT_AMOUNT.toString(),
+              maxCoinAmount: MAX_COIN_AMOUNT.toString(),
+            },
             limits: {
               maxSourceOffers: 4096,
               maxVisitedSubsetsPerPair: 100000,
@@ -274,11 +332,16 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
               maxMakersPerCombination: 8,
               maxWirePointsPerPair: 64,
               maxPairs: 64,
+              maxCandidatePairs: 4096,
+              maxDiscoveryWork: 1000000,
             },
             diagnostics: {
               stopReason: null,
               invalidResourceLimit: null,
               sourceOffersScanned: 4,
+              candidatePairsExamined: 2,
+              discoveryWork: 12,
+              safeMergeOrderWork: 0,
               visitedSubsets: 4,
               peakStoredExactInputs: 2,
               pairs: [
@@ -293,6 +356,8 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
                   amountCappedSubsets: 0,
                   frontierCombinations: 2,
                   wirePoints: 4,
+                  discoveryWork: 7,
+                  safeMergeOrderWork: 0,
                 },
                 {
                   tokenIn: TKB,
@@ -305,6 +370,8 @@ export function buildStatusSnapshot(options: FixtureSnapshotOptions = {}): Statu
                   amountCappedSubsets: 0,
                   frontierCombinations: 1,
                   wirePoints: 2,
+                  discoveryWork: 5,
+                  safeMergeOrderWork: 0,
                 },
               ],
             },
@@ -457,7 +524,7 @@ export function buildMonitorSnapshot(options: {
       uptimeMs: 60_000,
       pollMs: 4000,
       historyLimit: 500,
-      contractVersion: 2,
+      contractVersion: 3,
       withdrawals: options.withdrawals ?? 0,
       lastWithdrawalAt: null,
       lastWithdrawalMs: null,

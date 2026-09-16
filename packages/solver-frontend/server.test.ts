@@ -143,15 +143,37 @@ describe("aggregation from three sources", () => {
     const stack = await startStack();
     await waitFor(() => stack.site.monitor.snapshot().solver.state === "reachable");
     const old = buildStatusSnapshot() as any;
-    old.contractVersion = 1;
+    old.contractVersion = 2;
     old.ladder.last.rungs = 999;
     stack.solver.publish(old);
 
-    await waitFor(() => stack.site.monitor.snapshot().solver.contractVersion === 1);
+    await waitFor(() => stack.site.monitor.snapshot().solver.contractVersion === 2);
     const view = stack.site.monitor.snapshot().solver;
     expect(view.state).toBe("reachable");
     expect(view.expectedContractVersion).toBe(statusContractVersion);
-    expect(view.contractVersion).toBe(1);
+    expect(view.contractVersion).toBe(2);
+    expect(view.snapshot).toBeNull();
+  });
+
+  test("keeps unknown newer and missing status versions observable without interpreting them", async () => {
+    const stack = await startStack();
+    await waitFor(() => stack.site.monitor.snapshot().solver.state === "reachable");
+
+    const future = buildStatusSnapshot() as any;
+    future.contractVersion = statusContractVersion + 1;
+    stack.solver.publish(future);
+    await waitFor(() =>
+      stack.site.monitor.snapshot().solver.contractVersion === statusContractVersion + 1
+    );
+    expect(stack.site.monitor.snapshot().solver.snapshot).toBeNull();
+
+    const missing = buildStatusSnapshot() as any;
+    delete missing.contractVersion;
+    stack.solver.publish(missing);
+    await waitFor(() => stack.site.monitor.snapshot().solver.contractVersion === 0);
+    const view = stack.site.monitor.snapshot().solver;
+    expect(view.state).toBe("reachable");
+    expect(view.contractVersion).toBe(0);
     expect(view.snapshot).toBeNull();
   });
 

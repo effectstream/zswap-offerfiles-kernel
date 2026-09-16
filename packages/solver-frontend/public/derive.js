@@ -204,6 +204,21 @@ export function amountView(amount, colour, registry) {
   };
 }
 
+/** Signed companion used only for maker net provenance. Wallet and settlement
+ * amounts remain nonnegative everywhere else. */
+export function signedAmountView(amount, colour, registry) {
+  const text = String(amount ?? "");
+  if (!/^-?[0-9]+$/.test(text)) return { base: text, coins: null, decimals: null };
+  const negative = text.startsWith("-");
+  const magnitude = negative ? text.slice(1) : text;
+  const view = amountView(magnitude, colour, registry);
+  return {
+    ...view,
+    base: negative ? `-${view.base}` : view.base,
+    coins: negative && view.coins !== null ? `-${view.coins}` : view.coins,
+  };
+}
+
 // ── snapshot accessors ───────────────────────────────────────────────────────
 
 const section = (snapshot, name) => {
@@ -512,12 +527,18 @@ export function alarms(snapshot) {
     solver.contractVersion !== null &&
     solver.contractVersion !== solver.expectedContractVersion
   ) {
+    const reported = solver.contractVersion;
+    const versionDescription = reported <= 0
+      ? "does not report a valid status contract version"
+      : reported < solver.expectedContractVersion
+        ? `reports older status contract v${reported}`
+        : `reports unknown newer status contract v${reported}`;
     out.push({
       tone: "warn",
       key: "contract",
       message:
-        `The solver reports status contract v${solver.contractVersion} and this page renders ` +
-        `v${solver.expectedContractVersion}. The incompatible solver snapshot is not rendered; ` +
+        `The solver ${versionDescription}; this page requires v${solver.expectedContractVersion}. ` +
+        `The incompatible solver snapshot is not rendered; ` +
         `redeploy both sides together.`,
     });
   }
@@ -784,6 +805,9 @@ export function ladderPairs(snapshot, registry) {
   for (const pair of push.provenance ?? []) {
     provenanceFor.set(`${pair.tokenIn}|${pair.tokenOut}`, pair);
   }
+  const dependencyFor = new Map(
+    (push.physicalDependencies ?? []).map((dependency) => [dependency.offerHash, dependency]),
+  );
   return (push.levels ?? []).map((pair) => {
     const provenance = provenanceFor.get(`${pair.tokenIn}|${pair.tokenOut}`) ?? null;
     const combinations = provenance?.combinations ?? [];
@@ -798,6 +822,52 @@ export function ladderPairs(snapshot, registry) {
         activeCombination = combinations[combinationIndex];
       }
       const genuine = activeCombination !== null && activeCombination.input === level.input;
+      const tokenBalances = (activeCombination?.tokenBalances ?? []).map((balance) => {
+        const role = balance.token === pair.tokenIn
+          ? "external input"
+          : balance.token === pair.tokenOut
+            ? "external output"
+            : "intermediate";
+        return {
+          ...balance,
+          role,
+          label: tokenLabel(balance.token, registry),
+          givesView: amountView(balance.gives, balance.token, registry),
+          wantsView: amountView(balance.wants, balance.token, registry),
+          netView: signedAmountView(balance.net, balance.token, registry),
+        };
+      });
+      const receipts = [];
+      let receiptError = null;
+      for (const balance of activeCombination?.tokenBalances ?? []) {
+        try {
+          let amount = BigInt(balance.net);
+          if (balance.token === pair.tokenIn) amount += BigInt(level.input);
+          if (balance.token === pair.tokenOut) amount -= BigInt(level.output);
+          if (amount < 0n) {
+            receiptError = `negative ${tokenLabel(balance.token, registry)} remainder`;
+          } else if (amount > 0n) {
+            const text = amount.toString();
+            receipts.push({
+              token: balance.token,
+              amount: text,
+              label: tokenLabel(balance.token, registry),
+              view: amountView(text, balance.token, registry),
+            });
+          }
+        } catch {
+          receiptError = "invalid token accounting";
+        }
+      }
+      const dependencies = (activeCombination?.offerHashes ?? []).map((offerHash) => {
+        const dependency = dependencyFor.get(offerHash);
+        return {
+          offerHash,
+          combinations: dependency?.combinations ?? 1,
+          pairs: [...(dependency?.pairs ?? [])],
+          shared: (dependency?.combinations ?? 1) > 1 || (dependency?.pairs?.length ?? 1) > 1,
+        };
+      });
       return {
         index: index + 1,
         input: level.input,
@@ -815,6 +885,13 @@ export function ladderPairs(snapshot, registry) {
         makerOutputView: activeCombination === null
           ? null
           : amountView(activeCombination.output, pair.tokenOut, registry),
+        routeKind: activeCombination?.kind ?? null,
+        tokenBalances,
+        receipts,
+        receiptError,
+        dependencies,
+        sharedOfferHashes: dependencies.filter((dependency) => dependency.shared)
+          .map((dependency) => dependency.offerHash),
         offerHashes: [...(activeCombination?.offerHashes ?? [])],
       };
     });
@@ -837,6 +914,11 @@ export function ladderPairs(snapshot, registry) {
       capReasons: [...(provenance?.capReasons ?? [])],
       winningCombinations: combinations.length,
       uniqueMakers: uniqueMakers.size,
+      sharedMakers: [...uniqueMakers].filter((offerHash) => {
+        const dependency = dependencyFor.get(offerHash);
+        return dependency !== undefined &&
+          (dependency.combinations > 1 || dependency.pairs.length > 1);
+      }).length,
       points,
     };
   });
@@ -867,10 +949,36 @@ export function admissionRows(snapshot, registry) {
       offerHash: exclusion.offerHash,
       pair,
       reason: exclusion.reason,
-      tone: exclusion.reason === "unavailable" ? "acc" : "warn",
+      tone: exclusion.reason === "unavailable" || isRouteLimitationReason(exclusion.reason)
+        ? "acc"
+        : "warn",
+      scope: isRouteLimitationReason(exclusion.reason) ? "route limit" : "source eligibility",
       detail: exclusion.detail ?? exclusionDetail(exclusion.reason, unavailable.has(exclusion.offerHash)),
     };
   });
+}
+
+const ROUTE_LIMITATION_REASONS = new Set([
+  "pair-search-cap",
+  "global-search-cap",
+  "wire-point-cap",
+  "pair-cap",
+  "candidate-pair-cap",
+  "discovery-work-cap",
+  "unsafe-merge-order",
+  "merge-order-work-cap",
+  "minimum-output",
+  "unsupported-pair",
+  "aborted",
+  "abort-check-failed",
+  "invalid-pair",
+  // This may describe a combination total even when the physical file remains
+  // usable in a smaller witness, so never label it globally unusable.
+  "settlement-amount-cap",
+]);
+
+export function isRouteLimitationReason(reason) {
+  return ROUTE_LIMITATION_REASONS.has(reason);
 }
 
 /** One sentence per reason the solver can report, so the page never shows a
@@ -901,6 +1009,14 @@ export function exclusionDetail(reason, claimed) {
       return "outside the longest exact staircase prefix that fits the wire-point cap";
     case "pair-cap":
       return "outside the maximum directed pairs carried by one frame";
+    case "candidate-pair-cap":
+      return "pair discovery reached its exact candidate-pair bound";
+    case "discovery-work-cap":
+      return "pair discovery or safe merge planning reached its shared work bound";
+    case "unsafe-merge-order":
+      return "no physical-maker merge order keeps every ledger delta prefix representable";
+    case "merge-order-work-cap":
+      return "safe physical-maker merge ordering exhausted its bounded fallback search";
     case "aborted":
       return "the derivation was superseded or cancelled before exactness was established";
     case "abort-check-failed":
@@ -951,20 +1067,37 @@ export function bookRows(snapshot, registry) {
   }
   const excludedBy = new Map();
   for (const exclusion of ladder?.last?.excluded ?? []) {
-    excludedBy.set(exclusion.offerHash, exclusion.reason);
+    const reasons = excludedBy.get(exclusion.offerHash) ?? [];
+    if (!reasons.includes(exclusion.reason)) reasons.push(exclusion.reason);
+    excludedBy.set(exclusion.offerHash, reasons);
   }
-  return kernelBook.offers.map((offer) => ({
-    offerId: offer.offerId,
-    status: offer.status,
-    gives: offer.gives.map((leg) => ({ ...leg, label: tokenLabel(leg.token, registry), view: amountView(leg.amount, leg.token, registry) })),
-    wants: offer.wants.map((leg) => ({ ...leg, label: tokenLabel(leg.token, registry), view: amountView(leg.amount, leg.token, registry) })),
-    blockHeight: offer.blockHeight,
-    expiresAt: offer.expiresAt,
-    // `cache` is null while the solver is unreachable — "unknown", never "out".
-    inCache: cache === null ? null : cached.has(offer.offerId),
-    winningSets: winningSetsByOffer.get(offer.offerId) ?? [],
-    excludedReason: excludedBy.get(offer.offerId) ?? null,
-  }));
+  return kernelBook.offers.map((offer) => {
+    const winningSets = winningSetsByOffer.get(offer.offerId) ?? [];
+    const reasons = excludedBy.get(offer.offerId) ?? [];
+    // A physical file used by any published witness is demonstrably eligible.
+    // Reasons attached while considering other pairs are route limitations,
+    // not a global statement that the file cannot be spent.
+    const sourceExclusionReasons = winningSets.length > 0
+      ? []
+      : reasons.filter((reason) => !isRouteLimitationReason(reason));
+    const routeLimitReasons = winningSets.length > 0
+      ? reasons
+      : reasons.filter(isRouteLimitationReason);
+    return {
+      offerId: offer.offerId,
+      status: offer.status,
+      gives: offer.gives.map((leg) => ({ ...leg, label: tokenLabel(leg.token, registry), view: amountView(leg.amount, leg.token, registry) })),
+      wants: offer.wants.map((leg) => ({ ...leg, label: tokenLabel(leg.token, registry), view: amountView(leg.amount, leg.token, registry) })),
+      blockHeight: offer.blockHeight,
+      expiresAt: offer.expiresAt,
+      // `cache` is null while the solver is unreachable — "unknown", never "out".
+      inCache: cache === null ? null : cached.has(offer.offerId),
+      winningSets,
+      sourceExclusionReasons,
+      routeLimitReasons,
+      excludedReason: sourceExclusionReasons[0] ?? null,
+    };
+  });
 }
 
 /** The journal tail (User Story 3). Newest first, as the solver serves it. */
@@ -1119,15 +1252,30 @@ export function configRows(snapshot) {
     rows.push(["derivation makers / combination", String(limits.maxMakersPerCombination)]);
     rows.push(["derivation wire points / pair", String(limits.maxWirePointsPerPair)]);
     rows.push(["derivation pairs / frame", String(limits.maxPairs)]);
+    rows.push([
+      "candidate pairs / derivation",
+      `${diagnostics?.candidatePairsExamined ?? "?"} / ${limits.maxCandidatePairs}`,
+    ]);
+    rows.push([
+      "discovery work / derivation",
+      `${diagnostics?.discoveryWork ?? "?"} / ${limits.maxDiscoveryWork}`,
+    ]);
+    rows.push(["safe merge order work", String(diagnostics?.safeMergeOrderWork ?? "?")]);
     rows.push(["derivation result", diagnostics?.stopReason ?? "complete"]);
     rows.push(["peak exact input states", String(diagnostics?.peakStoredExactInputs ?? "?")]);
     for (const pair of diagnostics?.pairs ?? []) {
       if (pair.status !== "withheld") continue;
       rows.push([
         `withheld pair ${shortColour(pair.tokenIn)} → ${shortColour(pair.tokenOut)}`,
-        pair.reason ?? "unspecified",
+        `${pair.reason ?? "unspecified"} · discovery ${pair.discoveryWork ?? "?"} · ` +
+          `safe merge ${pair.safeMergeOrderWork ?? "?"} · subsets ${pair.visitedSubsets ?? "?"}`,
       ]);
     }
+  }
+  const amountBounds = ladder?.last?.amountBounds ?? null;
+  if (amountBounds) {
+    rows.push(["max supported settlement amount", amountBounds.maxSettlementAmount]);
+    rows.push(["coin format maximum", amountBounds.maxCoinAmount]);
   }
   if (process) {
     rows.push(["relay token", `${process.relayAuthTokenLength} chars (never shown)`]);

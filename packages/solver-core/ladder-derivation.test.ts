@@ -1170,6 +1170,36 @@ describe("implemented work and state bounds", () => {
     });
   }
 
+  test("direct-only rejected markets do not multiply graph-sized search scratch", () => {
+    const count = 4_096;
+    const minimums = new Map<string, bigint>();
+    const book = Array.from({ length: count }, (_, index) => {
+      const tokenIn = token(10_000 + index * 2);
+      const tokenOut = token(10_001 + index * 2);
+      minimums.set(tokenOut, 2n);
+      return offer(40_000 + index, 1n, 1n, tokenIn, tokenOut);
+    });
+    const started = performance.now();
+    const result = deriveLadder(book, {
+      ...OPTIONS,
+      minJobOutput: minimums,
+      resourceLimits: { maxMakersPerCombination: 1 },
+    });
+    const elapsedMs = performance.now() - started;
+    expect(result.levels).toEqual([]);
+    expect(result.diagnostics.stopReason).toBe("discovery-work-cap");
+    expect(result.diagnostics.discoveryWork).toBe(1_000_000);
+    expect(result.diagnostics.visitedSubsets).toBe(result.diagnostics.candidatePairsExamined);
+    expect(result.diagnostics.visitedSubsets).toBeGreaterThan(0);
+    expect(result.diagnostics.visitedSubsets).toBeLessThan(count);
+    expect(elapsedMs).toBeLessThan(250);
+    console.log(
+      `CI direct-only rejection: ${elapsedMs.toFixed(2)}ms, ` +
+        `${result.diagnostics.candidatePairsExamined} pairs, ` +
+        `${result.diagnostics.discoveryWork} discovery work`,
+    );
+  });
+
   test("dense cyclic discovery/search stays bounded with measured auxiliary work", () => {
     const cycleTokens = [token(200), token(201), token(202), token(203)];
     const book = Array.from({ length: 12 }, (_, index) => {

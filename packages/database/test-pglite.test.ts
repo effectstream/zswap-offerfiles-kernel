@@ -2,18 +2,15 @@ import { expect, test } from "bun:test";
 
 import { closeTestPglite, type TestPgliteHandle } from "./test-pglite.ts";
 
-test("PGlite teardown is ordered and idempotent", async () => {
+test("PGlite teardown delegates protocol draining to the owning handle", async () => {
   const events: string[] = [];
+  let releaseDrain!: () => void;
+  const drained = new Promise<void>((resolve) => { releaseDrain = resolve; });
   const handle: TestPgliteHandle = {
-    server: {
-      listening: true,
-      close(callback) {
-        events.push("server");
-        callback();
-      },
-    },
-    db: {
-      async close() { events.push("db"); },
+    async close(options) {
+      events.push(`handle:${options?.force === true ? "force" : "default"}`);
+      await drained;
+      events.push("drained");
     },
   };
   const client = {
@@ -22,35 +19,42 @@ test("PGlite teardown is ordered and idempotent", async () => {
 
   const first = closeTestPglite(handle, client);
   const repeated = closeTestPglite(handle, client);
+  let completed = false;
+  void first.then(() => { completed = true; });
   expect(repeated).toBe(first);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  expect(events).toEqual(["client", "handle:force"]);
+  expect(completed).toBe(false);
+  releaseDrain();
   await Promise.all([first, repeated]);
-  expect(events).toEqual(["client", "server", "db"]);
+  expect(completed).toBe(true);
+  expect(events).toEqual(["client", "handle:force", "drained"]);
 });
 
 test("PGlite teardown attempts every stage before surfacing cleanup errors", async () => {
   const events: string[] = [];
+  const clientError = new Error("client close failed");
+  const handleError = new Error("handle close failed");
   const handle: TestPgliteHandle = {
-    server: {
-      listening: true,
-      close(callback) {
-        events.push("server");
-        callback(Object.assign(new Error("server close failed"), { code: "EIO" }));
-      },
-    },
-    db: {
-      async close() {
-        events.push("db");
-        throw new Error("database close failed");
-      },
+    async close(options) {
+      events.push(`handle:${options?.force === true ? "force" : "default"}`);
+      throw handleError;
     },
   };
   const client = {
     async end() {
       events.push("client");
-      throw new Error("client close failed");
+      throw clientError;
     },
   };
 
-  await expect(closeTestPglite(handle, client)).rejects.toBeInstanceOf(AggregateError);
-  expect(events).toEqual(["client", "server", "db"]);
+  let caught: unknown;
+  try {
+    await closeTestPglite(handle, client);
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(AggregateError);
+  expect((caught as AggregateError).errors).toEqual([clientError, handleError]);
+  expect(events).toEqual(["client", "handle:force"]);
 });

@@ -1963,12 +1963,14 @@ test("maker deletion during exact read and expiry during address read cause zero
   await expired.executor.stop();
 });
 
-test("signed-delta terminal cap keeps surplus buildable and rejects larger inputs", () => {
-  const cost = MAX_SETTLEMENT_AMOUNT / 2n;
-  const sources = [offer(H1, N1, cost, 10n)];
+test("signed-delta terminal cap keeps receipts buildable and rejects M+1 jobs", () => {
+  const cost = MAX_SETTLEMENT_AMOUNT / 10n + 1n;
+  const sources = [offer(H1, N1, cost, MAX_SETTLEMENT_AMOUNT)];
   const { route } = routeFor(MAX_SETTLEMENT_AMOUNT.toString(), "1", { offers: sources, balances: {} });
   expect(receiptAmount(route, A)).toBe(MAX_SETTLEMENT_AMOUNT - cost);
-  expect(receiptAmount(route, B)).toBe(9n);
+  expect(receiptAmount(route, B)).toBe(MAX_SETTLEMENT_AMOUNT - 1n);
   expect(refusalReason(() => routeFor((MAX_SETTLEMENT_AMOUNT + 1n).toString(), "1", { offers: sources })))
+    .toBe(JOB_ROUTE_NOT_CURRENT);
+  expect(refusalReason(() => routeFor("1", (MAX_SETTLEMENT_AMOUNT + 1n).toString(), { offers: sources })))
     .toBe(JOB_ROUTE_NOT_CURRENT);
 });

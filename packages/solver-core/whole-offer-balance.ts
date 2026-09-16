@@ -4,7 +4,7 @@
 export const MAX_COIN_AMOUNT = (1n << 128n) - 1n;
 
 /**
- * Ledger-v8 transaction deltas are i128 and reject i128::MIN. Every exposed
+ * Ledger-v9 transaction deltas are i128 and reject i128::MIN. Every exposed
  * source, endpoint, receipt, and safe merge prefix therefore uses this bound.
  */
 export const MAX_SETTLEMENT_AMOUNT = (1n << 127n) - 1n;

@@ -1193,8 +1193,8 @@ solver depending on the kernel and relay rather than starting them.
 that normalize to **one shielded give leg and one shielded want leg** with
 distinct token colors and positive amounts, using at most **8 complete maker
 files per job**. Unshielded legs, mixed value layers, multi-leg baskets, and
-Midnight 2.x are refused before admission. A maker file is never partially
-consumed.
+legacy Midnight 1.x / ledger-v8 transactions are refused before admission. A
+maker file is never partially consumed.
 
 **Fees.** Maker offers are constructed with `payFees:false` (see
 [Encoding offers](#encoding-offers-swapoffer1)), so a maker's offer pays no fee

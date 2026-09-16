@@ -274,7 +274,8 @@ interface CombinationState {
   input: bigint;
   output: bigint;
   offerHashes: string[];
-  tokenBalances: WholeOfferTokenBalance[];
+  /** Direct-pair rows are derived from input/output only when encoded. */
+  tokenBalances: WholeOfferTokenBalance[] | null;
 }
 
 interface SearchResult {
@@ -335,15 +336,22 @@ const compareHashes = (a: readonly string[], b: readonly string[]): number => {
   return a.length - b.length;
 };
 
-const betterExactInputWitness = (
-  candidate: CombinationState,
+const betterSelectedWitness = (
+  output: bigint,
+  selected: readonly Crossable[],
   incumbent: CombinationState,
 ): boolean => {
-  if (candidate.output !== incumbent.output) return candidate.output > incumbent.output;
-  if (candidate.offerHashes.length !== incumbent.offerHashes.length) {
-    return candidate.offerHashes.length < incumbent.offerHashes.length;
+  if (output !== incumbent.output) return output > incumbent.output;
+  if (selected.length !== incumbent.offerHashes.length) {
+    return selected.length < incumbent.offerHashes.length;
   }
-  return compareHashes(candidate.offerHashes, incumbent.offerHashes) < 0;
+  for (let index = 0; index < selected.length; index += 1) {
+    const left = selected[index]!.offerHash;
+    const right = incumbent.offerHashes[index]!;
+    if (left < right) return true;
+    if (left > right) return false;
+  }
+  return false;
 };
 
 function toCrossable(
@@ -464,18 +472,16 @@ function enumeratePair(
         }
         selected.push(candidate);
         try {
-          const state: CombinationState = {
-            input: nextInput,
-            output: nextOutput,
-            offerHashes: selected.map((entry) => entry.offerHash),
-            tokenBalances: [
-              { token: tokenIn, gives: 0n, wants: nextInput, net: -nextInput },
-              { token: tokenOut, gives: nextOutput, wants: 0n, net: nextOutput },
-            ].sort((left, right) => left.token < right.token ? -1 : left.token > right.token ? 1 : 0),
-          };
-          const key = state.input.toString();
+          const key = nextInput.toString();
           const incumbent = exact.get(key);
-          if (incumbent === undefined || betterExactInputWitness(state, incumbent)) exact.set(key, state);
+          if (incumbent === undefined || betterSelectedWitness(nextOutput, selected, incumbent)) {
+            exact.set(key, {
+              input: nextInput,
+              output: nextOutput,
+              offerHashes: selected.map((entry) => entry.offerHash),
+              tokenBalances: null,
+            });
+          }
           if (selected.length < limits.maxMakersPerCombination) {
             visit(index + 1, nextInput, nextOutput, true);
           }
@@ -489,9 +495,13 @@ function enumeratePair(
       // bigint balance vectors; a winning state materializes its own rows.
       const candidateInputIndex = candidate.tokenInIndex;
       const candidateOutputIndex = candidate.tokenOutIndex;
+      const previousInputWants = wants[candidateInputIndex];
+      const previousInputNet = nets[candidateInputIndex];
+      const previousOutputGives = gives[candidateOutputIndex];
+      const previousOutputNet = nets[candidateOutputIndex];
       const inputWasAbsent = (gives[candidateInputIndex] ?? 0n) === 0n &&
-        (wants[candidateInputIndex] ?? 0n) === 0n;
-      const outputWasAbsent = (gives[candidateOutputIndex] ?? 0n) === 0n &&
+        (previousInputWants ?? 0n) === 0n;
+      const outputWasAbsent = (previousOutputGives ?? 0n) === 0n &&
         (wants[candidateOutputIndex] ?? 0n) === 0n;
       if (inputWasAbsent) activeTokenIndices.push(candidateInputIndex);
       if (outputWasAbsent) activeTokenIndices.push(candidateOutputIndex);
@@ -555,24 +565,23 @@ function enumeratePair(
             }
           }
           if (mergeOrder.ok) {
-            const state: CombinationState = {
-              input: -inputNet,
-              output: outputNet,
-              offerHashes: selected.map((entry) => entry.offerHash),
-              tokenBalances: [],
-            };
-            const key = state.input.toString();
+            const input = -inputNet;
+            const key = input.toString();
             const incumbent = exact.get(key);
-            if (incumbent === undefined || betterExactInputWitness(state, incumbent)) {
+            if (incumbent === undefined || betterSelectedWitness(outputNet, selected, incumbent)) {
               // Rows are already exact, unique and canonical. Materialize their
               // sorted provenance only when this safe witness enters the map.
-              state.tokenBalances = activeTokenIndices.map((index) => ({
-                token: tokenAt[index]!,
-                gives: gives[index] ?? 0n,
-                wants: wants[index] ?? 0n,
-                net: nets[index] ?? 0n,
-              })).sort((a, b) => a.token < b.token ? -1 : a.token > b.token ? 1 : 0);
-              exact.set(key, state);
+              exact.set(key, {
+                input,
+                output: outputNet,
+                offerHashes: selected.map((entry) => entry.offerHash),
+                tokenBalances: activeTokenIndices.map((index) => ({
+                  token: tokenAt[index]!,
+                  gives: gives[index] ?? 0n,
+                  wants: wants[index] ?? 0n,
+                  net: nets[index] ?? 0n,
+                })).sort((a, b) => a.token < b.token ? -1 : a.token > b.token ? 1 : 0),
+              });
             }
           } else if (mergeOrder.reason === "unsafe-merge-order") {
             unsafeMergeOrderSubsets += 1;
@@ -599,23 +608,17 @@ function enumeratePair(
         }
       } finally {
         selected.pop();
+        gives[candidateOutputIndex] = previousOutputGives;
+        nets[candidateOutputIndex] = previousOutputNet;
         if (outputWasAbsent) {
-          gives[candidateOutputIndex] = undefined;
-          nets[candidateOutputIndex] = undefined;
           const removed = activeTokenIndices.pop();
           if (removed !== candidateOutputIndex) throw new Error("balance stack corruption");
-        } else {
-          gives[candidateOutputIndex] = gives[candidateOutputIndex]! - candidate.amountOut;
-          nets[candidateOutputIndex] = nets[candidateOutputIndex]! - candidate.amountOut;
         }
+        wants[candidateInputIndex] = previousInputWants;
+        nets[candidateInputIndex] = previousInputNet;
         if (inputWasAbsent) {
-          wants[candidateInputIndex] = undefined;
-          nets[candidateInputIndex] = undefined;
           const removed = activeTokenIndices.pop();
           if (removed !== candidateInputIndex) throw new Error("balance stack corruption");
-        } else {
-          wants[candidateInputIndex] = wants[candidateInputIndex]! - candidate.amountIn;
-          nets[candidateInputIndex] = nets[candidateInputIndex]! + candidate.amountIn;
         }
       }
     }
@@ -680,6 +683,8 @@ function encodePrefix(
   frontier: readonly CombinationState[],
   retainedCount: number,
   maxWirePoints: number,
+  tokenIn: string,
+  tokenOut: string,
 ): EncodedFrontier | { failureReasons: LadderTerminalCapReason[] } {
   const retained = frontier.slice(0, retainedCount);
   const final = retained[retained.length - 1]!;
@@ -726,7 +731,10 @@ function encodePrefix(
       input: entry.input.toString(),
       output: entry.output.toString(),
       offerHashes: [...entry.offerHashes],
-      tokenBalances: serializeWholeOfferTokenBalances(entry.tokenBalances),
+      tokenBalances: serializeWholeOfferTokenBalances(entry.tokenBalances ?? [
+        { token: tokenIn, gives: 0n, wants: entry.input, net: -entry.input },
+        { token: tokenOut, gives: entry.output, wants: 0n, net: entry.output },
+      ]),
     })),
     terminalInput,
     nominalTerminalInput,
@@ -737,6 +745,8 @@ function encodePrefix(
 function longestEncodableFrontier(
   frontier: readonly CombinationState[],
   maxWirePoints: number,
+  tokenIn: string,
+  tokenOut: string,
 ): { encoded: EncodedFrontier | null; truncationReasons: FrontierCapReason[] } {
   let best: EncodedFrontier | null = null;
   const truncationReasons = new Set<FrontierCapReason>();
@@ -745,7 +755,7 @@ function longestEncodableFrontier(
   // work when the exact frontier itself is large.
   const mostThresholdsThatCanFit = Math.min(frontier.length, maxWirePoints - 1);
   for (let retained = 1; retained <= mostThresholdsThatCanFit; retained += 1) {
-    const encoded = encodePrefix(frontier, retained, maxWirePoints);
+    const encoded = encodePrefix(frontier, retained, maxWirePoints, tokenIn, tokenOut);
     if ("failureReasons" in encoded) {
       for (const reason of encoded.failureReasons) {
         // An adjacent omitted improvement may become encodable by retaining
@@ -1328,7 +1338,7 @@ export function deriveLadder(
           }
 
           const { encoded, truncationReasons } = longestEncodableFrontier(
-            frontier, limits.maxWirePointsPerPair,
+            frontier, limits.maxWirePointsPerPair, tokenIn, tokenOut,
           );
           if (encoded === null) {
             diagnostic.reason = truncationReasons[0]!;

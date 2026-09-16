@@ -34,7 +34,10 @@ import {
   relayView,
   shortColour,
   shortHex,
+  snapshotForPage,
   stageStates,
+  SUPPORTED_MONITOR_CONTRACT_VERSION,
+  SUPPORTED_STATUS_CONTRACT_VERSION,
   tileValues,
   tokenLabel,
   tokenRegistry,
@@ -47,8 +50,67 @@ import {
   TKA,
   TKB,
 } from "./test-helpers/fixtures.ts";
+import { monitorContractVersion } from "./server.ts";
+import { statusContractVersion } from "../solver-core/status-contract.ts";
 
 const registryOf = (snapshot: any) => tokenRegistry(snapshot);
+
+describe("local browser contract compatibility", () => {
+  test("the unbundled page supports the producer's current contracts", () => {
+    expect(SUPPORTED_MONITOR_CONTRACT_VERSION).toBe(monitorContractVersion);
+    expect(SUPPORTED_STATUS_CONTRACT_VERSION).toBe(statusContractVersion);
+  });
+
+  for (const [version, description] of [
+    [2, "older monitor contract v2"],
+    [4, "unknown newer monitor contract v4"],
+    [undefined, "does not report a valid monitor contract version"],
+    ["3", "does not report a valid monitor contract version"],
+  ] as const) {
+    test(`rejects monitor ${String(version)} even when it reports matching upstream versions`, () => {
+      const raw: any = buildMonitorSnapshot();
+      raw.monitor.contractVersion = version;
+      raw.solver.contractVersion = version;
+      raw.solver.expectedContractVersion = version;
+      raw.solver.snapshot.contractVersion = version;
+      expect(pillState(raw).text).toBe("INCOMPATIBLE CONTRACT");
+      expect(alarms(raw)[0].message).toContain(description);
+      expect(ladderPairs(raw, new Map())).toEqual([]);
+      const accepted = snapshotForPage(raw, 1234);
+      expect(accepted.now).toBe(1234);
+      expect(accepted.solver.snapshot).toBeNull();
+      expect(bookRows(accepted, tokenRegistry(accepted))).toEqual([]);
+      expect(jobRows(accepted, new Map())).toEqual([]);
+      expect(eventRows(accepted)).toEqual([]);
+      expect(tileValues(accepted)["tile-withdrawals"].value).toBe("—");
+    });
+  }
+
+  test("a v3 monitor cannot redefine the page's supported status version", () => {
+    const raw: any = buildMonitorSnapshot();
+    raw.solver.contractVersion = 2;
+    raw.solver.expectedContractVersion = 2;
+    raw.solver.snapshot.contractVersion = 2;
+    expect(alarms(raw)[0].message).toContain("this page requires v3");
+    expect(ladderPairs(raw, new Map())).toEqual([]);
+    expect(snapshotForPage(raw).solver.snapshot).toBeNull();
+  });
+
+  test("checks the nested status version and recovers when supported snapshots resume", () => {
+    const raw: any = buildMonitorSnapshot();
+    delete raw.solver.snapshot.contractVersion;
+    const rejected = snapshotForPage(raw);
+    expect(alarms(rejected)[0].message).toContain("does not report a valid status contract version");
+    expect(rejected.solver.snapshot).toBeNull();
+    raw.solver.snapshot.contractVersion = null;
+    expect(snapshotForPage(raw).solver.snapshot).toBeNull();
+    raw.solver.contractVersion = null;
+    expect(snapshotForPage(raw).solver.snapshot).toBeNull();
+    const supported = buildMonitorSnapshot();
+    expect(snapshotForPage(supported)).toBe(supported);
+    expect(pillState(snapshotForPage(supported)).text).toBe("QUOTING");
+  });
+});
 
 describe("formatters", () => {
   test("groupDigits groups with a narrow no-break space and leaves non-numbers alone", () => {
@@ -500,6 +562,56 @@ describe("ladders and admission (User Story 2)", () => {
       expect.objectContaining({ token: intermediate, amount: "200" }),
     ]));
     expect(pair.points[0].dependencies[0]).toMatchObject({ shared: true, combinations: 2 });
+  });
+
+  for (const [name, change] of [
+    ["missing rows", (combination: any) => { delete combination.tokenBalances; }],
+    ["empty rows", (combination: any) => { combination.tokenBalances = []; }],
+    ["non-array rows", (combination: any) => { combination.tokenBalances = {}; }],
+    ["missing input", (combination: any) => { combination.tokenBalances = combination.tokenBalances.filter((row: any) => row.token !== TKA); }],
+    ["duplicate token", (combination: any) => { combination.tokenBalances.push(combination.tokenBalances[0]); }],
+    ["inconsistent net", (combination: any) => { combination.tokenBalances[0].net = "0"; }],
+    ["invalid amount", (combination: any) => { combination.tokenBalances[0].gives = "garbage"; }],
+    ["missing signed net", (combination: any) => { delete combination.tokenBalances[0].net; }],
+  ] as const) {
+    test(`${name} makes receipts unknown rather than none at genuine and plateau points`, () => {
+      const raw: any = buildMonitorSnapshot();
+      change(raw.solver.snapshot.ladder.last.provenance[0].combinations[0]);
+      const points = ladderPairs(raw, registryOf(raw))[0].points;
+      for (const point of points.slice(0, 2)) {
+        expect(point.receiptError).toStartWith("unknown receipts:");
+        expect(point.receipts).toEqual([]);
+      }
+      expect(points[2].receiptError).toBeNull();
+    });
+  }
+
+  test("only valid complete accounting proves a genuine point has no receipts", () => {
+    const raw = buildMonitorSnapshot();
+    const point = ladderPairs(raw, registryOf(raw))[0].points[0];
+    expect(point.receipts).toEqual([]);
+    expect(point.receiptError).toBeNull();
+  });
+
+  test("R1-F02: the 5 -> 10 witness retains 45 input units at its 50-unit plateau", () => {
+    const raw: any = buildMonitorSnapshot();
+    const push = raw.solver.snapshot.ladder.last;
+    push.levels[0].levels = [{ input: "5", output: "10" }, { input: "50", output: "10" }];
+    push.provenance[0].combinations = [{
+      input: "5", output: "10", offerHashes: ["11".repeat(32)], kind: "direct",
+      tokenBalances: [
+        { token: TKA, gives: "0", wants: "5", net: "-5" },
+        { token: TKB, gives: "10", wants: "0", net: "10" },
+      ],
+    }];
+    const points = ladderPairs(raw, registryOf(raw))[0].points;
+    expect(points[0].receipts).toEqual([]);
+    expect(points[0].receiptError).toBeNull();
+    expect(points[1].receipts).toMatchObject([{ token: TKA, amount: "45" }]);
+    expect(points[1].receiptError).toBeNull();
+    delete push.provenance[0].combinations[0].tokenBalances;
+    expect(ladderPairs(raw, registryOf(raw))[0].points[1].receiptError)
+      .toBe("unknown receipts: missing token accounting");
   });
 
   test("a shortened terminal reports every cap reason and keeps the real witness", () => {

@@ -30,6 +30,64 @@
  */
 export const DEFAULT_TOKEN_DECIMALS = 6;
 
+// Local browser capabilities, mirrored from server.ts / status-contract.ts.
+// A monitor's expectedContractVersion cannot define what this loaded page understands.
+export const SUPPORTED_MONITOR_CONTRACT_VERSION = 3;
+export const SUPPORTED_STATUS_CONTRACT_VERSION = 3;
+
+const validVersion = (version) => Number.isSafeInteger(version) && version > 0;
+
+function versionProblem(kind, reported, supported) {
+  if (reported === supported) return null;
+  const description = !validVersion(reported)
+    ? `does not report a valid ${kind} contract version`
+    : reported < supported
+      ? `reports older ${kind} contract v${reported}`
+      : `reports unknown newer ${kind} contract v${reported}`;
+  return {
+    tone: "warn",
+    key: "contract",
+    message: `The ${kind === "monitor" ? "monitor" : "solver"} ${description}; ` +
+      `this page requires v${supported}. The incompatible ${kind} snapshot is not rendered; ` +
+      "redeploy the monitor and solver together and reload this page.",
+  };
+}
+
+function solverVersion(snapshot) {
+  const solver = snapshot?.solver;
+  // null with no payload means the monitor has never received solver status.
+  if (solver?.contractVersion == null && solver?.snapshot == null) return null;
+  if (solver?.contractVersion !== SUPPORTED_STATUS_CONTRACT_VERSION) return solver?.contractVersion ?? 0;
+  return solver?.snapshot == null ? solver.contractVersion : solver.snapshot.contractVersion ?? 0;
+}
+
+/** Local compatibility judgement, before reading any version-dependent fields. */
+export function contractProblem(snapshot) {
+  const monitor = versionProblem("monitor", snapshot?.monitor?.contractVersion, SUPPORTED_MONITOR_CONTRACT_VERSION);
+  if (monitor) return monitor;
+  const reported = solverVersion(snapshot);
+  return reported === null ? null : versionProblem("status", reported, SUPPORTED_STATUS_CONTRACT_VERSION);
+}
+
+/** Shared poll/SSE ingress. Replace incompatible data so a reconnect clears old UI. */
+export function snapshotForPage(snapshot, now = Date.now()) {
+  if (snapshot?.monitor?.contractVersion !== SUPPORTED_MONITOR_CONTRACT_VERSION) {
+    const reported = snapshot?.monitor?.contractVersion;
+    return {
+      now,
+      monitor: { contractVersion: validVersion(reported) ? reported : null },
+      solver: { state: "incompatible", snapshot: null, lastSeenAt: null },
+      kernel: { book: null, sync: null, knownTokens: null },
+      relay: null,
+      history: [],
+    };
+  }
+  if (contractProblem(snapshot)) {
+    return { ...snapshot, solver: { ...snapshot.solver, contractVersion: solverVersion(snapshot) ?? 0, snapshot: null } };
+  }
+  return snapshot;
+}
+
 // ── small formatters ─────────────────────────────────────────────────────────
 
 /** A section that failed to collect, on either side of the hop. */
@@ -222,6 +280,7 @@ export function signedAmountView(amount, colour, registry) {
 // ── snapshot accessors ───────────────────────────────────────────────────────
 
 const section = (snapshot, name) => {
+  if (contractProblem(snapshot)) return null;
   const status = snapshot?.solver?.snapshot;
   if (!status) return null;
   const value = status[name];
@@ -241,6 +300,7 @@ export const solverSection = (snapshot, name) => ok(section(snapshot, name));
  * its socket up → is it publishing.
  */
 export function pillState(snapshot) {
+  if (contractProblem(snapshot)) return { text: "INCOMPATIBLE CONTRACT", tone: "warn" };
   const solver = snapshot?.solver;
   if (!solver || solver.state !== "reachable") {
     return { text: "SOLVER UNREACHABLE", tone: "bad" };
@@ -497,6 +557,8 @@ export function stageStates(snapshot) {
 
 /** Only present when something is wrong; the page hides the block otherwise. */
 export function alarms(snapshot) {
+  const problem = contractProblem(snapshot);
+  if (problem) return [problem];
   const out = [];
   const solver = snapshot?.solver;
   if (!solver) return out;
@@ -520,26 +582,6 @@ export function alarms(snapshot) {
         `The solver's status listener at ${solver.host} has not answered since ` +
         `${clockLabel(solver.lastSeenAt)} (${durationLabel(now - solver.since)}). ` +
         `Showing the last snapshot it sent, greyed. The kernel and relay reads below are live.`,
-    });
-  }
-
-  if (
-    solver.contractVersion !== null &&
-    solver.contractVersion !== solver.expectedContractVersion
-  ) {
-    const reported = solver.contractVersion;
-    const versionDescription = reported <= 0
-      ? "does not report a valid status contract version"
-      : reported < solver.expectedContractVersion
-        ? `reports older status contract v${reported}`
-        : `reports unknown newer status contract v${reported}`;
-    out.push({
-      tone: "warn",
-      key: "contract",
-      message:
-        `The solver ${versionDescription}; this page requires v${solver.expectedContractVersion}. ` +
-        `The incompatible solver snapshot is not rendered; ` +
-        `redeploy both sides together.`,
     });
   }
 
@@ -687,7 +729,8 @@ export function tileValues(snapshot) {
   const kernelBook = snapshot?.kernel?.book;
   const kernelOffers = kernelBook && !isError(kernelBook) ? kernelBook.count : null;
   const relayTokens = snapshot?.relay?.tokens;
-  const monitor = snapshot?.monitor;
+  const monitor = snapshot?.monitor?.contractVersion === SUPPORTED_MONITOR_CONTRACT_VERSION
+    ? snapshot.monitor : null;
 
   const advertised = push ? push.tokenIds.length : null;
   const relayAgrees =
@@ -792,6 +835,32 @@ export function exponential(value) {
 
 // ── ladders, exclusions, book, jobs, inventory (FR-012) ──────────────────────
 
+/** An empty receipt list is meaningful only with complete, consistent net rows. */
+function witnessAccountingError(combination, pair) {
+  const rows = combination?.tokenBalances;
+  if (!Array.isArray(rows) || rows.length === 0) return "unknown receipts: missing token accounting";
+  const seen = new Set();
+  const unsigned = /^(0|[1-9][0-9]*)$/;
+  const signed = /^(0|-?[1-9][0-9]*)$/;
+  try {
+    for (const row of rows) {
+      if (!row || typeof row.token !== "string" || !/^[0-9a-f]{64}$/.test(row.token) || seen.has(row.token) ||
+          typeof row.gives !== "string" || !unsigned.test(row.gives) ||
+          typeof row.wants !== "string" || !unsigned.test(row.wants) ||
+          typeof row.net !== "string" || !signed.test(row.net)) throw new Error();
+      seen.add(row.token);
+      const net = BigInt(row.net);
+      if (BigInt(row.gives) - BigInt(row.wants) !== net) throw new Error();
+      if (row.token === pair.tokenIn ? net !== -BigInt(combination.input)
+        : row.token === pair.tokenOut ? net !== BigInt(combination.output) : net < 0n) throw new Error();
+    }
+    if (!seen.has(pair.tokenIn) || !seen.has(pair.tokenOut)) throw new Error();
+  } catch {
+    return "unknown receipts: invalid token accounting";
+  }
+  return null;
+}
+
 /**
  * One entry per published directed pair: protocol wire points joined to the
  * latest affordable genuine winning combination. Synthetic plateau endpoints
@@ -822,7 +891,9 @@ export function ladderPairs(snapshot, registry) {
         activeCombination = combinations[combinationIndex];
       }
       const genuine = activeCombination !== null && activeCombination.input === level.input;
-      const tokenBalances = (activeCombination?.tokenBalances ?? []).map((balance) => {
+      let receiptError = witnessAccountingError(activeCombination, pair);
+      const accountingRows = receiptError === null ? activeCombination.tokenBalances : [];
+      const tokenBalances = accountingRows.map((balance) => {
         const role = balance.token === pair.tokenIn
           ? "external input"
           : balance.token === pair.tokenOut
@@ -838,8 +909,7 @@ export function ladderPairs(snapshot, registry) {
         };
       });
       const receipts = [];
-      let receiptError = null;
-      for (const balance of activeCombination?.tokenBalances ?? []) {
+      for (const balance of accountingRows) {
         try {
           let amount = BigInt(balance.net);
           if (balance.token === pair.tokenIn) amount += BigInt(level.input);

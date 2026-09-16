@@ -780,6 +780,92 @@ describe("wire and numeric bounds", () => {
 });
 
 describe("fail-closed limits and cancellation", () => {
+  const rejectedCycle = (): LadderSourceOffer[] => Array.from({ length: 4_096 }, (_, index) =>
+    offer(20_000 + index, 1n, 1n, token(200 + index % 64), token(200 + (index + 1) % 64)));
+  const unrelatedPolicy = () => new Set([admissionPairKey(token(9_000), token(9_001))]);
+
+  test("scans a rejected immutable universe once per reason and charges every offer", () => {
+    const book = rejectedCycle();
+    const options = { ...OPTIONS, supportedPairs: unrelatedPolicy() };
+    const first = deriveLadder(book, { ...options, resourceLimits: { maxCandidatePairs: 1 } });
+    const full = deriveLadder(book, options);
+    expect(full.diagnostics.stopReason).toBeNull();
+    expect(full.diagnostics.candidatePairsExamined).toBe(4_032);
+    expect(full.diagnostics.visitedSubsets).toBe(0);
+    expect(full.excluded).toEqual(book.map(({ offerHash }) => ({ offerHash, reason: "unsupported-pair" })));
+    expect(full.excluded).toEqual(first.excluded);
+    expect(full.diagnostics.pairs[0]!.discoveryWork).toBe(4_097);
+    expect(full.diagnostics.pairs.slice(1).every((pair) => pair.discoveryWork === 1)).toBe(true);
+    expect(full.diagnostics.discoveryWork - first.diagnostics.discoveryWork).toBe(4_031);
+
+    // Different reasons must still reach every file even though the universe
+    // is identical; deduplicating the scan must not erase diagnostic meaning.
+    const mixed = deriveLadder(book, {
+      ...OPTIONS,
+      supportedPairs: new Set([admissionPairKey(token(200), token(201))]),
+      minJobOutput: new Map(),
+    });
+    expect(mixed.excluded.filter((row) => row.reason === "minimum-output")).toHaveLength(4_096);
+    expect(mixed.excluded.filter((row) => row.reason === "unsupported-pair")).toHaveLength(4_096);
+    expect(mixed.diagnostics.discoveryWork).toBe(full.diagnostics.discoveryWork + 4_096);
+  });
+
+  test("stops a diagnostic scan exactly at a lower discovery limit", () => {
+    const book = rejectedCycle();
+    const options = { ...OPTIONS, supportedPairs: unrelatedPolicy() };
+    const first = deriveLadder(book, { ...options, resourceLimits: { maxCandidatePairs: 1 } });
+    const scanStart = first.diagnostics.discoveryWork - book.length;
+    const capped = deriveLadder(book, {
+      ...options,
+      resourceLimits: { maxDiscoveryWork: scanStart + 37 },
+    });
+    expect(capped.diagnostics.stopReason).toBe("discovery-work-cap");
+    expect(capped.diagnostics.discoveryWork).toBe(scanStart + 37);
+    expect(capped.diagnostics.candidatePairsExamined).toBe(1);
+    expect(capped.diagnostics.pairs[0]!.reason).toBe("discovery-work-cap");
+    expect(capped.excluded).toEqual(book.slice(0, 37).map(({ offerHash }) => ({
+      offerHash, reason: "unsupported-pair",
+    })));
+    expect(capped.levels).toEqual([]);
+  });
+
+  for (const failure of ["aborted", "abort-check-failed"] as const) {
+    test(`one-shot ${failure} inside an exclusion scan withdraws earlier proven pairs`, () => {
+      const book = [offer(25_000, 1n, 2n, A, B), ...Array.from({ length: 512 }, (_, index) =>
+        offer(25_001 + index, 1n, 1n, C, D))];
+      let scanningRejectedPair = false;
+      let fired = false;
+      class Policy extends Set<string> {
+        override has(pair: string): boolean {
+          if (pair === admissionPairKey(A, B)) return true;
+          scanningRejectedPair = true;
+          return false;
+        }
+      }
+      const result = deriveLadder(book, {
+        ...OPTIONS,
+        supportedPairs: new Policy(),
+        shouldAbort: () => {
+          if (!scanningRejectedPair || fired) return false;
+          fired = true;
+          if (failure === "abort-check-failed") throw new Error("cancel diagnostic scan");
+          return true;
+        },
+      });
+      expect(fired).toBe(true);
+      expect(result.diagnostics.stopReason).toBe(failure);
+      expect(result.diagnostics.candidatePairsExamined).toBe(2);
+      expect(result.diagnostics.pairs.every((pair) => pair.status === "withheld" && pair.reason === failure)).toBe(true);
+      expect(result.levels).toEqual([]);
+      expect(result.provenance).toEqual([]);
+      const scanned = result.excluded.filter((row) => row.reason === "unsupported-pair").length;
+      expect(scanned).toBeGreaterThan(0);
+      expect(scanned).toBeLessThan(256);
+      expect(result.excluded.filter((row) => row.reason === failure)).toHaveLength(book.length);
+      expect(result.diagnostics.discoveryWork).toBeLessThanOrEqual(result.limits.maxDiscoveryWork);
+    });
+  }
+
   test("exports measured defaults and rejects raised, zero, fractional and unknown-runtime controls", () => {
     expect(DEFAULT_LADDER_RESOURCE_LIMITS).toEqual({
       maxSourceOffers: 4_096,
@@ -1061,6 +1147,29 @@ describe("shared schema and frame builders", () => {
 });
 
 describe("implemented work and state bounds", () => {
+  for (const shape of ["dense-cycle", "sixteen-token-cycle", "source-ceiling-chain"] as const) {
+    test(`R2 ${shape} completes the full default subset budget within 250ms`, () => {
+      const count = shape === "source-ceiling-chain" ? 4_096 : 20;
+      const cycleLength = shape === "dense-cycle" ? 4 : 16;
+      const book = Array.from({ length: count }, (_, index) => {
+        const from = shape === "source-ceiling-chain" ? index : index % cycleLength;
+        const to = shape === "source-ceiling-chain" ? index + 1 : (index + 1) % cycleLength;
+        const amount = shape === "source-ceiling-chain" ? 1n : BigInt(1 + Math.floor(index / cycleLength));
+        return offer(30_000 + index, amount, amount, token(200 + from), token(200 + to));
+      });
+      const started = performance.now();
+      const result = deriveLadder(book, OPTIONS);
+      const elapsedMs = performance.now() - started;
+      expect(result.diagnostics.sourceOffersScanned).toBe(count);
+      expect(result.diagnostics.visitedSubsets).toBe(200_000);
+      expect(result.diagnostics.stopReason).toBe("global-search-cap");
+      expect(result.levels).toEqual([]);
+      expect(result.diagnostics.discoveryWork).toBeLessThanOrEqual(1_000_000);
+      expect(elapsedMs).toBeLessThan(250);
+      console.log(`R2 ${shape}: ${elapsedMs.toFixed(2)}ms, ${result.diagnostics.visitedSubsets} visits, ${result.diagnostics.discoveryWork} discovery work`);
+    });
+  }
+
   test("dense cyclic discovery/search stays bounded with measured auxiliary work", () => {
     const cycleTokens = [token(200), token(201), token(202), token(203)];
     const book = Array.from({ length: 12 }, (_, index) => {

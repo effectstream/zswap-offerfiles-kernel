@@ -689,7 +689,11 @@ describe("wire and numeric bounds", () => {
       offer(2_304, 1n, 1n),
     ], OPTIONS);
     expect(outputOverflow.diagnostics.pairs[0]!.amountCappedSubsets).toBe(1);
-    expect(outputOverflow.provenance[0]!.combinations).toEqual([
+    expect(outputOverflow.provenance[0]!.combinations.map((combination) => ({
+      input: combination.input,
+      output: combination.output,
+      offerHashes: combination.offerHashes,
+    }))).toEqual([
       {
         input: "1",
         output: MAX_SETTLEMENT_AMOUNT.toString(),

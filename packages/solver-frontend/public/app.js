@@ -30,6 +30,7 @@ import {
   bookRows,
   clockLabel,
   configRows,
+  contractProblem,
   dustView,
   eventRows,
   exponential,
@@ -42,6 +43,7 @@ import {
   pillState,
   relayView,
   shortHex,
+  snapshotForPage,
   stageStates,
   swatch,
   tileValues,
@@ -282,7 +284,11 @@ function renderLadders(snapshot, registry) {
   const pairs = ladderPairs(snapshot, registry);
   const count = $("#ladders-count");
 
-  if (snapshot.solver.state !== "reachable") {
+  if (contractProblem(snapshot)) {
+    count.textContent = "incompatible contract";
+    host.append(emptyNode("Ladder provenance is unknown until compatible snapshots resume."));
+    return;
+  } else if (snapshot.solver.state !== "reachable") {
     count.textContent = "solver unreachable";
     host.append(emptyNode("The solver is not answering — the last ladder it published is below only if it was seen before it went away."));
     if (pairs.length === 0) return;
@@ -834,6 +840,7 @@ function renderEvents(snapshot) {
 }
 
 function render(snapshot) {
+  snapshot = snapshotForPage(snapshot);
   latest = snapshot;
   receivedAt = Date.now();
   const registry = tokenRegistry(snapshot);

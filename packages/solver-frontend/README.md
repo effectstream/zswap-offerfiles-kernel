@@ -62,6 +62,12 @@ shown explicitly as old, future versions as unknown, and incompatible payloads
 are not interpreted. The monitor aggregation contract is v3 for the same
 breaking nested snapshot change.
 
+The loaded browser checks monitor and status versions against its own v3
+support at the shared polling/SSE entry. A rollback or mixed deployment clears
+incompatible data and displays a contract alarm until compatible snapshots
+resume. Missing, incomplete or inconsistent v3 token accounting makes receipts
+unknown; only validated accounting can produce a displayed `none`.
+
 ## Configuration
 
 Resolved and validated before the listener binds. A startup that is missing or

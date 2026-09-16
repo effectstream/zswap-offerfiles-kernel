@@ -29,7 +29,6 @@ import {
   type SolverCapabilitiesMessage,
 } from "./relay-ws-contract.ts";
 import {
-  evaluateWholeOfferPair,
   findSafeWholeOfferMergeOrder,
   MAX_SAFE_MERGE_ORDER_WORK,
   MAX_SETTLEMENT_AMOUNT,
@@ -408,10 +407,9 @@ function enumeratePair(
   );
 
   const addBalance = (
-    balances: ReadonlyMap<string, WholeOfferTokenBalance>,
+    next: Map<string, WholeOfferTokenBalance>,
     candidate: Crossable,
   ): Map<string, WholeOfferTokenBalance> => {
-    const next = new Map(balances);
     const input = next.get(candidate.tokenIn) ?? {
       token: candidate.tokenIn,
       gives: 0n,
@@ -441,10 +439,11 @@ function enumeratePair(
 
   const visit = (
     start: number,
-    balances: ReadonlyMap<string, WholeOfferTokenBalance>,
+    balances: Map<string, WholeOfferTokenBalance>,
     selected: readonly Crossable[],
     directInput: bigint,
     directOutput: bigint,
+    sortedPrefixSafe: boolean,
   ): void => {
     for (let index = start; index < bucket.length && reason === null; index += 1) {
       if (visitedSubsets >= limits.maxVisitedSubsetsPerPair) {
@@ -490,85 +489,120 @@ function enumeratePair(
         const incumbent = exact.get(key);
         if (incumbent === undefined || betterExactInputWitness(state, incumbent)) exact.set(key, state);
         if (nextSelected.length < limits.maxMakersPerCombination) {
-          visit(index + 1, balances, nextSelected, nextInput, nextOutput);
+          visit(index + 1, balances, nextSelected, nextInput, nextOutput, true);
         }
         continue;
       }
 
-      const nextBalances = addBalance(balances, candidate);
-      const nextSelected = [...selected, candidate];
-      const evaluated = evaluateWholeOfferPair(nextBalances.values(), tokenIn, tokenOut);
-      if (evaluated.ok) {
-        // For a direct-only set every sorted prefix moves monotonically toward
-        // the already-bounded final endpoint deltas, so its safe order is
-        // proven without repeatedly rebuilding the same two-row vector.
-        const directOnly = nextSelected.every((entry) =>
-          entry.tokenIn === tokenIn && entry.tokenOut === tokenOut
-        );
-        const mergeWorkLimit = Math.min(
-          MAX_SAFE_MERGE_ORDER_WORK,
-          discoveryBudget.remaining(),
-        );
-        const mergeOrder = directOnly
-          ? { ok: true as const, work: 0 }
-          : findSafeWholeOfferMergeOrder(
-            nextSelected.map((entry) => ({
-              offerHash: entry.offerHash,
-              gives: [{ token: entry.tokenOut, amount: entry.amountOut }],
-              wants: [{ token: entry.tokenIn, amount: entry.amountIn }],
-            })),
-            {
-              maxWork: mergeWorkLimit,
-              shouldAbort,
-            },
+      // The depth is at most eight. Reuse its map rather than allocating a
+      // 16-row copy for every visited subset; rows themselves stay immutable
+      // so winning provenance can safely retain references after rollback.
+      const previousInput = balances.get(candidate.tokenIn);
+      const previousOutput = balances.get(candidate.tokenOut);
+      try {
+        const nextBalances = addBalance(balances, candidate);
+        const nextSelected = [...selected, candidate];
+        // Crossable terms were validated and canonicalized once at eligibility.
+        // Only these two rows change when extending the sorted physical prefix.
+        const changedInput = nextBalances.get(candidate.tokenIn)!.net;
+        const changedOutput = nextBalances.get(candidate.tokenOut)!.net;
+        const nextSortedPrefixSafe = sortedPrefixSafe &&
+          changedInput >= -MAX_SETTLEMENT_AMOUNT && changedInput <= MAX_SETTLEMENT_AMOUNT &&
+          changedOutput >= -MAX_SETTLEMENT_AMOUNT && changedOutput <= MAX_SETTLEMENT_AMOUNT;
+        const inputNet = nextBalances.get(tokenIn)?.net ?? 0n;
+        const outputNet = nextBalances.get(tokenOut)?.net ?? 0n;
+        let additionalDeficit = false;
+        let amountCapped = false;
+        if (inputNet < 0n && outputNet > 0n) {
+          for (const row of nextBalances.values()) {
+            if (row.token !== tokenIn && row.net < 0n) {
+              additionalDeficit = true;
+              break;
+            }
+            if (row.net < -MAX_SETTLEMENT_AMOUNT || row.net > MAX_SETTLEMENT_AMOUNT) {
+              amountCapped = true;
+            }
+          }
+        }
+        const economicCandidate = inputNet < 0n && outputNet > 0n && !additionalDeficit;
+        if (economicCandidate && !amountCapped) {
+          const mergeWorkLimit = Math.min(
+            MAX_SAFE_MERGE_ORDER_WORK,
+            discoveryBudget.remaining(),
           );
-        if (mergeOrder.work > 0) {
-          const budgetReason = discoveryBudget.charge(mergeOrder.work, "safe-merge-order");
-          safeMergeOrderWork += mergeOrder.work;
-          if (budgetReason !== null) {
-            reason = budgetReason;
+          // This is exactly the helper's sorted-hash fast path, shared along the
+          // DFS branch. An unsafe prefix still visits every descendant and uses
+          // the bounded alternative-order planner for every feasible candidate.
+          const mergeOrder = nextSortedPrefixSafe
+            ? { ok: true as const, work: 0 }
+            : findSafeWholeOfferMergeOrder(
+              nextSelected.map((entry) => ({
+                offerHash: entry.offerHash,
+                gives: [{ token: entry.tokenOut, amount: entry.amountOut }],
+                wants: [{ token: entry.tokenIn, amount: entry.amountIn }],
+              })),
+              {
+                maxWork: mergeWorkLimit,
+                shouldAbort,
+              },
+            );
+          if (mergeOrder.work > 0) {
+            const budgetReason = discoveryBudget.charge(mergeOrder.work, "safe-merge-order");
+            safeMergeOrderWork += mergeOrder.work;
+            if (budgetReason !== null) {
+              reason = budgetReason;
+              return;
+            }
+          }
+          if (mergeOrder.ok) {
+            const state: CombinationState = {
+              input: -inputNet,
+              output: outputNet,
+              offerHashes: nextSelected.map((entry) => entry.offerHash),
+              tokenBalances: [],
+            };
+            const key = state.input.toString();
+            const incumbent = exact.get(key);
+            if (incumbent === undefined || betterExactInputWitness(state, incumbent)) {
+              // Rows are already exact, unique and canonical. Materialize their
+              // sorted provenance only when this safe witness enters the map.
+              state.tokenBalances = [...nextBalances.values()].sort((a, b) =>
+                a.token < b.token ? -1 : a.token > b.token ? 1 : 0);
+              exact.set(key, state);
+            }
+          } else if (mergeOrder.reason === "unsafe-merge-order") {
+            unsafeMergeOrderSubsets += 1;
+          } else if (
+            mergeOrder.reason === "aborted" ||
+            mergeOrder.reason === "abort-check-failed"
+          ) {
+            reason = mergeOrder.reason;
+            return;
+          } else if (mergeOrder.reason === "merge-order-work-cap") {
+            reason = mergeWorkLimit < MAX_SAFE_MERGE_ORDER_WORK
+              ? "discovery-work-cap"
+              : "merge-order-work-cap";
             return;
           }
+        } else if (economicCandidate && amountCapped) {
+          amountCappedSubsets += 1;
         }
-        if (mergeOrder.ok) {
-          const state: CombinationState = {
-            input: evaluated.pair.input,
-            output: evaluated.pair.output,
-            offerHashes: nextSelected.map((entry) => entry.offerHash),
-            tokenBalances: evaluated.pair.tokenBalances,
-          };
-          const key = state.input.toString();
-          const incumbent = exact.get(key);
-          if (incumbent === undefined || betterExactInputWitness(state, incumbent)) {
-            exact.set(key, state);
-          }
-        } else if (mergeOrder.reason === "unsafe-merge-order") {
-          unsafeMergeOrderSubsets += 1;
-        } else if (
-          mergeOrder.reason === "aborted" ||
-          mergeOrder.reason === "abort-check-failed"
-        ) {
-          reason = mergeOrder.reason;
-          return;
-        } else if (mergeOrder.reason === "merge-order-work-cap") {
-          reason = mergeWorkLimit < MAX_SAFE_MERGE_ORDER_WORK
-            ? "discovery-work-cap"
-            : "merge-order-work-cap";
-          return;
-        }
-      } else if (evaluated.reason === "settlement-amount-cap") {
-        amountCappedSubsets += 1;
-      }
 
-      // Never prune an unbalanced or numerically out-of-range partial set: a
-      // later physical maker can repair its deficits and signed net amounts.
-      if (nextSelected.length < limits.maxMakersPerCombination) {
-        visit(index + 1, nextBalances, nextSelected, 0n, 0n);
+        // Never prune an unbalanced or numerically out-of-range partial set: a
+        // later physical maker can repair its deficits and signed net amounts.
+        if (nextSelected.length < limits.maxMakersPerCombination) {
+          visit(index + 1, nextBalances, nextSelected, 0n, 0n, nextSortedPrefixSafe);
+        }
+      } finally {
+        if (previousInput === undefined) balances.delete(candidate.tokenIn);
+        else balances.set(candidate.tokenIn, previousInput);
+        if (previousOutput === undefined) balances.delete(candidate.tokenOut);
+        else balances.set(candidate.tokenOut, previousOutput);
       }
     }
   };
 
-  visit(0, new Map(), [], 0n, 0n);
+  visit(0, new Map(), [], 0n, 0n, true);
   return {
     exact,
     visitedSubsets,
@@ -715,20 +749,6 @@ function longestEncodableFrontier(
 
 const excludedHash = (offer: LadderSourceOffer): string =>
   typeof offer.offerHash === "string" ? offer.offerHash.toLowerCase() : "";
-
-const addPairExclusions = (
-  excluded: LadderExclusion[],
-  seen: Set<string>,
-  bucket: readonly Crossable[],
-  reason: LadderExclusionReason,
-): void => {
-  for (const offer of bucket) {
-    const key = `${offer.offerHash}:${reason}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    excluded.push({ offerHash: offer.offerHash, reason });
-  }
-};
 
 const emptyDiagnostics = (): LadderDerivationDiagnostics => ({
   stopReason: null,
@@ -1012,7 +1032,10 @@ export function deriveLadder(
         }
         diagnostics.discoveryWork += 1;
         if (kind === "safe-merge-order") diagnostics.safeMergeOrderWork += 1;
-        if ((diagnostics.discoveryWork & 255) === 0) {
+        if (
+          (diagnostics.discoveryWork & 255) === 0 &&
+          globalStop !== "aborted" && globalStop !== "abort-check-failed"
+        ) {
           const stopped = abortReason(options.shouldAbort);
           if (stopped !== null) return stopped;
         }
@@ -1021,278 +1044,322 @@ export function deriveLadder(
     },
   };
 
-  const graph = buildDiscoveryGraph(retained, discoveryBudget);
-  if ("reason" in graph) {
-    diagnostics.stopReason = graph.reason;
-    addPairExclusions(excluded, pairExclusionKeys, retained, graph.reason);
-    return emptyDerived(limits, diagnostics, excluded);
-  }
-
-  const cyclicComponents: DiscoveryComponent[] = [];
-  for (const component of graph.components) {
-    const componentWork = discoveryBudget.charge();
-    if (componentWork !== null) {
-      diagnostics.stopReason = componentWork;
-      addPairExclusions(excluded, pairExclusionKeys, retained, componentWork);
-      return emptyDerived(limits, diagnostics, excluded);
+  // A universe is immutable and reused across endpoint pairs. Its full
+  // exclusion set for a given reason is identical every time; scan it once.
+  const excludedUniverses = new Map<readonly Crossable[], Set<LadderExclusionReason>>();
+  const exclusionScanStop = Symbol("exclusion-scan-stop");
+  const addPairExclusions = (
+    bucket: readonly Crossable[],
+    reason: LadderExclusionReason,
+    detail?: LadderExclusion["detail"],
+  ): void => {
+    let reasons = excludedUniverses.get(bucket);
+    if (reasons?.has(reason)) return;
+    if (reasons === undefined) {
+      reasons = new Set();
+      excludedUniverses.set(bucket, reasons);
     }
-    if (component.cyclic) cyclicComponents.push(component);
-  }
-  const wantedTokenSet = new Set<string>();
-  for (const offer of retained) {
-    const wantedWork = discoveryBudget.charge();
-    if (wantedWork !== null) {
-      diagnostics.stopReason = wantedWork;
-      addPairExclusions(excluded, pairExclusionKeys, retained, wantedWork);
-      return emptyDerived(limits, diagnostics, excluded);
-    }
-    wantedTokenSet.add(offer.tokenIn);
-  }
-  const wantedTokens = [...wantedTokenSet];
-  const wantedSort = chargeDeterministicSort(wantedTokens.length, discoveryBudget);
-  if (wantedSort !== null) {
-    diagnostics.stopReason = wantedSort;
-    addPairExclusions(excluded, pairExclusionKeys, retained, wantedSort);
-    return emptyDerived(limits, diagnostics, excluded);
-  }
-  wantedTokens.sort();
-  const universeCache = new Map<number, { offers: Crossable[]; outputs: string[] }>();
-
-  const universeFor = (
-    inputComponent: DiscoveryComponent,
-  ):
-    | { ok: true; offers: Crossable[]; outputs: string[] }
-    | { ok: false; reason: "discovery-work-cap" | "aborted" | "abort-check-failed" } => {
-    const cached = universeCache.get(inputComponent.root);
-    if (cached !== undefined) return { ok: true, ...cached };
-    const included = inputComponent.cyclic
-      ? cyclicComponents
-      : [inputComponent, ...cyclicComponents];
-    const componentRoots = new Set<number>();
-    for (const component of included) {
-      const componentWork = discoveryBudget.charge();
-      if (componentWork !== null) return { ok: false, reason: componentWork };
-      componentRoots.add(component.root);
-    }
-    const universeOffers: Crossable[] = [];
-    const outputs = new Set<string>();
-    // `retained` is already sorted by full hash, so filtering it avoids an
-    // additional comparison sort while preserving physical tie order.
-    for (const offer of retained) {
-      const offerWork = discoveryBudget.charge();
-      if (offerWork !== null) return { ok: false, reason: offerWork };
-      const component = graph.componentByToken.get(offer.tokenIn)!;
-      if (!componentRoots.has(component.root)) continue;
-      universeOffers.push(offer);
-      outputs.add(offer.tokenOut);
-    }
-    const outputTokens = [...outputs];
-    const outputSort = chargeDeterministicSort(outputTokens.length, discoveryBudget);
-    if (outputSort !== null) return { ok: false, reason: outputSort };
-    outputTokens.sort();
-    const cachedUniverse = { offers: universeOffers, outputs: outputTokens };
-    universeCache.set(inputComponent.root, cachedUniverse);
-    return { ok: true, ...cachedUniverse };
-  };
-
-  pairDiscovery:
-  for (const tokenIn of wantedTokens) {
-    const universe = universeFor(graph.componentByToken.get(tokenIn)!);
-    if (!universe.ok) {
-      globalStop = universe.reason;
-      diagnostics.stopReason = universe.reason;
-      break;
-    }
-    for (const tokenOut of universe.outputs) {
-      if (tokenOut === tokenIn) continue;
-      if (diagnostics.candidatePairsExamined >= limits.maxCandidatePairs) {
-        globalStop = "candidate-pair-cap";
-        diagnostics.stopReason = globalStop;
-        break pairDiscovery;
-      }
-      const pairWorkStart = diagnostics.discoveryWork;
-      const pairDiscoveryWork = discoveryBudget.charge();
-      if (pairDiscoveryWork !== null) {
-        globalStop = pairDiscoveryWork;
-        diagnostics.stopReason = pairDiscoveryWork;
-        break pairDiscovery;
-      }
-      diagnostics.candidatePairsExamined += 1;
-
-      const bucket = universe.offers;
-      const diagnostic: LadderPairDiagnostic = {
-        tokenIn,
-        tokenOut,
-        status: "withheld",
-        reason: null,
-        candidateOffers: bucket.length,
-        visitedSubsets: 0,
-        storedExactInputs: 0,
-        amountCappedSubsets: 0,
-        frontierCombinations: 0,
-        wirePoints: 0,
-        discoveryWork: 0,
-        safeMergeOrderWork: 0,
-      };
-      diagnostics.pairs.push(diagnostic);
-
-      try {
-        if (levels.length >= limits.maxPairs) {
-          diagnostic.reason = "pair-cap";
-          addPairExclusions(excluded, pairExclusionKeys, bucket, "pair-cap");
-          continue;
-        }
-        if (
-          options.supportedPairs != null &&
-          !options.supportedPairs.has(admissionPairKey(tokenIn, tokenOut))
-        ) {
-          diagnostic.reason = "unsupported-pair";
-          addPairExclusions(excluded, pairExclusionKeys, bucket, "unsupported-pair");
-          continue;
-        }
-        const minimum = options.minJobOutput?.get(tokenOut);
-        if (options.minJobOutput != null && minimum === undefined) {
-          diagnostic.reason = "minimum-output";
-          addPairExclusions(excluded, pairExclusionKeys, bucket, "minimum-output");
-          continue;
-        }
-
-        const stopped = abortReason(options.shouldAbort);
-        if (stopped !== null) {
+    for (const offer of bucket) {
+      const stopped = discoveryBudget.charge();
+      if (stopped !== null) {
+        // Cancellation always invalidates the whole snapshot, including when
+        // its final diagnostics use the last discovery work unit.
+        if (globalStop !== "aborted" && globalStop !== "abort-check-failed") {
           globalStop = stopped;
           diagnostics.stopReason = stopped;
-          diagnostic.reason = stopped;
-          addPairExclusions(excluded, pairExclusionKeys, bucket, stopped);
+        }
+        throw exclusionScanStop;
+      }
+      addPairExclusion({ offerHash: offer.offerHash, reason, ...(detail === undefined ? {} : { detail }) });
+    }
+    reasons.add(reason);
+  };
+
+  try {
+    const graph = buildDiscoveryGraph(retained, discoveryBudget);
+    if ("reason" in graph) {
+      globalStop = graph.reason;
+      diagnostics.stopReason = graph.reason;
+      addPairExclusions(retained, graph.reason);
+      return emptyDerived(limits, diagnostics, excluded);
+    }
+
+    const cyclicComponents: DiscoveryComponent[] = [];
+    for (const component of graph.components) {
+      const componentWork = discoveryBudget.charge();
+      if (componentWork !== null) {
+        globalStop = componentWork;
+        diagnostics.stopReason = componentWork;
+        addPairExclusions(retained, componentWork);
+        return emptyDerived(limits, diagnostics, excluded);
+      }
+      if (component.cyclic) cyclicComponents.push(component);
+    }
+    const wantedTokenSet = new Set<string>();
+    for (const offer of retained) {
+      const wantedWork = discoveryBudget.charge();
+      if (wantedWork !== null) {
+        globalStop = wantedWork;
+        diagnostics.stopReason = wantedWork;
+        addPairExclusions(retained, wantedWork);
+        return emptyDerived(limits, diagnostics, excluded);
+      }
+      wantedTokenSet.add(offer.tokenIn);
+    }
+    const wantedTokens = [...wantedTokenSet];
+    const wantedSort = chargeDeterministicSort(wantedTokens.length, discoveryBudget);
+    if (wantedSort !== null) {
+      globalStop = wantedSort;
+      diagnostics.stopReason = wantedSort;
+      addPairExclusions(retained, wantedSort);
+      return emptyDerived(limits, diagnostics, excluded);
+    }
+    wantedTokens.sort();
+    const universeCache = new Map<number, { offers: Crossable[]; outputs: string[] }>();
+
+    const universeFor = (
+      inputComponent: DiscoveryComponent,
+    ):
+      | { ok: true; offers: Crossable[]; outputs: string[] }
+      | { ok: false; reason: "discovery-work-cap" | "aborted" | "abort-check-failed" } => {
+      const cached = universeCache.get(inputComponent.root);
+      if (cached !== undefined) return { ok: true, ...cached };
+      const included = inputComponent.cyclic
+        ? cyclicComponents
+        : [inputComponent, ...cyclicComponents];
+      const componentRoots = new Set<number>();
+      for (const component of included) {
+        const componentWork = discoveryBudget.charge();
+        if (componentWork !== null) return { ok: false, reason: componentWork };
+        componentRoots.add(component.root);
+      }
+      const universeOffers: Crossable[] = [];
+      const outputs = new Set<string>();
+      // `retained` is already sorted by full hash, so filtering it avoids an
+      // additional comparison sort while preserving physical tie order.
+      for (const offer of retained) {
+        const offerWork = discoveryBudget.charge();
+        if (offerWork !== null) return { ok: false, reason: offerWork };
+        const component = graph.componentByToken.get(offer.tokenIn)!;
+        if (!componentRoots.has(component.root)) continue;
+        universeOffers.push(offer);
+        outputs.add(offer.tokenOut);
+      }
+      const outputTokens = [...outputs];
+      const outputSort = chargeDeterministicSort(outputTokens.length, discoveryBudget);
+      if (outputSort !== null) return { ok: false, reason: outputSort };
+      outputTokens.sort();
+      const cachedUniverse = { offers: universeOffers, outputs: outputTokens };
+      universeCache.set(inputComponent.root, cachedUniverse);
+      return { ok: true, ...cachedUniverse };
+    };
+
+    pairDiscovery:
+    for (const tokenIn of wantedTokens) {
+      const universe = universeFor(graph.componentByToken.get(tokenIn)!);
+      if (!universe.ok) {
+        globalStop = universe.reason;
+        diagnostics.stopReason = universe.reason;
+        break;
+      }
+      for (const tokenOut of universe.outputs) {
+        if (tokenOut === tokenIn) continue;
+        if (diagnostics.candidatePairsExamined >= limits.maxCandidatePairs) {
+          globalStop = "candidate-pair-cap";
+          diagnostics.stopReason = globalStop;
           break pairDiscovery;
         }
+        const pairWorkStart = diagnostics.discoveryWork;
+        const pairDiscoveryWork = discoveryBudget.charge();
+        if (pairDiscoveryWork !== null) {
+          globalStop = pairDiscoveryWork;
+          diagnostics.stopReason = pairDiscoveryWork;
+          break pairDiscovery;
+        }
+        diagnostics.candidatePairsExamined += 1;
 
-        const search = enumeratePair(
-          bucket,
+        const bucket = universe.offers;
+        const diagnostic: LadderPairDiagnostic = {
           tokenIn,
           tokenOut,
-          limits,
-          diagnostics,
-          options.shouldAbort,
-          discoveryBudget,
-        );
-        diagnostic.visitedSubsets = search.visitedSubsets;
-        diagnostic.storedExactInputs = search.exact.size;
-        diagnostic.amountCappedSubsets = search.amountCappedSubsets;
-        diagnostic.safeMergeOrderWork = search.safeMergeOrderWork;
-        diagnostics.peakStoredExactInputs = Math.max(
-          diagnostics.peakStoredExactInputs,
-          search.exact.size,
-        );
-        if (search.reason !== null) {
-          diagnostic.reason = search.reason;
-          addPairExclusions(excluded, pairExclusionKeys, bucket, search.reason);
+          status: "withheld",
+          reason: null,
+          candidateOffers: bucket.length,
+          visitedSubsets: 0,
+          storedExactInputs: 0,
+          amountCappedSubsets: 0,
+          frontierCombinations: 0,
+          wirePoints: 0,
+          discoveryWork: 0,
+          safeMergeOrderWork: 0,
+        };
+        diagnostics.pairs.push(diagnostic);
+
+        try {
+          if (levels.length >= limits.maxPairs) {
+            diagnostic.reason = "pair-cap";
+            addPairExclusions(bucket, "pair-cap");
+            continue;
+          }
           if (
-            search.reason === "global-search-cap" ||
-            search.reason === "discovery-work-cap" ||
-            search.reason === "aborted" ||
-            search.reason === "abort-check-failed"
+            options.supportedPairs != null &&
+            !options.supportedPairs.has(admissionPairKey(tokenIn, tokenOut))
           ) {
-            globalStop = search.reason;
-            diagnostics.stopReason = search.reason;
+            diagnostic.reason = "unsupported-pair";
+            addPairExclusions(bucket, "unsupported-pair");
+            continue;
+          }
+          const minimum = options.minJobOutput?.get(tokenOut);
+          if (options.minJobOutput != null && minimum === undefined) {
+            diagnostic.reason = "minimum-output";
+            addPairExclusions(bucket, "minimum-output");
+            continue;
+          }
+
+          const stopped = abortReason(options.shouldAbort);
+          if (stopped !== null) {
+            globalStop = stopped;
+            diagnostics.stopReason = stopped;
+            diagnostic.reason = stopped;
+            addPairExclusions(bucket, stopped);
             break pairDiscovery;
           }
-          continue;
-        }
 
-        const stoppedAfterSearch = abortReason(options.shouldAbort);
-        if (stoppedAfterSearch !== null) {
-          globalStop = stoppedAfterSearch;
-          diagnostics.stopReason = stoppedAfterSearch;
-          diagnostic.reason = stoppedAfterSearch;
-          addPairExclusions(excluded, pairExclusionKeys, bucket, stoppedAfterSearch);
-          break pairDiscovery;
-        }
-
-        const frontierResult = bestOutputFrontier(search.exact, options.shouldAbort);
-        if (frontierResult.reason !== null) {
-          globalStop = frontierResult.reason;
-          diagnostics.stopReason = frontierResult.reason;
-          diagnostic.reason = frontierResult.reason;
-          addPairExclusions(
-            excluded,
-            pairExclusionKeys,
+          const search = enumeratePair(
             bucket,
-            frontierResult.reason,
+            tokenIn,
+            tokenOut,
+            limits,
+            diagnostics,
+            options.shouldAbort,
+            discoveryBudget,
           );
-          break pairDiscovery;
-        }
-        let frontier = frontierResult.frontier;
-        if (minimum !== undefined) frontier = frontier.filter((entry) => entry.output >= minimum);
-        if (frontier.length === 0) {
-          diagnostic.reason = search.amountCappedSubsets > 0
-            ? "settlement-amount-cap"
-            : search.unsafeMergeOrderSubsets > 0
-            ? "unsafe-merge-order"
-            : "minimum-output";
-          addPairExclusions(excluded, pairExclusionKeys, bucket, diagnostic.reason);
-          continue;
-        }
-
-        const { encoded, truncationReasons } = longestEncodableFrontier(
-          frontier, limits.maxWirePointsPerPair,
-        );
-        if (encoded === null) {
-          diagnostic.reason = truncationReasons[0]!;
-          for (const reason of truncationReasons) {
-            addPairExclusions(excluded, pairExclusionKeys, bucket, reason);
+          diagnostic.visitedSubsets = search.visitedSubsets;
+          diagnostic.storedExactInputs = search.exact.size;
+          diagnostic.amountCappedSubsets = search.amountCappedSubsets;
+          diagnostic.safeMergeOrderWork = search.safeMergeOrderWork;
+          diagnostics.peakStoredExactInputs = Math.max(
+            diagnostics.peakStoredExactInputs,
+            search.exact.size,
+          );
+          if (search.reason !== null) {
+            diagnostic.reason = search.reason;
+            if (
+              search.reason === "global-search-cap" ||
+              search.reason === "discovery-work-cap" ||
+              search.reason === "aborted" ||
+              search.reason === "abort-check-failed"
+            ) {
+              globalStop = search.reason;
+              diagnostics.stopReason = search.reason;
+              addPairExclusions(bucket, search.reason);
+              break pairDiscovery;
+            }
+            addPairExclusions(bucket, search.reason);
+            continue;
           }
-          continue;
-        }
 
-        const stoppedAfterEncoding = abortReason(options.shouldAbort);
-        if (stoppedAfterEncoding !== null) {
-          globalStop = stoppedAfterEncoding;
-          diagnostics.stopReason = stoppedAfterEncoding;
-          diagnostic.reason = stoppedAfterEncoding;
-          addPairExclusions(excluded, pairExclusionKeys, bucket, stoppedAfterEncoding);
-          break pairDiscovery;
-        }
-
-        const pair: PriceLevelsPair = { tokenIn, tokenOut, levels: encoded.levels };
-        const rejection = rejectPair(pair);
-        if (rejection !== null || !isPriceLevelsPair(pair)) {
-          diagnostic.reason = "invalid-pair";
-          for (const offer of bucket) {
-            addPairExclusion({
-              offerHash: offer.offerHash,
-              reason: "invalid-pair",
-              ...(rejection === null ? {} : { detail: rejection }),
-            });
+          const stoppedAfterSearch = abortReason(options.shouldAbort);
+          if (stoppedAfterSearch !== null) {
+            globalStop = stoppedAfterSearch;
+            diagnostics.stopReason = stoppedAfterSearch;
+            diagnostic.reason = stoppedAfterSearch;
+            addPairExclusions(bucket, stoppedAfterSearch);
+            break pairDiscovery;
           }
-          continue;
-        }
 
-        levels.push(pair);
-        provenance.push({
-          tokenIn,
-          tokenOut,
-          combinations: encoded.combinations,
-          terminalInput: encoded.terminalInput.toString(),
-          nominalTerminalInput: encoded.nominalTerminalInput.toString(),
-          capReasons: encoded.capReasons,
-        });
-        diagnostic.status = "published";
-        diagnostic.frontierCombinations = encoded.combinations.length;
-        diagnostic.wirePoints = encoded.levels.length;
-        if (encoded.combinations.length < frontier.length) {
-          const used = new Set(encoded.combinations.flatMap((entry) => entry.offerHashes));
-          for (const offer of bucket) {
-            if (!used.has(offer.offerHash)) {
-              for (const reason of truncationReasons) {
-                addPairExclusion({ offerHash: offer.offerHash, reason });
+          const frontierResult = bestOutputFrontier(search.exact, options.shouldAbort);
+          if (frontierResult.reason !== null) {
+            globalStop = frontierResult.reason;
+            diagnostics.stopReason = frontierResult.reason;
+            diagnostic.reason = frontierResult.reason;
+            addPairExclusions(
+              bucket,
+              frontierResult.reason,
+            );
+            break pairDiscovery;
+          }
+          let frontier = frontierResult.frontier;
+          if (minimum !== undefined) frontier = frontier.filter((entry) => entry.output >= minimum);
+          if (frontier.length === 0) {
+            diagnostic.reason = search.amountCappedSubsets > 0
+              ? "settlement-amount-cap"
+              : search.unsafeMergeOrderSubsets > 0
+              ? "unsafe-merge-order"
+              : "minimum-output";
+            addPairExclusions(bucket, diagnostic.reason);
+            continue;
+          }
+
+          const { encoded, truncationReasons } = longestEncodableFrontier(
+            frontier, limits.maxWirePointsPerPair,
+          );
+          if (encoded === null) {
+            diagnostic.reason = truncationReasons[0]!;
+            for (const reason of truncationReasons) {
+              addPairExclusions(bucket, reason);
+            }
+            continue;
+          }
+
+          const stoppedAfterEncoding = abortReason(options.shouldAbort);
+          if (stoppedAfterEncoding !== null) {
+            globalStop = stoppedAfterEncoding;
+            diagnostics.stopReason = stoppedAfterEncoding;
+            diagnostic.reason = stoppedAfterEncoding;
+            addPairExclusions(bucket, stoppedAfterEncoding);
+            break pairDiscovery;
+          }
+
+          const pair: PriceLevelsPair = { tokenIn, tokenOut, levels: encoded.levels };
+          const rejection = rejectPair(pair);
+          if (rejection !== null || !isPriceLevelsPair(pair)) {
+            diagnostic.reason = "invalid-pair";
+            addPairExclusions(bucket, "invalid-pair", rejection ?? undefined);
+            continue;
+          }
+
+          levels.push(pair);
+          provenance.push({
+            tokenIn,
+            tokenOut,
+            combinations: encoded.combinations,
+            terminalInput: encoded.terminalInput.toString(),
+            nominalTerminalInput: encoded.nominalTerminalInput.toString(),
+            capReasons: encoded.capReasons,
+          });
+          diagnostic.status = "published";
+          diagnostic.frontierCombinations = encoded.combinations.length;
+          diagnostic.wirePoints = encoded.levels.length;
+          if (encoded.combinations.length < frontier.length) {
+            const used = new Set(encoded.combinations.flatMap((entry) => entry.offerHashes));
+            for (const offer of bucket) {
+              const stopped = discoveryBudget.charge();
+              if (stopped !== null) {
+                globalStop = stopped;
+                diagnostics.stopReason = stopped;
+                throw exclusionScanStop;
+              }
+              if (!used.has(offer.offerHash)) {
+                for (const reason of truncationReasons) {
+                  addPairExclusion({ offerHash: offer.offerHash, reason });
+                }
               }
             }
           }
+        } finally {
+          diagnostic.discoveryWork = diagnostics.discoveryWork - pairWorkStart;
         }
-      } finally {
-        diagnostic.discoveryWork = diagnostics.discoveryWork - pairWorkStart;
       }
     }
+
+  } catch (error) {
+    if (error !== exclusionScanStop) throw error;
+    const lastPair = diagnostics.pairs.at(-1);
+    if (lastPair?.status === "withheld") lastPair.reason = globalStop;
+    // Completed pairs remain proved on an auxiliary-work cap. The global stop
+    // marks diagnostic collection incomplete; no additional scan runs outside
+    // the budget. Cancellation is handled below and clears every publication.
   }
 
   // Cancellation invalidates the whole snapshot, including completed pairs.
@@ -1303,12 +1370,11 @@ export function deriveLadder(
       diagnostic.reason = globalStop;
       diagnostic.frontierCombinations = 0;
       diagnostic.wirePoints = 0;
-      addPairExclusions(
-        excluded,
-        pairExclusionKeys,
-        retained,
-        globalStop,
-      );
+    }
+    try {
+      addPairExclusions(retained, globalStop);
+    } catch (error) {
+      if (error !== exclusionScanStop) throw error;
     }
     levels.length = 0;
     provenance.length = 0;

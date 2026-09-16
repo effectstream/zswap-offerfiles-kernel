@@ -21,7 +21,7 @@ import {
 
 /** A 64-hex colour that still reads as itself in an 8-character prefix. */
 export const colour = (head: string): string =>
-  (head + "9d3c8a1f7b25e04c6a83fd19b40e7c52a6f381d0").slice(0, 64);
+  (head + "9d3c8a1f7b25e04c6a83fd19b40e7c52a6f381d0").padEnd(64, "0").slice(0, 64);
 
 export const TKA = colour("e7580bfc");
 export const TKB = colour("fda14e2e");

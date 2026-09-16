@@ -654,6 +654,7 @@ describe("wire and numeric bounds", () => {
   });
 
   test("applies the ledger-v9 signed-delta ceiling while retaining u256 wire grammar", () => {
+    expect(MAX_SETTLEMENT_AMOUNT).toBe((1n << 127n) - 1n);
     const cappedInput = MAX_SETTLEMENT_AMOUNT / 10n + 1n;
     const capped = deriveLadder([offer(2_300, cappedInput, 1n)], OPTIONS);
     expect(capped.provenance[0]!.terminalInput).toBe(MAX_SETTLEMENT_AMOUNT.toString());

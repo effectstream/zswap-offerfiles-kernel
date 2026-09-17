@@ -14,7 +14,7 @@ import type { SyncDependencies } from "./src/book-sync.ts";
 import { RELAY_WS_OPEN, type RelayWebSocketLike } from "./src/relay-client.ts";
 import { Stock } from "./src/stock.ts";
 import { SolverOperationJournal } from "./src/operation-journal.ts";
-import { JOB_RECONCILING, JOB_ROUTE_UNAVAILABLE } from "./src/swap-job-executor.ts";
+import { JOB_RECONCILING, JOB_ROUTE_NOT_CURRENT } from "./src/swap-job-executor.ts";
 
 const TOKEN = "a".repeat(64);
 
@@ -153,11 +153,7 @@ const row = {
 const OFFER_HASH_2 = "12".repeat(32);
 const NULLIFIER_2 = "32".repeat(32);
 
-/** A second, WORSE-rate offer on the same pair, so the seeded book has an
- *  INTERIOR interval — the only thing the F03 residual budget is ever about.
- *  Rate 1 against `row`'s rate 2, so the unbounded ladder is (10, 20) then
- *  (20, 30) and the interval (10, 20) can demand up to floor(10 · 9 / 10) = 9
- *  of tokenOut out of the solver's own inventory. */
+/** A second maker improves the quote only when both complete files fit. */
 const row2 = {
   ...row,
   offerId: OFFER_HASH_2,
@@ -567,26 +563,9 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
   expect(withdrawal).toBeGreaterThanOrEqual(0);
 });
 
-// FR-002/FR-003 through the real wiring. This is the layer P4-F02 lived at:
-// `runSolver` handed the admission policy to the relay client, the relay
-// client's options did not declare it, and it evaporated. The residual budget
-// (F03) is wired the same way, so it is asserted here too — end to end from the
-// wallet's balance read to the bytes on the socket and back through admission.
-//
-// RE-ENCODED at 00006-R2 (FR-003 / SC-002). This test was
-// "an underfunded solver publishes nothing and refuses the job its ladder would
-// have implied": the wallet held only tokenOut, the tokenIn publication cap
-// therefore withheld EVERY rung, and the assertion was an empty `price-levels`
-// frame plus a `route_unavailable` refusal of the exact-rung job. Both halves
-// have changed meaning now that fee sizing spends no tokenIn:
-//
-//   * publication is NOT empty — the whole-maker rung publishes from a wallet
-//     holding NOTHING, which is the availability this project exists to restore;
-//   * the refusal that remains is the one that was always a solvency fact: an
-//     INTERIOR job whose residual tokenOut the solver cannot pay, refused
-//     fail-closed with zero wallet mutation (spec 00006 edge case
-//     "zero-tokenOut + interior-demand job racing publication").
-test("a solver with NO inventory publishes its whole-maker rung and still refuses an unaffordable residual", async () => {
+// Publication and admission use the same staircase even with zero swap-token balances.
+
+test("an empty wallet publishes the full staircase and refuses output above the maker maximum", async () => {
   const lifecycle: string[] = [];
   const socket = new RunSocket(lifecycle);
   let mutations = 0;
@@ -627,9 +606,6 @@ test("a solver with NO inventory publishes its whole-maker rung and still refuse
     walletDependencies: {
       buildWallet: async () => ({ wallet, dustSecretKey: "dust-key", zswapSecretKeys: {} }),
       waitForSync: async () => {},
-      // NOTHING. Not the pair's tokenIn (which nothing reads any more), and not
-      // its tokenOut either. Was `{[B]: 1_000n}` — tokenOut had to be funded so
-      // that the empty ladder could be attributed to the tokenIn cap alone.
       shieldedBalances: async () => ({}),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
     } as any,
@@ -643,39 +619,34 @@ test("a solver with NO inventory publishes its whole-maker rung and still refuse
         Array.isArray(frame.levels) && frame.levels.length > 0),
       "the first non-empty ladder push",
     );
-    // AVAILABILITY RESTORED, on the wire, from a wallet with no tokens at all:
-    // the whole-maker first rung publishes because the maker offer it consumes
-    // pays it, and it opens no interpolation interval. The SECOND rung is
-    // withheld by the unchanged F03 residual bound, since the interval it opens
-    // could demand 9 of tokenOut this solver does not have.
+    // Complete makers fund every published plateau independently of wallet stock.
     expect(handle.book.get(OFFER_HASH)).toBeDefined();
     expect(handle.book.get(OFFER_HASH_2)).toBeDefined();
     const levels = socket.sent.filter((frame) => frame.type === "price-levels");
     expect(levels.at(-1)).toEqual({
       type: "price-levels",
-      levels: [{ tokenIn: A, tokenOut: B, levels: [{ input: "10", output: "20" }] }],
+      levels: [{ tokenIn: A, tokenOut: B, levels: [
+        { input: "10", output: "20" }, { input: "19", output: "20" },
+        { input: "20", output: "30" }, { input: "200", output: "30" },
+      ] }],
     });
     const capabilities = socket.sent.filter((frame) => frame.type === "solver-capabilities");
     expect(capabilities.at(-1)).toMatchObject({ tokenIds: [A, B] });
 
-    // And if the relay dispatches an INTERIOR job anyway (a stale quote, or an
-    // operator running with the publication budget open), admission refuses it
-    // fail-closed with zero wallet mutation. Size 15 quotes 25 against the full
-    // book; the maker prefix pays 20, so 5 of tokenOut would come out of a Stock
-    // holding none.
+    // Input15 affords output20. Demanding25 is refused before any wallet mutation.
     socket.receive({
-      type: "swap", jobId: "unaffordable-residual", tokenIn: A, tokenOut: B,
+      type: "swap", jobId: "above-maker-maximum", tokenIn: A, tokenOut: B,
       amountIn: "15", amountOut: "25",
     });
     await waitFor(
       () => socket.sent.some((frame) =>
-        frame.type === "job-error" && frame.jobId === "unaffordable-residual"),
+        frame.type === "job-error" && frame.jobId === "above-maker-maximum"),
       "the fail-closed job refusal",
     );
     expect(socket.sent.findLast((frame) => frame.type === "job-error")).toEqual({
       type: "job-error",
-      jobId: "unaffordable-residual",
-      reason: JOB_ROUTE_UNAVAILABLE,
+      jobId: "above-maker-maximum",
+      reason: JOB_ROUTE_NOT_CURRENT,
     });
     expect(mutations).toBe(0);
     expect(handle.stock.reserved(B)).toBe(0n);
@@ -843,4 +814,13 @@ test("a status port already in use is a LISTED launch problem, before the wallet
   } finally {
     occupied.stop(true);
   }
+});
+
+test("untyped retired ladderConfigPath is rejected before reading dependencies or effects", async () => {
+  let effects = 0;
+  await expect(runSolver({
+    ladderConfigPath: "/must-not-read.json",
+    get walletDependencies() { effects += 1; throw new Error("dependency accessed"); },
+  } as any)).rejects.toThrow("ladderConfigPath was removed");
+  expect(effects).toBe(0);
 });

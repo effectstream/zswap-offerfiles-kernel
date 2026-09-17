@@ -6,7 +6,7 @@ import { getEnv } from "@effectstream/utils/runtime";
 
 import { forwardAdmissionPolicy } from "@zswap-da/solver-core/admission-policy";
 import { buildWallet, shieldedBalances, shieldedKeys, waitForSync } from "@zswap-da/solver-core/wallet";
-import { MAX_EXACT_FILES_PER_READ } from "@zswap-da/solver-core/exact-files-contract";
+import { DEFAULT_LADDER_RESOURCE_LIMITS } from "@zswap-da/solver-core/ladder-derivation";
 
 import {
   isDryRun,
@@ -19,7 +19,6 @@ import {
   SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS,
   SOLVER_BACKEND_HEALTH_MAX_AGE_MS,
   SOLVER_EXPIRY_MARGIN_SECONDS,
-  SOLVER_LADDER_CONFIG,
   SOLVER_RELAY_AUTH_TOKEN,
   SOLVER_RELAY_WS_URL,
   SOLVER_RESYNC_INTERVAL_MS,
@@ -33,12 +32,13 @@ import { startAdmissionWarnings, type AdmissionWarningTimers } from "./admission
 import {
   SOLVER_NETWORK_IDS,
   SolverLaunchConfigError,
+  assertNoRetiredSolverPricingEnv,
+  assertNoRetiredSolverPricingOptions,
   type SolverStatusLaunchConfig,
 } from "./launch.ts";
 import { createStatusCollector, type StatusCollector, type StatusTimers } from "./status.ts";
 import { startStatusServer, type StatusServerHandle } from "./status-server.ts";
 import { Book, type BookOffer } from "./book.ts";
-import { loadLadderConfig, type LoadedLadders } from "./config.ts";
 import {
   startBookSync,
   type BookChange,
@@ -81,8 +81,6 @@ export interface SolverOptions {
   /** Cancels startup acquisition. Once a handle is returned, callers own
    * shutdown through `SolverHandle.stop()`. */
   signal?: AbortSignal;
-  /** Defaults to SOLVER_LADDER_CONFIG. */
-  ladderConfigPath?: string;
   /** Defaults to ZSWAP_API. */
   api?: string;
   /** Read-only mirror and real inventory without starting relay jobs. */
@@ -150,7 +148,6 @@ export interface SolverOptions {
 }
 
 export interface SolverHandle {
-  readonly ladders: LoadedLadders;
   readonly book: Book;
   /** Compatibility alias. R2 removed pre-match validation; settlement bytes
    * come only from the job-time exact-files read. */
@@ -466,6 +463,8 @@ export function armBookReadyDecisionGate(
 }
 
 export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle> {
+  assertNoRetiredSolverPricingEnv();
+  assertNoRetiredSolverPricingOptions(opts as unknown as Readonly<Record<string, unknown>>);
   const walletDependencies = opts.walletDependencies ?? DEFAULT_WALLET_DEPENDENCIES;
   const api = opts.api ?? ZSWAP_API;
   const dryRun = opts.dryRun ?? isDryRun();
@@ -525,10 +524,6 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
       // Diagnostics cannot own readiness, execution, or shutdown lifecycle.
     }
   };
-  if (opts.signal?.aborted) {
-    throw asError(opts.signal.reason, "solver startup aborted");
-  }
-  const ladders = await loadLadderConfig(opts.ladderConfigPath ?? SOLVER_LADDER_CONFIG);
   if (opts.signal?.aborted) {
     throw asError(opts.signal.reason, "solver startup aborted");
   }
@@ -653,8 +648,9 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
         pushIntervalMs: opts.relayPushIntervalMs ?? relayEnv.pushIntervalMs,
         maxParallelSwaps,
-        maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
-        maxPairs: null,
+        maxRungsPerPair: DEFAULT_LADDER_RESOURCE_LIMITS.maxWirePointsPerPair,
+        maxPairs: DEFAULT_LADDER_RESOURCE_LIMITS.maxPairs,
+        maxMakersPerRoute: DEFAULT_LADDER_RESOURCE_LIMITS.maxMakersPerCombination,
         settleTtlMinutes: SOLVER_SETTLE_TTL_MINUTES,
       },
       sync: () => sync,
@@ -761,8 +757,8 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     }
   };
 
-  /** Publish NOW instead of waiting for the next tick. Used where inventory
-   *  authority changes, so a withdrawal is not delayed by up to one push
+  /** Publish NOW instead of waiting for the next tick. Used where runtime
+   *  readiness changes, so a withdrawal is not delayed by up to one push
    *  interval and a recovery is not either. Never throws and never blocks: the
    *  relay client coalesces this into any push already in flight. */
   const republishLadder = (reason: string): void => {
@@ -771,19 +767,8 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     });
   };
 
-  // A failed/started refresh empties Stock, which withdraws residual inventory
-  // authority. Maker-backed rungs still come from the current book cache — but
-  // FR-003 bounds the PUBLISHED rungs by that same authority, so an emptied
-  // Stock also withdraws every rung whose interpolation interval needs a
-  // residual payout. STILL LOAD-BEARING after 00006-R2 dropped the tokenIn
-  // bound: the tokenOut half alone changes what is publishable on both edges.
-  // (What changed is the floor — an emptied Stock now withdraws the interior
-  // rungs and keeps the whole-maker ones, instead of withdrawing everything.)
-  // Both directions are republished immediately rather than at the next tick:
-  // withdrawing late would keep advertising liquidity the executor has already
-  // started refusing, and recovering late would strand the solver unquotable
-  // for a full interval after each settlement (every terminal outcome triggers
-  // a refresh).
+  // Balance reads support wallet readiness, status and persisted payout claims.
+  // Their values do not change canonical whole-offer prices or new-job routes.
   inventoryChanged = (ready): void => {
     notifyStatus();
     if (ready && !backendCurrent) {
@@ -990,20 +975,10 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
         ladder: {
           expiryMarginSeconds: opts.expiryMarginSeconds ?? SOLVER_EXPIRY_MARGIN_SECONDS,
           maxParallelSwaps,
-          // One swap job is one bounded exact-files read. Never advertise a rung
-          // whose whole-offer prefix cannot fit that read.
-          maxRungsPerPair: MAX_EXACT_FILES_PER_READ,
           unavailableOfferHashes: activeJobs.unavailableOfferHashes,
           // FR-002: ONE policy object, the same one the executor admits with, so
           // a field cannot reach admission without reaching the wire (P4-F02).
           ...forwardAdmissionPolicy(admission),
-          // FR-003: never advertise a rung this solver could not pay the
-          // residual for. Read per push, so an inventory refresh — including the
-          // deliberate emptying that follows a lost backend authority —
-          // withdraws the affected rungs on the very next push. Whole-maker
-          // rungs survive an empty snapshot: 00006-R2 removed the tokenIn bound
-          // that used to withdraw them too.
-          spendableInventory: () => stock.spendable(),
         },
         pushIntervalMs: opts.relayPushIntervalMs ?? relayEnv.pushIntervalMs,
         reconnectDelayMs: opts.relayReconnectDelayMs ?? relayEnv.reconnectDelayMs,
@@ -1060,7 +1035,6 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   let stopPromise: Promise<void> | null = null;
 
   return {
-    ladders,
     book: activeSync.book,
     validatedBook: activeSync.book,
     stock,

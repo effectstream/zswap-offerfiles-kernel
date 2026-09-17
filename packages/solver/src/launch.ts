@@ -9,8 +9,8 @@
  *
  * Why an entrypoint-level resolver when `runSolver` already validates:
  *
- * - `runSolver` throws on the FIRST missing value, after it has already loaded
- *   the ladder file and (for the journal) touched the filesystem. An operator
+ * - `runSolver` throws on the FIRST missing value, after it has already touched
+ *   the journal filesystem. An operator
  *   bringing up a Compose service wants one message naming everything that is
  *   wrong, before any resource is acquired.
  * - Several boundaries have silent defaults that are safe for a developer and
@@ -43,7 +43,6 @@ import { getEnv } from "@effectstream/utils/runtime";
 import { SOLVER_STATUS_MIN_TOKEN_LENGTH } from "@zswap-da/solver-core/status-contract";
 
 import {
-  DEFAULT_SOLVER_LADDER_CONFIG,
   DEV_SEED,
   loadSolverFeeSizingTakerInputs,
   loadSolverJournalEnv,
@@ -54,6 +53,26 @@ import {
 } from "../env.ts";
 
 export type EnvReader = (name: string) => string | undefined;
+
+/** Pricing inputs removed by 00009. Their presence is always an upgrade error:
+ * the live Offer Files book is now the sole source of ladder economics. */
+export const RETIRED_SOLVER_PRICING_ENV = [
+  "SOLVER_LADDER_CONFIG",
+  "SOLVER_ENABLE_PATH_B",
+  "SOLVER_ENABLE_CYCLES",
+  "SOLVER_ENABLE_RESIDUAL_TOPUPS",
+] as const;
+
+export const RETIRED_SOLVER_PRICING_OPTIONS = ["ladderConfigPath"] as const;
+
+const retiredPricingProblems = (read: EnvReader): string[] =>
+  RETIRED_SOLVER_PRICING_ENV
+    .filter((name) => read(name) !== undefined)
+    .map(
+      (name) =>
+        `${name} was removed: delete it; the solver now derives whole-offer ` +
+        "combination staircases with a fixed 10x terminal plateau from the live Offer Files book",
+    );
 
 /** The network ids `midnight-env` resolves. Anything else is a typo that would
  * otherwise be treated as a deployed network with generated URLs. */
@@ -80,7 +99,6 @@ export interface SolverLaunchConfig {
   journal: SolverJournalEnv;
   seed: string;
   dryRun: boolean;
-  ladderConfigPath: string;
   /** 00006 FR-001. How many taker zswap inputs fee sizing models; the
    * reservation funds a real taker half of up to this many `+ 2` inputs. */
   feeSizingTakerInputs: number;
@@ -132,6 +150,27 @@ export class SolverLaunchConfigError extends Error {
   }
 }
 
+/** Used by the legacy network-specific launchers, which keep their narrower
+ * configuration contract but must still reject removed pricing selectors. */
+export function assertNoRetiredSolverPricingEnv(read: EnvReader = getEnv): void {
+  const problems = retiredPricingProblems(read);
+  if (problems.length > 0) throw new SolverLaunchConfigError(problems);
+}
+
+/** Runtime guard for untyped JavaScript/harness callers. Call this before any
+ * file, wallet, journal, backend, or relay operation. */
+export function assertNoRetiredSolverPricingOptions(
+  options: Readonly<Record<string, unknown>>,
+): void {
+  const retired = RETIRED_SOLVER_PRICING_OPTIONS.filter((name) => name in options);
+  if (retired.length === 0) return;
+  throw new Error(
+    `${retired.join(", ")} ${retired.length === 1 ? "was" : "were"} removed: delete ` +
+      `${retired.length === 1 ? "it" : "them"}; the solver derives whole-offer combination ` +
+      "staircases with a fixed 10x terminal plateau from the live Offer Files book",
+  );
+}
+
 const CANONICAL_SEED = /^[0-9a-f]{64}$/;
 
 const isCanonicalScalar = (raw: string): boolean =>
@@ -175,7 +214,7 @@ export function resolveSolverLaunchConfig(
   options: SolverLaunchOptions = {},
 ): SolverLaunchConfig {
   const read = options.read ?? getEnv;
-  const problems: string[] = [];
+  const problems: string[] = retiredPricingProblems(read);
   const warnings: string[] = [];
 
   // ── network ────────────────────────────────────────────────────────────────
@@ -341,14 +380,6 @@ export function resolveSolverLaunchConfig(
     }
   }
 
-  const ladderConfigPath = read("SOLVER_LADDER_CONFIG") ?? DEFAULT_SOLVER_LADDER_CONFIG;
-  if (read("SOLVER_LADDER_CONFIG") === undefined) {
-    warnings.push(
-      `SOLVER_LADDER_CONFIG is unset — using the in-repo dev ladder file ` +
-        `${DEFAULT_SOLVER_LADDER_CONFIG}`,
-    );
-  }
-
   // ── capital-free fee sizing (00006 FR-001) ─────────────────────────────────
   // A malformed value must be one of the listed problems, not a crash inside
   // `runSolver` after the wallet is already up.
@@ -457,7 +488,6 @@ export function resolveSolverLaunchConfig(
     journal,
     seed,
     dryRun,
-    ladderConfigPath,
     feeSizingTakerInputs,
     status,
     warnings,
@@ -478,7 +508,7 @@ export function describeSolverLaunchConfig(config: SolverLaunchConfig): string {
     `  relay http     : ${config.relayHttpUrl}`,
     `  relay token    : set (${config.relayAuthToken.length} chars)`,
     `  journal        : ${config.journal.path}`,
-    `  ladder config  : ${config.ladderConfigPath}`,
+    `  pricing policy : live whole-offer combinations; fixed 10x terminal plateau`,
     `  fee sizing     : models ${config.feeSizingTakerInputs} taker input(s) ` +
       `(funds a taker half of up to ${config.feeSizingTakerInputs + 2}) ` +
       `— SOLVER_FEE_SIZING_TAKER_INPUTS`,

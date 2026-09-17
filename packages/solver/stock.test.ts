@@ -195,12 +195,7 @@ test("reserved never exceeds balance and available+reserved is conserved, over r
   }
 });
 
-// FR-003: the snapshot publication is allowed to advertise as executable.
-// Derivation must stay reproducible from its inputs, so the push loop takes one
-// of these per push rather than reading Stock live. `deriveLadder` reads only a
-// pair's tokenOut entry from it — 00006-R2 removed the tokenIn bound (spec 00006
-// FR-003) — so an EMPTY snapshot now means "whole-maker rungs only", not
-// "publish nothing".
+// Availability snapshots preserve historical payout accounting independently of pricing.
 
 test("spendable() snapshots available per token, and omits what cannot be moved", () => {
   const stock = new Stock();
@@ -211,13 +206,12 @@ test("spendable() snapshots available per token, and omits what cannot be moved"
   // spendable for a residual payout.
   stock.reserve(claim(["h1"], ["n1"], [[B, 50n]]));
   expect([...stock.spendable()]).toEqual([[A, 1000n]]);
-  // Zero is omitted rather than published as 0n — the derivation treats an
-  // absent token as zero, so the two are equivalent and one shape is enough.
+  // Exhausted tokens have no positive availability.
   expect(stock.spendable().get(B)).toBeUndefined();
   expect(stock.available(B)).toBe(0n);
 });
 
-test("spendable() is a detached copy, so a push cannot observe a later mutation", () => {
+test("spendable() is a detached copy, so a status read cannot observe a later mutation", () => {
   const stock = new Stock();
   stock.setBalances({ [A]: 1000n });
   const snapshot = stock.spendable();
@@ -229,11 +223,7 @@ test("spendable() is a detached copy, so a push cannot observe a later mutation"
   expect(stock.available(A)).toBe(100n);
 });
 
-test("an emptied balance view withdraws the residual budget, which is what a failed refresh does", () => {
-  // `createInventoryRefreshController` empties Stock for the whole read/failure
-  // window. After FR-003 that also withdraws residual-budget-bounded rungs from
-  // the next push, and this is the number it withdraws them with. Whole-maker
-  // rungs survive it since 00006-R2.
+test("an emptied balance view retains historical payout reservations", () => {
   const stock = new Stock();
   stock.setBalances({ [A]: 1000n, [B]: 1000n });
   stock.reserve(claim(["h1"], ["n1"], [[A, 10n]]));

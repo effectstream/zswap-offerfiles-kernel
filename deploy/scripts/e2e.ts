@@ -20,10 +20,9 @@
 //   A  exact-advertised  — demand == the relay's own quote.
 //   B  lower-demand      — demand STRICTLY BELOW the quote. This is the
 //                          real-boundary proof for FR-001/P4-F01, and the only
-//                          place the wallet facade is asked for a settlement
-//                          leg with an EMPTY input map (the solver keeps the
-//                          surplus, and "keeping" is expressed as an output
-//                          with no inputs).
+//                          real-boundary proof that the solver returns the
+//                          taker's exact demand and keeps complete-offer output
+//                          surplus without swap-token inputs.
 //   C  above-advertised  — demand ABOVE the quote: no settlement anywhere.
 //
 // ── Why the demand, not the quote, is what the wire carries ──────────────────
@@ -32,7 +31,9 @@
 // guaranteed offer's deltas to `{dx, requiredOutput}` (positive delta = the
 // token being sold, negative = the token owed), and `POST /intent` forwards
 // exactly that pair to the solver. A solver qualifies when
-// `interpolateQuote(levels, dx) >= requiredOutput` (`solverAcceptsPrice`), so a
+// `interpolateQuote(levels, dx) >= requiredOutput` (`solverAcceptsPrice`). The
+// solver's canonical whole-offer staircase makes that interpolation flat
+// between genuine improvements, so a
 // LOWER demand is accepted and dispatched verbatim while a HIGHER one leaves no
 // qualifying solver and the intent is refused 503. Case B's shape is therefore
 // producible by the real wire with no reference change at all — a taker simply
@@ -98,7 +99,7 @@ const SKIP_PROVISION = process.env["E2E_SKIP_PROVISION"] === "true";
 // treat a funded stack as one. See `assertUnfundedSolver` below.
 const REQUIRE_UNFUNDED_SOLVER = process.env["E2E_REQUIRE_UNFUNDED_SOLVER"] === "true";
 const PROVISION_RECEIPT =
-  process.env["SOLVER_PROVISION_RECEIPT"] ?? "/srv/solver-config/provision-receipt.json";
+  process.env["SOLVER_PROVISION_RECEIPT"] ?? "/srv/solver-provision/provision-receipt.json";
 /** The fee-sizing model the solver is running with. Unset means the solver's
  *  own default of 1 (`entrypoint-common.sh` unsets an empty value before
  *  `start.solver.ts` sees it, so "" here really is "default"). Recorded, not
@@ -125,8 +126,8 @@ const CASE_C = {
 const TAKER_TOKEN_IN_FUNDING = BigInt(process.env["E2E_TAKER_FUNDING"] ?? "10000000");
 const NIGHT = "0".repeat(64);
 /** A dust coin's capacity is tied to the size of the NIGHT UTXO backing it, so
- *  a few large UTXOs are usable immediately where many tiny ones are worthless
- *  for days (see packages/solver/scripts/bootstrap-dev.ts). */
+ *  a few large UTXOs are usable immediately where many tiny ones can remain
+ *  unusable for days. */
 const NIGHT_PER_UTXO = 5_000_000_000_000n;
 const NIGHT_UTXO_COUNT = 2;
 /** Settle window between two submits from the SAME wallet — one undeployed
@@ -144,7 +145,7 @@ const INTENT_RETRY_TIMEOUT_MS = Number(process.env["E2E_INTENT_RETRY_TIMEOUT_MS"
 const JOURNAL_TERMINAL_TIMEOUT_MS = Number(process.env["E2E_JOURNAL_TERMINAL_TIMEOUT_MS"] ?? "300000");
 /** After the book changes, give the solver's mirror a full projection cycle
  *  before quoting against it. Without this a case can be dispatched against a
- *  rung the solver derived from the offer the PREVIOUS case just consumed; the
+ *  whole-offer step the solver derived from the offer the PREVIOUS case just consumed; the
  *  executor's exact-file check would refuse it safely, but the refusal would be
  *  an artifact of test sequencing rather than a property of the stack. */
 const MIRROR_SETTLE_MS = Number(process.env["E2E_MIRROR_SETTLE_MS"] ?? "25000");
@@ -527,6 +528,7 @@ interface ProvisionReceipt {
   script?: string;
   measuredAt?: string;
   inventorySource?: string;
+  pricingSource?: string;
   dustReady?: boolean;
   nightBeforeDustRegistrationSpecks?: string;
   nightAfterDustRegistrationSpecks?: string;
@@ -546,7 +548,7 @@ interface ProvisionReceipt {
  * therefore taken by `deploy/scripts/provision-solver-fees.ts` — the process
  * that legitimately owns that facade, at the moment provisioning ends and
  * before the solver boots — and published as a receipt on the shared
- * `solver-config` volume, which this service mounts read-only.
+ * `solver-provision-state` volume, which this service mounts read-only.
  *
  * The receipt is not the only evidence and is not meant to be: the run's other
  * half is `deploy/scripts/read-wallet.ts` afterwards, which reads the solver's
@@ -579,6 +581,11 @@ function assertUnfundedSolver(tokenIn: string, tokenOut: string): ProvisionRecei
   assert(receipt.inventorySource === "external", "solver inventory source is external", {
     inventorySource: receipt.inventorySource,
   });
+  assert(
+    receipt.pricingSource === "live-offer-files-book",
+    "solver pricing source is the live Offer Files book",
+    { pricingSource: receipt.pricingSource },
+  );
   const shielded = receipt.solverShielded ?? {};
   const nonZero = Object.entries(shielded).filter(([, v]) => BigInt(v) !== 0n);
   assert(
@@ -593,7 +600,7 @@ function assertUnfundedSolver(tokenIn: string, tokenOut: string): ProvisionRecei
   );
   assert(
     BigInt(shielded[tokenOut] ?? "0") === 0n,
-    "…including zero tokenOut (so no interior rung is fundable either)",
+    "…including zero tokenOut (so no swap-token subsidy is available)",
     { tokenOut, held: shielded[tokenOut] ?? "0" },
   );
   // The funding fact is the CONFIRMED balance measured before dust
@@ -1280,8 +1287,8 @@ try {
     );
     assert(
       BigInt(openingQuote.amountOut) === OFFER_GIVE,
-      "the relay's quote traces to the maker offer's whole-rung terms (non-empty price levels)",
-      { amountIn: OFFER_WANT.toString(), amountOut: openingQuote.amountOut, rung: OFFER_GIVE.toString() },
+      "the relay's quote traces to the maker offer's complete-file terms (non-empty price levels)",
+      { amountIn: OFFER_WANT.toString(), amountOut: openingQuote.amountOut, offerOutput: OFFER_GIVE.toString() },
     );
     record("06-unfunded-ladder", {
       relayTokens: openingTokens,

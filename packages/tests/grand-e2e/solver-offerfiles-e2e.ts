@@ -502,7 +502,7 @@ interface RealE1ServiceBootResult {
   databaseBootstrap: RealE1DatabaseBootstrapEvidence;
   celestiaCadence: RealE1CelestiaCadenceEvidence;
   celestiaSigner: RealE1CelestiaSignerEvidence;
-  actor: { offerHash: string; manifestSha256: string; ladderSha256: string };
+  actor: { offerHash: string; manifestSha256: string };
   publication: { evidenceSha256: string };
   indexedOffer: Record<string, unknown>;
   validationVerdict: Record<string, unknown>;
@@ -5371,7 +5371,7 @@ async function assertNoBatcherTrafficAfter(
   const events = await recorderEvents(session as unknown as HarnessSession);
   assert(
     !events.some((event) => eventSequence(event) > startSequence && event.channel === "batcher"),
-    `${label}: Path A touched the recorded batcher boundary`,
+    `${label}: solver-owned submission touched the recorded batcher boundary`,
   );
 }
 
@@ -6457,7 +6457,7 @@ async function prepareRealInvalidCorpus(
   // transaction's hash into `consumingFundingTxHash`. What remains for this
   // site is the LAST link — that the manifest names that same transaction, once
   // — which the hash equality below establishes. The former nullifiers-in-
-  // `identifiers` clause was impossible by construction: ledger-v8's
+  // `identifiers` clause was impossible by construction: ledger-v9's
   // `Transaction::identifiers()` returns value and intent-binding commitments,
   // never nullifiers (e2e open questions E1-Q1 and E1-Q6).
   assert(
@@ -8578,26 +8578,20 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
       900_000,
     );
     const actorManifestPath = join(session.files.runtimeDirectory, "actor", "actor-manifest.json");
-    const ladderPath = join(session.files.runtimeDirectory, "actor", "solver-ladder.json");
     const preSpentPath = join(session.files.runtimeDirectory, "actor", "pre-spent-liveness.json");
     const actorManifestBytes = await assertPrivateArtifact(actorManifestPath);
-    const ladderBytes = await assertPrivateArtifact(ladderPath);
     const preSpentBytes = await assertPrivateArtifact(preSpentPath);
     const actorManifest = JSON.parse(actorManifestBytes.toString("utf8")) as {
       schema?: unknown;
       runId?: unknown;
       networkId?: unknown;
       offer?: { offerHash?: unknown; offerBlob?: unknown };
-      ladder?: { sha256?: unknown };
     };
     assert(actorManifest.runId === config.runId, "actor manifest is not bound to the acceptance run");
     assert(actorManifest.networkId === "undeployed", "actor manifest has the wrong Midnight network");
     const offerHash = String(actorManifest.offer?.offerHash ?? "");
     const offerBlob = String(actorManifest.offer?.offerBlob ?? "");
     assert(/^[0-9a-f]{64}$/.test(offerHash) && offerBlob.length > 0, "actor manifest has no canonical offer");
-    const ladderSha256 = createHash("sha256").update(ladderBytes).digest("hex");
-    assert(actorManifest.ladder?.sha256 === ladderSha256, "actor manifest ladder hash mismatch");
-
     await runAcceptanceOneShot(
       session,
       config,
@@ -8651,10 +8645,6 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
     assert(
       (await assertPrivateArtifact(actorManifestPath)).equals(actorManifestBytes),
       "actor manifest changed after its read-only handoffs",
-    );
-    assert(
-      (await assertPrivateArtifact(ladderPath)).equals(ladderBytes),
-      "solver ladder changed after its read-only handoffs",
     );
     assert(
       (await assertPrivateArtifact(preSpentPath)).equals(preSpentBytes),
@@ -8714,7 +8704,6 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
     const artifacts = await captureRealE1Artifacts(session);
     for (const [label, bytes] of [
       ["actor manifest", actorManifestBytes],
-      ["solver ladder", ladderBytes],
       ["pre-spent liveness", preSpentBytes],
       ["publication evidence", publicationBytes],
     ] as const) {
@@ -8775,7 +8764,6 @@ async function runRealE1ServiceBootstrap(): Promise<RealE1ServiceBootResult> {
       actor: {
         offerHash,
         manifestSha256: createHash("sha256").update(actorManifestBytes).digest("hex"),
-        ladderSha256,
       },
       publication: { evidenceSha256: createHash("sha256").update(publicationBytes).digest("hex") },
       indexedOffer,
@@ -8947,10 +8935,8 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
       900_000,
     );
     const actorManifestPath = join(session.files.runtimeDirectory, "actor", "actor-manifest.json");
-    const ladderPath = join(session.files.runtimeDirectory, "actor", "solver-ladder.json");
     const preSpentPath = join(session.files.runtimeDirectory, "actor", "pre-spent-liveness.json");
     const actorManifestBytes = await assertPrivateArtifact(actorManifestPath);
-    const ladderBytes = await assertPrivateArtifact(ladderPath);
     const preSpentBytes = await assertPrivateArtifact(preSpentPath);
     const actorManifest = JSON.parse(actorManifestBytes.toString("utf8")) as {
       schema?: unknown;
@@ -8958,14 +8944,13 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
       networkId?: unknown;
       tokens?: { B?: unknown };
       offer?: { offerHash?: unknown; offerBlob?: unknown; expiresAt?: unknown };
-      ladder?: { sha256?: unknown };
     };
     const offerHash = String(actorManifest.offer?.offerHash ?? "");
     const offerBlob = String(actorManifest.offer?.offerBlob ?? "");
     const expiresAt = String(actorManifest.offer?.expiresAt ?? "");
     const tokenB = String(actorManifest.tokens?.B ?? "").toLowerCase();
     assert(
-      actorManifest.schema === "zswap-offer-files-real-actors/v1" &&
+      actorManifest.schema === "zswap-offer-files-real-actors/v2" &&
         actorManifest.runId === config.runId && actorManifest.networkId === "undeployed" &&
         /^[0-9a-f]{64}$/.test(offerHash) && offerBlob.length > 0 &&
         /^[0-9a-f]{64}$/.test(tokenB) && Number.isFinite(Date.parse(expiresAt)) &&
@@ -8976,11 +8961,6 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
       createHash("sha256").update(OfferFiles.decode(offerBlob)).digest("hex") === offerHash,
       "actor offer blob is not bound to its content hash",
     );
-    assert(
-      actorManifest.ladder?.sha256 === createHash("sha256").update(ladderBytes).digest("hex"),
-      "actor solver ladder is not hash-bound",
-    );
-
     await runAcceptanceOneShot(
       session,
       config,
@@ -9067,7 +9047,10 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
     const { ntpBoundary, events } = await captureRealE1FinalNtpEvidence(session, initialNtpBoundary);
     assert(events.every((event, index) => eventSequence(event) === index + 1), "E1 global recorder sequence is not total");
     assertInvalidCorpusNeverReachedSolver(events, invalidCorpus, offerHash);
-    assert(!events.some((event) => event.channel === "batcher"), "E1 Path A touched the batcher boundary");
+    assert(
+      !events.some((event) => event.channel === "batcher"),
+      "E1 solver-owned submission touched the batcher boundary",
+    );
     assert(
       !events.some(
         (event) => event.channel === "backend" && event.phase === "request" &&
@@ -9082,7 +9065,6 @@ async function runRealE1Acceptance(): Promise<RealE1AcceptanceResult> {
     );
     assert(
       (await assertPrivateArtifact(actorManifestPath)).equals(actorManifestBytes) &&
-        (await assertPrivateArtifact(ladderPath)).equals(ladderBytes) &&
         (await assertPrivateArtifact(preSpentPath)).equals(preSpentBytes) &&
         (await assertPrivateArtifact(publicationPath)).equals(publicationBytes),
       "sealed actor/publication authority changed across the E1 matrix",

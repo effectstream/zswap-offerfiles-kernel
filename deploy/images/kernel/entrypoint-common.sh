@@ -21,8 +21,7 @@ set -euo pipefail
 # as a real value (`getEnv` is a bare `process.env[key]`). So an operator who
 # simply left a knob blank in .env would silently override a sound default with
 # an empty string — an EMPTY Celestia namespace (publisher and reader silently
-# stop agreeing, blobs are written and never read), an EMPTY ladder path, an
-# empty policy document.
+# stop agreeing, blobs are written and never read), or an empty policy document.
 #
 # Only genuinely optional knobs are listed. Nothing here is part of a launch
 # contract: the solver's seven mandatory variables are deliberately absent, so
@@ -49,7 +48,6 @@ for _optional_env in \
   CELESTIA_NAMESPACE \
   CELESTIA_AUTH_TOKEN \
   API_RATE_LIMIT_ALLOWLIST \
-  SOLVER_LADDER_CONFIG \
   SOLVER_SUPPORTED_PAIRS \
   SOLVER_MIN_JOB_OUTPUT \
   SOLVER_FEE_SIZING_TAKER_INPUTS \

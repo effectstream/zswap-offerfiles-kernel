@@ -57,7 +57,7 @@ import type { FrontendConfig } from "./env.ts";
 
 /** Bumped by a removal or a meaning change in `MonitorSnapshot`, never by an
  *  additive field. The page refuses to guess at a version it does not know. */
-export const monitorContractVersion = 1;
+export const monitorContractVersion = 2;
 
 export interface MonitorError {
   error: string;
@@ -590,9 +590,15 @@ export function createMonitor(config: FrontendConfig, deps: MonitorDeps = {}): M
 
   const applySolverSnapshot = (value: unknown, transport: "stream" | "poll"): boolean => {
     if (!isRecord(value) || typeof value["now"] !== "number") return false;
-    const status = value as unknown as StatusSnapshot;
-    solver.snapshot = status;
-    solver.contractVersion = asNumber(value["contractVersion"], 0) || null;
+    const reportedVersion = asNumber(value["contractVersion"], 0) || null;
+    solver.contractVersion = reportedVersion;
+    // A version mismatch is still a successful reachability probe, but its
+    // payload must not be interpreted as the current contract. In particular,
+    // v1 rung/residual provenance cannot be mistaken for v2 combinations and
+    // synthetic plateau points.
+    solver.snapshot = reportedVersion === statusContractVersion
+      ? value as unknown as StatusSnapshot
+      : null;
     markReachable(transport);
     changed();
     return true;

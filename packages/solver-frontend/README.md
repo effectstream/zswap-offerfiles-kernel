@@ -20,10 +20,10 @@ proxies a caller-chosen path to it.
 | Status pill | QUOTING / WITHDRAWN / DISCONNECTED / STARTING / DRY-RUN / SOLVER UNREACHABLE | the solver snapshot |
 | Health strip | six stages — kernel sync → book cache → inventory → journal & DUST → relay socket → published ladder — each with a one-line reason and a "since" | kernel `/v1/health/sync` + the solver snapshot |
 | Alarms | only what is wrong: unreachable, relay down, cache blocked, DUST window blocked, quarantined jobs, failed reverts, push failures, an empty relay token list, a degraded status section, a contract mismatch | derived |
-| Tiles | pairs, rungs (whole vs interior), tokens advertised, pushes, book size, jobs in flight, completed, quarantined, withdrawals observed, per-job DUST | solver + kernel + this service |
-| Published ladders | per directed pair: cumulative input → output, implied rate to 6 dp, whether a rung closes a **whole** maker offer or is **interior** liquidity served from solver inventory, and the maker hash | the solver's last derived push |
-| Not published | every book offer the derivation left out, with the solver's OWN `LadderExclusionReason` (`multi-leg`, `non-shielded-leg`, `unavailable`, `rung-cap`, `residual-budget`, `invalid-pair`, …) | the same push's exclusions |
-| Book | the kernel's offers beside the solver's mirror: cached or not, on the wire at which rung or excluded for which reason | kernel `/v1/offers` + solver |
+| Tiles | pairs, wire points, distinct maker files, winning sets, tokens advertised, pushes, book size, jobs in flight, completed, quarantined, withdrawals observed, per-job DUST | solver + kernel + this service |
+| Published ladders | per directed pair: wire input → quoted output, genuine threshold or synthetic plateau, the winning set's true maker input/output totals, and every complete maker file in that set | the solver's last derived push |
+| Not published | every book offer the derivation left out, with the solver's OWN `LadderExclusionReason` (`multi-leg`, `non-shielded-leg`, `unavailable`, `pair-search-cap`, `wire-point-cap`, `invalid-pair`, …) | the same push's exclusions |
+| Book | the kernel's offers beside the solver's mirror: cached or not, every winning set that reuses it, or its exclusion reason | kernel `/v1/offers` + solver |
 | Jobs | the newest journal rows: state, offers, payout, receipt. **No transaction bytes** — the contract has no field for them | the solver's journal tail |
 | Inventory / DUST / Relay / Configuration / Events | balances, the rolling fee window, the relay's public token list, the launch settings as resolved (no secrets), and a merged log of solver diagnostics and this service's own observations | as labelled in each block's `?` |
 
@@ -43,6 +43,12 @@ marked as derived — never instead of them. Since 00024 that is every token the
 stack mints, so a registry row (or an older node) that states no `decimals` is
 read as **6**, not as "base units are coins". A colour with no registry row is
 shown as short hex, never hidden.
+
+**Status contract v2 is a breaking observability change.** It replaces
+cumulative rung/residual provenance with exact winning combinations, explicit
+terminal and nominal inputs, cap reasons, bounded-search diagnostics, wire-point
+counts, and distinct maker counts. The frontend discards snapshots from any
+other status version instead of interpreting their fields under v2 semantics.
 
 ## Configuration
 

@@ -451,7 +451,7 @@ function ladderStage(snapshot) {
   }
   return {
     tone: push.pairs > 0 ? "ok" : "warn",
-    summary: `${push.pairs} pair(s) · ${push.rungs} rung(s)`,
+    summary: `${push.pairs} pair(s) · ${push.wirePoints} wire point(s)`,
     since: `pushed ${agoLabel(now, push.derivedAt)}`,
   };
 }
@@ -517,7 +517,8 @@ export function alarms(snapshot) {
       key: "contract",
       message:
         `The solver reports status contract v${solver.contractVersion} and this page renders ` +
-        `v${solver.expectedContractVersion}. Some panels may be blank until both sides are redeployed.`,
+        `v${solver.expectedContractVersion}. The incompatible solver snapshot is not rendered; ` +
+        `redeploy both sides together.`,
     });
   }
 
@@ -674,7 +675,7 @@ export function tileValues(snapshot) {
         push.tokenIds.every((token) => relayTokens.includes(token))
       : null;
 
-  const whole = push ? countWholeRungs(push) : null;
+  const uniqueMakers = push ? countUniqueMakers(push) : null;
 
   return {
     "tile-pairs": {
@@ -682,11 +683,11 @@ export function tileValues(snapshot) {
       detail: book ? `of ${book.pairs.length} in book` : "book unknown",
     },
     "tile-rungs": {
-      value: push ? String(push.rungs) : DASH,
+      value: push ? String(push.wirePoints) : DASH,
       detail:
-        whole === null
+        uniqueMakers === null
           ? "no push yet"
-          : `${whole} whole · ${Math.max(0, (push?.rungs ?? 0) - whole)} interior`,
+          : `${uniqueMakers} unique maker(s) · ${push.winningCombinations} winning set(s)`,
     },
     "tile-tokens": {
       value: advertised === null ? DASH : String(advertised),
@@ -747,15 +748,16 @@ export function tileValues(snapshot) {
   };
 }
 
-/** A rung closed by consuming a WHOLE maker offer carries that offer's hash;
- *  an interior rung is served from solver inventory and names none. */
-export function countWholeRungs(push) {
+/** Count each maker file once even when several winning sets reuse it. */
+export function countUniqueMakers(push) {
   if (!push || !Array.isArray(push.provenance)) return 0;
-  let whole = 0;
+  const hashes = new Set();
   for (const pair of push.provenance) {
-    for (const rung of pair.rungs ?? []) if (rung.offerHash) whole += 1;
+    for (const combination of pair.combinations ?? []) {
+      for (const offerHash of combination.offerHashes ?? []) hashes.add(offerHash);
+    }
   }
-  return whole;
+  return hashes.size;
 }
 
 /** `2780000000000000` → `2.78e15`, so a DUST figure fits a tile. */
@@ -770,9 +772,9 @@ export function exponential(value) {
 // ── ladders, exclusions, book, jobs, inventory (FR-012) ──────────────────────
 
 /**
- * One entry per published directed pair: the wire levels joined to the
- * derivation's provenance, so each rung says whether it closes a maker offer
- * (whole) or is served from solver inventory (interior).
+ * One entry per published directed pair: protocol wire points joined to the
+ * latest affordable genuine winning combination. Synthetic plateau endpoints
+ * reuse that set while retaining its true maker input/output totals.
  */
 export function ladderPairs(snapshot, registry) {
   const ladder = solverSection(snapshot, "ladder");
@@ -784,11 +786,18 @@ export function ladderPairs(snapshot, registry) {
   }
   return (push.levels ?? []).map((pair) => {
     const provenance = provenanceFor.get(`${pair.tokenIn}|${pair.tokenOut}`) ?? null;
-    const rungs = (pair.levels ?? []).map((level, index) => {
-      const source = provenance?.rungs?.[index] ?? null;
-      // A level that matches a provenance rung's cumulative input is that
-      // rung; anything else is interpolated interior liquidity.
-      const whole = source !== null && source.input === level.input;
+    const combinations = provenance?.combinations ?? [];
+    let activeCombination = null;
+    let combinationIndex = -1;
+    const points = (pair.levels ?? []).map((level, index) => {
+      while (
+        combinationIndex + 1 < combinations.length &&
+        BigInt(combinations[combinationIndex + 1].input) <= BigInt(level.input)
+      ) {
+        combinationIndex += 1;
+        activeCombination = combinations[combinationIndex];
+      }
+      const genuine = activeCombination !== null && activeCombination.input === level.input;
       return {
         index: index + 1,
         input: level.input,
@@ -796,17 +805,39 @@ export function ladderPairs(snapshot, registry) {
         inputView: amountView(level.input, pair.tokenIn, registry),
         outputView: amountView(level.output, pair.tokenOut, registry),
         rate: impliedRate(level.input, level.output),
-        kind: whole ? "whole" : "interior",
-        offerHash: whole ? source.offerHash : null,
+        kind: genuine ? "genuine" : "plateau",
+        terminal: provenance !== null && level.input === provenance.terminalInput,
+        makerInput: activeCombination?.input ?? null,
+        makerOutput: activeCombination?.output ?? null,
+        makerInputView: activeCombination === null
+          ? null
+          : amountView(activeCombination.input, pair.tokenIn, registry),
+        makerOutputView: activeCombination === null
+          ? null
+          : amountView(activeCombination.output, pair.tokenOut, registry),
+        offerHashes: [...(activeCombination?.offerHashes ?? [])],
       };
     });
+    const uniqueMakers = new Set(
+      combinations.flatMap((combination) => combination.offerHashes ?? []),
+    );
     return {
       tokenIn: pair.tokenIn,
       tokenOut: pair.tokenOut,
       labelIn: tokenLabel(pair.tokenIn, registry),
       labelOut: tokenLabel(pair.tokenOut, registry),
-      residualBound: provenance ? provenance.residualBound : null,
-      rungs,
+      terminalInput: provenance?.terminalInput ?? null,
+      nominalTerminalInput: provenance?.nominalTerminalInput ?? null,
+      terminalInputView: provenance
+        ? amountView(provenance.terminalInput, pair.tokenIn, registry)
+        : null,
+      nominalTerminalInputView: provenance
+        ? amountView(provenance.nominalTerminalInput, pair.tokenIn, registry)
+        : null,
+      capReasons: [...(provenance?.capReasons ?? [])],
+      winningCombinations: combinations.length,
+      uniqueMakers: uniqueMakers.size,
+      points,
     };
   });
 }
@@ -854,16 +885,44 @@ export function exclusionDetail(reason, claimed) {
       return claimed
         ? "claimed by an in-flight job; it returns when the job reaches a terminal state"
         : "claimed by an in-flight job";
-    case "rung-cap":
-      return "beyond the configured rungs-per-pair cap";
-    case "residual-budget":
-      return "an interior rung above it would need more tokenOut than the solver holds";
+    case "duplicate-offer":
+      return "a duplicate content hash; each complete maker file may enter the search once";
+    case "shared-coin":
+      return "shares an input coin with another admitted maker file";
+    case "settlement-amount-cap":
+      return "its amount or combination total exceeds the ledger-v9 settlement bound";
+    case "source-offer-cap":
+      return "the source snapshot exceeded the bounded derivation scan";
+    case "pair-search-cap":
+      return "the exact subset search for this pair exhausted its work bound";
+    case "global-search-cap":
+      return "the full derivation exhausted its exact subset work bound";
+    case "wire-point-cap":
+      return "outside the longest exact staircase prefix that fits the wire-point cap";
+    case "pair-cap":
+      return "outside the maximum directed pairs carried by one frame";
+    case "aborted":
+      return "the derivation was superseded or cancelled before exactness was established";
+    case "abort-check-failed":
+      return "the derivation cancellation check failed; publication stopped safely";
     case "invalid-pair":
       return "refused by the pair schema";
     case "no-expiry":
-      return "no expiry, or one inside the configured margin";
-    case "expired":
-      return "past its expiry";
+      return "has no expiry";
+    case "expiring":
+      return "expired or inside the configured settlement margin";
+    case "non-positive-amount":
+      return "contains a zero or negative maker amount";
+    case "same-token":
+      return "requires and supplies the same token";
+    case "malformed-token":
+      return "contains a malformed token colour";
+    case "malformed-hash":
+      return "contains a malformed offer content hash";
+    case "malformed-nullifier":
+      return "contains a malformed maker input nullifier";
+    case "minimum-output":
+      return "cannot reach the configured minimum output";
     case "unsupported-pair":
       return "outside SOLVER_SUPPORTED_PAIRS";
     default:
@@ -878,11 +937,17 @@ export function bookRows(snapshot, registry) {
   const cache = solverSection(snapshot, "book");
   const cached = new Set((cache?.offers ?? []).map((offer) => offer.offerHash));
   const ladder = solverSection(snapshot, "ladder");
-  const rungOf = new Map();
+  const winningSetsByOffer = new Map();
+  let winningSet = 0;
   for (const pair of ladder?.last?.provenance ?? []) {
-    (pair.rungs ?? []).forEach((rung, index) => {
-      if (rung.offerHash) rungOf.set(rung.offerHash, index + 1);
-    });
+    for (const combination of pair.combinations ?? []) {
+      winningSet += 1;
+      for (const offerHash of combination.offerHashes ?? []) {
+        const sets = winningSetsByOffer.get(offerHash) ?? [];
+        sets.push(winningSet);
+        winningSetsByOffer.set(offerHash, sets);
+      }
+    }
   }
   const excludedBy = new Map();
   for (const exclusion of ladder?.last?.excluded ?? []) {
@@ -897,7 +962,7 @@ export function bookRows(snapshot, registry) {
     expiresAt: offer.expiresAt,
     // `cache` is null while the solver is unreachable — "unknown", never "out".
     inCache: cache === null ? null : cached.has(offer.offerId),
-    rung: rungOf.get(offer.offerId) ?? null,
+    winningSets: winningSetsByOffer.get(offer.offerId) ?? [],
     excludedReason: excludedBy.get(offer.offerId) ?? null,
   }));
 }
@@ -1011,6 +1076,9 @@ export function configRows(snapshot) {
   const admission = solverSection(snapshot, "admission");
   const listener = solverSection(snapshot, "listener");
   const journal = solverSection(snapshot, "journal");
+  const ladder = solverSection(snapshot, "ladder");
+  const limits = ladder?.last?.limits ?? null;
+  const diagnostics = ladder?.last?.diagnostics ?? null;
   const rows = [];
   if (admission) {
     rows.push(["push interval", `${groupDigits(String(admission.pushIntervalMs))} ms`]);
@@ -1035,7 +1103,30 @@ export function configRows(snapshot) {
       rows.push(["settle TTL", `${admission.settleTtlMinutes} min`]);
     }
     if (admission.maxRungsPerPair !== null && admission.maxRungsPerPair !== undefined) {
-      rows.push(["max rungs / pair", String(admission.maxRungsPerPair)]);
+      rows.push(["max wire points / pair", String(admission.maxRungsPerPair)]);
+    }
+    if (admission.maxPairs !== null && admission.maxPairs !== undefined) {
+      rows.push(["max pairs / frame", String(admission.maxPairs)]);
+    }
+    if (admission.maxMakersPerRoute !== undefined) {
+      rows.push(["max makers / route", String(admission.maxMakersPerRoute)]);
+    }
+  }
+  if (limits) {
+    rows.push(["source offers / derivation", `${diagnostics?.sourceOffersScanned ?? "?"} / ${limits.maxSourceOffers}`]);
+    rows.push(["visited subsets / pair cap", String(limits.maxVisitedSubsetsPerPair)]);
+    rows.push(["visited subsets / derivation", `${diagnostics?.visitedSubsets ?? "?"} / ${limits.maxVisitedSubsetsTotal}`]);
+    rows.push(["derivation makers / combination", String(limits.maxMakersPerCombination)]);
+    rows.push(["derivation wire points / pair", String(limits.maxWirePointsPerPair)]);
+    rows.push(["derivation pairs / frame", String(limits.maxPairs)]);
+    rows.push(["derivation result", diagnostics?.stopReason ?? "complete"]);
+    rows.push(["peak exact input states", String(diagnostics?.peakStoredExactInputs ?? "?")]);
+    for (const pair of diagnostics?.pairs ?? []) {
+      if (pair.status !== "withheld") continue;
+      rows.push([
+        `withheld pair ${shortColour(pair.tokenIn)} → ${shortColour(pair.tokenOut)}`,
+        pair.reason ?? "unspecified",
+      ]);
     }
   }
   if (process) {

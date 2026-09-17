@@ -5,7 +5,7 @@ paths. They do not deploy an issuer or create token inventory.
 
 | Script | Caller | Responsibility |
 |---|---|---|
-| `provision-solver-fees.ts` | `solver-provision` one-shot | Validate explicit pair IDs, externally prefunded NIGHT and usable DUST; write the ladder and factual receipt. |
+| `provision-solver-fees.ts` | `solver-provision` one-shot | Validate externally prefunded NIGHT and usable DUST; write a factual fee-inventory receipt. |
 | `post-maker-offer.ts` | `maker-offer` one-shot | Post one real offer using explicit token IDs and an already funded maker wallet. |
 | `offer-poster.ts` | opt-in `offer-poster` loop | Adopt matching spendable coins, journal before build, quote, post, verify and re-offer released inventory. |
 | `e2e.ts` | `scripts` service in profile `e2e` | Run local end-to-end offer/solver/settlement assertions using explicit, externally funded tokens. |
@@ -20,8 +20,8 @@ issuer or funding process before these scripts start.
 `provision-solver-fees.ts` calls `registerNightForDust` only for the solver's
 already held NIGHT. A `false` return or error is fatal and includes the external
 NIGHT/DUST prerequisite. Its receipt records `inventorySource`, `dustReady`, the
-explicit pair and measured balances. It does not claim a successful state after
-a failed registration.
+live-book pricing source and measured balances. It accepts no pair or ladder
+input and does not claim a successful state after a failed registration.
 
 The poster's decision code lives in `lib/poster-{config,journal,tick,scheduler,
 health}.ts`. Tests cover arbitrary explicit token IDs, wallet inventory filters,

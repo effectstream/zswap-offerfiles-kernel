@@ -15,7 +15,7 @@ import {
   bookRows,
   coinValue,
   configRows,
-  countWholeRungs,
+  countUniqueMakers,
   durationLabel,
   dustPercent,
   dustView,
@@ -225,7 +225,7 @@ describe("the six-stage health strip (FR-012)", () => {
     expect(stages[3].summary).toBe("reconciled · 1 open");
     expect(stages[3].since).toBe("window 27% used");
     expect(stages[4].summary).toBe("connected");
-    expect(stages[5].summary).toBe("2 pair(s) · 3 rung(s)");
+    expect(stages[5].summary).toBe("2 pair(s) · 6 wire point(s)");
   });
 
   test("a journal with nothing in flight is green", () => {
@@ -347,12 +347,15 @@ describe("alarms (FR-012)", () => {
     expect(list.map((alarm: any) => alarm.message).join(" ")).toContain("Relay /tokens is empty");
   });
 
-  test("a status contract mismatch is a warning, not a blank page", () => {
+  test("a status contract mismatch is explicit and its payload is not interpreted", () => {
     const snapshot = buildMonitorSnapshot();
-    (snapshot as any).solver.contractVersion = 99;
+    (snapshot as any).solver.contractVersion = 1;
+    (snapshot as any).solver.snapshot = null;
     const list = alarms(snapshot);
     expect(list[0].key).toBe("contract");
-    expect(list[0].message).toContain("v99");
+    expect(list[0].message).toContain("v1");
+    expect(list[0].message).toContain("not rendered");
+    expect(ladderPairs(snapshot, registryOf(snapshot))).toEqual([]);
   });
 
   test("a degraded solver section is reported rather than silently missing", () => {
@@ -365,12 +368,16 @@ describe("alarms (FR-012)", () => {
 });
 
 describe("tiles", () => {
-  test("counts whole and interior rungs from the derivation's provenance", () => {
+  test("counts wire points, winning sets, and reused makers independently", () => {
     const snapshot = buildMonitorSnapshot();
-    expect(countWholeRungs((snapshot as any).solver.snapshot.ladder.last)).toBe(3);
+    // OFFER_A belongs to two winning combinations but is one maker file.
+    expect(countUniqueMakers((snapshot as any).solver.snapshot.ladder.last)).toBe(3);
     const tiles = tileValues(snapshot);
     expect(tiles["tile-pairs"].value).toBe("2");
-    expect(tiles["tile-rungs"]).toEqual({ value: "3", detail: "3 whole · 0 interior" });
+    expect(tiles["tile-rungs"]).toEqual({
+      value: "6",
+      detail: "3 unique maker(s) · 3 winning set(s)",
+    });
     expect(tiles["tile-tokens"].detail).toBe("relay /tokens agrees");
     expect(tiles["tile-pushes"].value).toBe("1 482");
     // The per-job DUST cap is what a job reserves — the tooltip's "fee
@@ -401,33 +408,69 @@ describe("tiles", () => {
 });
 
 describe("ladders and admission (User Story 2)", () => {
-  test("each rung carries its rate, its kind and the maker offer it closes", () => {
+  test("genuine and plateau wire points carry the exact winning maker totals", () => {
     const snapshot = buildMonitorSnapshot();
     const pairs = ladderPairs(snapshot, registryOf(snapshot));
     expect(pairs).toHaveLength(2);
     expect(pairs[0].labelIn).toBe("TKA");
     expect(pairs[0].labelOut).toBe("TKB");
-    expect(pairs[0].residualBound).toBe("100000");
-    expect(pairs[0].rungs[0]).toMatchObject({
+    expect(pairs[0]).toMatchObject({
+      terminalInput: "13500000",
+      nominalTerminalInput: "13500000",
+      capReasons: [],
+      winningCombinations: 2,
+      uniqueMakers: 2,
+    });
+    expect(pairs[0].points[0]).toMatchObject({
       index: 1,
       rate: "0.666666",
-      kind: "whole",
+      kind: "genuine",
+      makerInput: "750000",
+      makerOutput: "500000",
     });
-    expect(pairs[0].rungs[0].offerHash).toStartWith("b74a4cec");
-    expect(pairs[0].rungs[0].inputView.base).toBe("750 000");
+    expect(pairs[0].points[0].offerHashes[0]).toStartWith("b74a4cec");
+    expect(pairs[0].points[0].inputView.base).toBe("750 000");
   });
 
-  test("a level with no matching provenance rung is interior liquidity", () => {
-    const status = buildStatusSnapshot();
-    // An interpolated size between two whole rungs: it is served from solver
-    // inventory and names no maker offer.
-    (status.ladder as any).last.levels[0].levels.splice(1, 0, {
-      input: "900000",
-      output: "600000",
+  test("synthetic endpoints reuse a winning set without inflating its maker cost", () => {
+    const snapshot = buildMonitorSnapshot();
+    const points = ladderPairs(snapshot, registryOf(snapshot))[0].points;
+    expect(points[1]).toMatchObject({
+      input: "1349999",
+      output: "500000",
+      kind: "plateau",
+      terminal: false,
+      makerInput: "750000",
+      offerHashes: [(buildStatusSnapshot().book as any).offers[0].offerHash],
     });
+    expect(points[3]).toMatchObject({
+      input: "13500000",
+      kind: "plateau",
+      terminal: true,
+      makerInput: "1350000",
+      makerOutput: "900000",
+    });
+    expect(points[3].offerHashes).toHaveLength(2);
+  });
+
+  test("a shortened terminal reports every cap reason and keeps the real witness", () => {
+    const status = buildStatusSnapshot();
+    const last = (status.ladder as any).last;
+    last.levels[0].levels = last.levels[0].levels.slice(0, 2);
+    last.provenance[0].combinations = last.provenance[0].combinations.slice(0, 1);
+    last.provenance[0].terminalInput = "1349999";
+    last.provenance[0].nominalTerminalInput = "7500000";
+    last.provenance[0].capReasons = ["wire-point-cap", "next-omitted-improvement"];
+
     const snapshot = buildMonitorSnapshot({ status });
-    const rungs = ladderPairs(snapshot, registryOf(snapshot))[0].rungs;
-    expect(rungs[1]).toMatchObject({ kind: "interior", offerHash: null });
+    const pair = ladderPairs(snapshot, registryOf(snapshot))[0];
+    expect(pair.capReasons).toEqual(["wire-point-cap", "next-omitted-improvement"]);
+    expect(pair.points.at(-1)).toMatchObject({
+      terminal: true,
+      kind: "plateau",
+      input: "1349999",
+      makerInput: "750000",
+    });
   });
 
   test("exclusions carry the solver's OWN reason, joined to the book row", () => {
@@ -447,12 +490,26 @@ describe("ladders and admission (User Story 2)", () => {
     for (const reason of [
       "multi-leg",
       "non-shielded-leg",
+      "non-positive-amount",
+      "same-token",
+      "malformed-token",
+      "malformed-hash",
+      "malformed-nullifier",
+      "duplicate-offer",
+      "shared-coin",
       "unavailable",
-      "rung-cap",
-      "residual-budget",
+      "settlement-amount-cap",
+      "source-offer-cap",
+      "pair-search-cap",
+      "global-search-cap",
+      "wire-point-cap",
+      "pair-cap",
+      "minimum-output",
+      "aborted",
+      "abort-check-failed",
       "invalid-pair",
       "no-expiry",
-      "expired",
+      "expiring",
       "unsupported-pair",
     ]) {
       expect(exclusionDetail(reason, false).length).toBeGreaterThan(10);
@@ -467,12 +524,12 @@ describe("ladders and admission (User Story 2)", () => {
 });
 
 describe("book, jobs, inventory, DUST, relay, config, events", () => {
-  test("the book marks each offer's cache membership and wire position", () => {
+  test("the book marks every winning set that reuses a maker", () => {
     const snapshot = buildMonitorSnapshot();
     const rows = bookRows(snapshot, registryOf(snapshot));
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ inCache: true, rung: 1, excludedReason: null });
-    expect(rows[1]).toMatchObject({ inCache: true, rung: null, excludedReason: "multi-leg" });
+    expect(rows[0]).toMatchObject({ inCache: true, winningSets: [1, 2], excludedReason: null });
+    expect(rows[1]).toMatchObject({ inCache: true, winningSets: [], excludedReason: "multi-leg" });
     expect(rows[0].gives[0].label).toBe("TKB");
   });
 
@@ -536,7 +593,26 @@ describe("book, jobs, inventory, DUST, relay, config, events", () => {
     expect(flat).toContain("relay token: 48 chars (never shown)");
     expect(flat).toContain("supported pairs: OPEN");
     expect(flat).toContain("fee sizing: models 1 taker input(s) (funds up to 3)");
+    expect(flat).toContain("max wire points / pair: 64");
+    expect(flat).toContain("max pairs / frame: 64");
+    expect(flat).toContain("max makers / route: 8");
+    expect(flat).toContain("source offers / derivation: 4 / 4096");
+    expect(flat).toContain("visited subsets / pair cap: 100000");
+    expect(flat).toContain("visited subsets / derivation: 4 / 200000");
     expect(flat).not.toContain("seed");
+  });
+
+  test("the configuration panel exposes global and per-pair derivation limits", () => {
+    const status = buildStatusSnapshot();
+    const last = (status.ladder as any).last;
+    last.diagnostics.stopReason = "global-search-cap";
+    last.diagnostics.pairs[0].status = "withheld";
+    last.diagnostics.pairs[0].reason = "pair-search-cap";
+    const flat = configRows(buildMonitorSnapshot({ status }))
+      .map((row: any) => row.join(": "))
+      .join("\n");
+    expect(flat).toContain("derivation result: global-search-cap");
+    expect(flat).toContain("withheld pair e7580bfc… → fda14e2e…: pair-search-cap");
   });
 
   test("events merge the solver's diagnostics with the console's transitions, newest first", () => {

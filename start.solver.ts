@@ -81,7 +81,6 @@ try {
         relayUrl: config.relayWsUrl,
         relayHttpUrl: config.relayHttpUrl,
         relayAuthToken: config.relayAuthToken,
-        ladderConfigPath: config.ladderConfigPath,
         feeSizingTakerInputs: config.feeSizingTakerInputs,
         // 00007 FR-001. Null when SOLVER_STATUS_PORT is unset, and then nothing
         // downstream of this line changes.

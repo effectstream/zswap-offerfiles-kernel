@@ -5,8 +5,9 @@
 > This 2026-08-13 draft was never approved, and the product it proposes is **not**
 > the solver in this repository. It describes a *public offer-book market maker*
 > that reads the kernel book and submits directly; the implemented solver is a
-> **Midnight Intents relay solver** — it connects outbound to a relay, publishes
-> price ladders, and settles the swap jobs the relay dispatches to it.
+> **Midnight Intents relay solver** — it connects outbound to a relay, derives
+> whole-offer combination staircases from the live Offer Files book, publishes
+> them, and settles the swap jobs the relay dispatches to it.
 > Decisions 1 and 4 below therefore contradict the shipped system, and Decision 2's
 > "Path B" language predates the current relay job lifecycle.
 >
@@ -14,9 +15,9 @@
 > [`README.md` → "Running the COW solver"](../README.md#running-the-cow-solver)
 > and [`API.md` → "The COW solver (Midnight Intents side)"](../API.md#the-cow-solver-midnight-intents-side)
 > — executable topology, supported domain (Midnight 2.x / ledger-v9, single-leg
-> distinct-token shielded, ≤ 8 makers, optional shielded residual), `payFees:false`
-> fee ownership, lower-demand/surplus job semantics, and the executability bounds
-> on published liquidity.
+> distinct-token shielded, ≤ 8 complete makers), `payFees:false` fee ownership,
+> both-surplus job semantics, no swap-token inventory subsidy, the fixed 10x
+> terminal plateau, and the resource bounds on published liquidity.
 >
 > Retained only as a record of the original scoping decisions and of the
 > default-off safety posture they justified (that posture still holds: mainnet

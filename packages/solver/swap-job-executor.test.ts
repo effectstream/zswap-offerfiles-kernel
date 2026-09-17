@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { admissionPairKey } from "@zswap-da/solver-core/admission-policy";
+import { MAX_SETTLEMENT_AMOUNT } from "@zswap-da/solver-core/ladder-derivation";
 import {
   DEFAULT_MODELLED_TAKER_INPUTS,
   FEE_SIZING_PLACEHOLDER_AMOUNT,
@@ -63,10 +64,6 @@ const fakeTx = (label: string, rows: Imbalance[] = []): FakeTx => ({
   serialize: () => new TextEncoder().encode(label),
 });
 
-const makerRows = (amountIn: bigint, amountOut: bigint): Imbalance[] => [
-  { seg: 0, tag: "shielded", raw: B, amount: amountOut },
-  { seg: 0, tag: "shielded", raw: A, amount: -amountIn },
-];
 
 const offer = (
   offerHash: string,
@@ -149,13 +146,7 @@ function harness(options: {
   minJobOutput?: ReadonlyMap<string, bigint> | null;
   dustAdmission?: { maxPerJob: bigint; maxPerWindow: bigint; windowMs: number } | null;
   dustAmount?: bigint | null;
-  /** tokenOut funds a residual payout, and that is the ONLY thing inventory
-   *  funds. The default deliberately stocks NO tokenIn (00006-R2 / SC-002): every
-   *  executor test in this file therefore runs against a wallet that holds none
-   *  of the job's input token, which together with `refuseTokenInSelection`
-   *  makes "the solver needs no tokenIn" a standing control rather than one
-   *  test. Was `{[A]: 1_000n, [B]: 1_000n}` while the tokenIn publication cap
-   *  existed — tests had to stock tokenIn just to get past the admission guard. */
+  /** New-job economics are identical for any swap-token balance. */
   balances?: Record<string, bigint>;
   journalPath?: string;
   /** 00006 FR-001 / SC-001. `false` lets `initSwap` accept a tokenIn spend so a
@@ -180,6 +171,7 @@ function harness(options: {
   const stock = new Stock();
   stock.setBalances(options.balances ?? { [B]: 1_000n });
   const calls: string[] = [];
+  const exactRequests: string[][] = [];
   const reverts: unknown[] = [];
   /** Every `initSwap` call, so a test can assert the exact leg the solver built. */
   const legs: Array<{ label: string; inputs: Record<string, bigint>; outputs: Imbalance[] }> = [];
@@ -232,13 +224,10 @@ function harness(options: {
     // (zero inputs, one or two outputs) are modelled instead of assumed.
     initSwap: async (inputs, outputs) => {
       const shielded = ((inputs as any).shielded ?? {}) as Record<string, bigint>;
-      // 00006 FR-001 / SC-001. A wallet holding no tokenIn cannot select tokenIn
-      // coins, and this double refuses to pretend otherwise. Since the fee-sizing
-      // mirror is gone, nothing on the mandatory path ever asks — the solver's
-      // own balancing leg spends tokenOut or nothing at all.
-      if (refuseTokenInSelection && shielded[A] !== undefined) {
+      // Refuse any swap-token input; every new-job wallet leg must be receive-only.
+      if (refuseTokenInSelection && Object.keys(shielded).length > 0) {
         calls.push("REFUSED-tokenIn-selection");
-        throw new Error("wallet holds no tokenIn: coin selection refused");
+        throw new Error("wallet holds no swap tokens: coin selection refused");
       }
       const rows: Imbalance[] = [
         ...Object.entries(shielded).map(([token, amount]) => ({
@@ -331,6 +320,7 @@ function harness(options: {
       }) as any,
       readExactOfferFiles: async (offerIds) => {
         calls.push("exact-files");
+        exactRequests.push([...offerIds]);
         if (exactBarrier) await exactBarrier;
         return await exact(offerIds.map((offerId) => sources.find((source) => source.offerHash === offerId)!));
       },
@@ -354,7 +344,10 @@ function harness(options: {
       reconstructOffer: (blob) => {
         const hash = blob.slice("blob:".length);
         const source = sources.find((candidate) => candidate.offerHash === hash)!;
-        return fakeTx(`maker:${hash}`, makerRows(source.wants[0]!.amount, source.gives[0]!.amount)) as any;
+        return fakeTx(`maker:${hash}`, [
+          { seg: 0, tag: "shielded", raw: source.gives[0]!.token, amount: source.gives[0]!.amount },
+          { seg: 0, tag: "shielded", raw: source.wants[0]!.token, amount: -source.wants[0]!.amount },
+        ]) as any;
       },
       deriveOfferSemantics: (transaction: any) => {
         const hash = transaction.label.slice("maker:".length);
@@ -396,6 +389,7 @@ function harness(options: {
     stock,
     wallet,
     calls,
+    exactRequests,
     reverts,
     legs,
     imbalanceReads,
@@ -454,28 +448,16 @@ test("exact-boundary job fetches exact files after arrival, funds DUST, and retu
   await h.executor.stop();
 });
 
-test("between-rung job uses whole exact offers plus bounded solver residual", async () => {
-  const h = harness({ offers: [offer(H1, N1, 10n, 20n), offer(H2, N2, 10n, 10n)] });
-  const result = await h.executor.onSwap(job("residual", "15", "25"));
-  expect(result.type).toBe("swap-tx");
-  expect(h.calls).toContain("residual");
-  expect(h.stock.reserved(B)).toBe(5n);
-  expect(h.journal.list().filter((row) => row.operationKey.endsWith(":residual"))
-    .map((row) => row.operationKind)).toEqual(["RESIDUAL_BUILD", "FINALIZED_CONTRIBUTION"]);
+test("between-threshold job keeps input surplus and never spends swap tokens", async () => {
+  const h = harness({ offers: [offer(H1, N1, 10n, 20n), offer(H2, N2, 10n, 10n)], balances: {} });
+  expect((await h.executor.onSwap(job("plateau", "15", "20"))).type).toBe("swap-tx");
+  expect(h.legs[0]!.inputs).toEqual({});
+  expect(h.stock.reserved(B)).toBe(0n);
+  expect(h.journal.list().every((row) => Object.keys(row.claim.payouts).length === 0)).toBe(true);
   await h.executor.stop();
 });
 
-// FR-001 / P4-F01 BEHAVIOUR CHANGE, recorded here rather than deleted.
-//
-// Before this test asserted BOTH directions of a strict equality: a job whose
-// `amountOut` differed from `interpolateQuote(levels, amountIn)` in either
-// direction was refused `route_not_current`. The pinned reference relay only
-// ever promises the taker AT MOST the interpolated output and dispatches the
-// taker's own demand (`relay-ws.ts` solverAcceptsPrice `output >= requiredOutput`,
-// `router/jobId.ts` sendSwap `quote.requiredOutput`), so refusing a LOWER demand
-// refused legitimate jobs. What survives — and is pinned below — is the
-// above-advertised half of the old assertion; the accepted half is now the
-// matrix in the next tests.
+
 test("cache staleness and above-advertised demand fail before exact-file or wallet work", async () => {
   const stale = harness({ current: false });
   expect(await stale.executor.onSwap(job())).toEqual({ type: "job-error", jobId: "job-1", reason: JOB_CACHE_NOT_CURRENT });
@@ -492,8 +474,7 @@ test("cache staleness and above-advertised demand fail before exact-file or wall
   await drift.executor.stop();
 });
 
-/** Three distinct marginal rates ⇒ rungs {10,30} {20,50} {30,60}; the interior
- *  quote at 15 is 40; `residualBound` is one whole offer's payout, 30. */
+/** Three makers with equal cost and different outputs. */
 const LADDER = (): BookOffer[] => [
   offer(H1, N1, 10n, 30n),
   offer(H2, N2, 10n, 20n),
@@ -538,54 +519,30 @@ const refusalReason = (body: () => unknown): string => {
   return "no-refusal";
 };
 
-test("FR-001 every reference-valid demand resolves with explicit maker prefix and surplus disposition", () => {
-  // amountIn, amountOut, consumed maker prefix, residualIn, residualOut (paid
-  // from Stock), surplusOut (retained by the solver).
-  const matrix: Array<[string, string, string[], bigint, bigint, bigint]> = [
-    // Exact-advertised controls: the only shapes accepted before FR-001.
-    ["15", "40", [H1], 5n, 10n, 0n],
-    ["20", "50", [H1, H2], 0n, 0n, 0n],
-    ["30", "60", [H1, H2, H3], 0n, 0n, 0n],
-    // Case 1 — interior above the prefix: the residual path still pays out.
-    ["15", "35", [H1], 5n, 5n, 0n],
-    ["15", "31", [H1], 5n, 1n, 0n],
-    // Case 2 — interior at/below the prefix payout: nothing is paid out and the
-    // difference is retained (the taker also overpays input by `residualIn`).
-    ["15", "30", [H1], 5n, 0n, 0n],
-    ["15", "25", [H1], 5n, 0n, 5n],
-    ["15", "1", [H1], 5n, 0n, 29n],
-    // Case 3 — lowered exact rung: no residual input, pure retained surplus.
-    ["20", "45", [H1, H2], 0n, 0n, 5n],
-    ["30", "59", [H1, H2, H3], 0n, 0n, 1n],
-    // Case 4 — minimum positive demand at the first and last rung.
-    ["10", "1", [H1], 0n, 0n, 29n],
-    ["30", "1", [H1, H2, H3], 0n, 0n, 59n],
+test("each admitted demand selects the maximum affordable witness and exact surpluses", () => {
+  const matrix: Array<[string, string, string[], bigint, bigint]> = [
+    ["15", "30", [H1], 5n, 0n], ["15", "25", [H1], 5n, 5n],
+    ["15", "1", [H1], 5n, 29n], ["20", "50", [H1, H2], 0n, 0n],
+    ["20", "45", [H1, H2], 0n, 5n], ["30", "59", [H1, H2, H3], 0n, 1n],
+    ["10", "1", [H1], 0n, 29n], ["30", "1", [H1, H2, H3], 0n, 59n],
+    ["300", "60", [H1, H2, H3], 270n, 0n],
   ];
-
-  for (const [amountIn, amountOut, prefix, residualIn, residualOut, surplusOut] of matrix) {
-    const label = `${amountIn}→${amountOut}`;
+  for (const [amountIn, amountOut, hashes, surplusIn, surplusOut] of matrix) {
     const { route, stock } = routeFor(amountIn, amountOut);
-    expect(route.offers.map((source) => source.offerHash), label).toEqual(prefix);
-    expect(route.residualIn, label).toBe(residualIn);
-    expect(route.residualOut, label).toBe(residualOut);
-    expect(route.surplusOut, label).toBe(surplusOut);
-    // Exactly one direction is ever live, and the numbers reconcile the job to
-    // the maker prefix: prefix.output + residualOut − surplusOut === amountOut.
-    expect(route.residualOut === 0n || route.surplusOut === 0n, label).toBe(true);
-    const prefixOut = route.offers.reduce((sum, source) => sum + source.gives[0]!.amount, 0n);
-    const prefixIn = route.offers.reduce((sum, source) => sum + source.wants[0]!.amount, 0n);
-    expect(prefixOut + residualOut - surplusOut, label).toBe(BigInt(amountOut));
-    expect(prefixIn + residualIn, label).toBe(BigInt(amountIn));
-    // Only a payout consumes budget; retained value is never reserved.
-    expect([...route.claim.payouts], label).toEqual(residualOut === 0n ? [] : [[B, residualOut]]);
-    expect(stock.reserved(B), label).toBe(residualOut);
-    expect(stock.reserved(A), label).toBe(0n);
-    // No unselected offer is claimed.
-    for (const unselected of LADDER().filter((source) => !prefix.includes(source.offerHash))) {
-      expect(stock.isOfferClaimed(unselected), `${label} ${unselected.offerHash}`).toBe(false);
+    expect(route.offers.map((source) => source.offerHash)).toEqual(hashes);
+    expect(route.surplusIn).toBe(surplusIn);
+    expect(route.surplusOut).toBe(surplusOut);
+    expect(route.offers.reduce((sum, source) => sum + source.wants[0]!.amount, 0n) + surplusIn).toBe(BigInt(amountIn));
+    expect(route.offers.reduce((sum, source) => sum + source.gives[0]!.amount, 0n) - surplusOut).toBe(BigInt(amountOut));
+    expect([...route.claim.payouts]).toEqual([]);
+    expect(stock.reserved(A)).toBe(0n);
+    expect(stock.reserved(B)).toBe(0n);
+    for (const unselected of LADDER().filter((source) => !hashes.includes(source.offerHash))) {
+      expect(stock.isOfferClaimed(unselected)).toBe(false);
     }
   }
 });
+
 
 test("FR-001 above-advertised, out-of-ladder, and non-positive demands stay refused", () => {
   // Above the advertised curve — the negative control, at an interior size and
@@ -597,7 +554,7 @@ test("FR-001 above-advertised, out-of-ladder, and non-positive demands stay refu
   // Outside the ladder in either direction stays a refusal, lowered demand or
   // not: the relay would not have quoted these sizes.
   expect(refusalReason(() => routeFor("5", "1"))).toBe(JOB_ROUTE_NOT_CURRENT);
-  expect(refusalReason(() => routeFor("31", "1"))).toBe(JOB_ROUTE_NOT_CURRENT);
+  expect(refusalReason(() => routeFor("301", "1"))).toBe(JOB_ROUTE_NOT_CURRENT);
   // `0 <` half of the admission rule.
   expect(refusalReason(() => routeFor("15", "0"))).toBe(JOB_ROUTE_NOT_CURRENT);
   // FR-010: a LOWER demand is exactly what the configured minimum exists to
@@ -612,26 +569,14 @@ test("FR-001 above-advertised, out-of-ladder, and non-positive demands stay refu
 // for a reason that had nothing to do with surplus. With that bound gone the
 // original, stronger form is restored: an EMPTY wallet — zero of both tokens —
 // serves every at/below-prefix demand, which is exactly what 00006 is for.
-test("FR-001 retained surplus needs NO inventory at all while a residual payout still gates on Stock", () => {
-  // Surplus is inflow-only: a solver with an empty token wallet can still serve
-  // every at/below-prefix demand.
-  for (const [amountIn, amountOut, surplusOut] of [
-    ["15", "30", 0n], ["15", "25", 5n], ["20", "45", 5n], ["10", "1", 29n],
-  ] as const) {
-    const { route, stock } = routeFor(amountIn, amountOut, { balances: {} });
-    expect(route.surplusOut).toBe(surplusOut);
-    expect(route.residualOut).toBe(0n);
-    expect(stock.reserved(A)).toBe(0n);
-    expect(stock.reserved(B)).toBe(0n);
+test("one-unit maker shortfall refuses both funded and empty wallets", () => {
+  for (const balances of [{}, { [A]: 1_000n, [B]: 1_000n }]) {
+    expect(refusalReason(() => routeFor("15", "31", { balances }))).toBe(JOB_ROUTE_NOT_CURRENT);
+    const { route } = routeFor("15", "25", { balances });
+    expect(route.surplusIn).toBe(5n);
+    expect(route.surplusOut).toBe(5n);
+    expect([...route.claim.payouts]).toEqual([]);
   }
-  // The payout direction is unchanged: fail closed when the residual is not
-  // affordable, and no claim survives the refusal. tokenIn is absent throughout,
-  // so the refusal can only be the residual.
-  expect(refusalReason(() => routeFor("15", "35", { balances: { [B]: 4n } })))
-    .toBe(JOB_ROUTE_UNAVAILABLE);
-  const affordable = routeFor("15", "35", { balances: { [B]: 5n } });
-  expect(affordable.route.residualOut).toBe(5n);
-  expect(affordable.stock.available(B)).toBe(0n);
 });
 
 const netImbalance = (rows: Imbalance[]): Array<[string, bigint]> => {
@@ -642,6 +587,7 @@ const netImbalance = (rows: Imbalance[]): Array<[string, bigint]> => {
   }
   return [...totals].filter(([, amount]) => amount !== 0n).sort();
 };
+
 
 test("FR-001 a lowered demand settles end to end with the surplus retained by the solver", async () => {
   // Case 2 — interior, below the prefix payout: zero-input leg that keeps both
@@ -665,7 +611,7 @@ test("FR-001 a lowered demand settles end to end with the surplus retained by th
     ],
   });
   // The relay half is still exactly the inverse job — the taker is paid the 25
-  // it demanded, not the 30 the maker prefix pays — and it contains only the
+  // it demanded, not the 30 the winning makers pays — and it contains only the
   // selected maker file.
   const relay = h.imbalanceReads.at(-1)!;
   expect(relay.label).toBe(`maker:${H1}+residual-final+dust-final`);
@@ -724,25 +670,18 @@ test("FR-001 a lowered exact rung and the minimum positive demand both settle", 
   await minimum.executor.stop();
 });
 
-test("FR-001 the residual payout path is unchanged end to end for a lowered interior demand", async () => {
-  // Case 1 — still above the prefix payout after lowering: the solver pays the
-  // difference out of Stock exactly as before.
-  const h = harness({ offers: LADDER(), status: "consumed" });
-  expect((await h.executor.onSwap(job("residual-lowered", "15", "35"))).type).toBe("swap-tx");
-  expect(h.legs[0]).toEqual({
-    label: "residual",
-    inputs: { [B]: 5n },
-    outputs: [{ seg: 0, tag: "shielded", raw: A, amount: -5n }],
-  });
-  expect(netImbalance(h.imbalanceReads.at(-1)!.rows)).toEqual([[A, -15n], [B, 35n]]);
-  expect(h.stock.reserved(B)).toBe(5n);
-  expect(h.journal.list().filter((row) => row.operationKey.endsWith(":residual"))
-    .map((row) => row.operationKind)).toEqual(["RESIDUAL_BUILD", "FINALIZED_CONTRIBUTION"]);
-  await h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "residual-lowered", txId: RELAY_TX });
-  expect(h.executor.stats()).toMatchObject({ completed: 1, quarantined: 0 });
-  expect(h.stock.reserved(B)).toBe(0n);
-  await h.executor.stop();
+test("lowered demand above the maker maximum refuses before wallet mutation", async () => {
+  for (const balances of [{}, { [B]: 1_000n }]) {
+    const h = harness({ offers: LADDER(), balances });
+    expect(await h.executor.onSwap(job("shortfall", "15", "35"))).toEqual({
+      type: "job-error", jobId: "shortfall", reason: JOB_ROUTE_NOT_CURRENT,
+    });
+    expect(h.calls).toEqual([]);
+    expect(h.journal.list()).toEqual([]);
+    await h.executor.stop();
+  }
 });
+
 
 test("RF3 pair and minimum policy is rechecked at job time before exact or wallet work", async () => {
   const unsupported = harness({ supportedPairs: new Set([`${B}->${A}`]) });
@@ -1319,7 +1258,7 @@ test("SC-001 a wallet that refuses all tokenIn coin selection still settles a wh
     [{ type: "shielded", outputs: [] }],
     { dustSecretKey: "dust-key" },
     { ttl: new Date(Date.now() + 60_000), payFees: false },
-  )).rejects.toThrow(/wallet holds no tokenIn/);
+  )).rejects.toThrow(/wallet holds no swap tokens/);
   await control.executor.stop();
 });
 
@@ -1440,14 +1379,14 @@ test("FR-003 a job whose tokenIn the solver does not hold SETTLES (SC-002)", asy
   for (const balances of [{ [A]: 14n, [B]: 1_000n }, zeroTokenIn]) {
     const resolved = routeFor("15", "25", { balances });
     expect(resolved.route.surplusOut).toBe(5n);
-    expect(resolved.route.residualOut).toBe(0n);
+    expect([...resolved.route.claim.payouts]).toEqual([]);
     expect(resolved.stock.reserved(A)).toBe(0n);
   }
   // …and the resolved route is IDENTICAL to the one a fully funded wallet gets,
   // which is the "byte-for-byte" half of FR-003: nothing else moved.
   const funded = routeFor("15", "25", { balances: { [A]: 1_000n, [B]: 1_000n } });
   const unfunded = routeFor("15", "25", { balances: zeroTokenIn });
-  for (const key of ["residualIn", "residualOut", "surplusOut"] as const) {
+  for (const key of ["surplusIn", "surplusOut"] as const) {
     expect(unfunded.route[key], key).toBe(funded.route[key]);
   }
   expect(unfunded.route.offers.map((source) => source.offerHash))
@@ -1471,11 +1410,7 @@ test("FR-003 a job whose tokenIn the solver does not hold SETTLES (SC-002)", asy
 });
 
 test("FR-003 no reservation or balance on the tokenIn side can refuse a job", () => {
-  // WAS: a live claim paying out tokenA reduced `available(A)` below `amountIn`
-  // and the job was refused `JOB_ROUTE_UNAVAILABLE`. tokenIn is not consulted
-  // any more, so neither the balance nor an outstanding reservation against it
-  // can decide a route. (A reservation on the tokenOUT side still can — see the
-  // residual tests.)
+  // Unrelated historical payout claims cannot change a new maker-backed route.
   const book = new Book();
   for (const source of LADDER()) book.upsert(source);
   const stock = new Stock();
@@ -1498,64 +1433,32 @@ test("FR-003 no reservation or balance on the tokenIn side can refuse a job", ()
   // One resolve per size: a second one would refuse "already claimed", which is
   // the offer-reservation property and not this test's subject.
   const fifteen = resolve("15");
-  expect(fifteen.residualIn).toBe(5n);
-  expect(fifteen.residualOut).toBe(0n);
+  expect(fifteen.surplusIn).toBe(5n);
+  expect([...fifteen.claim.payouts]).toEqual([]);
   // The tokenIn reservation is untouched by the route: only a payout reserves.
   expect(stock.reserved(A)).toBe(6n);
   expect(stock.reserved(B)).toBe(0n);
 });
 
-test("FR-003 publication withholds what it cannot execute, and admission refuses it again", () => {
-  // The two layers, and the honest statement of how they relate: publication is
-  // bounded by each interval's WORST case, admission by the actual job. So a
-  // withheld rung's worst job is refused twice, while a cheap job inside the
-  // same withheld interval would still resolve — publication is deliberately
-  // conservative, and admission is the fail-closed authority.
-  //
-  // ONE budget since 00006-R2. The tokenIn half of this test (tokenIn 19 →
-  // published tail 10, size 20 refused `JOB_ROUTE_UNAVAILABLE`) is inverted
-  // below: the same snapshot now publishes the whole ladder and admits the job.
+test("publication and admission share the complete staircase and range", () => {
   const book = new Book();
   for (const source of LADDER()) book.upsert(source);
-  const published = (balances: Record<string, bigint>) => {
-    const stock = new Stock();
-    stock.setBalances(balances);
-    return deriveLadderPush({ book, isCurrent: () => true }, {
-      nowMs: Date.now(),
-      expiryMarginSeconds: 120,
-      spendableInventory: stock.spendable(),
-    }).priceLevels.levels[0]?.levels ?? [];
-  };
-  const FULL = [
-    { input: "10", output: "30" },
-    { input: "20", output: "50" },
-    { input: "30", output: "60" },
-  ];
-
-  // WAS FR-004: `{A: 19n}` published only `[{10, 30}]` and refused size 20.
-  const noTokenInBound = { [A]: 19n, [B]: 1_000n };
-  expect(published(noTokenInBound)).toEqual(FULL);
-  expect(routeFor("20", "1", { balances: noTokenInBound }).route.surplusOut).toBe(49n);
-  expect(routeFor("15", "1", { balances: noTokenInBound }).route.surplusOut).toBe(29n);
-  // Zero tokenIn is the same ladder and the same admission.
-  expect(published({ [B]: 1_000n })).toEqual(FULL);
-  expect(routeFor("30", "1", { balances: { [B]: 1_000n } }).route.surplusOut).toBe(59n);
-
-  // FR-003, UNCHANGED. The interval (10, 20) can demand up to
-  // floor(20 · 9 / 10) = 18 of tokenOut, so 8 withholds the rung that opens it —
-  // and it does so from a wallet holding no tokenIn at all.
-  const residualBalances = { [B]: 8n };
-  expect(published(residualBalances)).toEqual([{ input: "10", output: "30" }]);
-  // The worst job in that withheld interval: quote at 19 is 48, of which 18 is
-  // a solver payout.
-  expect(refusalReason(() => routeFor("19", "48", { balances: residualBalances })))
-    .toBe(JOB_ROUTE_UNAVAILABLE);
-  // …while a cheap job in the same interval remains affordable. This is not a
-  // gap: publication bounds the interval, admission bounds the job.
-  expect(routeFor("19", "35", { balances: residualBalances }).route.residualOut).toBe(5n);
-  // SC-002's zero/zero corner, at this layer too: whole-maker first rung only.
-  expect(published({})).toEqual([{ input: "10", output: "30" }]);
+  const published = deriveLadderPush({ book, isCurrent: () => true }, {
+    nowMs: Date.now(), expiryMarginSeconds: 120,
+  });
+  expect(published.priceLevels.levels[0]!.levels).toEqual([
+    { input: "10", output: "30" }, { input: "19", output: "30" },
+    { input: "20", output: "50" }, { input: "29", output: "50" },
+    { input: "30", output: "60" }, { input: "300", output: "60" },
+  ]);
+  for (const balances of [{}, { [A]: 1_000n, [B]: 1_000n }]) {
+    expect(routeFor("19", "30", { balances }).route.surplusIn).toBe(9n);
+    expect(refusalReason(() => routeFor("19", "31", { balances }))).toBe(JOB_ROUTE_NOT_CURRENT);
+    expect(routeFor("300", "60", { balances }).route.surplusIn).toBe(270n);
+    expect(refusalReason(() => routeFor("301", "1", { balances }))).toBe(JOB_ROUTE_NOT_CURRENT);
+  }
 });
+
 
 test("FR-002 the policy the executor admits with is the policy publication used", () => {
   // Both layers now read the same `JobAdmissionPolicy` object through the same
@@ -1576,4 +1479,155 @@ test("FR-002 the policy the executor admits with is the policy publication used"
     (() => { const stock = new Stock(); stock.setBalances({ [A]: 1_000n, [B]: 1_000n }); return stock; })(),
     { nowMs: Date.now(), expiryMarginSeconds: 120, unavailableOfferHashes: [], ...policy },
   ))).toBe(JOB_PAIR_UNSUPPORTED);
+});
+
+test("C5 hard case publishes 14 points and switches exact makers with both surpluses", async () => {
+  const unit = 1_000_000n;
+  const sources = [
+    offer(H1, N1, unit, unit),
+    offer(H2, N2, 10n * unit, 20n * unit),
+    offer(H3, N3, 150n * unit, 100n * unit),
+  ];
+  const book = new Book();
+  sources.forEach((source) => book.upsert(source));
+  const publication = deriveLadderPush({ book, isCurrent: () => true }, {
+    nowMs: Date.now(), expiryMarginSeconds: 120,
+  });
+  expect(publication.priceLevels.levels[0]!.levels).toHaveLength(14);
+  expect(publication.derived.provenance[0]!.combinations).toHaveLength(7);
+  expect(publication.derived.provenance[0]!.terminalInput).toBe("1610000000");
+  for (const [input, output, hashes, surplusIn, surplusOut] of [
+    ["150000000", "100000000", [H3], 0n, 0n],
+    ["159990000", "100000000", [H1, H3], 8_990_000n, unit],
+    ["160000000", "120000000", [H2, H3], 0n, 0n],
+    ["1610000000", "121000000", [H1, H2, H3], 1_449_000_000n, 0n],
+  ] as const) {
+    const h = harness({ offers: sources, balances: {}, status: "consumed" });
+    try {
+      expect((await h.executor.onSwap(job("hard-case", input, output))).type).toBe("swap-tx");
+      expect(h.exactRequests).toEqual([[...hashes]]);
+      expect(h.legs.every((leg) => Object.keys(leg.inputs).length === 0)).toBe(true);
+      const outputs = h.legs.flatMap((leg) => leg.outputs);
+      expect(outputs.filter((entry) => entry.raw === A).reduce((sum, entry) => sum - entry.amount, 0n)).toBe(surplusIn);
+      expect(outputs.filter((entry) => entry.raw === B).reduce((sum, entry) => sum - entry.amount, 0n)).toBe(surplusOut);
+      expect(netImbalance(h.imbalanceReads.at(-1)!.rows)).toEqual([[A, -BigInt(input)], [B, BigInt(output)]]);
+      await h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "hard-case", txId: RELAY_TX });
+      for (const source of sources) expect(h.book.get(source.offerHash) === undefined).toBe(new Set<string>(hashes).has(source.offerHash));
+    } finally { await h.executor.stop(); }
+  }
+  for (const input of ["999999", "1610000001"]) {
+    expect(refusalReason(() => routeFor(input, "1", { offers: sources }))).toBe(JOB_ROUTE_NOT_CURRENT);
+  }
+});
+
+test("C5 reverse-direction tail pays150A from three exact files and retains100B", async () => {
+  const unit = 1_000_000n;
+  const sources = ([[H1, N1, 20n, 100n], [H2, N2, 10n, 40n], [H3, N3, 30n, 10n]] as const)
+    .map(([hash, nullifier, cost, output]) => {
+      const source = offer(hash, nullifier, cost * unit, output * unit);
+      source.gives[0]!.token = A;
+      source.wants[0]!.token = B;
+      return source;
+    });
+  const h = harness({ offers: sources, balances: {}, status: "consumed" });
+  try {
+    const published = deriveLadderPush({ book: h.book, isCurrent: () => true }, {
+      nowMs: Date.now(), expiryMarginSeconds: 120,
+    });
+    expect(published.priceLevels.levels[0]!.levels).toHaveLength(8);
+    const reverse = { ...job("reverse-tail", "160000000", "150000000"), tokenIn: B, tokenOut: A };
+    expect((await h.executor.onSwap(reverse)).type).toBe("swap-tx");
+    expect(h.exactRequests).toEqual([[H1, H2, H3]]);
+    expect(h.legs[0]).toMatchObject({ inputs: {}, outputs: [
+      { seg: 0, tag: "shielded", raw: B, amount: -100_000_000n },
+    ] });
+    expect(netImbalance(h.imbalanceReads.at(-1)!.rows)).toEqual([[A, 150_000_000n], [B, -160_000_000n]]);
+    await h.executor.onTxSubmitted({ type: "tx-submitted", jobId: "reverse-tail", txId: RELAY_TX });
+    expect(h.book.size).toBe(0);
+  } finally { await h.executor.stop(); }
+  for (const [input, admitted] of [["600000000", true], ["600000001", false]] as const) {
+    const fresh = harness({ offers: sources, balances: {} });
+    try {
+      const result = await fresh.executor.onSwap({ ...job("reverse-bound", input, "150000000"), tokenIn: B, tokenOut: A });
+      expect(result.type).toBe(admitted ? "swap-tx" : "job-error");
+    } finally { await fresh.executor.stop(); }
+  }
+});
+
+test("C5 24A=>20B, refused24A=>28B, then25A=>28B use only funded whole offers", async () => {
+  for (const balances of [{}, { [A]: 1_000n, [B]: 1_000n }]) {
+    const sources = [offer(H1, N1, 10n, 20n), offer(H2, N2, 15n, 10n)];
+    const refused = harness({ offers: sources, balances });
+    try {
+      expect((await refused.executor.onSwap(job("short", "24", "28"))).type).toBe("job-error");
+      expect(refused.calls).toEqual([]);
+      expect(refused.stock.isClaimed({ offerHashes: [H1, H2], nullifiers: [N1, N2] })).toBe(false);
+      expect((await refused.executor.onSwap(job("valid-after-short", "25", "28"))).type).toBe("swap-tx");
+      expect(refused.exactRequests).toEqual([[H1, H2]]);
+      expect(refused.legs[0]).toMatchObject({ inputs: {}, outputs: [
+        { seg: 0, tag: "shielded", raw: B, amount: -2n },
+      ] });
+    } finally { await refused.executor.stop(); }
+    const plateau = harness({ offers: sources, balances });
+    try {
+      expect((await plateau.executor.onSwap(job("plateau24", "24", "20"))).type).toBe("swap-tx");
+      expect(plateau.exactRequests).toEqual([[H1]]);
+      expect(plateau.legs[0]).toMatchObject({ inputs: {}, outputs: [
+        { seg: 0, tag: "shielded", raw: A, amount: -14n },
+      ] });
+    } finally { await plateau.executor.stop(); }
+  }
+});
+
+test("fresh expiry and source cap refuse after bounded search before reservation", () => {
+  const book = new Book();
+  const source = offer(H1, N1, 10n, 20n);
+  source.expiresAt = 200_000;
+  book.upsert(source);
+  const stock = new Stock();
+  expect(refusalReason(() => resolveSwapJobRoute(job(), { book, isCurrent: () => true }, stock, {
+    nowMs: 0, freshNowMs: () => 80_000, expiryMarginSeconds: 120, unavailableOfferHashes: [],
+  }))).toBe(JOB_ROUTE_NOT_CURRENT);
+  expect(stock.isOfferClaimed(source)).toBe(false);
+  book.upsert(offer(H2, N2, 10n, 10n));
+  book.all = () => { throw new Error("unbounded source copy"); };
+  expect(refusalReason(() => resolveSwapJobRoute(job(), { book, isCurrent: () => true }, stock, {
+    nowMs: 0, expiryMarginSeconds: 120, unavailableOfferHashes: [], resourceLimits: { maxSourceOffers: 1 },
+  }))).toBe(JOB_ROUTE_NOT_CURRENT);
+});
+
+test("maker deletion during exact read and expiry during address read cause zero wallet mutation", async () => {
+  const deleted = harness();
+  deleted.blockExact();
+  const pending = deleted.executor.onSwap(job("deleted"));
+  await Promise.resolve();
+  deleted.book.remove(H1);
+  deleted.releaseExact();
+  expect((await pending).type).toBe("job-error");
+  expect(deleted.calls).toEqual(["exact-files"]);
+  expect(deleted.stock.isClaimed({ offerHashes: [H1], nullifiers: [N1] })).toBe(false);
+  await deleted.executor.stop();
+
+  const expired = harness({ blockWallet: true });
+  const blocked = expired.executor.onSwap(job("expired-address"));
+  await Promise.resolve();
+  await Promise.resolve();
+  expired.advance(3_600_000);
+  expired.releaseWallet();
+  expect((await blocked).type).toBe("job-error");
+  expect(expired.calls).toEqual(["exact-files"]);
+  expect(expired.stock.isClaimed({ offerHashes: [H1], nullifiers: [N1] })).toBe(false);
+  await expired.executor.stop();
+});
+
+test("signed-delta terminal cap keeps receipts buildable and rejects M+1 jobs", () => {
+  const cost = MAX_SETTLEMENT_AMOUNT / 10n + 1n;
+  const sources = [offer(H1, N1, cost, MAX_SETTLEMENT_AMOUNT)];
+  const { route } = routeFor(MAX_SETTLEMENT_AMOUNT.toString(), "1", { offers: sources, balances: {} });
+  expect(route.surplusIn).toBe(MAX_SETTLEMENT_AMOUNT - cost);
+  expect(route.surplusOut).toBe(MAX_SETTLEMENT_AMOUNT - 1n);
+  expect(refusalReason(() => routeFor((MAX_SETTLEMENT_AMOUNT + 1n).toString(), "1", { offers: sources })))
+    .toBe(JOB_ROUTE_NOT_CURRENT);
+  expect(refusalReason(() => routeFor("1", (MAX_SETTLEMENT_AMOUNT + 1n).toString(), { offers: sources })))
+    .toBe(JOB_ROUTE_NOT_CURRENT);
 });

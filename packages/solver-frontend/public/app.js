@@ -309,7 +309,9 @@ function renderLadders(snapshot, registry) {
         emptyNode(
           push.withheld === "withdrawn"
             ? "EMPTY BY DESIGN — the solver withdrew its quotes deliberately (graceful stop or explicit withdrawal). The relay is holding an empty ladder."
-            : `EMPTY BY DESIGN — this push is the fail-closed withdrawal (${push.withheld}). It is not an absence of liquidity; the solver refuses to quote from a cache it cannot trust.`,
+            : `EMPTY BY DESIGN — this push is the fail-closed withdrawal (${push.withheld}${
+              push.withheldReason ? `: ${push.withheldReason}` : ""
+            }). It is not an absence of liquidity; the canonical derivation was not safe to publish.`,
         ),
       );
       return;
@@ -334,27 +336,56 @@ function renderLadders(snapshot, registry) {
       el(
         "span",
         "meta",
-        `${pair.rungs.length} rung(s)` +
-          (pair.residualBound === null
-            ? ""
-            : ` · residual budget ${groupDigits(pair.residualBound)} ${pair.labelOut}`),
+        `${pair.points.length} wire point(s) · ${pair.winningCombinations} winning set(s) · ` +
+          `${pair.uniqueMakers} unique maker(s)`,
       ),
     );
+    if (pair.terminalInputView !== null) {
+      const constrained = pair.terminalInput !== pair.nominalTerminalInput;
+      head.append(el(
+        "span",
+        "meta",
+        `terminal ${pair.terminalInputView.base} ${pair.labelIn}` +
+          (constrained && pair.nominalTerminalInputView !== null
+            ? ` · nominal ${pair.nominalTerminalInputView.base}`
+            : "") +
+          (pair.capReasons.length > 0 ? ` · cap: ${pair.capReasons.join(", ")}` : ""),
+      ));
+    }
     block.append(head);
 
-    const rows = pair.rungs.map((rung) => {
-      const row = el("tr", "rung");
-      row.append(el("td", "mono", String(rung.index)));
-      row.append(amountCell(rung.inputView));
-      row.append(amountCell(rung.outputView));
-      row.append(el("td", "num", rung.rate ?? "—"));
+    const rows = pair.points.map((point) => {
+      const row = el("tr", "wire-point");
+      row.append(el("td", "mono", String(point.index)));
+      row.append(amountCell(point.inputView));
+      row.append(amountCell(point.outputView));
+      row.append(el("td", "num", point.rate ?? "—"));
       const kind = el("td");
-      kind.append(tagNode(rung.kind === "whole" ? "ok" : "acc", rung.kind));
+      kind.append(tagNode(
+        point.kind === "genuine" ? "ok" : "acc",
+        point.terminal && point.kind === "plateau" ? "terminal plateau" : point.kind,
+      ));
       row.append(kind);
-      const closes = el("td");
-      if (rung.offerHash) closes.append(hexNode(rung.offerHash));
-      else closes.append(el("span", "muted", "solver inventory"));
-      row.append(closes);
+      row.append(
+        point.makerInputView === null
+          ? el("td", "muted", "missing provenance")
+          : amountCell(point.makerInputView),
+      );
+      row.append(
+        point.makerOutputView === null
+          ? el("td", "muted", "missing provenance")
+          : amountCell(point.makerOutputView),
+      );
+      const witnesses = el("td");
+      if (point.offerHashes.length === 0) {
+        witnesses.append(el("span", "muted", "missing provenance"));
+      } else {
+        point.offerHashes.forEach((offerHash, index) => {
+          if (index > 0) witnesses.append(document.createTextNode(" + "));
+          witnesses.append(hexNode(offerHash));
+        });
+      }
+      row.append(witnesses);
       return row;
     });
     const scroll = el("div", "scroll");
@@ -366,7 +397,9 @@ function renderLadders(snapshot, registry) {
           { label: "Taker gets", numeric: true },
           { label: "Rate", numeric: true },
           { label: "Kind" },
-          { label: "Closes maker offer" },
+          { label: "True maker input", numeric: true },
+          { label: "True maker output", numeric: true },
+          { label: "Winning complete files" },
         ],
         rows,
       ),
@@ -483,7 +516,9 @@ function renderBook(snapshot, registry) {
         );
         tr.append(cacheCell);
         const wire = el("td");
-        if (row.rung !== null) wire.append(tagNode("ok", `rung ${row.rung}`));
+        if (row.winningSets.length > 0) {
+          wire.append(tagNode("ok", `set${row.winningSets.length === 1 ? "" : "s"} ${row.winningSets.join(", ")}`));
+        }
         else if (row.excludedReason !== null) wire.append(tagNode("warn", row.excludedReason));
         else wire.append(el("span", "muted", "—"));
         tr.append(wire);

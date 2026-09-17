@@ -19,22 +19,192 @@
 --
 -- Local-only additions go in local-migration.sql, which still runs after this.
 
+-- ── Reference prices (assets) ─────────────────────────────────────────────
+--
+-- Declared here, ahead of known_tokens, only because known_tokens.asset_id
+-- references it. The rest of the market-data tables (token_prices) are in the
+-- "Market data" section further down, and this table's comment block is the
+-- one place the whole pricing model is written out:
+--
+--   asset_prices   USD per COIN of a tradable asset, keyed by the CoinGecko
+--                  id. USD is the numeraire: every price in this schema is a
+--                  USD price and NO asset is assumed to be worth one dollar —
+--                  the stablecoins are quoted like everything else, so a
+--                  depeg is visible in quotes and in the sponsorship gate.
+--                  Refreshed by the standalone `packages/price-feed` process.
+--   known_tokens   maps a Midnight token colour to an asset_id (or, when NULL,
+--                  is mapped by NAME through packages/database/price-map.ts)
+--                  and carries the `decimals` needed to turn a per-coin price
+--                  into the per-BASE-UNIT price the API serves.
+--   token_prices   operator overrides (`manual`) and the deterministic demo
+--                  rows (`fallback`) for tokens with no asset behind them.
+--
+-- source:
+--   'seed'  the value shipped in this file — captured from CoinGecko on
+--           2026-09-02 so a stack that never runs the price-feed service still
+--           quotes real ratios. Overwritten by the service.
+--   'feed'  written by packages/price-feed from CoinGecko.
+--
+-- There is no third source. Every asset in this table is fetched from the
+-- provider; nothing is pinned to a constant.
+--
+-- Seed values, all captured 2026-09-02 from
+--   GET /api/v3/simple/price?ids=<id>&vs_currencies=usd&include_last_updated_at=true
+-- provider_updated_at is CoinGecko's own `last_updated_at` (unix seconds),
+-- written through to_timestamp() so the epoch in the plan is the literal here
+-- and no timezone is guessed:
+--   bitcoin    77387       1788380750
+--   ethereum   2393.28     1788380750
+--   usd-coin   0.999818    1788380750
+--   midnight-3 0.01918181  1788380780   (NIGHT — coingecko.com/en/coins/midnight-3)
+--   usdm-2     1.001       1788388850   (Moneta's Cardano USDM, the asset the
+--                                        VIA Labs bridge carries to Midnight —
+--                                        coingecko.com/en/coins/usdm-2. Close
+--                                        to a dollar, but NOT a $1 peg: it is
+--                                        observed like every other asset.)
+CREATE TABLE asset_prices (
+    asset_id            TEXT PRIMARY KEY,
+    price_usd           NUMERIC NOT NULL,
+    source              TEXT NOT NULL CHECK (source IN ('seed', 'feed')),
+    provider_updated_at TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO asset_prices (asset_id, price_usd, source, provider_updated_at) VALUES
+('bitcoin',    77387,      'seed',  to_timestamp(1788380750)),
+('ethereum',   2393.28,    'seed',  to_timestamp(1788380750)),
+('usd-coin',   0.999818,   'seed',  to_timestamp(1788380750)),
+('midnight-3', 0.01918181, 'seed',  to_timestamp(1788380780)),
+('usdm-2',     1.001,      'seed',  to_timestamp(1788388850));
+
+-- One row (id = 1), upserted by packages/price-feed after every cycle. Not
+-- seeded: "the feed has never run here" and "the feed ran and told us nothing"
+-- must be distinguishable, and an absent row is the honest spelling of the
+-- first. GET /v1/prices reports all-null feed status when it is missing.
+CREATE TABLE price_feed_status (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    provider    TEXT NOT NULL,
+    last_run_at TIMESTAMPTZ,
+    last_ok_at  TIMESTAMPTZ,
+    last_error  TEXT
+);
+
 -- DEMO / TEMPORARY: known_tokens is a manually curated convenience table for
 -- this demo. The official Midnight token-metadata standard is not yet live.
 -- Names and kinds stored here are unverified and MUST NOT be treated as
 -- authoritative token information. This table and its API endpoints will be
 -- replaced once the standard is finalised.
+--
+-- decimals / asset_id carry a DEFAULT and a NULL respectively, which the
+-- header's "no DEFAULT cushions" rule allows here because neither is a
+-- compatibility shim for an old writer:
+--   decimals DEFAULT 6 is the semantic default for legacy/local registration.
+--     Canonical registry imports always state their published value (BTC 8,
+--     ETH 18, stablecoins 6); a caller with any other scale must do the same.
+--   asset_id NULL means "no asset behind this colour" (test tokens), which is
+--     a state the resolver handles explicitly, not a missing value.
 CREATE TABLE known_tokens (
     id SERIAL PRIMARY KEY,
     token_color TEXT UNIQUE NOT NULL,
     name TEXT UNIQUE NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('shielded', 'unshielded'))
+    kind TEXT NOT NULL CHECK (kind IN ('shielded', 'unshielded')),
+    -- Base units per coin, as a power of ten. The API serves prices PER BASE
+    -- UNIT (amounts are integer base units everywhere and carry no metadata),
+    -- so a token's price is asset_prices.price_usd / 10^decimals.
+    decimals INTEGER NOT NULL DEFAULT 6 CHECK (decimals BETWEEN 0 AND 38),
+    -- When set, wins over the name map in packages/database/price-map.ts.
+    asset_id TEXT REFERENCES asset_prices(asset_id)
 );
 
-INSERT INTO known_tokens (token_color, name, kind) VALUES
-('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded');
+-- Ownership marker for the six names managed by the external canonical
+-- registry importer. A name by itself is not provenance: the local demo API
+-- can register any uppercase name, including TWBTC. The importer records the
+-- exact color it last committed and refuses to overwrite a same-name row that
+-- neither matches this marker nor the incoming canonical record.
+CREATE TABLE canonical_token_registry_state (
+    name              TEXT PRIMARY KEY,
+    token_color       TEXT UNIQUE NOT NULL,
+    network           TEXT NOT NULL CHECK (network IN ('preview', 'preprod', 'stagenet')),
+    registry_revision TEXT NOT NULL,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Legacy local colours (WBTC, WETH, TESTTOKEN*) are NOT seeded. The six
+-- external faucet tokens below ARE seeded from the pinned ready Preprod
+-- registry, so a fresh database has canonical defaults even while the faucet
+-- service is offline. Source evidence and immutable snapshots live in
+-- packages/database/fixtures/.
+--
+-- The other two defaults are:
+--   NIGHT — the native token, colour 0x00…00 on every network. **6 decimals**:
+--           1 NIGHT = 10^6 Stars (its base unit) — STARS_PER_NIGHT in
+--           midnight-ledger/ledger/src/structure.rs, confirmed in
+--           NIGHT-shielded-vs-unshielded-FINDINGS.md ("1 NIGHT = 10⁶ atomic
+--           units (Stars)"). This row was seeded at 0 before PR #54's own
+--           follow-up fix: since `decimals` here means "base units per PRICED
+--           coin" (not the display decimals of the colour itself), a 0 priced
+--           one Star at NIGHT's whole-coin price of ~$0.019 — every quote and
+--           sponsorship threshold touching NIGHT (and anything registered to
+--           mirror it, e.g. sNight) was off by 10^6.
+--   SNIGHT — the shielded-night wrapper (effectstream/shielded-night): NIGHT
+--           held as a shielded (Zswap) token, locked 1:1, so one sNight base
+--           unit is one Star. It therefore prices off NIGHT's asset
+--           (`midnight-3`) with **NIGHT's 6 decimals** — the two rows must
+--           carry the same value or a NIGHT <-> sNight offer of equal base
+--           units stops being at par under the sponsorship gate.
+--
+--           Preprod is the canonical default. Patch this row only when an
+--           operator deliberately selects another network for this database.
+--
+--           Unlike native NIGHT, sNight's colour is
+--             tokenType(pad(32, "shielded-night:wrapper"), self())
+--           i.e. rawTokenType(pad32("shielded-night:wrapper"), <contract
+--           address>) with @midnightntwrk/ledger-v9 — so it derives from the
+--           contract ADDRESS and differs per network:
+--             preview  address 80b89b9a4213c61da84f54b2ea02e2809f9c4dedbdafacd04b38d4667bee1396
+--                      colour  793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c
+--             preprod  address e354e6725893397e6a2dfa44522a017fabb5d9c92efed50288711f5f865c8950
+--                      colour  8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819
+--             mainnet  not deployed — MAINNET_ADDRESS is empty in the
+--                      shielded-night repo's frontend/.env, so there is no
+--                      colour to seed yet.
+--           This file runs against an EMPTY database exactly once, so an
+--           ALREADY-LIVE database is not reached by editing it: patch that one
+--           by hand, with
+--             UPDATE known_tokens SET token_color = '<colour>' WHERE name = 'SNIGHT';
+--           or POST /v1/known-tokens.
+--           asset-prices.test.ts re-derives the seeded colour AND the preprod
+--           one from the addresses above, so neither the row nor this comment
+--           can rot after a contract redeploy.
+--
+-- Local test helpers must use externally issued same-chain values; none of
+-- WBTC/WETH/TESTTOKEN* is a canonical default or added here.
+INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES
+('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 6, 'midnight-3'),
+-- preprod sNight — see the SNIGHT note above before selecting another network.
+('8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819', 'SNIGHT','shielded',   6, 'midnight-3'),
+-- mint-test-tokens Preprod registry revision
+-- ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc
+('b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc', 'TWBTC',   'shielded',   8, 'bitcoin'),
+('087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f', 'TWETH',   'shielded',  18, 'ethereum'),
+('a5c902be8fff1a0c3f10a926b24c3eaa8a93215535915b5af47d2c6a59febab5', 'TWUSDC',  'shielded',   6, 'usd-coin'),
+('931ceb35c81dc57978fea79de042a4a31f7694d012d0d79b351789502fc7b6ee', 'TWUSDM',  'shielded',   6, 'usdm-2'),
+('4ecbf451771bebdc0e9ad7aed27405b7f5dee20121bcf0be5746a4ef22748e9f', 'UTWUSDC', 'unshielded', 6, 'usd-coin'),
+('be3354fbcec9efa8c2d75eb64ab49a7fd2bda9cfa76b3cf6ede47fef63b6878e', 'UTWBTC',  'unshielded', 8, 'bitcoin');
 -- ('0000000000000000000000000000000000000000000000000000000000000001', 'SILK', 'shielded'),
 -- ('0000000000000000000000000000000000000000000000000000000000000002', 'DUSK', 'shielded')
+
+-- Seed importer ownership with the same six rows. This lets an explicit
+-- Preview/Stagenet import replace Preprod atomically while refusing unrelated
+-- same-name or same-colour records.
+INSERT INTO canonical_token_registry_state
+    (name, token_color, network, registry_revision) VALUES
+('TWBTC',   'b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
+('TWETH',   '087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
+('TWUSDC',  'a5c902be8fff1a0c3f10a926b24c3eaa8a93215535915b5af47d2c6a59febab5', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
+('TWUSDM',  '931ceb35c81dc57978fea79de042a4a31f7694d012d0d79b351789502fc7b6ee', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
+('UTWUSDC', '4ecbf451771bebdc0e9ad7aed27405b7f5dee20121bcf0be5746a4ef22748e9f', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
+('UTWBTC',  'be3354fbcec9efa8c2d75eb64ab49a7fd2bda9cfa76b3cf6ede47fef63b6878e', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc');
 
 -- ── Live offers ───────────────────────────────────────────────────────────
 --
@@ -542,9 +712,27 @@ CREATE INDEX idx_known_roots_height       ON known_roots (height);
 
 -- ── Market data ───────────────────────────────────────────────────────────
 
+-- Per-token USD price PER BASE UNIT, for the two cases asset_prices cannot
+-- cover. This table is no longer the primary price source — see the
+-- asset_prices comment block above for the full model.
+--
+--   'manual'   an operator's override. Wins over everything, and NOTHING ever
+--              rewrites it: not the price-feed service (which only touches
+--              asset_prices), not the quote path. Delete the row to go back to
+--              the asset price.
+--   'fallback' the deterministic demo price (priceOf() in
+--              packages/node/market-mock.ts), written once on the first quote
+--              of a registered token with no asset behind it — the test
+--              tokens. It is NOT a market price and every API surface labels
+--              it as such; the sponsorship gate treats it as UNPRICED.
+--
+-- DEFAULT 'fallback' is not a compatibility cushion: the only writer that
+-- omits the column is that first-quote insert, and 'fallback' is what it
+-- means. A manual row is written by hand, with the column stated.
 CREATE TABLE token_prices (
     token_color TEXT PRIMARY KEY,
     price_usd   NUMERIC NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'fallback' CHECK (source IN ('manual', 'fallback')),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

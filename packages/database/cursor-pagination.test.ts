@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // Keyset pagination: pages must cover the book exactly once — no duplicates,
 // no gaps — including across rows that SHARE a celestia_height (offers
@@ -34,8 +35,8 @@ const {
 
 const PORT = 54337;
 const PORT_REPLICA = 54338;
-let handle: { close: () => Promise<void> };
-let replicaHandle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
+let replicaHandle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 let replica: InstanceType<typeof pg.Client>;
 
@@ -77,12 +78,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
-  try {
-    await replicaHandle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
+  await closeTestPglite(replicaHandle, replica);
 });
 
 async function pageFrom(

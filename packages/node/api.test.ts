@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { closeTestPglite } from "../database/test-pglite.ts";
 
 // HTTP-level tests: the REAL apiRouter registered on a real fastify instance
 // over in-memory PGlite with the real migrations — no route copies, no mocks.
@@ -16,7 +17,7 @@ const fastify = (await import("fastify")).default;
 const { apiRouter } = await import("./api.ts");
 
 const PORT = 54339;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 let server: any;
 
@@ -56,14 +57,30 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await server?.close();
-    await handle?.close();
-  } catch { /* noop */ }
+  } finally {
+    await closeTestPglite(handle, client);
+  }
 });
 
 const getJson = async (url: string) => {
   const res = await server.inject({ method: "GET", url });
   return { status: res.statusCode, body: res.json() };
 };
+
+describe("GET /v1/midnight/config — network-only wallet configuration", () => {
+  test("serves network endpoints without contract metadata", async () => {
+    delete process.env["MIDNIGHT_CONTRACT_ADDRESS"];
+    const { status, body } = await getJson("/v1/midnight/config");
+    expect(status).toBe(200);
+    expect(body.contractAddress).toBeUndefined();
+    expect(body).toMatchObject({
+      networkId: expect.any(String),
+      indexerUri: expect.any(String),
+      indexerWsUri: expect.any(String),
+      proofServerUri: expect.any(String),
+    });
+  });
+});
 
 describe("GET /v1/offers — keyset pagination over HTTP", () => {
   test("first page returns {offers, next_cursor}; cursor chains to the end exactly once", async () => {
@@ -193,8 +210,14 @@ describe("POST /v1/known-tokens — registry gate (item #20)", () => {
         payload,
       });
       expect(res.statusCode).toBe(200);
+      // 00024 FR-001: the payload states no `decimals`, which is what an OLD
+      // client (the preprod SPA before its port lands) sends. The response and
+      // the row must both say 6 — the registry's default — not 0.
+      expect(res.json()).toMatchObject({ success: true, name: "GATETEST", decimals: 6 });
       const listed = await getJson("/v1/known-tokens");
-      expect(listed.body.some((t: any) => t.name === "GATETEST")).toBe(true);
+      const written = listed.body.find((t: any) => t.name === "GATETEST");
+      expect(written).toBeDefined();
+      expect(written.decimals).toBe(6);
     } finally {
       delete process.env["ENABLE_TOKEN_REGISTRY"];
     }
@@ -239,5 +262,387 @@ describe("GET /v1/quote — unknown-token demo fallback", () => {
   test("malformed colors still answer 400", async () => {
     const { status } = await getJson("/v1/quote?from_token=zzz&to_token=abc&from_amount=1");
     expect(status).toBe(400);
+  });
+});
+
+// ── Reference prices (00005) ───────────────────────────────────────────────
+//
+// The same real router over the same real migrations, so the seeds under test
+// are literally the ones a fresh deployment gets.
+
+const WBTC = `e7${"5".repeat(62)}`;
+const WETH = `fd${"a".repeat(62)}`;
+const WSBTC8 = `b8${"8".repeat(62)}`;
+const TESTA = `d1${"3".repeat(62)}`;
+const OVERRIDDEN = `c0${"f".repeat(62)}`;
+
+const COLOR_NIGHT = "0".repeat(64);
+const COLOR_TWBTC = "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc";
+const COLOR_TWETH = "087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f";
+const COLOR_TWUSDC = "a5c902be8fff1a0c3f10a926b24c3eaa8a93215535915b5af47d2c6a59febab5";
+const COLOR_TWUSDM = "931ceb35c81dc57978fea79de042a4a31f7694d012d0d79b351789502fc7b6ee";
+
+/** `GET /v1/prices` for a set of colours — `tokens` is required (Q-11). */
+const pricesFor = (...colors: string[]) => getJson(`/v1/prices?tokens=${colors.join(",")}`);
+
+const registerToken = (
+  color: string,
+  name: string,
+  kind: "shielded" | "unshielded" = "shielded",
+  // 00024 FR-001: manually registered legacy rows default to 6 decimals, so a
+  // fixture that says nothing must behave like one that states that default.
+  decimals = 6,
+  assetId: string | null = null,
+) =>
+  client.query(
+    "INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES ($1,$2,$3,$4,$5)",
+    [color, name, kind, decimals, assetId],
+  );
+
+describe("GET /v1/prices", () => {
+  test("a fresh database already serves the seeded reference prices", async () => {
+    const { status, body } = await pricesFor(
+      COLOR_NIGHT,
+      COLOR_TWBTC,
+      COLOR_TWETH,
+      COLOR_TWUSDC,
+      COLOR_TWUSDM,
+    );
+    expect(status).toBe(200);
+    expect(body.sponsor_discount).toBe(0.025);
+
+    // Never ran here — every field null, and the shape is still present so a
+    // client does not have to special-case a missing object.
+    expect(body.feed).toEqual({
+      provider: "coingecko",
+      last_run_at: null,
+      last_ok_at: null,
+      last_error: null,
+    });
+
+    // ONLY the assets the requested tokens reference.
+    const assets = new Map<string, any>(body.assets.map((a: any) => [a.asset_id, a]));
+    expect([...assets.keys()].sort()).toEqual([
+      "bitcoin",
+      "ethereum",
+      "midnight-3",
+      "usd-coin",
+      "usdm-2",
+    ]);
+    // The stablecoin is an observed price like the rest — not 1, and with a
+    // provider timestamp of its own.
+    expect(assets.get("usdm-2")).toMatchObject({
+      price_usd: "1.001",
+      source: "seed",
+      provider_updated_at: "2026-09-02T22:40:50.000Z",
+    });
+    expect(assets.get("midnight-3").provider_updated_at).toBe("2026-09-02T20:26:20.000Z");
+
+    // Canonical seeded tokens are priced PER BASE UNIT at their published
+    // 8/18/6 decimal scales.
+    const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
+    expect([...tokens.keys()].sort()).toEqual(["NIGHT", "TWBTC", "TWETH", "TWUSDC", "TWUSDM"]);
+    // 6 decimals: 1 NIGHT = 10^6 Stars (base units), so the price served per
+    // base unit is the seeded midnight-3 coin price divided by 1e6.
+    expect(tokens.get("NIGHT")).toMatchObject({
+      asset_id: "midnight-3",
+      decimals: 6,
+      price_usd: "0.00000001918181",
+      source: "seed",
+    });
+    expect(tokens.get("TWBTC")).toMatchObject({
+      kind: "shielded",
+      decimals: 8,
+      price_usd: "0.00077387",
+      source: "seed",
+    });
+    expect(tokens.get("TWETH")).toMatchObject({
+      kind: "shielded",
+      decimals: 18,
+      price_usd: "0.00000000000000239328",
+      source: "seed",
+    });
+    expect(tokens.get("TWUSDM")).toMatchObject({
+      kind: "shielded",
+      decimals: 6,
+      price_usd: "0.000001001",
+      source: "seed",
+    });
+  });
+
+  test("the endpoint is read-only — polling it writes no demo rows", async () => {
+    await registerToken(TESTA, "TESTTOKENA");
+    const before = await client.query("SELECT COUNT(*)::int AS n FROM token_prices");
+    await pricesFor(TESTA);
+    await pricesFor(TESTA);
+    const after = await client.query("SELECT COUNT(*)::int AS n FROM token_prices");
+    expect(after.rows[0].n).toBe(before.rows[0].n);
+
+    // …and an unpriced token is simply absent rather than invented.
+    const { body } = await pricesFor(TESTA);
+    expect(body.tokens.map((t: any) => t.name)).not.toContain("TESTTOKENA");
+  });
+
+  // ── `tokens` is required and bounded (Q-11) ──────────────────────────────
+
+  test("only the requested colours come back, and unknown ones are silently absent", async () => {
+    const unknown = `ab${"9".repeat(62)}`;
+    const { status, body } = await pricesFor(COLOR_TWUSDC, unknown);
+    expect(status).toBe(200);
+    // Other defaults are seeded and priced, but were not asked for.
+    expect(body.tokens.map((t: any) => t.name)).toEqual(["TWUSDC"]);
+    // An unknown colour is an answer ("no reference price"), not a client
+    // error: the batcher asks about whatever colours an offer's legs carry.
+    expect(body.tokens.map((t: any) => t.token_color)).not.toContain(unknown);
+    expect(body.assets.map((a: any) => a.asset_id)).toEqual(["usd-coin"]);
+    // The two always-present fields survive a request that matched nothing.
+    const { body: none } = await pricesFor(unknown);
+    expect(none.tokens).toEqual([]);
+    expect(none.assets).toEqual([]);
+    expect(none.sponsor_discount).toBe(0.025);
+    expect(none.feed.provider).toBe("coingecko");
+  });
+
+  test("a missing, empty or malformed `tokens` is 400 VALIDATION with a reason", async () => {
+    const cases: [string, RegExp][] = [
+      ["/v1/prices", /tokens is required/],
+      ["/v1/prices?tokens=", /tokens is required/],
+      ["/v1/prices?tokens=,,", /tokens is required/],
+      [`/v1/prices?tokens=${COLOR_TWUSDC},nothex`, /not a 64-hex token color/],
+      [`/v1/prices?tokens=${"1".repeat(63)}`, /not a 64-hex token color/],
+      [`/v1/prices?tokens=${"1".repeat(65)}`, /not a 64-hex token color/],
+      // Two `tokens=` params arrive as an array, which is not a colour list.
+      [`/v1/prices?tokens=${COLOR_TWUSDC}&tokens=${COLOR_NIGHT}`, /single comma-separated string/],
+    ];
+    for (const [url, reason] of cases) {
+      const { status, body } = await getJson(url);
+      expect(status).toBe(400);
+      expect(body.error).toBe("VALIDATION");
+      expect(body.reason).toMatch(reason);
+    }
+  });
+
+  test("more than 50 colours is refused; exactly 50 is served", async () => {
+    const color = (i: number) => i.toString(16).padStart(2, "0") + "e".repeat(62);
+    const fifty = Array.from({ length: 50 }, (_, i) => color(i));
+    const { status: okStatus } = await getJson(`/v1/prices?tokens=${fifty.join(",")}`);
+    expect(okStatus).toBe(200);
+
+    const { status, body } = await getJson(`/v1/prices?tokens=${[...fifty, color(50)].join(",")}`);
+    expect(status).toBe(400);
+    expect(body.reason).toContain("at most 50 colors, got 51");
+  });
+
+  test("colours are normalised: upper case and duplicates are accepted", async () => {
+    // GET /v1/quote already lower-cases from_token/to_token; two routes in one
+    // API disagreeing about the case of the same 64 hex characters would be a
+    // trap. Duplicates collapse rather than duplicating rows in the response.
+    const { status, body } = await pricesFor(
+      COLOR_TWUSDM.toUpperCase(),
+      COLOR_TWUSDM,
+      ` ${COLOR_TWUSDM} `.replace(/ /g, ""),
+    );
+    expect(status).toBe(200);
+    expect(body.tokens).toHaveLength(1);
+    expect(body.tokens[0].token_color).toBe(COLOR_TWUSDM);
+  });
+
+  test("feed status is reported once the service has run", async () => {
+    await client.query(
+      `INSERT INTO price_feed_status (id, provider, last_run_at, last_ok_at, last_error)
+       VALUES (1, 'coingecko', TIMESTAMPTZ '2026-09-03 00:00:00+00', TIMESTAMPTZ '2026-09-03 00:00:00+00', NULL)`,
+    );
+    const { body } = await pricesFor(COLOR_NIGHT);
+    expect(body.feed).toEqual({
+      provider: "coingecko",
+      last_run_at: "2026-09-03T00:00:00.000Z",
+      last_ok_at: "2026-09-03T00:00:00.000Z",
+      last_error: null,
+    });
+    await client.query("DELETE FROM price_feed_status");
+  });
+});
+
+describe("GET /v1/quote — reference prices (SC-001)", () => {
+  test("WBTC→WETH registered BY NAME quotes the real BTC/ETH ratio", async () => {
+    // Neither colour is seeded — faucet colours change on every redeploy — so
+    // this is the whole name-mapping path, end to end over HTTP.
+    await registerToken(WBTC, "WBTC");
+    await registerToken(WETH, "WETH");
+
+    const { status, body } = await getJson(
+      `/v1/quote?from_token=${WBTC}&to_token=${WETH}&from_amount=1000`,
+    );
+    expect(status).toBe(200);
+    expect(body.market_rate).toBeCloseTo(77387 / 2393.28, 12);
+    // Before this project preprod answered 0.2153 here, from colour hashes.
+    expect(body.market_rate).toBeGreaterThan(32);
+    expect(body.source).toBe("token-prices");
+    expect(body.from_source).toBe("seed");
+    expect(body.to_source).toBe("seed");
+    expect(body.sponsor_discount).toBe(0.025);
+    expect(typeof body.prices_updated_at).toBe("string");
+    // 6 decimals (00024): 1000 base units is a millionth of a coin each, so
+    // the give leg is worth 1000 × 77387 / 1e6 — the same quote, a millionth of
+    // the USD the 0-decimals registry used to claim.
+    expect(body.from_usd).toBeCloseTo((1000 * 77387) / 1e6, 6);
+    // The auto-suggested amount is the sponsorship threshold, so it is sponsored.
+    expect(body.sponsored).toBe(true);
+    expect(body.discount).toBeGreaterThanOrEqual(0.025);
+  });
+
+  test("an offer priced AT reference is reported as not sponsored", async () => {
+    const atReference = Math.floor(1000 * (77387 / 2393.28));
+    const { body } = await getJson(
+      `/v1/quote?from_token=${WBTC}&to_token=${WETH}&from_amount=1000&to_amount=${atReference}`,
+    );
+    expect(body.sponsored).toBe(false);
+    expect(body.discount).toBeLessThan(0.025);
+  });
+
+  test("decimals divide the per-coin price into a per-base-unit one", async () => {
+    // Same asset as WBTC, eight decimals: one base unit is 1e-8 of a coin.
+    await registerToken(WSBTC8, "WSBTC", "shielded", 8);
+    const { body } = await getJson(
+      `/v1/quote?from_token=${WSBTC8}&to_token=${WETH}&from_amount=100000000`,
+    );
+    // 1e8 base units = 1 coin = one bitcoin's worth.
+    expect(body.from_usd).toBeCloseTo(77387, 6);
+    expect(body.from_source).toBe("seed");
+
+    const { body: prices } = await pricesFor(WSBTC8);
+    const wsbtc = prices.tokens.find((t: any) => t.name === "WSBTC");
+    expect(wsbtc).toMatchObject({ decimals: 8, price_usd: "0.00077387", source: "seed" });
+  });
+
+  test("a `feed` row replaces the seed and is reported as `feed`", async () => {
+    await client.query(
+      "UPDATE asset_prices SET price_usd = 80000, source = 'feed' WHERE asset_id = 'bitcoin'",
+    );
+    const { body } = await getJson(
+      `/v1/quote?from_token=${WBTC}&to_token=${WETH}&from_amount=1000`,
+    );
+    expect(body.from_source).toBe("feed");
+    expect(body.market_rate).toBeCloseTo(80000 / 2393.28, 12);
+    await client.query(
+      "UPDATE asset_prices SET price_usd = 77387, source = 'seed' WHERE asset_id = 'bitcoin'",
+    );
+  });
+
+  test("a manual override beats the asset price and is labelled `manual`", async () => {
+    await registerToken(OVERRIDDEN, "WSETH");
+    await client.query(
+      "INSERT INTO token_prices (token_color, price_usd, source) VALUES ($1, '5', 'manual')",
+      [OVERRIDDEN],
+    );
+    const { body } = await getJson(
+      `/v1/quote?from_token=${OVERRIDDEN}&to_token=${WETH}&from_amount=1000`,
+    );
+    expect(body.from_source).toBe("manual");
+    expect(body.from_usd).toBeCloseTo(5000, 6);
+
+    // …and the quote does not overwrite it.
+    const row = await client.query("SELECT price_usd, source FROM token_prices WHERE token_color = $1", [
+      OVERRIDDEN,
+    ]);
+    expect(row.rows[0]).toMatchObject({ price_usd: "5", source: "manual" });
+  });
+
+  test("a registered token with no mapping falls back once, and stays put", async () => {
+    const { body } = await getJson(
+      `/v1/quote?from_token=${TESTA}&to_token=${WETH}&from_amount=1000`,
+    );
+    expect(body.from_source).toBe("fallback");
+    expect(body.to_source).toBe("seed");
+    // One side is a demo price, so the pair has no honest age.
+    expect(body.prices_updated_at).toBeTruthy();
+    expect(body.source).toBe("token-prices"); // both colours ARE registered
+
+    const first = await client.query(
+      "SELECT price_usd, source FROM token_prices WHERE token_color = $1",
+      [TESTA],
+    );
+    expect(first.rows).toHaveLength(1);
+    expect(first.rows[0].source).toBe("fallback");
+
+    // A second quote reuses the row rather than writing another one.
+    await getJson(`/v1/quote?from_token=${TESTA}&to_token=${WETH}&from_amount=2000`);
+    const second = await client.query(
+      "SELECT price_usd, source FROM token_prices WHERE token_color = $1",
+      [TESTA],
+    );
+    expect(second.rows).toHaveLength(1);
+    expect(second.rows[0].price_usd).toBe(first.rows[0].price_usd);
+
+    // Now that it has a row it appears in /v1/prices, labelled honestly.
+    // Q-11 keeps this write deliberately: the demo price stays inspectable
+    // and overridable in token_prices.
+    const { body: prices } = await pricesFor(TESTA);
+    expect(prices.tokens.find((t: any) => t.name === "TESTTOKENA")).toMatchObject({
+      source: "fallback",
+      asset_id: null,
+    });
+  });
+
+  test("an unregistered colour is `demo-fallback` and prices_updated_at is null", async () => {
+    const unknown = `9${"9".repeat(63)}`;
+    const { body } = await getJson(
+      `/v1/quote?from_token=${WBTC}&to_token=${unknown}&from_amount=1000`,
+    );
+    expect(body.source).toBe("demo-fallback");
+    expect(body.from_source).toBe("seed");
+    expect(body.to_source).toBe("demo-fallback");
+    expect(body.prices_updated_at).toBeNull();
+
+    const persisted = await client.query("SELECT 1 FROM token_prices WHERE token_color = $1", [
+      unknown,
+    ]);
+    expect(persisted.rows).toHaveLength(0);
+  });
+});
+
+// ── sNight, a seeded default token (00021) ─────────────────────────────────
+//
+// Nothing is registered here: the SNIGHT row comes out of 000-init.sql like
+// NIGHT and the six canonical Preprod rows, so what these read back over HTTP
+// is exactly what a fresh
+// deployment serves. The seeded colour is *preprod*; another network patches
+// the row deliberately — see the SNIGHT note in 000-init.sql.
+
+describe("sNight is a seeded known token", () => {
+  const COLOR_SNIGHT = "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
+  const COLOR_SNIGHT_PREVIEW =
+    "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c";
+
+  test("GET /v1/known-tokens lists it with NIGHT's shape", async () => {
+    const { status, body } = await getJson("/v1/known-tokens");
+    expect(status).toBe(200);
+    const byName = new Map<string, any>(body.map((t: any) => [t.name, t]));
+    expect(byName.get("SNIGHT")).toMatchObject({
+      token_color: COLOR_SNIGHT,
+      kind: "shielded",
+      // Q3: NIGHT's decimals, so equal base units are at par under the gate.
+      decimals: byName.get("NIGHT").decimals,
+      asset_id: "midnight-3",
+    });
+    // Exactly one sNight row — `name` is UNIQUE, and the colour of a network
+    // this database was not built for must not be here.
+    expect(body.filter((t: any) => t.name === "SNIGHT")).toHaveLength(1);
+    expect(body.some((t: any) => t.token_color === COLOR_SNIGHT_PREVIEW)).toBe(false);
+  });
+
+  test("GET /v1/prices prices it exactly as NIGHT, per base unit", async () => {
+    const { status, body } = await pricesFor(COLOR_SNIGHT, COLOR_NIGHT);
+    expect(status).toBe(200);
+    const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
+    const night = tokens.get("NIGHT");
+    expect(tokens.get("SNIGHT")).toMatchObject({
+      asset_id: "midnight-3",
+      decimals: night.decimals,
+      price_usd: night.price_usd,
+      source: "seed",
+    });
+    // One asset behind both legs — sNight adds no new price to fetch.
+    expect(body.assets.map((a: any) => a.asset_id)).toEqual(["midnight-3"]);
   });
 });

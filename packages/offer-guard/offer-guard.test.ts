@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { bech32m } from "@scure/base";
 import { OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
 
@@ -94,6 +96,63 @@ describe("guardOffer ladder (structure gate, no fixture needed)", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe("BAD_DESERIALIZE");
     expect(consulted).toBe(0);
+  });
+});
+
+describe("guardOffer shared liveness evaluator (real proven fixture)", () => {
+  const fixture = readFileSync(
+    join(import.meta.dir, "..", "validator", "fixtures", "valid-offer.bech32"),
+    "utf8",
+  ).trim();
+  const opts = { networkId: "undeployed", maxBytes: 1024 * 1024 };
+
+  test("keeps submission dedup before ordered nullifier/root liveness", async () => {
+    const probes: string[] = [];
+    const verdict = await guardOffer(fixture, {
+      ...opts,
+      isDuplicate: async () => {
+        probes.push("duplicate");
+        return null;
+      },
+      isNullifierSpent: async () => {
+        probes.push("nullifier");
+        return false;
+      },
+      isKnownRoot: async () => {
+        probes.push("root");
+        return false;
+      },
+    });
+
+    expect(verdict).toMatchObject({ ok: false, code: "ROOT_UNKNOWN" });
+    expect(probes).toEqual(["duplicate", "nullifier", "root"]);
+  });
+
+  test("returns the shared NULLIFIER_SPENT verdict and short-circuits", async () => {
+    let rootProbes = 0;
+    const verdict = await guardOffer(fixture, {
+      ...opts,
+      isNullifierSpent: async () => true,
+      isKnownRoot: async () => {
+        rootProbes += 1;
+        return true;
+      },
+    });
+
+    expect(verdict).toMatchObject({ ok: false, code: "NULLIFIER_SPENT" });
+    expect(rootProbes).toBe(0);
+  });
+
+  test("all configured liveness probes plus crypto produce one valid verdict", async () => {
+    const verdict = await guardOffer(fixture, {
+      ...opts,
+      isDuplicate: async () => null,
+      isNullifierSpent: async () => false,
+      isUnshieldedLive: async () => true,
+      isKnownRoot: async () => true,
+    });
+    expect(verdict.ok).toBe(true);
+    if (verdict.ok) expect(verdict.offerHash).toBe(offerHashFromBlob(fixture));
   });
 });
 

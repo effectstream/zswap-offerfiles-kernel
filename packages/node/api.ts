@@ -4,12 +4,8 @@ import rateLimit from "@fastify/rate-limit";
 import {
   getKnownTokens,
   insertKnownToken,
-  isNullifierSpent,
-  isUnshieldedCreated,
-  isKnownRootLive,
+  getAssetPrices,
   getLatestEffectstreamBlock,
-  getTokenPrice,
-  upsertTokenPrice,
   checkTokenNameExists,
   getTokenByColor,
   getPairs,
@@ -26,15 +22,47 @@ import {
   findActiveOfferByUnshieldedOutput,
 } from "@zswap-da/database";
 
-import { ALLOW_CONTRACT_MAKER_OFFERS, isTokenRegistryEnabled, MIDNIGHT_NETWORK_ID, OFFER_MAX_BYTES, ROOT_WINDOW_SECONDS, midnightContract } from "./env.ts";
+import {
+  ALLOW_CONTRACT_MAKER_OFFERS,
+  apiRateLimitAllowList,
+  apiRateLimitMax,
+  apiSseMaxConnections,
+  apiUpdatesMaxConnections,
+  isEventGatePollEnabled,
+  isTokenRegistryEnabled,
+  sponsorDiscount,
+  sponsorDiscountBps,
+  MIDNIGHT_NETWORK_ID,
+  OFFER_MAX_BYTES,
+  ROOT_WINDOW_SECONDS,
+} from "./env.ts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
+import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/solver-core/amount";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
-import { eventBus, emitAppEvent, markBlockCommitted, type AppEvent } from "./event-bus.ts";
-import { quoteWithPrices, priceOf } from "./market-mock.ts";
+import {
+  eventBus,
+  emitAppEvent,
+  markBlockCommitted,
+  type AppEvent,
+} from "./event-bus.ts";
+import { quoteWithPrices } from "./market-mock.ts";
+import {
+  listPricesForTokens,
+  loadPricingContext,
+  parseTokensParam,
+  resolveTokenPrice,
+} from "./prices.ts";
 import { realStats, realHistory } from "./trade-data.ts";
 import { getSyncStatus } from "./sync-health.ts";
-import { registerZkAssetRoutes } from "./zk-assets.ts";
+import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
+import {
+  checkOfferSponsorship,
+  describeSponsorshipPolicy,
+} from "./offer-sponsorship.ts";
+import { registerExactFilesRoute } from "./offer-files-read.ts";
+import { registerOfferConsumptionRoute } from "./offer-consumption-read.ts";
+import { registerOfferUpdatesStream } from "./offer-updates-stream.ts";
 import { registerDocsRoutes } from "./docs.ts";
 import { offerHashFromBlob } from "./offer-hash.ts";
 import { declaredMarkers, duplicateMarkerReason, DUPLICATE_MARKERS } from "./marker-dedup.ts";
@@ -45,11 +73,36 @@ import { declaredMarkers, duplicateMarkerReason, DUPLICATE_MARKERS } from "./mar
 // value layer. Our DB column is `kind`; the wire name is the MIP's.
 type TokenLegDto = { token: string; amount: string; type: string };
 
+/** Write one SSE frame without retaining an unbounded slow-client buffer. */
+export function writeSseChunk(
+  raw: any,
+  chunk: string,
+  cleanup: () => void,
+): boolean {
+  if (raw.destroyed || raw.writableEnded) {
+    cleanup();
+    return false;
+  }
+  try {
+    if (raw.write(chunk) === true) return true;
+  } catch {
+    // Treat write failures exactly like response close.
+  }
+  // ServerResponse.write() returning false means the per-client buffer crossed
+  // its high-water mark. SSE has no replay cursor here, so retaining arbitrary
+  // event data is both misleading and a public memory-DoS primitive. Clients
+  // reconnect after the socket closes and refresh state from GET /v1/offers.
+  try { raw.destroy(); } catch { /* already closed */ }
+  cleanup();
+  return false;
+}
+
 export const apiRouter: StartConfigApiRouter = async function (
   server: any,
   dbConn: any,
 ): Promise<void> {
-  // 60 requests/min per IP — applied to every route in this router.
+  // Per-IP request budget (default 600/min) — applied to every route in this
+  // router.
   //
   // `statusCode` is load-bearing, not decoration: @fastify/rate-limit THROWS
   // whatever this builder returns (`throw params.errorResponseBuilder(...)`),
@@ -59,7 +112,8 @@ export const apiRouter: StartConfigApiRouter = async function (
   // clients "server fault" instead of "back off", so no caller could throttle
   // itself. Verified: 90 requests gave {200:56, 500:34}.
   await server.register(rateLimit, {
-    max: 60,
+    max: apiRateLimitMax(),
+    allowList: apiRateLimitAllowList(),
     timeWindow: "1 minute",
     errorResponseBuilder: () => ({
       statusCode: 429,
@@ -80,6 +134,20 @@ export const apiRouter: StartConfigApiRouter = async function (
     }
     const status = Number(error?.statusCode);
     if (Number.isFinite(status) && status >= 400 && status < 500) {
+      const isExactFilesRead = String(request?.url ?? "").split("?", 1)[0] ===
+        "/v1/offers/files";
+      if (status === 413 && isExactFilesRead) {
+        return reply.code(413).send({
+          error: "TOO_LARGE",
+          reason: "request body exceeds the configured transport limit",
+        });
+      }
+      if (status === 415 && isExactFilesRead) {
+        return reply.code(400).send({
+          error: "VALIDATION",
+          reason: "exact-files reads require application/json",
+        });
+      }
       return reply
         .code(status)
         .send({ error: error?.error ?? "BAD_REQUEST", reason: error?.message });
@@ -90,13 +158,29 @@ export const apiRouter: StartConfigApiRouter = async function (
       .send({ error: "INTERNAL", reason: error?.message ?? "Unknown error" });
   });
 
-  // GET /keys/*, /zkir/* — ZK assets for the browser prover (the frontend now
-  // lives in its own repo and fetches these from this API instead of staging
-  // copies into its public/ dir).
-  registerZkAssetRoutes(server);
+  // State the fee-sponsorship policy once, at startup. Two jobs: an operator
+  // can see what POST /v1/offers will do without reading code, and a typo in
+  // BATCHER_SPONSOR_POLICY throws HERE — before the server is ready — instead
+  // of on the first submission.
+  console.log(`[API] ${describeSponsorshipPolicy()}`);
 
   // GET /docs — interactive API playground (upload + accept/settle debugger).
   registerDocsRoutes(server);
+
+  // Side-effect-free exact-files read. Registration happens after the
+  // router-wide limiter and before the submission route; it shares the
+  // canonical validation/liveness primitives but never calls the batcher.
+  registerExactFilesRoute(server, dbConn);
+
+  // Strict RF2 settlement authority. This is a SELECT-only read and returns
+  // inner-ledger evidence only when every shielded marker agrees.
+  registerOfferConsumptionRoute(server, dbConn);
+
+  // GET /v1/offers/updates — the client-initiated websocket update stream.
+  // Same lifecycle events as the SSE route below, plus a per-subscription
+  // sequence number so a consumer mirroring the book can prove it missed
+  // nothing. It lives on the HTTP server's `upgrade` event, not on a route.
+  registerOfferUpdatesStream(server, dbConn);
 
   // Drive the event gate from THIS pool — the whole point is that it is not
   // the connection running the block transaction. The runtime writes the block
@@ -105,17 +189,21 @@ export const apiRouter: StartConfigApiRouter = async function (
   // Without this poll nothing is ever published; with it, nothing is published
   // early. 1 s against a ~1 s block time — a tick of latency, never a lost
   // event, since the buffer holds until the height is seen.
-  const gatePoll = setInterval(() => {
-    void getLatestEffectstreamBlock
-      .run(undefined, dbConn)
-      .then((rows) => {
-        const h = rows[0]?.block_height;
-        if (h != null) markBlockCommitted(h as any);
-      })
-      .catch(() => { /* transient; the next tick retries and the buffer waits */ });
-  }, 1000);
-  (gatePoll as any).unref?.();
-  server.addHook("onClose", async () => clearInterval(gatePoll));
+  const gatePoll = isEventGatePollEnabled()
+    ? setInterval(() => {
+      void getLatestEffectstreamBlock
+        .run(undefined, dbConn)
+        .then((rows) => {
+          const h = rows[0]?.block_height;
+          if (h != null) markBlockCommitted(h as any);
+        })
+        .catch(() => { /* transient; the next tick retries and the buffer waits */ });
+    }, 1000)
+    : null;
+  if (gatePoll !== null) (gatePoll as any).unref?.();
+  server.addHook("onClose", async () => {
+    if (gatePoll !== null) clearInterval(gatePoll);
+  });
 
   // Adjudicate the fill verdict after each CONSUMED archive. The event is
   // released only after its block commits (see the gate above), so this
@@ -138,6 +226,29 @@ export const apiRouter: StartConfigApiRouter = async function (
     }
   };
   eventBus.on("app_event", onAppEvent);
+  const sseMaxConnections = apiSseMaxConnections();
+  // The emitter warning threshold should reflect the explicit connection caps
+  // of BOTH event transports (SSE responses and websocket subscriptions), plus
+  // non-stream projection listeners. The caps, not EventEmitter warnings, are
+  // the resource boundary. One owner raises and restores this so the two
+  // transports cannot fight over the threshold at shutdown.
+  const priorEventBusMaxListeners = eventBus.getMaxListeners();
+  eventBus.setMaxListeners(
+    Math.max(priorEventBusMaxListeners, sseMaxConnections + apiUpdatesMaxConnections() + 10),
+  );
+  let activeSseConnections = 0;
+  const activeSseResponses = new Set<any>();
+  // Fastify's preClose hook runs before it waits for active requests. Without
+  // this, persistent streams can prevent server.close() from settling.
+  server.addHook("preClose", async () => {
+    for (const raw of activeSseResponses) {
+      try { raw.destroy(); } catch { /* already closed */ }
+    }
+  });
+  server.addHook("onClose", async () => {
+    eventBus.off("app_event", onAppEvent);
+    eventBus.setMaxListeners(priorEventBusMaxListeners);
+  });
 
   // The repair sweep. Every archived CONSUMED offer owes exactly one verdict;
   // this finds the ones that never got it — a crash between COMMIT and the
@@ -366,20 +477,42 @@ export const apiRouter: StartConfigApiRouter = async function (
     return result;
   });
 
-  // GET /v1/quote — price quote for from→to backed by the token_prices DB table.
-  // On first request for a token the deterministic fallback price is inserted so
-  // subsequent calls are consistent and operators can override rows manually.
+  // GET /v1/prices?tokens=<color>[,<color>...] — the reference prices behind
+  // every quote and behind the batcher's sponsorship gate, plus how old they
+  // are and where they came from.
+  //
+  // `tokens` is REQUIRED and bounded at 50 (Q-11). There is no unfiltered
+  // form: the batcher asks per offer for that offer's leg colours and the UI
+  // asks for the pair on screen, so an endpoint whose cost grew with the size
+  // of the registry served nobody and would have become the slowest route here
+  // the first time a few thousand short-lived tokens were minted.
+  //
+  // Read-only: unlike the quote path it never writes a demo row.
+  server.get("/v1/prices", async (request: any, reply: any) => {
+    const parsed = parseTokensParam((request?.query ?? {})["tokens"]);
+    if (!Array.isArray(parsed)) {
+      return reply.code(400).send({ error: "VALIDATION", reason: parsed.reason });
+    }
+    return listPricesForTokens(dbConn, parsed);
+  });
+
+  // GET /v1/quote — price quote for from→to. Prices resolve through
+  // packages/prices.ts: a manual override, else the token's reference asset
+  // (÷ 10^decimals), else the deterministic demo price, which is inserted on
+  // first request so subsequent calls are consistent and operators can
+  // override the row by hand.
   // Params: from_token, to_token (hex colors), from_amount (base units),
   // optional to_amount (a user-set receive amount → discount/sponsored vs it).
-  async function resolvePrice(token: string): Promise<number> {
-    const rows = await getTokenPrice.run({ token_color: token }, dbConn);
-    if (rows.length > 0) return Number(rows[0].price_usd);
-    const fallback = priceOf(token);
-    await upsertTokenPrice.run({ token_color: token, price_usd: fallback }, dbConn);
-    return fallback;
-  }
 
   const TOKEN_COLOR_RE = /^[0-9a-f]{64}$/;
+  const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,77})$/; // bounded above by u256
+  const MAX_AMOUNT = (1n << 256n) - 1n;
+
+  const parseQuoteAmount = (value: unknown): bigint | null => {
+    if (typeof value !== "string" || !AMOUNT_RE.test(value)) return null;
+    const amount = BigInt(value);
+    return amount <= MAX_AMOUNT ? amount : null;
+  };
 
   server.get("/v1/quote", async (request: any, reply: any) => {
     const q = request?.query ?? {};
@@ -391,6 +524,29 @@ export const apiRouter: StartConfigApiRouter = async function (
         reason: "from_token and to_token must be 64-hex token colors",
       });
     }
+    if (fromToken === toToken) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "from_token and to_token must be distinct",
+      });
+    }
+    const fromAmount = parseQuoteAmount((q as any).from_amount);
+    if (fromAmount === null || fromAmount <= 0n) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "from_amount must be a positive canonical decimal integer no larger than u256",
+      });
+    }
+    const hasToAmount = (q as any).to_amount !== undefined;
+    const parsedToAmount = hasToAmount ? parseQuoteAmount((q as any).to_amount) : undefined;
+    if (hasToAmount && parsedToAmount === null) {
+      return reply.code(400).send({
+        error: "VALIDATION",
+        reason: "to_amount must be a canonical decimal integer no larger than u256",
+      });
+    }
+    const toAmount: bigint | undefined = parsedToAmount ?? undefined;
+
     // DEMO FALLBACK — unknown tokens quote at $1 (so two unknowns are 1:1).
     // This endpoint used to 404 UNKNOWN_TOKEN for unregistered colors, on the
     // principle that quoting arbitrary colors fabricates a market rate. That
@@ -412,14 +568,48 @@ export const apiRouter: StartConfigApiRouter = async function (
           `No token-tracking solution yet; fix before any real pricing. Tokens: ${unknownTokens.join(", ")}`,
       );
     }
-    const digits = (v: unknown) => String(v ?? "").replace(/[^0-9]/g, "");
-    const fromAmount = BigInt(digits((q as any).from_amount) || "0");
-    const toRaw = digits((q as any).to_amount);
-    const toAmount = toRaw.length ? BigInt(toRaw) : undefined;
+    // An unregistered colour is quoted at $1 without touching the database —
+    // `demo-fallback`, the one source that is not a row anywhere.
+    const DEMO = { price_usd: "1", source: "demo-fallback" as const, updated_at: null };
+    const ctx = await loadPricingContext(dbConn);
     const priceFor = (color: string) =>
-      unknownTokens.includes(color) ? Promise.resolve(1) : resolvePrice(color);
-    const [pf, pt] = await Promise.all([priceFor(fromToken), priceFor(toToken)]);
-    return quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount);
+      unknownTokens.includes(color)
+        ? Promise.resolve(DEMO)
+        : resolveTokenPrice(dbConn, color, ctx);
+    // Sequential: one pg client, and pg serialises concurrent queries on it
+    // anyway (with a deprecation warning). Two reads, not a round trip saved.
+    const fromPrice = await priceFor(fromToken);
+    const toPrice = await priceFor(toToken);
+    const pf = Number(fromPrice.price_usd);
+    const pt = Number(toPrice.price_usd);
+
+    // The OLDER of the two, because a quote is only as fresh as its stalest
+    // side. null when either side has no real price to be stale.
+    const pricesUpdatedAt =
+      fromPrice.updated_at === null || toPrice.updated_at === null
+        ? null
+        : fromPrice.updated_at < toPrice.updated_at
+          ? fromPrice.updated_at
+          : toPrice.updated_at;
+
+    // Quotes come from the token-price table (or the demo fallback) only. The
+    // backend deliberately holds NO solver state: solver-posted ladders used to
+    // take precedence here through a registry this node maintained, which made
+    // the indexer a quote venue for one class of client. Under the confirmed
+    // architecture the COW solver pushes its ladders to the Midnight Intents
+    // relay and the relay does the interpolation, so this backend keeps a
+    // single, client-agnostic price source.
+    return {
+      ...quoteWithPrices(fromToken, toToken, fromAmount, pf, pt, toAmount, sponsorDiscountBps()),
+      source: unknownTokens.length > 0 ? "demo-fallback" : "token-prices",
+      // Per-side provenance, so the UI can say "CoinGecko, 3 h ago" for one
+      // leg and "demo rate" for the other instead of collapsing both into the
+      // single top-level `source`.
+      sponsor_discount: sponsorDiscount(),
+      from_source: fromPrice.source,
+      to_source: toPrice.source,
+      prices_updated_at: pricesUpdatedAt,
+    };
   });
 
   // GET /v1/chart/{stats,history} — REAL per-pair market data derived from the
@@ -448,9 +638,8 @@ export const apiRouter: StartConfigApiRouter = async function (
     return realHistory(dbConn, pair.base, pair.quote);
   });
 
-  // POST /v1/known-tokens — register a token name/color pair. The browser-wallet
-  // mint path submits the contract call client-side and still needs the backend
-  // DB to know the token name for indexing/display.
+  // POST /v1/known-tokens — register an externally issued token name/color pair
+  // so the backend can index and display it.
   server.post(
     "/v1/known-tokens",
     {
@@ -462,6 +651,15 @@ export const apiRouter: StartConfigApiRouter = async function (
             color: { type: "string" },
             name: { type: "string" },
             kind: { type: "string", enum: ["shielded", "unshielded"] },
+            // Base units per coin. Omitted means the legacy default of 6.
+            // Registrants SHOULD still send it explicitly: a token on another
+            // scale states its own value, or
+            // its USD price would be off by 10^(6 − its decimals).
+            decimals: { type: "integer", minimum: 0, maximum: 38 },
+            // Reference asset (a CoinGecko id). Omitted means "price it by
+            // NAME through price-map.ts", which is right for every token the
+            // default map already knows.
+            asset_id: { type: "string" },
           },
         },
       },
@@ -497,23 +695,45 @@ export const apiRouter: StartConfigApiRouter = async function (
         return reply.code(409).send({ error: `Token color already registered as "${colorCheck[0].name}"` });
       }
 
-      await insertKnownToken.run({ token_color: color, name, kind }, dbConn);
+      const decimals =
+        request.body.decimals === undefined ? null : Number(request.body.decimals);
+      const assetId =
+        request.body.asset_id === undefined
+          ? null
+          : String(request.body.asset_id).trim().toLowerCase() || null;
+      // A colour claiming an asset nobody seeded would fail the FK with a
+      // 500; answer it as the client error it is.
+      if (assetId !== null) {
+        const assets = await getAssetPrices.run(undefined, dbConn);
+        if (!assets.some((a) => a.asset_id === assetId)) {
+          return reply.code(400).send({
+            error: `Unknown asset_id "${assetId}" — known: ${assets.map((a) => a.asset_id).join(", ")}`,
+          });
+        }
+      }
+
+      await insertKnownToken.run(
+        { token_color: color, name, kind, decimals, asset_id: assetId },
+        dbConn,
+      );
       emitAppEvent({ type: "token_minted", name, color, kind });
-      return { success: true, color, name, kind };
+      // `?? DEFAULT_TOKEN_DECIMALS` mirrors the COALESCE in InsertKnownToken and
+      // the column DEFAULT: what the row actually holds is what is answered.
+      return {
+        success: true,
+        color,
+        name,
+        kind,
+        decimals: decimals ?? DEFAULT_TOKEN_DECIMALS,
+        asset_id: assetId,
+      };
     },
   );
 
-  // GET /v1/midnight/config — expose the public Midnight config the browser
-  // contract client needs (contract address, indexer, proof server). Never
-  // include secrets.
+  // GET /v1/midnight/config — expose public network endpoints for browser
+  // wallets. Offer Files has no application contract address.
   server.get("/v1/midnight/config", async () => {
-    const contractAddress =
-      midnightContract?.contractAddress ?? process.env.MIDNIGHT_CONTRACT_ADDRESS;
-    if (!contractAddress) {
-      throw new Error("Midnight contract metadata is not available");
-    }
     return {
-      contractAddress,
       indexerUri: midnightNetworkConfig.indexer,
       indexerWsUri: midnightNetworkConfig.indexerWS,
       proofServerUri: midnightNetworkConfig.proofServer,
@@ -525,7 +745,7 @@ export const apiRouter: StartConfigApiRouter = async function (
   // Uses effectstream.effectstream_blocks for NTP and
   // effectstream.sync_protocol_pagination for parallel chains.
   // Chain tips are fetched from the Midnight indexer / Celestia RPC and cached 60 s.
-  // Exempt from the 60/min API budget — UIs poll this as a liveness probe.
+  // Exempt from the per-IP API budget — UIs poll this as a liveness probe.
   server.get("/v1/health/sync", { config: { rateLimit: false } }, async () => {
     return getSyncStatus(dbConn);
   });
@@ -545,7 +765,7 @@ export const apiRouter: StartConfigApiRouter = async function (
   });
 
   // Status lookup for My Trades startup reconciliation. Returns
-  // { offer, status } with status 'live' | 'consumed' | 'cancelled' | 'expired' | 'not_found'.
+  // { offer, status } with status live/consumed/cancelled/expired/unknown/not_found.
   //
   // Always via the content hash — an indexed probe. Undecodable blobs are
   // answered WITHOUT touching the DB: they can never have been indexed
@@ -674,57 +894,60 @@ export const apiRouter: StartConfigApiRouter = async function (
         });
       }
 
-      // Liveness: never pay a Celestia fee for an offer whose coins are already
-      // spent on chain (it can never settle). The spent_* sets are populated by
-      // the node's midnight-* sync handlers.
-      for (const nullifier of validation.nullifiers ?? []) {
-        const spent = await isNullifierSpent.run({ nullifier }, dbConn);
-        if (spent.length > 0) {
-          return reply.code(400).send({
-            error: "NULLIFIER_SPENT",
-            reason: `nullifier already spent: ${nullifier}`,
-          });
-        }
-      }
-      // Liveness: unshielded UTXO must exist in created_unshielded (absent = spent or never created).
-      for (const s of validation.unshieldedSpends ?? []) {
-        const live = await isUnshieldedCreated.run(
-          { owner: s.owner, intent_hash: s.intentHash, output_no: s.outputNo },
-          dbConn,
-        );
-        if (live.length === 0) {
-          return reply.code(400).send({
-            error: "UTXO_NOT_LIVE",
-            reason:
-              `unshielded UTXO not live (spent or never created): ${s.owner}/${s.intentHash}/${s.outputNo}`,
-          });
-        }
-      }
-      // Root-known: each shielded input must prove against a known recent
-      // root, with the window enforced at read time. The cutoff is derived
-      // from the latest PROCESSED block's timestamp — the same L2 clock that
-      // stamps known_roots.last_seen_ms — never from the wall clock, and never
-      // from MAX(last_seen_ms) (which stops advancing exactly when the window
-      // needs to close). isKnownRootLive keeps the newest root valid
-      // regardless of age, mirroring the ledger's past_roots re-insertion.
-      const latestBlock = (await getLatestEffectstreamBlock.run(undefined, dbConn))[0];
-      const chainNowMs = latestBlock ? Number(latestBlock.ms_timestamp) : 0;
-      for (const root of validation.inputRoots ?? []) {
-        const known = await isKnownRootLive.run(
-          { root, cutoff_ms: chainNowMs - ROOT_WINDOW_SECONDS * 1000 },
-          dbConn,
-        );
-        if (known.length === 0) {
+      // Fee-sponsorship pre-check. Placed HERE — after the byte-identical
+      // dedup probe, before liveness and crypto — for two reasons:
+      //
+      //   * cost: dedup is one indexed probe on a hash that has already been
+      //     computed, so it stays first; this is two small point reads per
+      //     distinct colour, still far below a liveness sweep and orders of
+      //     magnitude below proof verification.
+      //   * usefulness: "we will not pay for this trade" is the answer the
+      //     maker can act on (re-price and resubmit), so it should not sit
+      //     behind the most expensive checks in the ladder.
+      //
+      // Reading `gives`/`wants` from an as-yet cryptographically unverified
+      // transaction is safe HERE and only here, because the worst a forged
+      // offer can do with it is get itself refused — nothing is logged as fact
+      // and no fee is spent. The BATCHER, which does spend the fee, evaluates
+      // the same rule only after verifying the proofs.
+      const refusal = await checkOfferSponsorship(dbConn, {
+        gives: validation.gives ?? [],
+        wants: validation.wants ?? [],
+      });
+      if (refusal !== null) return reply.code(422).send(refusal);
+
+      // Indexed liveness uses the same ordered descriptors and normalized
+      // reasons as STM ingestion and the future validate-for-use route. The
+      // root clock remains API-specific: latest PROCESSED Effectstream block,
+      // never wall time or MAX(last_seen_ms). It is resolved lazily only after
+      // nullifier and UTXO probes pass.
+      const liveness = await evaluateOfferLivenessFromDatabase(
+        validation,
+        dbConn,
+        {
+          getRootCutoffMs: async () => {
+            const latestBlock = (await getLatestEffectstreamBlock.run(
+              undefined,
+              dbConn,
+            ))[0];
+            const chainNowMs = latestBlock ? Number(latestBlock.ms_timestamp) : 0;
+            return chainNowMs - ROOT_WINDOW_SECONDS * 1000;
+          },
+        },
+      );
+      if (!liveness.ok) {
+        if (liveness.descriptor.kind === "root") {
+          const root = liveness.descriptor.root;
           const tip = await getSyncStatus(dbConn).catch(() => null as any);
           const rootsMeta = tip?.sets?.known_roots;
           return reply.code(400).send({
-            error: "ROOT_UNKNOWN",
-            reason: `input merkle root not a known recent chain root: ${root}`,
+            error: liveness.code,
+            reason: liveness.reason,
             hint:
               "Lace proved against a Merkle root this node has never synced. " +
               "Usually Lace's indexer URI differs from this node even when networkId matches " +
               `(node networkId=${MIDNIGHT_NETWORK_ID}, indexer=${midnightNetworkConfig.indexer}). ` +
-              "In Lace → undeployed, set indexer to this node's indexer, mint there, rebuild the offer. " +
+              "Configure Lace for this node's indexer, obtain same-chain inventory, then rebuild the offer. " +
               "Retrying the same blob will not help if the root is foreign.",
             diagnostics: {
               offerRoot: root,
@@ -737,6 +960,10 @@ export const apiRouter: StartConfigApiRouter = async function (
             },
           });
         }
+        return reply.code(400).send({
+          error: liveness.code,
+          reason: liveness.reason,
+        });
       }
 
       // Cryptographic verification — last and mandatory. Everything above read
@@ -785,34 +1012,69 @@ export const apiRouter: StartConfigApiRouter = async function (
 
   // GET /v1/offers/stream — Server-Sent Events stream for real-time offer lifecycle updates
   server.get("/v1/offers/stream", async (request: any, reply: any) => {
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-    });
+    if (activeSseConnections >= sseMaxConnections) {
+      return reply
+        .header("Retry-After", "5")
+        .code(503)
+        .send({
+          error: "SSE_CAPACITY",
+          reason: "Too many active event streams; retry with backoff.",
+        });
+    }
 
-    const send = (data: object) => {
-      try {
-        reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-      } catch { /* client disconnected */ }
+    const raw = reply.raw;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let listenerRegistered = false;
+    let cleaned = false;
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+    const listener = (event: object) => {
+      writeSseChunk(raw, `data: ${JSON.stringify({ ...event, timestamp: Date.now() })}\n\n`, cleanup);
+    };
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      raw.off("close", cleanup);
+      request.raw.off("aborted", cleanup);
+      if (listenerRegistered) eventBus.off("app_event", listener);
+      if (heartbeat !== undefined) clearInterval(heartbeat);
+      activeSseResponses.delete(raw);
+      activeSseConnections -= 1;
+      resolveClosed();
     };
 
-    send({ type: "connected", timestamp: Date.now() });
+    activeSseConnections += 1;
+    activeSseResponses.add(raw);
+    // A long response ends on ServerResponse.close. IncomingMessage.close can
+    // describe completion of the request side and is therefore not the stream
+    // lifecycle signal; request.aborted remains a useful secondary signal.
+    raw.once("close", cleanup);
+    request.raw.once("aborted", cleanup);
 
-    const listener = (event: object) => send({ ...event, timestamp: Date.now() });
-    eventBus.on("app_event", listener);
+    try {
+      reply.hijack();
+      raw.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+      });
+      if (!writeSseChunk(
+        raw,
+        `data: ${JSON.stringify({ type: "connected", timestamp: Date.now() })}\n\n`,
+        cleanup,
+      )) return;
 
-    const heartbeat = setInterval(() => {
-      try { reply.raw.write(": heartbeat\n\n"); } catch { /* noop */ }
-    }, 30_000);
+      eventBus.on("app_event", listener);
+      listenerRegistered = true;
+      heartbeat = setInterval(() => {
+        writeSseChunk(raw, ": heartbeat\n\n", cleanup);
+      }, 30_000);
 
-    request.raw.on("close", () => {
-      eventBus.off("app_event", listener);
-      clearInterval(heartbeat);
-    });
-
-    // Keep connection open — never resolve
-    await new Promise(() => {});
+      if (raw.destroyed || raw.writableEnded || request.raw.aborted) cleanup();
+      await closed;
+    } finally {
+      cleanup();
+    }
   });
 };

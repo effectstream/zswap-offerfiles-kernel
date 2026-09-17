@@ -1,43 +1,33 @@
-// EXTERNAL-STACK entrypoint: run ONLY the kernel's own processes (pglite,
-// contract deploy, sync node, batcher) against Midnight + Celestia
-// infrastructure that something else operates — e.g. the demo-infra compose
-// stack (acedward/midnight-2-offers) or any node/indexer/proof-server triple
-// plus a Celestia node.
+// EXTERNAL-STACK entrypoint: run only the kernel processes against Midnight
+// and Celestia infrastructure operated elsewhere.
 //
 //   bunx orchestrator start start.external.ts
 //
-// Required env (same names the SDK/batcher already read — nothing bespoke):
-//   MIDNIGHT_NETWORK_ID        e.g. undeployed
-//   MIDNIGHT_NODE_HTTP         e.g. http://node:9944
-//   MIDNIGHT_INDEXER_HTTP      e.g. http://indexer:8088/api/v4/graphql
-//   MIDNIGHT_INDEXER_WS        e.g. ws://indexer:8088/api/v4/graphql/ws
-//   MIDNIGHT_PROOF_SERVER_URL  e.g. http://proof-server:6300
-//   MIDNIGHT_WALLET_SEED       deploy/mint wallet (prefunded)
-//   BATCHER_WALLET_SEED        batcher fee wallet (prefunded, distinct seed)
-//   CELESTIA_RPC_URL           e.g. http://celestia:26658
-//   CELESTIA_AUTH_TOKEN        admin token of that Celestia node
-//   CELESTIA_NAMESPACE         defaults to the MIP-0006 shared namespace
+// Required env (the SDK and batcher read these names directly):
+//   MIDNIGHT_NETWORK_ID
+//   MIDNIGHT_NODE_HTTP
+//   MIDNIGHT_INDEXER_HTTP
+//   MIDNIGHT_INDEXER_WS
+//   MIDNIGHT_PROOF_SERVER_URL
+//   BATCHER_WALLET_SEED        prefunded fee wallet
+//   CELESTIA_RPC_URL
+//   CELESTIA_AUTH_TOKEN
+//   CELESTIA_NAMESPACE
 //
-// Why not start.dev.ts with env pointing at the stack: launchMidnight /
-// launchCelestia launch their OWN devnet unconditionally, and launchMidnight
-// declares `stopProcessAtPort: [9944, 8088, 6300]` — against a live external
-// stack it kills the very listeners it was meant to use. Measured 2026-08-25;
-// see packages/node/preflight-external.ts and the demo-infra master plan
-// (T4.3).
-//
-// The Compact contract is NOT compiled here: external mode assumes
-// src/managed/ exists (the container image bakes it at build time; a source
-// checkout gets it from `bun run build:midnight` / infra/compact.sh).
+// This launcher never deploys a contract or mints/funds inventory. Wallets
+// that submit transactions must already hold same-chain assets and fee funds.
 
-import path from "node:path";
 import type { OrchestratorConfig } from "@effectstream/orchestrator/config";
 import { DbNames, launchPglite } from "@effectstream/orchestrator/launch-pglite";
 
-const root = import.meta.dirname!;
-
 const PREFLIGHT = "preflight-external";
-const CONTRACT_DEPLOY = "midnight-contract";
-const MINT = "midnight-mint-test-tokens";
+const SYNC_API_HEALTH = "sync-api-health";
+const LOCAL_ZSWAP_API = "http://127.0.0.1:9999";
+const ZSWAP_API = process.env["ZSWAP_API"]?.trim() || LOCAL_ZSWAP_API;
+const ZSWAP_HEALTH_WAIT = `${ZSWAP_API.replace(/\/+$/, "")}/v1/health`.replace(
+  /^(https?):\/\//,
+  "$1-get://",
+);
 
 export default {
   processes: [
@@ -52,35 +42,22 @@ export default {
     ...launchPglite(),
 
     {
-      name: CONTRACT_DEPLOY,
-      description: "Deploy the offer-files contract to the external chain",
-      cwd: path.join(root, "packages/contracts-midnight"),
-      args: ["run", "midnight-contract:deploy"],
-      env: { MIDNIGHT_STORAGE_PASSWORD: "YourPasswordMy1!" },
-      waitToExit: true,
-      critical: true,
-      dependsOn: [PREFLIGHT, DbNames.PGLITE_WAIT],
-    },
-
-    {
-      name: MINT,
-      description: "Mint dev test tokens (2 shielded + 1 unshielded) via the offer-files contract",
-      cwd: path.join(root, "packages/contracts-midnight"),
-      args: ["run", "mint-test-tokens.ts"],
-      waitToExit: true,
-      // NOT critical: a mint hiccup must not tear the stack down (same rule
-      // as start.dev.ts).
-      dependsOn: [CONTRACT_DEPLOY],
-    },
-
-    {
       name: "sync",
       description: "ZSwap-DA sync node (external Celestia + Midnight)",
       args: ["run", "packages/node/main.dev.ts"],
       waitToExit: false,
       type: "system-dependency",
-      env: { PGLITE: "true" },
-      dependsOn: [DbNames.PGLITE_WAIT, CONTRACT_DEPLOY],
+      env: { PGLITE: "true", ENABLE_TOKEN_REGISTRY: "true" },
+      dependsOn: [PREFLIGHT, DbNames.PGLITE_WAIT],
+    },
+
+    {
+      name: SYNC_API_HEALTH,
+      description: `Wait for the ZSwap-DA kernel API at ${ZSWAP_API}`,
+      args: ["x", "wait-on", "--timeout", "600000", ZSWAP_HEALTH_WAIT],
+      waitToExit: true,
+      critical: true,
+      dependsOn: ["sync"],
     },
 
     {
@@ -90,10 +67,7 @@ export default {
       waitToExit: false,
       type: "system-dependency",
       link: "http://localhost:3334",
-      // Same serialization rule as start.dev.ts: the batcher's unshielded
-      // wallet bootstrap must not overlap the mint wallet's indexer
-      // subscriptions.
-      dependsOn: [CONTRACT_DEPLOY, MINT],
+      dependsOn: [PREFLIGHT, SYNC_API_HEALTH],
     },
   ],
 } satisfies OrchestratorConfig;

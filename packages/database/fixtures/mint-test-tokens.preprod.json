@@ -1,0 +1,372 @@
+{
+  "schemaVersion": "1.0.0",
+  "registryRevision": "ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc",
+  "status": "ready",
+  "generatedAt": "2026-09-08T01:10:04.083Z",
+  "network": {
+    "key": "preprod",
+    "displayName": "Preprod",
+    "protocolFamily": "midnight-1.x",
+    "networkId": "preprod",
+    "chainId": "Midnight Preprod",
+    "stackIdentity": "1.0.2-eb71e64e:0xdf831b09a8baa92badf47762ce5ac439b7e47e3ed3d39600cfdd44fad552361b:32e372888a8ff513f4c91be25b4cfe99471c8d040c2c03959b863810b08df3f7"
+  },
+  "compatibility": {
+    "profile": "v1",
+    "compiler": "0.31.1",
+    "compactRuntime": "0.16.0",
+    "ledger": "8.1.0",
+    "midnightJs": "4.1.1",
+    "walletSdk": "1.2.0"
+  },
+  "tokens": [
+    {
+      "symbol": "twBTC",
+      "name": "Test-wrapped BTC",
+      "decimals": 8,
+      "privacy": "shielded",
+      "domainSeparator": "mint-test-tokens:twBTC",
+      "faucet": {
+        "humanAmount": "1",
+        "baseUnits": "100000000"
+      },
+      "activeDeploymentId": "twBTC:63b8bc1238b4dd44ec914362073460c5d66f3143661c8e7aa9f8ce4c6f3173a7",
+      "deployments": [
+        {
+          "deploymentId": "twBTC:63b8bc1238b4dd44ec914362073460c5d66f3143661c8e7aa9f8ce4c6f3173a7",
+          "status": "active",
+          "contractAddress": "8ac6efda97e7164b12017f83c154866d7759452dd0736861e72f196e790c08a0",
+          "tokenId": "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc",
+          "deploymentTransaction": "a2add0d6a6265a3d4b9bd25572e16272a24fa68282a5845b9cc4fe266886e34e",
+          "deployedAt": "2026-09-08T01:08:12.000Z",
+          "verifiedAt": "2026-09-08T01:08:27.246Z",
+          "network": {
+            "key": "preprod",
+            "displayName": "Preprod",
+            "protocolFamily": "midnight-1.x",
+            "networkId": "preprod",
+            "chainId": "Midnight Preprod",
+            "stackIdentity": "1.0.2-eb71e64e:0xdf831b09a8baa92badf47762ce5ac439b7e47e3ed3d39600cfdd44fad552361b:32e372888a8ff513f4c91be25b4cfe99471c8d040c2c03959b863810b08df3f7"
+          },
+          "compatibility": {
+            "profile": "v1",
+            "compiler": "0.31.1",
+            "compactRuntime": "0.16.0",
+            "ledger": "8.1.0",
+            "midnightJs": "4.1.1",
+            "walletSdk": "1.2.0"
+          },
+          "deploymentToolchain": {
+            "runner": "@midnightntwrk/wallet-sdk-facade",
+            "runnerVersion": "4.1.0",
+            "walletSdk": "1.2.0"
+          },
+          "confirmation": {
+            "blockHeight": "2452849",
+            "blockHash": "f3082e35d275bedccd6cb4e8894cca9108cf55be164f189713300227ef480223"
+          },
+          "maintenanceAuthority": {
+            "status": "retained",
+            "address": "12c93886d2ea2265e95bd967e6586757b75b050b1eae640be7a56cd1e70bcd14"
+          },
+          "artifact": {
+            "sourceRevision": "418cce599bc1f712ba1a0d277765f96e2f693e27",
+            "compilerVersion": "0.31.1",
+            "artifactSha256": "bff08ae9d229d61cde3ea6b19244a357b157a00694890e8173d8760642284de1",
+            "openZeppelinRelease": null
+          }
+        }
+      ]
+    },
+    {
+      "symbol": "twETH",
+      "name": "Test-wrapped ETH",
+      "decimals": 18,
+      "privacy": "shielded",
+      "domainSeparator": "mint-test-tokens:twETH",
+      "faucet": {
+        "humanAmount": "5",
+        "baseUnits": "5000000000000000000"
+      },
+      "activeDeploymentId": "twETH:0efd3a2108c52349335e008d046b2724952ee6237f30349c121b546d0e3b8a27",
+      "deployments": [
+        {
+          "deploymentId": "twETH:0efd3a2108c52349335e008d046b2724952ee6237f30349c121b546d0e3b8a27",
+          "status": "active",
+          "contractAddress": "cb60723ffec390516e4fb4798796c2512233f08b6bade5a66a53e9019ef2abbf",
+          "tokenId": "087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f",
+          "deploymentTransaction": "61f93d704fc776de24976ca5f6a3bac867e0d02d632092e775579c2d58023280",
+          "deployedAt": "2026-09-08T01:08:30.000Z",
+          "verifiedAt": "2026-09-08T01:08:44.991Z",
+          "network": {
+            "key": "preprod",
+            "displayName": "Preprod",
+            "protocolFamily": "midnight-1.x",
+            "networkId": "preprod",
+            "chainId": "Midnight Preprod",
+            "stackIdentity": "1.0.2-eb71e64e:0xdf831b09a8baa92badf47762ce5ac439b7e47e3ed3d39600cfdd44fad552361b:32e372888a8ff513f4c91be25b4cfe99471c8d040c2c03959b863810b08df3f7"
+          },
+          "compatibility": {
+            "profile": "v1",
+            "compiler": "0.31.1",
+            "compactRuntime": "0.16.0",
+            "ledger": "8.1.0",
+            "midnightJs": "4.1.1",
+            "walletSdk": "1.2.0"
+          },
+          "deploymentToolchain": {
+            "runner": "@midnightntwrk/wallet-sdk-facade",
+            "runnerVersion": "4.1.0",
+            "walletSdk": "1.2.0"
+          },
+          "confirmation": {
+            "blockHeight": "2452852",
+            "blockHash": "fa4dac379144b473781f542159b79c906d544e3d64d8c09f73e03a054c87ed66"
+          },
+          "maintenanceAuthority": {
+            "status": "retained",
+            "address": "dd2934b54cbc0a13b7f2c2c4e43e9803e391703bfc46e007e21e93b398dba657"
+          },
+          "artifact": {
+            "sourceRevision": "418cce599bc1f712ba1a0d277765f96e2f693e27",
+            "compilerVersion": "0.31.1",
+            "artifactSha256": "bff08ae9d229d61cde3ea6b19244a357b157a00694890e8173d8760642284de1",
+            "openZeppelinRelease": null
+          }
+        }
+      ]
+    },
+    {
+      "symbol": "twUSDC",
+      "name": "Test-wrapped USDC",
+      "decimals": 6,
+      "privacy": "shielded",
+      "domainSeparator": "mint-test-tokens:twUSDC",
+      "faucet": {
+        "humanAmount": "10000",
+        "baseUnits": "10000000000"
+      },
+      "activeDeploymentId": "twUSDC:083bca47460d56412482af1a4e53ba5e4d2c7527bdab95b2bd46a54cc7a0a703",
+      "deployments": [
+        {
+          "deploymentId": "twUSDC:083bca47460d56412482af1a4e53ba5e4d2c7527bdab95b2bd46a54cc7a0a703",
+          "status": "active",
+          "contractAddress": "8d601b9a3b4be681f61a6d52bcf87d8aad658a31f10ed7ea2f1ff3934181a67c",
+          "tokenId": "a5c902be8fff1a0c3f10a926b24c3eaa8a93215535915b5af47d2c6a59febab5",
+          "deploymentTransaction": "ab95021c1c3ead04c7a02542900903b1624b4ec9aadaa0f1d95784e198ac633d",
+          "deployedAt": "2026-09-08T01:08:48.000Z",
+          "verifiedAt": "2026-09-08T01:09:03.117Z",
+          "network": {
+            "key": "preprod",
+            "displayName": "Preprod",
+            "protocolFamily": "midnight-1.x",
+            "networkId": "preprod",
+            "chainId": "Midnight Preprod",
+            "stackIdentity": "1.0.2-eb71e64e:0xdf831b09a8baa92badf47762ce5ac439b7e47e3ed3d39600cfdd44fad552361b:32e372888a8ff513f4c91be25b4cfe99471c8d040c2c03959b863810b08df3f7"
+          },
+          "compatibility": {
+            "profile": "v1",
+            "compiler": "0.31.1",
+            "compactRuntime": "0.16.0",
+            "ledger": "8.1.0",
+            "midnightJs": "4.1.1",
+            "walletSdk": "1.2.0"
+          },
+          "deploymentToolchain": {
+            "runner": "@midnightntwrk/wallet-sdk-facade",
+            "runnerVersion": "4.1.0",
+            "walletSdk": "1.2.0"
+          },
+          "confirmation": {
+            "blockHeight": "2452855",
+            "blockHash": "5aab9005b2261f35a7b5119c0b3a9bbdd224d2e28363191ab74ceb293929d206"
+          },
+          "maintenanceAuthority": {
+            "status": "retained",
+            "address": "27183389a7a53245b846d0f29d04c3c0ff688499c7c3bc5938fd0e4b4e5ddd0f"
+          },
+          "artifact": {
+            "sourceRevision": "418cce599bc1f712ba1a0d277765f96e2f693e27",
+            "compilerVersion": "0.31.1",
+            "artifactSha256": "bff08ae9d229d61cde3ea6b19244a357b157a00694890e8173d8760642284de1",
+            "openZeppelinRelease": null
+          }
+        }
+      ]
+    },
+    {
+      "symbol": "twUSDM",
+      "name": "Test-wrapped USDM",
+      "decimals": 6,
+      "privacy": "shielded",
+      "domainSeparator": "mint-test-tokens:twUSDM",
+      "faucet": {
+        "humanAmount": "10000",
+        "baseUnits": "10000000000"
+      },
+      "activeDeploymentId": "twUSDM:296b153e7be4a2e67b5a0728ee2825078012860252095f71b051527e45ab0d12",
+      "deployments": [
+        {
+          "deploymentId": "twUSDM:296b153e7be4a2e67b5a0728ee2825078012860252095f71b051527e45ab0d12",
+          "status": "active",
+          "contractAddress": "9a6af50949b0cb361a20fbecad39a94e8e96697d0624fb102c032a098a917fd6",
+          "tokenId": "931ceb35c81dc57978fea79de042a4a31f7694d012d0d79b351789502fc7b6ee",
+          "deploymentTransaction": "cb3766fbe2aed4d3162ff2ea3c0bcffc64a18852b7f97024c8183a1cb6d2364e",
+          "deployedAt": "2026-09-08T01:09:06.000Z",
+          "verifiedAt": "2026-09-08T01:09:22.173Z",
+          "network": {
+            "key": "preprod",
+            "displayName": "Preprod",
+            "protocolFamily": "midnight-1.x",
+            "networkId": "preprod",
+            "chainId": "Midnight Preprod",
+            "stackIdentity": "1.0.2-eb71e64e:0xdf831b09a8baa92badf47762ce5ac439b7e47e3ed3d39600cfdd44fad552361b:32e372888a8ff513f4c91be25b4cfe99471c8d040c2c03959b863810b08df3f7"
+          },
+          "compatibility": {
+            "profile": "v1",
+            "compiler": "0.31.1",
+            "compactRuntime": "0.16.0",
+            "ledger": "8.1.0",
+            "midnightJs": "4.1.1",
+            "walletSdk": "1.2.0"
+          },
+          "deploymentToolchain": {
+            "runner": "@midnightntwrk/wallet-sdk-facade",
+            "runnerVersion": "4.1.0",
+            "walletSdk": "1.2.0"
+          },
+          "confirmation": {
+            "blockHeight": "2452858",
+            "blockHash": "7df4598f61e32245951f8dc63112ac74fc10b0efb97e759341c9debffd9db7f5"
+          },
+          "maintenanceAuthority": {
+            "status": "retained",
+            "address": "6f0013847e791f562ff16a59b3fbf26cf5a830aecd0abd04697bf1e2bed6930d"
+          },
+          "artifact": {
+            "sourceRevision": "418cce599bc1f712ba1a0d277765f96e2f693e27",
+            "compilerVersion": "0.31.1",
+            "artifactSha256": "bff08ae9d229d61cde3ea6b19244a357b157a00694890e8173d8760642284de1",
+            "openZeppelinRelease": null
+          }
+        }
+      ]
+    },
+    {
+      "symbol": "utwUSDC",
+      "name": "Unshielded-test-wrapped USDC",
+      "decimals": 6,
+      "privacy": "unshielded",
+      "domainSeparator": "mint-test-tokens:utwUSDC",
+      "faucet": {
+        "humanAmount": "10000",
+        "baseUnits": "10000000000"
+      },
+      "activeDeploymentId": "utwUSDC:f82923f12fdb291ce7eb967bf7443b84609b0f00a4d60d5be90932b067dc46b9",
+      "deployments": [
+        {
+          "deploymentId": "utwUSDC:f82923f12fdb291ce7eb967bf7443b84609b0f00a4d60d5be90932b067dc46b9",
+          "status": "active",
+          "contractAddress": "3fcb2bebe1d7a9c21aee97bf4d7cbc204ecfbc42cdcb72fc00bf16556ac500be",
+          "tokenId": "4ecbf451771bebdc0e9ad7aed27405b7f5dee20121bcf0be5746a4ef22748e9f",
+          "deploymentTransaction": "6ba80d8febdf5a2311e8ece3dbf546f956880f1dcccaab4a9a9e9fec88b09af3",
+          "deployedAt": "2026-09-08T01:09:30.000Z",
+          "verifiedAt": "2026-09-08T01:09:44.945Z",
+          "network": {
+            "key": "preprod",
+            "displayName": "Preprod",
+            "protocolFamily": "midnight-1.x",
+            "networkId": "preprod",
+            "chainId": "Midnight Preprod",
+            "stackIdentity": "1.0.2-eb71e64e:0xdf831b09a8baa92badf47762ce5ac439b7e47e3ed3d39600cfdd44fad552361b:32e372888a8ff513f4c91be25b4cfe99471c8d040c2c03959b863810b08df3f7"
+          },
+          "compatibility": {
+            "profile": "v1",
+            "compiler": "0.31.1",
+            "compactRuntime": "0.16.0",
+            "ledger": "8.1.0",
+            "midnightJs": "4.1.1",
+            "walletSdk": "1.2.0"
+          },
+          "deploymentToolchain": {
+            "runner": "@midnightntwrk/wallet-sdk-facade",
+            "runnerVersion": "4.1.0",
+            "walletSdk": "1.2.0"
+          },
+          "confirmation": {
+            "blockHeight": "2452862",
+            "blockHash": "23572666e42105286b1ae80b42cbc9520538ef5c2b61fc3124e78ad1a98ea5e3"
+          },
+          "maintenanceAuthority": {
+            "status": "retained",
+            "address": "8f55941e0f8a7a371ff062e11f288da33381152e17cf1d05c35e7039827ee477"
+          },
+          "artifact": {
+            "sourceRevision": "418cce599bc1f712ba1a0d277765f96e2f693e27",
+            "compilerVersion": "0.31.1",
+            "artifactSha256": "bd8bc8c22b9ee8a8a329d1a54270b864f8a84918344d0337605913ff4e00d5d4",
+            "openZeppelinRelease": null
+          }
+        }
+      ]
+    },
+    {
+      "symbol": "utwBTC",
+      "name": "Unshielded-test-wrapped BTC",
+      "decimals": 8,
+      "privacy": "unshielded",
+      "domainSeparator": "mint-test-tokens:utwBTC",
+      "faucet": {
+        "humanAmount": "1",
+        "baseUnits": "100000000"
+      },
+      "activeDeploymentId": "utwBTC:4bdf20d3ec08feb529bcfdfa872f2ad9da2224f72ec8b14abf5391ff40ece0f2",
+      "deployments": [
+        {
+          "deploymentId": "utwBTC:4bdf20d3ec08feb529bcfdfa872f2ad9da2224f72ec8b14abf5391ff40ece0f2",
+          "status": "active",
+          "contractAddress": "3db3a17ba17e1357b7b8c51c76cf8ffa7ee205369ae64637909867488d913dda",
+          "tokenId": "be3354fbcec9efa8c2d75eb64ab49a7fd2bda9cfa76b3cf6ede47fef63b6878e",
+          "deploymentTransaction": "cf23992a45f5102536b1c5d0391a78a5170d1e5a48452f0df3b5d44ff439b677",
+          "deployedAt": "2026-09-08T01:09:48.000Z",
+          "verifiedAt": "2026-09-08T01:10:04.066Z",
+          "network": {
+            "key": "preprod",
+            "displayName": "Preprod",
+            "protocolFamily": "midnight-1.x",
+            "networkId": "preprod",
+            "chainId": "Midnight Preprod",
+            "stackIdentity": "1.0.2-eb71e64e:0xdf831b09a8baa92badf47762ce5ac439b7e47e3ed3d39600cfdd44fad552361b:32e372888a8ff513f4c91be25b4cfe99471c8d040c2c03959b863810b08df3f7"
+          },
+          "compatibility": {
+            "profile": "v1",
+            "compiler": "0.31.1",
+            "compactRuntime": "0.16.0",
+            "ledger": "8.1.0",
+            "midnightJs": "4.1.1",
+            "walletSdk": "1.2.0"
+          },
+          "deploymentToolchain": {
+            "runner": "@midnightntwrk/wallet-sdk-facade",
+            "runnerVersion": "4.1.0",
+            "walletSdk": "1.2.0"
+          },
+          "confirmation": {
+            "blockHeight": "2452865",
+            "blockHash": "3e4848b3d770d61cce728b197eff7eb1fb2bcebe9895b4c4f39167fa56e54f27"
+          },
+          "maintenanceAuthority": {
+            "status": "retained",
+            "address": "7ebae7a2791d3df5c3de0e6e2792362a2bb7396f3d16587f56a015d59546a22b"
+          },
+          "artifact": {
+            "sourceRevision": "418cce599bc1f712ba1a0d277765f96e2f693e27",
+            "compilerVersion": "0.31.1",
+            "artifactSha256": "bd8bc8c22b9ee8a8a329d1a54270b864f8a84918344d0337605913ff4e00d5d4",
+            "openZeppelinRelease": null
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 // runs with the same config produce byte-identical chain writes (the basis of
 // the Phase-7 determinism check). NO Math.random anywhere in this suite.
 
+import { fileURLToPath } from "node:url";
 export const API = process.env["ZSWAP_API"] ?? "http://127.0.0.1:9999";
 export const BATCHER_URL = process.env["BATCHER_SUBMIT_URL"] ?? "http://127.0.0.1:3334";
 export const CELESTIA_RPC_URL = process.env["CELESTIA_RPC_URL"] ?? "http://127.0.0.1:26658";
@@ -52,9 +53,9 @@ export const CANCEL_DOUBLE_SEED = seed("c1");
 export const TAKER_SEEDS: string[] = ["b0", "b1", "b2", "b3", "b4", "b5"].map(seed);
 
 // ── Tokens ───────────────────────────────────────────────────────────────────
-// Three shielded + two unshielded colors minted by genesis at suite start.
-// Domain separators are disjoint from the startup mint (0x70/0x63) and the
-// other e2e suites (0xa0/0xa1/0xd0/0xd1).
+// Three shielded + two unshielded colors supplied by the suite environment.
+// The genesis seed must already hold sufficient same-chain inventory before
+// this suite starts; setup only distributes that inventory to test actors.
 //
 // TC exists ONLY for the §2.5 basket fixture, and a third shielded colour is
 // genuinely required for it: a basket needs two colours on one side, and
@@ -64,8 +65,8 @@ export const TAKER_SEEDS: string[] = ["b0", "b1", "b2", "b3", "b4", "b5"].map(se
 //
 // No maker or taker is funded in TC — only the basket specialist is (see
 // setupActors) — so the funding plan's per-offer arithmetic is untouched.
-export const TOKEN_SEPS = { TA: 0xe0, TB: 0xe1, UA: 0xe2, UB: 0xe3, TC: 0xe4 } as const;
-export type TokenKey = keyof typeof TOKEN_SEPS;
+export const TOKEN_KEYS = ["TA", "TB", "UA", "UB", "TC"] as const;
+export type TokenKey = (typeof TOKEN_KEYS)[number];
 
 // Fixed reference prices per (give → want) direction, used to derive want
 // amounts. Purely a test-side convention; ±5% deterministic wiggle by index.
@@ -90,7 +91,8 @@ export const TAKER_COIN = 3000n; // wants can reach ~2500
 export const GIVE_MIN = 500n;
 export const GIVE_SPAN = 1000n; // give ∈ [500, 1500]
 
-export const MINT_AMOUNT = 1_000_000_000n; // genesis mint per color
+// Minimum externally prefunded genesis inventory per test colour.
+export const REQUIRED_GENESIS_INVENTORY = 1_000_000_000n;
 
 // Publish every Nth valid offer via direct blob.Submit instead of the API
 // (path-B positive coverage at scale; 1.4 does one explicitly too).
@@ -139,6 +141,13 @@ export const NODE_B_SYNC_TIMEOUT_MS = 45 * 60_000;
 // scorecard). Everything else in `public` must be byte-identical.
 export const DIFF_EXCLUDED_TABLES: Record<string, string> = {
   token_prices: "request-driven (first /v1/quote writes the row) — not chain-derived",
+  // 00005. asset_prices ships SEEDED and is therefore identical on two
+  // replicas of the same schema — but the price-feed service overwrites it
+  // from CoinGecko on its own schedule, so two nodes whose feeds ran at
+  // different moments legitimately hold different prices. Externally sourced,
+  // not chain-derived: the diff cannot say anything useful about it.
+  asset_prices: "externally sourced (CoinGecko, on the price-feed's schedule) — not chain-derived",
+  price_feed_status: "per-node record of when THIS node's price feed last ran",
 };
 // Columns excluded from the determinism diff, per HANDOFF §9.
 //
@@ -166,4 +175,4 @@ export const DIFF_EXCLUDED_COLUMNS = new Set([
 export const DEEP_AUDIT = process.env["GRAND_DEEP_AUDIT"] !== "0";
 export const DEEP_AUDIT_SAMPLE = 25;
 
-export const OUT_DIR = new URL("./out/", import.meta.url).pathname;
+export const OUT_DIR = fileURLToPath(new URL("./out/", import.meta.url));

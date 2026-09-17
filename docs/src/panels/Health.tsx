@@ -10,7 +10,14 @@ export function HealthPanel() {
       <div className="card">
         <h3><span className="method get">GET</span><span className="path">/health</span></h3>
         <div className="actions">
-          <button className="btn primary" type="button" onClick={() => dbg.call(api.health())}>Send</button>
+          <button className="btn" type="button" onClick={() => dbg.call(api.processHealth())}>Process liveness</button>
+        </div>
+      </div>
+      <div className="card">
+        <h3><span className="method get">GET</span><span className="path">/v1/health</span></h3>
+        <p className="lead">Aggregate NTP, Midnight, and Celestia readiness. Gate current-book UI on <code>synced</code>.</p>
+        <div className="actions">
+          <button className="btn primary" type="button" onClick={() => dbg.call(api.health())}>Protocol readiness</button>
         </div>
       </div>
       <div className="card">

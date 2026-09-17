@@ -10,8 +10,29 @@ or `bun run docs:build` and open
 [`http://localhost:9999/docs`](http://localhost:9999/docs). Debug offer upload
 (`POST /v1/offers`), browse the open book, poll status, stream SSE,
 settle via the batcher's `midnight-balancer` target, and connect a wallet to
-inspect balances / mint test tokens (`VITE_PROOF_SERVER_URL`, default
-`http://localhost:6300`).
+inspect balances or open the external faucet (`VITE_FAUCET_URL`, default
+`https://mint-test-tokens.pages.dev/`; default network `preprod`).
+
+**Repository validation scope.** There are two strict, no-emit TypeScript gates,
+and `bun run typecheck` runs both.
+
+- `bun run typecheck:backend` covers the 27 production `packages/node` roots
+  only; it excludes node tests and the grand-E2E entrypoint, builds the real
+  dependency graph without modifying it, and fails all node-owned or fileless
+  compiler diagnostics.
+- `bun run typecheck:solver` covers the solver: `packages/solver`,
+  `packages/solver-core` and `packages/validator` — **production and test
+  sources alike** — plus every other first-party file that imports the solver's
+  source, discovered by scanning rather than by a maintained list. Zero
+  diagnostics are required. Test sources are inside this gate deliberately: the
+  drift it exists to catch (an E2E harness still passing callbacks the solver no
+  longer accepts) lived in a test file.
+
+Neither gate is a workspace-wide typecheck: each reports, but does not fail on,
+diagnostics in dependencies outside its own roots. CI also bundles API examples
+01, 03, 05, 07, and 11 before running the docs playground typecheck. Example
+11's Midnight network-id and ledger-v9 imports are direct root dependencies,
+not transitive assumptions.
 
 ---
 
@@ -53,7 +74,6 @@ CELESTIA_FETCH_CONCURRENCY=12           # parallel RPC calls per window
 
 # ── Midnight ─────────────────────────────────────────────────────────────────
 MIDNIGHT_NETWORK_ID=undeployed|preview|mainnet
-MIDNIGHT_CONTRACT_ADDRESS=mn1...        # required on preview/mainnet
 MIDNIGHT_START_BLOCK=1
 MIDNIGHT_DELAY_MS=30000                 # indexer poll delay
 
@@ -65,10 +85,14 @@ NTP_STEP_SIZE=1000
 # ── Node ──────────────────────────────────────────────────────────────────────
 EFFECTSTREAM_API_PORT=9999
 BATCHER_SUBMIT_URL=http://127.0.0.1:3334
+BATCHER_SUBMIT_TIMEOUT_MS=310000        # absolute fetch + receipt-body deadline
+API_SSE_MAX_CONNECTIONS=100             # persistent stream cap; excess gets 503
+API_UPDATES_MAX_CONNECTIONS=100         # websocket update-stream cap; excess is refused
 OFFER_TTL_SECONDS=                      # offer lifetime; DEFAULTS to ROOT_WINDOW_SECONDS
                                         # (shielded fillability tracks the root window)
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
+OFFER_FILES_READ_TIMEOUT_MS=15000        # exact-files read decision budget; max 60000
 ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
                                         # 3600 (1 h) on all currently deployed networks;
                                         # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
@@ -79,6 +103,35 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults
                                         # intent TTLs and moves independently. Too wide ⇒
                                         # phantom unfillable offers on the book; too narrow
                                         # ⇒ valid offers rejected ROOT_UNKNOWN.
+
+# ── Solver process (packages/solver, started by `bun run start:solver`) ────────
+# The seven values below are MANDATORY for that entrypoint, in dry-run as well
+# as live mode; it validates all of them before opening a wallet, socket or
+# journal and exits non-zero listing every problem at once.
+MIDNIGHT_NETWORK_ID=undeployed           # declared explicitly: the SDK otherwise assumes undeployed
+ZSWAP_API=http://127.0.0.1:9999          # kernel Offer Files REST/SSE base
+SOLVER_SEED=...                          # the repository dev seed is accepted only on undeployed
+SOLVER_RELAY_WS_URL=wss://relay/solver   # outbound Midnight Intents solver socket
+SOLVER_RELAY_HTTP_URL=https://relay/api/v1  # public relay HTTP base for durable GET /jobs/:jobId
+                                        # never derived from the websocket URL
+SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer, >= 32 chars; backend exact-files is unauthenticated
+SOLVER_JOURNAL_PATH=/var/lib/cow-solver/operations.sqlite  # absolute, per-instance volume; :memory: refused
+
+SOLVER_DRY_RUN=true                      # mainnet default; mirrors the live Offer Files book,
+                                        # syncs the REAL wallet, starts no relay jobs, mutates nothing
+SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
+SOLVER_ENABLED=true                      # "false" exits 0 without requiring the values above
+SOLVER_RELAY_MAX_PARALLEL_SWAPS=8        # advertised and enforced proof-build capacity
+SOLVER_STATUS_POLL_MS=5000               # missed-signal backend-consumption backstop
+SOLVER_SETTLE_TTL_MINUTES=30             # wallet rollback window when no terminal signal arrives
+SOLVER_SUPPORTED_PAIRS=                  # JSON ["<64hex>-><64hex>"]; bounds publication AND admission
+SOLVER_MIN_JOB_OUTPUT=                   # JSON {"<64hex out-token>":"<min>"}; same two boundaries
+SOLVER_DUST_MAX_PER_JOB=                 # DUST admission budget; all three DUST values set together
+SOLVER_DUST_MAX_PER_WINDOW=
+SOLVER_DUST_WINDOW_MS=
+SOLVER_FEE_SIZING_TAKER_INPUTS=1          # taker zswap inputs the fee estimate models; [1,64]
+                                        # funds a real taker half of up to n+2 inputs
+                                        # each extra input costs 12-14% more DUST, actually spent
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -143,6 +196,14 @@ curl http://host:9999/health
 
 ---
 
+#### `GET /v1/health`
+
+Aggregate protocol-readiness probe. It uses the same state as the
+detailed endpoint below and returns `{ "status": "ok|syncing|error", "synced":
+true|false }`. Unlike `/health`, this is not merely HTTP-process liveness.
+
+---
+
 #### `GET /v1/health/sync`
 
 Per-protocol sync progress. Use this to confirm the node is serving live data before submitting offers.
@@ -181,12 +242,15 @@ curl http://host:9999/v1/health/sync
 
 | Field | Description |
 |---|---|
-| `status` | `"ok"` — within 2 NTP blocks of real time (≤ 20 min lag); `"syncing"` — catching up; `"error"` — no blocks finalized yet |
+| `status` | `"ok"` only when NTP is within 2 configured blocks, both chain tips are reachable, Midnight is ≤12 blocks behind, and Celestia is ≤4 blocks behind; `"syncing"` when a chain is unknown/behind; `"error"` when no NTP block has finalized |
 | `ntp.lag_seconds` | Seconds of history remaining to process |
 | `midnight.tip` | Live Midnight chain tip (cached 60 s; `null` if unreachable) |
 | `celestia.tip` | Live Celestia chain tip (cached 60 s; `null` if unreachable) |
 | `sets.*` | Sizes of the ingested liveness sets (cached 15 s) |
 | `recent_rejections` | Blobs discarded at ingestion, as `{celestia_height, code, count}` for the 20 most recent heights. **`celestia_height` is the indexer's own L2 block height, not a Celestia height** (legacy column name). Rejected blob bodies are deleted, so this is how namespace spam stays visible — see [Ingestion pipeline](#ingestion-pipeline-the-critical-path) |
+
+The complete response is cached for 5 seconds with single-flight coalescing;
+rate-limit-exempt UI polling bursts therefore share one DB/RPC computation.
 
 On a fresh database the initial sync of 89 days of Midnight history takes approximately 4 hours.
 
@@ -234,6 +298,14 @@ Returns the current live offer book — offers published to Celestia, validated,
 ```
 
 Each row is a MIP-0006 `OffchainOfferPayload`. **`offerBech32` is omitted in list responses** — the spec's presence rule is "at least one of `offerId`/`offerBech32`", and a real offer's string is 16–25 KB, so a 100-row page carrying strings would be megabytes. Fetch the string per offer via `GET /v1/offers/:offerId`, which always includes it. `blobChars` sizes that fetch.
+
+`computed.expiresAt` is the earliest applicable ledger constraint: the
+proof-root last-seen time plus the root window and the earliest Intent TTL are
+both considered, including for mixed transactions. The publication TTL is a
+defensive fallback only when neither constraint exists. Cleanup executes on an
+L2 block and archives only when this persisted timestamp is at or before that
+block's timestamp, so an early or duplicate scheduled input cannot expire the
+offer prematurely.
 
 | Field | Description |
 |---|---|
@@ -338,6 +410,137 @@ Lookups resolve via the offer's content hash (an indexed probe). A blob that doe
 
 ---
 
+#### `POST /v1/offers/files`
+
+The **exact-files read**: name content identities, get back the exact indexed
+bytes for the ones that are live and valid right now, and a stable
+machine-readable verdict for every other one. This is the read a solver uses at
+job time, when it must build a settlement out of the maker's real bytes rather
+than anything it cached.
+
+It is not the submission route, and it inverts the submission route's
+semantics: being already indexed and live is exactly what makes an offer
+usable here, never a duplicate error. It never calls the batcher, publishes to
+Celestia, pays a Celestia fee, schedules input, or changes lifecycle state.
+Every database operation on this path is a read.
+
+No authentication: this backend serves every client alike and keeps no
+per-solver state. Exposure is bounded by the router-wide request budget, the
+identity cap per request, one absolute deadline, and a small concurrency
+window.
+
+```bash
+curl -X POST http://host:9999/v1/offers/files \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "schemaVersion": 1,
+    "profile": "offer-files-solver-v1",
+    "offerIds": ["9f2c4a...e1"]
+  }'
+```
+
+The body is closed: all three fields are required and extra fields return
+`400`. `offerIds` holds 1–8 distinct identities, each exactly 64 lowercase hex
+characters (SHA-256 of the decoded raw transaction bytes).
+
+**Response `200`** — one entry per requested identity, in request order:
+
+```json
+{
+  "schemaVersion": 1,
+  "profile": "offer-files-solver-v1",
+  "files": [
+    {
+      "offerId": "9f2c4a...e1",
+      "offer": "swapoffer1...",
+      "verdict": {
+        "schemaVersion": 1,
+        "profile": "offer-files-solver-v1",
+        "valid": true,
+        "live": true,
+        "claimedOfferId": "9f2c4a...e1",
+        "computedOfferId": "9f2c4a...e1",
+        "stateVersion": "42",
+        "validatedAt": "2026-08-14T12:34:56.000Z",
+        "status": "live",
+        "code": "VALID",
+        "computed": {
+          "gives": [ { "token": "00...00", "amount": "1000000", "kind": "SHIELDED" } ],
+          "wants": [ { "token": "ff...ff", "amount": "5000000", "kind": "SHIELDED" } ],
+          "inputNullifiers": ["7c1d9b..."],
+          "expiresAt": "2026-08-14T13:34:56.000Z"
+        }
+      }
+    },
+    {
+      "offerId": "1b77aa...09",
+      "verdict": {
+        "schemaVersion": 1,
+        "profile": "offer-files-solver-v1",
+        "valid": false,
+        "live": false,
+        "claimedOfferId": "1b77aa...09",
+        "computedOfferId": null,
+        "stateVersion": "42",
+        "validatedAt": "2026-08-14T12:34:56.000Z",
+        "status": "not_indexed",
+        "code": "NOT_INDEXED",
+        "reason": "the requested offer identity is not indexed by this backend"
+      }
+    }
+  ]
+}
+```
+
+`offer` is present **if and only if** the entry's verdict is `VALID`, and the
+bytes always hash to the identity they are served under — the server re-derives
+that binding before answering, and callers must re-derive it on receipt. A
+refusal can never carry usable bytes.
+
+`valid`, current `live`, and stored lifecycle `status` are separate facts. An
+indexed live but unsupported shape can be `status:"live"` and `live:true` while
+`valid:false`; a spent input or stale root can retain stored `status:"live"`
+while current `live:false`. Expiry may also become current before the cleanup
+transition runs, producing `code:"EXPIRED"`, `status:"live"`, and
+`live:false`. Any non-live stored status must have `live:false`.
+
+Stable refusal codes include `UNSUPPORTED_PROFILE`, `HASH_MISMATCH`,
+`NOT_INDEXED`, `NOT_LIVE`, `EXPIRED`, `UNSUPPORTED_SHAPE`, and the canonical
+structure/crypto/liveness codes documented for submission. `HASH_MISMATCH`
+means the indexed row's stored bytes do not hash to the identity it is filed
+under — index corruption, reported per identity instead of as an outage. Every
+per-identity outcome uses `200`; malformed envelopes use `400`, oversized
+transports `413`, and `429` is the router-wide rate limit. Unsynchronized
+backend state, a full concurrency window, a deadline, a cancellation, or an
+internal read failure use `503 FILES_UNAVAILABLE`. None of the non-200
+responses is a verdict — in particular an unsynchronized node will not report
+an offer as absent.
+
+Per identity the backend proves its own positions current, validates structure
+and indexed liveness, and rejects unsupported transaction economics before
+native proof work. Supported shapes run canonical proof verification, re-fetch
+both external chain tips, then perform a fresh committed status/liveness read
+bound to the same L2 anchor. `stateVersion` and `validatedAt` identify that
+final backend state. The answer is point-in-time: it is not a reservation or a
+fill promise, and an offer can be consumed a moment later.
+
+The same canonical components serve HTTP submission, STM ingestion, and this
+read; contract tests drive all of them over one shared fixture matrix so their
+codes cannot drift apart.
+
+The decision timer is observed at async yields and between validation/read
+stages. The ledger's native proof verifier is synchronous and cannot be
+interrupted — or even let the event-loop timer fire — once it has started, so
+the deadline is not a hard wall-clock latency cap while proof verification
+runs. Identities are resolved serially, at most four reads run concurrently,
+and requests past that window are refused immediately rather than queued. If an
+HTTP deadline wins while a database read is still settling, that slot stays
+occupied until the underlying read-only operation actually finishes. An
+incomplete request-body abort or a response-socket close also cancels at the
+next cooperative boundary.
+
+---
+
 #### `GET /v1/pairs`
 
 All known trading pairs, combining historical fill data from `pair_stats` with live open-offer counts. Use this to populate a pair picker or market list. Pairs are keyed by **token color only** — resolve display names separately via `GET /v1/known-tokens`.
@@ -390,8 +593,8 @@ a basket does not appear as a market at all.
 
 #### `GET /v1/known-tokens`
 
-> **⚠️ Demo endpoint — do not use as a source of truth.**
-> This registry is a temporary convenience feature for this demo. The official Midnight token-metadata standard is not yet live. Names and kinds stored here are manually curated and unverified. Do not rely on this endpoint for authoritative token information.
+> **⚠️ Mixed registry endpoint — do not treat the endpoint itself as a source of truth.**
+> Fresh databases contain six records pinned from the external canonical test-token registry, while local operators may also add manually curated rows. Use the published registry revision when provenance matters.
 
 All registered token colors.
 
@@ -401,9 +604,31 @@ curl http://host:9999/v1/known-tokens
 
 ```json
 [
-  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded" }
+  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded", "decimals": 6, "asset_id": "midnight-3" },
+  { "id": 2, "token_color": "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819", "name": "SNIGHT", "kind": "shielded", "decimals": 6, "asset_id": "midnight-3" },
+  { "id": 3, "token_color": "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc", "name": "TWBTC", "kind": "shielded", "decimals": 8, "asset_id": "bitcoin" }
 ]
 ```
+
+`NIGHT`, `SNIGHT`, `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and
+`UTWBTC` are seeded by the schema. The six `TW*`/`UTW*` records exactly match
+the pinned ready Preprod registry revision
+`ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc`;
+their complete source fixture and checksum are in
+`packages/database/fixtures/`. The optional `start.dev.ts` import can replace
+those six rows in an existing database for an explicitly selected network. A
+failed import preserves all current values, and editing `000-init.sql` alone
+never changes an already initialized database.
+
+`SNIGHT` — the
+[shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
+held as a shielded token — is the one seed whose colour depends on the network,
+because it derives from the contract address. The schema seeds **Preprod**
+(`8fac382b…6819`, shown above); Preview is `793c29c9…f99c`, and `mainnet` has
+no deployment yet. An operator selecting another network patches that separate
+row before a fresh database is created, or updates it deliberately in an
+existing database. It carries NIGHT's `decimals` and prices off the same asset,
+so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
 appearing in an offer says nothing about its name, and an offer's value layer
@@ -421,12 +646,12 @@ token-metadata standard lands.
 > Requires `ENABLE_TOKEN_REGISTRY=true`; otherwise returns `404 NOT_ENABLED`. Enable it for local dev and e2e only.
 > Registering a name here does not make it canonical. Any operator can write any name against any color. Wait for the official token-metadata standard before building user-facing trust on top of this endpoint.
 
-Register a human-readable name for a token color before any offers appear (e.g. immediately after a browser-wallet mint).
+Register a human-readable name for a local/test token color before any offers appear.
 
 ```bash
 curl -X POST http://host:9999/v1/known-tokens \
   -H "Content-Type: application/json" \
-  -d '{"color":"70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569","name":"TESTTOKENA","kind":"shielded"}'
+  -d '{"color":"70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569","name":"TESTTOKENA","kind":"shielded","decimals":6}'
 ```
 
 **Body**
@@ -435,16 +660,22 @@ curl -X POST http://host:9999/v1/known-tokens \
 {
   "color": "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569",
   "name": "TESTTOKENA",
-  "kind": "shielded"
+  "kind": "shielded",
+  "decimals": 6
 }
 ```
 
-`name` must be unique (max 16 chars, stored uppercased). `kind` is `"shielded"` or `"unshielded"`.
+`name` must be unique (max 16 chars, stored uppercased). `kind` is `"shielded"` or
+`"unshielded"`. `decimals` is optional (integer, `[0, 38]`) and **defaults to 6**
+for legacy/local registrations. Canonical imports state 8 for BTC variants, 18
+for ETH and 6 for stablecoins. Any other scale must be explicit, or its USD
+price is off by `10^(6 − its decimals)`.
+`asset_id` is optional too: omitted means "price it by NAME".
 
 **Success `200`**
 
 ```json
-{ "success": true, "color": "70ce...", "name": "TESTTOKENA", "kind": "shielded" }
+{ "success": true, "color": "70ce...", "name": "TESTTOKENA", "kind": "shielded", "decimals": 6, "asset_id": null }
 ```
 
 **Conflict `409`** — name or color already registered:
@@ -510,6 +741,40 @@ API-gate and transport codes are deliberately separate from
 `DUPLICATE_MARKERS` (`409`) is marker dedup, below; `VALIDATION` (`400`)
 is a malformed JSON body; and `RATE_LIMITED` (`429`) is the HTTP limiter.
 
+**Fee-sponsorship error `422`**
+
+The offer is well-formed and settleable — it is simply not a trade this
+deployment will pay a Celestia fee to publish. Nothing was forwarded to the
+batcher, so nothing was spent. Re-price the offer and resubmit; `GET /v1/quote`'s
+`suggested_to_amount` is an amount that passes.
+
+```json
+{
+  "error": "NOT_SPONSORED",
+  "reason": "wants 1.0% below reference, sponsorship needs ≥ 2.5% below",
+  "give_usd": 30656.1,
+  "want_usd": 30349.5,
+  "implied_discount": 0.01,
+  "sponsor_discount": 0.025
+}
+```
+
+| Code | Meaning |
+|---|---|
+| `NOT_SPONSORED` | The wanted value is not at least `sponsor_discount` below the given value at reference prices. Body carries `give_usd`, `want_usd`, `implied_discount`, `sponsor_discount` |
+| `UNPRICED_TOKEN` | A leg's token has no market price and `BATCHER_SPONSOR_UNPRICED=reject`. Body carries `unpriced` (the colours) and `sponsor_discount`. **Not emitted under the default `allow`** |
+| `PRICE_UNAVAILABLE` | Forwarded from the batcher: it could not reach this node's `/v1/prices` and is in `enforce`. The node's own pre-check never emits it — it reads the database directly |
+
+All three also arrive as `422` when the **batcher** refuses after the node
+forwarded (a node in `warn` with a batcher in `enforce`, or a stale batcher
+snapshot); `reason` is then the batcher's own message, verbatim. Before this
+existed those surfaced as `500 INTERNAL`, which told the maker "server problem,
+retry unchanged" — the opposite of the truth.
+
+Under the default `BATCHER_SPONSOR_POLICY=warn` the node emits **no 422 at all**:
+it logs what `enforce` would have refused and forwards. See the fee-sponsorship
+section under *Ingestion pipeline* for the full policy table.
+
 ### Dedup is two rules (`DUPLICATE_OFFER` and `DUPLICATE_MARKERS`)
 
 **BREAKING as of 2026-08-18** — a submission that previously succeeded can now
@@ -560,13 +825,146 @@ Validation consults the node's local state only — no live RPC calls are made. 
 
 ### Market data
 
+> **Breaking compatibility note:** quote amounts that were previously sanitized
+> (for example `1_000` or `-100`) now return `400`; send canonical decimal u256
+> strings. Solver-level publication now requires bearer authentication plus a
+> positive `version`, and `pairs` is interpreted as a complete replacement.
+> Solver-backed `/v1/quote` precedence is default-off until explicitly enabled.
+
+#### `GET /v1/prices?tokens=<color>[,<color>…]`
+
+The reference prices for the colours you name, where they came from, and how old
+they are. This is the source of truth behind `GET /v1/quote` and behind the
+batcher's fee sponsorship — the batcher looks colours up here rather than keeping
+its own prices, so the threshold the UI shows and the one the batcher enforces
+cannot drift apart.
+
+**`tokens` is required.** 1-50 64-hex colours, comma-separated. There is no
+unfiltered form: both callers only ever want the colours in front of them (a
+pair on screen, an offer's legs), and an endpoint whose cost grew with the size
+of the registry would become the slowest route here the first time a few
+thousand short-lived tokens were minted.
+
+| Input | Answer |
+|---|---|
+| missing, empty, or only commas | `400 { "error": "VALIDATION", "reason": "tokens is required: …" }` |
+| an entry that is not 64 hex characters | `400` naming the entry |
+| more than 50 entries | `400` saying how many arrived |
+| a colour this node does not price | `200`, and the colour is simply **absent** from `tokens` — not an error |
+
+Colours are matched case-insensitively and duplicates collapse, exactly as
+`from_token`/`to_token` are treated on `/v1/quote`; responses always spell them
+lower case.
+
+Every price is in **USD** — USD is the numeraire and no asset is assumed to be
+worth one dollar, stablecoins included: they are quoted from the provider like
+everything else, so a depeg is visible here.
+
+Prices are **per base unit**. Amounts everywhere in this API are integer base units
+and carry no decimals metadata, so a token's price is its asset's per-coin price
+divided by `10^known_tokens.decimals`. A dollar-ish stablecoin with 6 decimals is
+about `0.000001` here, and that is the number to multiply an amount by.
+
+```bash
+curl "http://host:9999/v1/prices?tokens=e758…a912,d133…3333"
+```
+
+```json
+{
+  "sponsor_discount": 0.025,
+  "feed": {
+    "provider": "coingecko",
+    "last_run_at": "2026-09-03T00:00:00.000Z",
+    "last_ok_at":  "2026-09-03T00:00:00.000Z",
+    "last_error":  null
+  },
+  "assets": [
+    { "asset_id": "bitcoin", "price_usd": "77387", "source": "feed",
+      "provider_updated_at": "2026-09-02T20:25:50.000Z", "updated_at": "2026-09-03T00:00:00.000Z" }
+  ],
+  "tokens": [
+    { "token_color": "e758...a912", "name": "WBTC", "kind": "shielded", "decimals": 6,
+      "asset_id": "bitcoin", "price_usd": "0.077387", "source": "feed",
+      "updated_at": "2026-09-03T00:00:00.000Z" },
+    { "token_color": "d133...3333", "name": "TESTTOKENA", "kind": "shielded", "decimals": 6,
+      "asset_id": null, "price_usd": "13.0238", "source": "fallback",
+      "updated_at": "2026-09-02T12:00:00.000Z" }
+  ]
+}
+```
+
+Only `bitcoin` is in `assets`: it is the asset that produced WBTC's price.
+TESTTOKENA's `fallback` price comes from its colour, not from an asset, so
+nothing is listed for it — and the other four seeded assets were not asked
+about.
+
+`price_usd` is a decimal **string** — the column is `NUMERIC` and the values are
+exact; parsing them as doubles is the caller's decision, not ours.
+
+| `source` | Meaning |
+|---|---|
+| `feed` | fetched from CoinGecko by the `price-feed` service |
+| `seed` | the value shipped in `000-init.sql` (captured 2026-09-02). A stack that never runs the feed still quotes real ratios |
+| `manual` | an operator's row in `token_prices`. Wins over everything; nothing rewrites it |
+| `fallback` | the deterministic demo price derived from the token's colour. **Not a market price** — label it as such in a UI, and the sponsorship gate treats it as *unpriced* |
+
+`tokens` lists the **requested** colours that resolve to a price, and `assets`
+only the assets those prices came from — every row in `assets` explains a row in
+`tokens`. A requested colour with no mapping and no quote yet is simply absent
+rather than being given a demo row: this endpoint never writes. (The quote path
+still writes one, deliberately, so an operator can inspect and override it.)
+
+`feed` is all-nulls when the service has never run against this database.
+
+**Mapping.** Token colors are opaque, network-specific external IDs. Rows without
+an explicit asset ID therefore use a normalized-name fallback: `WBTC`/`WSBTC`/`BTC`
+→ `bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` → `usd-coin`, `USDM` →
+`usdm-2` (Moneta's Cardano USDM, the asset the VIA Labs bridge carries to
+Midnight), `NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3` (the shielded-night
+wrapper is locked 1:1 against NIGHT, so it is the same asset — no new price to
+fetch). Canonical registry rows carry explicit asset IDs. `known_tokens.asset_id`
+overrides the fallback map, and `PRICE_FEED_MAP`
+(`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
+
+**`decimals` is base units per priced coin, not display decimals.** `NIGHT` is
+seeded with `decimals: 6` — 1 NIGHT is 10⁶ Stars, its base unit
+(`STARS_PER_NIGHT` in `midnight-ledger/ledger/src/structure.rs`) — so its
+per-base-unit price is the seeded `midnight-3` coin price divided by `10^6`.
+Canonical registry tokens preserve their published decimals: BTC variants are
+8, ETH is 18, and stablecoins are 6. A legacy/local colour registered through
+`POST /v1/known-tokens` without an explicit `decimals` still defaults to `6`.
+Registrants should send it anyway.
+
+**The `price-feed` service.** `packages/price-feed` is a separate process, not part
+of the node: the node never calls CoinGecko. It refreshes `asset_prices` once a day
+(`PRICE_FEED_INTERVAL_MS`), asking for up to `PRICE_FEED_BATCH_SIZE` ids (default
+50) per request with at least `PRICE_FEED_REQUEST_SPACING_MS` between requests, so
+credits scale with `ceil(assets / 50)` and today's five assets are ONE call. A
+failed request is recorded against every id it carried and the next batch is still
+made; a `429` stops the cycle and lands in `feed.last_error`. A single bad id
+inside an otherwise good response fails only that id.
+
+`bun run --filter @zswap-da/price-feed once` (or `docker compose run --rm
+price-feed --once`) takes a single refresh now. It needs `COINGECKO_API_KEY`;
+without one it only warns — `--once` exits non-zero, loop mode warns on every
+tick and does nothing — and the seeded prices keep serving. **It is not part of a
+development stack**: `bun run dev` does not start it, because the seeds already
+give development real ratios (Q-11).
+
 #### `GET /v1/quote`
 
-Price quote for a token swap, backed by the `token_prices` table. On first request the deterministic fallback price is written; subsequent calls are consistent. Operators can override rows directly in the DB.
+Price quote for a token swap. Prices resolve in this order: an operator's `manual`
+row in `token_prices`, else the token's reference asset from `/v1/prices`
+(÷ `10^decimals`), else the deterministic demo price — which is written to
+`token_prices` on first request so subsequent calls are consistent and an operator
+can override the row by hand.
 
 Unregistered colors quote at a **$1 demo fallback** (two unknown tokens ⇒ 1:1) instead of erroring — loudly logged server-side, never persisted to `token_prices`. This is a stopgap until token identity is chain-derived (TokenMint registry); do not treat fallback quotes as market data. Malformed colors answer `400`.
 
-**Query parameters:** `from_token`, `to_token` (64-hex, no `0x`), `from_amount` (base units), optional `to_amount`.
+**Query parameters:** `from_token`, `to_token` (distinct 64-hex values, no `0x`),
+`from_amount` (positive base units), and optional `to_amount`. Amounts use canonical
+decimal u256 grammar: digits only, no sign/separator/exponent/decimal/leading zeroes.
+Malformed input returns `400 VALIDATION`; it is never sanitized into a different amount.
 
 ```bash
 curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from_amount=1000000"
@@ -586,7 +984,12 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
   "discount":            0.025,
   "sponsored":           true,
   "from_usd":            1.46,
-  "to_usd":              1.42
+  "to_usd":              1.42,
+  "source":              "token-prices",
+  "sponsor_discount":    0.025,
+  "from_source":         "seed",
+  "to_source":           "fallback",
+  "prices_updated_at":   "2026-09-02T20:25:50.000Z"
 }
 ```
 
@@ -599,6 +1002,16 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 | `discount` | Fractional gap below `market_rate` (e.g. `0.025` = 2.5% under market) |
 | `sponsored` | `true` when the implied rate is at least the sponsorship discount below market (the batcher's fee-sponsorship policy hook) |
 | `from_usd`, `to_usd` | USD value of each leg at the reference price |
+| `source` | `token-prices` or `demo-fallback` (unchanged: `demo-fallback` iff either colour is unregistered) |
+| `sponsor_discount` | The threshold `sponsored` was decided against, as a fraction (`SPONSOR_DISCOUNT_BPS / 10000`) |
+| `from_source`, `to_source` | Per-leg provenance: `feed`, `seed`, `fixed`, `manual`, `fallback`, or `demo-fallback`. A UI should label the last two as demo rates |
+| `prices_updated_at` | The **older** of the two legs' `updated_at` — a quote is only as fresh as its stalest side. `null` when either leg is `demo-fallback` |
+
+This backend holds no solver state, so nothing else can win the quote. Solver
+ladders are pushed to the Midnight Intents relay, which does its own
+interpolation; the backend's job is the indexed book and its reads. What the
+solver publishes, and what it will settle, is described in
+[The COW solver](#the-cow-solver-midnight-intents-side) below.
 
 ---
 
@@ -643,7 +1056,7 @@ Last 120 fills (consumed offers) for a pair, newest first. Basket offers never p
 
 #### `GET /v1/offers/stream`
 
-Server-Sent Events stream for real-time offer lifecycle notifications. A comment-only keepalive (`: heartbeat`) is sent every 30 seconds.
+Server-Sent Events stream for real-time offer lifecycle notifications. A comment-only keepalive (`: heartbeat`) is sent every 30 seconds. The node accepts at most `API_SSE_MAX_CONNECTIONS` concurrent streams (default 100); excess connections receive `503 SSE_CAPACITY` with `Retry-After: 5`. A client that stops consuming and applies response backpressure is disconnected instead of being buffered without bound. Reconnect with backoff and refresh `GET /v1/offers`; the stream has no replay cursor.
 
 ```bash
 curl -N http://host:9999/v1/offers/stream
@@ -654,13 +1067,13 @@ curl -N http://host:9999/v1/offers/stream
 ```
 data: {"type":"connected","timestamp":1750800000000}
 
-data: {"type":"offer_indexed","offerId":42,"blockHeight":1281600,"gives":[...],"wants":[...],"timestamp":...}
+data: {"type":"offer_indexed","offerId":42,"offerHash":"9f2c...","blockHeight":1281600,"gives":[...],"wants":[...],"timestamp":...}
 
-data: {"type":"offer_consumed","offerId":42,"nullifier":"abc123...","timestamp":...}
+data: {"type":"offer_consumed","offerId":42,"offerHash":"9f2c...","nullifier":"abc123...","timestamp":...}
 
-data: {"type":"offer_expired","offerId":42,"timestamp":...}
+data: {"type":"offer_expired","offerId":42,"offerHash":"9f2c...","timestamp":...}
 
-data: {"type":"offer_rejected","code":"ROOT_UNKNOWN","reason":"...","blockHeight":...,"timestamp":...}
+data: {"type":"offer_rejected","code":"ROOT_UNKNOWN","reason":"...","offerHash":"9f2c...","blockHeight":...,"timestamp":...}
 
 data: {"type":"token_minted","name":"MYTOKEN","color":"...","kind":"shielded","timestamp":...}
 ```
@@ -668,7 +1081,72 @@ data: {"type":"token_minted","name":"MYTOKEN","color":"...","kind":"shielded","t
 `timestamp` (ms epoch) is added by the server to every event. `offer_consumed`
 carries **either** `nullifier` (shielded input spent) **or** `unshieldedSpend`
 (`{owner, intentHash, outputNo}`, unshielded UTXO spent) depending on which coin
-was consumed — handle both.
+was consumed — handle both. REST uses the content-addressed `offerHash`; numeric
+`offerId` is a node-local row id. `offerHash` can be absent only for legacy rows
+inserted before hashes were persisted, or for a rejection too malformed to hash.
+
+---
+
+#### `GET /v1/offers/updates` (websocket)
+
+The same offer-lifecycle events as the SSE stream above, over a websocket, with
+the two extra signals a client that **mirrors the book** needs in order to prove
+it has missed nothing. Client-initiated like every other endpoint here: the node
+never connects to a client, and it keeps no per-client state beyond the socket —
+no registry, no cursor, no replay buffer, no credentials. Anyone may open it;
+nothing about it is solver-specific. `GET /v1/offers/stream` is unchanged and
+remains the right choice for browsers and dashboards.
+
+```bash
+websocat ws://host:9999/v1/offers/updates
+```
+
+**Frames.** Text frames only, one JSON object each, in the closed
+`offer-updates-v1` grammar. The client sends nothing at all.
+
+```json
+{"protocol":"offer-updates-v1","schemaVersion":1,"type":"ready","streamId":"6f1c…","seq":0,"ts":1750800000000,"blockL2Height":"128401"}
+{"protocol":"offer-updates-v1","schemaVersion":1,"type":"update","streamId":"6f1c…","seq":1,"ts":1750800000100,"event":{"type":"offer_indexed","offerId":42,"offerHash":"9f2c…","blockHeight":1281600,"gives":[],"wants":[],"timestamp":1750800000100}}
+```
+
+- `event` is **byte-identical to the SSE payload** — the node's lifecycle event
+  plus the server-stamped `timestamp` — so one event handler serves both
+  transports.
+- `streamId` (32 lowercase hex) identifies ONE subscription. A different value
+  is a different subscription: nothing carries over.
+- `seq` is per-subscription. `ready` is always `0`, and every following frame is
+  exactly the previous one plus one. **A skipped number means a mutation was not
+  delivered.** Treat it as a lost stream — reconnect and take a fresh full-book
+  read — never as an absence of news. The node never renumbers, never back-fills,
+  and never drops a frame silently: when it cannot deliver one it drops the
+  connection instead.
+- `blockL2Height` is the committed Effectstream (L2) height at or before the
+  moment this subscription was registered, or `null` when it could not be read.
+  It is a floor: heights only advance, so a later `GET /v1/health/sync` reporting
+  a LOWER `blockL2.height` is evidence the node has rewound (a restore, or a
+  lagging replica behind a load balancer). No snapshot repairs that, so a mirror
+  should stop treating its cache as current.
+
+**Ordering guarantee.** The node attaches its event listener BEFORE it writes
+`ready`, in the same synchronous step. `ready` therefore means "everything from
+here on reaches you", which is what makes the standard startup sequence sound:
+subscribe, buffer, read the full book with `GET /v1/offers`, replay the buffer,
+then apply increments live. (`GET /v1/offers/stream` writes its `connected`
+frame before subscribing, and has no sequence numbers with which to notice the
+difference.)
+
+**Keepalive.** The node sends a websocket ping every 30 seconds and requires a
+pong within two intervals.
+
+**Refusals are disconnects, not status codes.** This node runs on Bun, where an
+upgraded connection cannot carry an HTTP response body, and where a
+server-initiated websocket close leaves the HTTP server unable to shut down. So
+every refusal here — the `API_UPDATES_MAX_CONNECTIONS` cap (default 100), a
+malformed handshake, a client that sends data on this push-only stream, a peer
+that stops reading, a frame too large to deliver, a missing pong, node shutdown
+— ends the connection without a close code or reason. Reconnect with backoff and
+resynchronize; that is the same recovery an ordinary network drop needs, and a
+correct consumer of this stream already implements it.
 
 ---
 
@@ -676,7 +1154,7 @@ was consumed — handle both.
 
 #### `GET /v1/midnight/config`
 
-Public Midnight configuration the browser contract client needs. Never includes secrets.
+Public Midnight network configuration the browser wallet needs. Never includes secrets.
 
 ```bash
 curl http://host:9999/v1/midnight/config
@@ -684,7 +1162,6 @@ curl http://host:9999/v1/midnight/config
 
 ```json
 {
-  "contractAddress": "mn1abc...",
   "indexerUri":      "https://indexer.midnight.network:8088/graphql",
   "indexerWsUri":    "wss://indexer.midnight.network:8088/graphql",
   "proofServerUri":  "https://proof.midnight.network",
@@ -692,7 +1169,97 @@ curl http://host:9999/v1/midnight/config
 }
 ```
 
-Returns `500` if `MIDNIGHT_CONTRACT_ADDRESS` is not set.
+The endpoint remains available without any application contract metadata.
+
+---
+
+## The COW solver (Midnight Intents side)
+
+The solver is **not** part of this HTTP API and listens on no port. It is a
+separate process (`bun run start:solver`; see README → "Running the COW solver")
+that consumes this backend as a client — `GET /v1/offers`, `GET /v1/offers/updates`,
+`POST /v1/offers/files`, `GET /v1/health/sync` — and connects **outbound** to a
+Midnight Intents relay, where it publishes price ladders and settles the swap
+jobs the relay dispatches to it. Neither `bun run dev` nor `bun run start:mainnet`
+launches it.
+
+**Topology.** Kernel (node), batcher and solver are three independent processes.
+The kernel indexes and serves offers; the batcher publishes blobs to Celestia;
+the solver mirrors the kernel's book and owns its own wallet, journal and relay
+connection. A container deployment gives each of them its own service, with the
+solver depending on the kernel and relay rather than starting them.
+
+**Supported domain.** Midnight 2.x / ledger-v9 only. The solver settles offers
+that normalize to **one shielded give leg and one shielded want leg** with
+distinct token colors and positive amounts, using at most **8 complete maker
+files per job**. Unshielded legs, mixed value layers, multi-leg baskets, and
+legacy Midnight 1.x / ledger-v8 transactions are refused before admission. A
+maker file is never partially consumed.
+
+**Fees.** Maker offers are constructed with `payFees:false` (see
+[Encoding offers](#encoding-offers-swapoffer1)), so a maker's offer pays no fee
+itself. The settling side pays: for a relay job, the solver sizes and funds the
+DUST for the transaction it submits, bounded by the `SOLVER_DUST_*` admission
+budget. Sizing that fee requires **no swap-token inventory**: the taker's half is
+modelled by a synthetic transaction built from ledger primitives with the taker
+half's shape, because the DUST fee is a function of transaction structure only,
+not of any coin's value, token type or owner. Earlier builds spent — and
+immediately reverted — the job's full `amountIn` of the input token out of the
+solver's own wallet to do this. The solver still needs NIGHT/DUST for the fee
+itself. See `SOLVER_FEE_SIZING_TAKER_INPUTS` below.
+
+**Quotes are indicative.** A published ladder is authenticated market data for
+the relay's interpolation, not a reservation: nothing is held, and admission is
+re-decided at job time against the current book and policy. The kernel's
+`GET /v1/quote` is a separate, `token_prices`-backed contract and is not replaced
+by solver data.
+
+**A job's `amountOut` is the taker's exact demand, and may be below the quote.**
+For the job's input, the solver chooses the single advertised whole-file
+combination whose genuine threshold supports the demand. Every selected file
+executes unchanged and in full:
+
+| Case | Disposition |
+|---|---|
+| Selected files require exactly `amountIn` and supply exactly `amountOut` | Settles with no swap-token surplus. |
+| Selected files require less than `amountIn` | Excess taker input is paid to the solver's shielded address. |
+| Selected files supply more than `amountOut` | Excess maker output is paid to the solver's shielded address. |
+| Selected files supply less than `amountOut` | Refused; the solver never pays the shortfall from inventory. |
+
+Out-of-ladder sizes, non-positive demands, stale routes, disallowed pairs,
+below-minimum outputs, incompatible maker sets, exhausted resource limits and
+DUST-budget violations remain refusals.
+
+**Published liquidity comes only from the live Offer Files book.** For each
+directed pair, the solver searches all affordable compatible combinations of at
+most eight complete files and publishes every strict improvement in maximum
+maker output. Flat sections end one input base unit before the next improvement.
+The last genuine threshold has one fixed flat endpoint at 10 times its input;
+that synthetic point never creates maker liquidity. Search, numeric, freshness,
+64-wire-point and 64-pair limits fail closed by withholding or withdrawing the
+affected pair.
+
+Swap-token wallet balances do not affect published prices or route choice. The
+solver contributes empty swap-token input maps and needs only NIGHT/DUST for
+fees. Excess taker input and excess maker output are both explicit settlement
+outputs to the solver.
+
+**Breaking configuration change.** `SOLVER_LADDER_CONFIG`, manual
+`pairs[].levels`, `SOLVER_ENABLE_PATH_B`, `SOLVER_ENABLE_CYCLES`, and
+`SOLVER_ENABLE_RESIDUAL_TOPUPS` were removed. Their presence is an upgrade error;
+delete them instead of replacing them with another pricing source.
+
+**`SOLVER_FEE_SIZING_TAKER_INPUTS`** (optional; integer `[1, 64]`, default `1`).
+The relay dispatches a numeric job and merges the taker's own half, so the solver
+cannot know how many zswap inputs the taker's coin selection produced. This is
+how many it models when sizing the fee. Measured coverage: a stand-in modelling
+`n` inputs funds a real taker half of up to **`n + 2`** inputs. Each extra
+modelled input costs **12–14 %** more DUST, actually spent (not merely reserved),
+and consumes `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` budget
+faster. Under-modelling is an availability failure — the chain rejects the merged
+transaction, the relay reports `submit-failed`, and the solver's contribution is
+reverted — never a loss of funds. A malformed value is a listed `start:solver`
+launch problem; the startup banner prints the effective model and its coverage.
 
 ---
 
@@ -769,12 +1336,16 @@ Submit a blob directly to the batcher queue. Structure and cryptographic proofs 
 
 **Rate-limited `429`**
 
+Per client IP, `API_RATE_LIMIT_MAX` requests per minute across every `/v1/*`
+route (default 600; `/v1/health` and `/v1/health/sync` are exempt). The
+`x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` headers
+are set on every counted response; back off on `429` instead of retry-looping.
+
 ```json
 {
-  "success": false,
-  "error": "Rate limit exceeded",
-  "message": "Too many requests. Please retry after 60 seconds.",
-  "retryAfter": 60
+  "statusCode": 429,
+  "error": "RATE_LIMITED",
+  "reason": "Too many requests — please wait before retrying."
 }
 ```
 
@@ -834,7 +1405,57 @@ Rejected blobs are additionally **deleted** from `effectstream.primitive_account
 
 What survives is the *fact* of the rejection, aggregated in `offer_rejections` as one row per `(celestia_height, code)` and surfaced on `GET /v1/health/sync` as `recent_rejections`. Aggregation is what makes that table safe to keep: its row count is bounded by heights × reject codes, never by the number of blobs posted — a million junk blobs in one block produce a single row with `count: 1000000`.
 
-Step 5 of the ideal ladder — *reject offers below a minimum value* — is **not implemented**: it needs a price oracle. MIP-0006 suggests the natural floor is the offer's own publication cost. The derived legs are available at that point in the pipeline, so the hook slot exists.
+#### Fee sponsorship — implemented, and deliberately *not* part of this ladder
+
+Step 5 of the ideal ladder — *reject offers below a minimum value* — is now
+implemented, as a **fee-sponsorship gate**, in two places:
+
+* **the batcher's `validateInput`**, which is authoritative because it holds the
+  wallet: it refuses to pay a Celestia fee for an offer whose wanted value is not
+  at least the sponsorship discount below the reference price. It has no database,
+  so for each offer it asks this node's `GET /v1/prices?tokens=` for exactly that
+  offer's leg colours, caching each colour for `BATCHER_PRICE_TTL_MS` (default 10
+  minutes). It does **not** mirror the price table (Q-11);
+* **`POST /v1/offers`**, which asks the same question earlier and answers
+  `422 NOT_SPONSORED` with the numbers, so a maker learns it from a readable
+  response instead of an opaque failure.
+
+Both call the same `evaluateSponsorship()` in `@zswap-da/offer-guard`, over the
+same prices, so the `sponsored` flag `GET /v1/quote` shows the maker cannot promise
+something the batcher then refuses.
+
+**It is NOT enforced at STM ingestion, and that is intentional.** The MIP-0006
+namespace is permissionless: anyone can post an offer straight to Celestia at their
+own expense, and this node still indexes it. The gate decides who gets a *free ride*
+on the batcher's wallet, not what is a valid offer. So the ladder above is unchanged
+— an unsponsored offer that reaches the namespace is ingested exactly like any
+other, and a UI must not assume every indexed offer was sponsored.
+
+Policy, read from the same variable names by both processes so they cannot drift:
+
+| Variable | Values | Default | Effect |
+|---|---|---|---|
+| `BATCHER_SPONSOR_POLICY` | `enforce` \| `warn` \| `off` | `warn` | `enforce` refuses; `warn` logs what `enforce` would have refused and lets it through; `off` skips the check entirely |
+| `BATCHER_SPONSOR_UNPRICED` | `allow` \| `reject` | `allow` | what to do when a leg's token has no market price (every test token). `allow` keeps them flowing |
+| `SPONSOR_DISCOUNT_BPS` | `0`–`9999` | `250` | the threshold. On the batcher this is only a bootstrap — once the node answers, the node's `sponsor_discount` wins |
+| `BATCHER_NODE_API_URL` | URL | `http://127.0.0.1:9999` | where the batcher asks `/v1/prices?tokens=` (compose: `http://kernel:9999`) |
+| `BATCHER_PRICE_TTL_MS` | ms | `600000` | how long a per-colour answer counts as current before it is asked for again |
+| `BATCHER_PRICE_MAX_AGE_MS` | ms | `172800000` | how old an answer may be and still be served when a re-ask FAILS. Past it the colour is unavailable. Must be ≥ the TTL |
+
+An invalid value for any of these **throws at startup** rather than falling back to
+a default: an operator who typed `enfroce` wants offers refused, and silently
+sponsoring everything is precisely what they were preventing.
+
+A batcher that cannot reach the node behaves per `BATCHER_SPONSOR_POLICY`:
+`enforce` answers `PRICE_UNAVAILABLE`, `warn` sponsors and logs once a minute.
+Note the difference from an *unpriced* leg: "the node answered and has no market
+price for this colour" is `BATCHER_SPONSOR_UNPRICED`'s question, while "I could
+not ask" is the policy's. A colour with a cached answer younger than
+`BATCHER_PRICE_MAX_AGE_MS` is still served during an outage, so a brief node
+restart does not make every offer unavailable.
+
+(`BATCHER_PRICE_REFRESH_MS` configured the old ten-minute table poll and no longer
+does anything.)
 
 ### Manual submission (curl)
 

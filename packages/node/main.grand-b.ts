@@ -38,14 +38,12 @@ import {
 } from "@effectstream/config";
 import {
   PrimitiveTypeCelestiaGeneric,
-  PrimitiveTypeMidnightGeneric,
   PrimitiveTypeMidnightNullifierAndCommitment,
   PrimitiveTypeMidnightUnshieldedSpend,
   PrimitiveTypeMidnightUnshieldedCreate,
   PrimitiveTypeMidnightZswapRoot,
 } from "@effectstream/sm/builtin";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
-import { OfferFilesContract } from "@zswap-da/contract-offer-files";
 
 import { migrationTable } from "@zswap-da/database";
 import { apiRouter } from "./api.ts";
@@ -58,25 +56,7 @@ import {
   CELESTIA_POLLING_INTERVAL_MS,
   CELESTIA_RPC_URL,
   CELESTIA_STEP_SIZE,
-  midnightContract,
 } from "./env.ts";
-
-// Same env-first resolution as config.dev.ts (see the note there): the deploy
-// may be a separate one-shot, so the address has to be injectable. Kept
-// identical on purpose — grand-b-config-drift.test.ts asserts these two
-// configs do not diverge.
-const contractAddress =
-  process.env.MIDNIGHT_CONTRACT_ADDRESS ?? midnightContract?.contractAddress;
-
-if (!contractAddress) {
-  throw new Error(
-    `No Midnight contract address for network '${midnightNetworkConfig.id}'.\n` +
-      "Either:\n" +
-      "  1. Set MIDNIGHT_CONTRACT_ADDRESS, or\n" +
-      `  2. Provide packages/contracts-midnight/contract-offer-files.${midnightNetworkConfig.id}.json\n` +
-      "     (written by `bun run --filter @zswap-da/contracts-midnight midnight-contract:deploy`).",
-  );
-}
 
 const startTimeRaw = process.env["GRAND_NTP_START_TIME"];
 if (!startTimeRaw || !Number.isFinite(Number(startTimeRaw))) {
@@ -155,18 +135,6 @@ const config = new ConfigBuilder()
           startBlockHeight: 1,
           namespace: CELESTIA_NAMESPACE,
           stateMachinePrefix: "celestia-zswap",
-        }),
-      )
-      .addPrimitive(
-        (syncProtocols) => (syncProtocols as any).parallelMidnight,
-        () => ({
-          name: "ZswapMidnightState",
-          type: PrimitiveTypeMidnightGeneric,
-          startBlockHeight: 1,
-          contractAddress,
-          stateMachinePrefix: "midnight-zswap",
-          contract: { ledger: OfferFilesContract.ledger },
-          networkId: midnightNetworkConfig.id,
         }),
       )
       .addPrimitive(

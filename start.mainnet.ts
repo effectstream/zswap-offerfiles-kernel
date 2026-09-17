@@ -2,13 +2,17 @@ import path from "node:path";
 import type { OrchestratorConfig } from "@effectstream/orchestrator/config";
 import { DbNames, launchPglite } from "@effectstream/orchestrator/launch-pglite";
 import {
-  launchMidnight,
-  MidnightNames,
-} from "@effectstream/orchestrator/launch-midnight";
+  launchMidnightServices,
+  MidnightServiceNames,
+} from "./scripts/launch-midnight-services.ts";
 
 const root = import.meta.dirname!;
 
-const midnightDeps = [MidnightNames.CONTRACT_DEPLOY];
+const midnightDeps = [
+  MidnightServiceNames.NODE_WAIT,
+  MidnightServiceNames.INDEXER_WAIT,
+  MidnightServiceNames.PROOF_SERVER_WAIT,
+];
 
 // Pre-flight: verify the Celestia mainnet light node is reachable and funded.
 // Aborts before launching anything else if the operator skipped the setup.
@@ -69,11 +73,7 @@ export default {
   processes: [
     ...launchPglite(),
 
-    ...launchMidnight(
-      "@zswap-da/contracts-midnight",
-      { cwd: path.join(root, "packages/contracts-midnight") },
-      { env: { MIDNIGHT_STORAGE_PASSWORD: "YourPasswordMy1!" } },
-    ),
+    ...launchMidnightServices(path.join(root, "packages/midnight-infra")),
 
     {
       name: "sync",

@@ -34,16 +34,18 @@ while (true) {
         let detail = "";
         switch (event.type) {
           case "offer_indexed":
-            detail = `id=${event.offerId}  celestia=#${event.celestiaHeight}`;
+            detail = `id=${event.offerId}  hash=${String(event.offerHash).slice(0, 12)}…  l2=#${event.blockHeight}`;
             break;
           case "offer_consumed":
-            detail = `id=${event.offerId}  nullifier=${String(event.nullifier).slice(0, 16)}…`;
+            detail = event.nullifier
+              ? `id=${event.offerId}  hash=${String(event.offerHash).slice(0, 12)}…  nullifier=${String(event.nullifier).slice(0, 16)}…`
+              : `id=${event.offerId}  hash=${String(event.offerHash).slice(0, 12)}…  unshielded=${JSON.stringify(event.unshieldedSpend)}`;
             break;
           case "offer_expired":
-            detail = `id=${event.offerId}`;
+            detail = `id=${event.offerId}  hash=${String(event.offerHash).slice(0, 12)}…`;
             break;
           case "offer_rejected":
-            detail = `code=${event.code}  celestia=#${event.celestiaHeight}`;
+            detail = `code=${event.code}  hash=${String(event.offerHash).slice(0, 12)}…  l2=#${event.blockHeight}`;
             break;
           case "token_minted":
             detail = `${event.name}  color=${String(event.color).slice(0, 16)}…`;

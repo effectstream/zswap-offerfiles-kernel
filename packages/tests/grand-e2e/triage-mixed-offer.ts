@@ -27,14 +27,14 @@ import { TX_TTL_MS } from "./config.ts";
 setNetworkId(net.id as any);
 (globalThis as any).WebSocket = WebSocket;
 
-// Genesis holds both the shielded mint and NIGHT, so one wallet can build the
+// Genesis holds both the externally issued shielded token and NIGHT, so one wallet can build the
 // mixed offer without the suite's whole funding fan-out.
 const w = await buildWallet(net.walletSeed);
 await waitForSync(w, { requireUnshieldedFunds: true });
 
 const shieldedBalances = (await w.wallet.shielded.waitForSyncedState()).balances ?? {};
 const giveColor = Object.keys(shieldedBalances).find((c) => (shieldedBalances as any)[c] > 0n);
-if (!giveColor) throw new Error("no shielded balance on genesis — run mint-test-tokens first");
+if (!giveColor) throw new Error("no shielded balance on genesis — provision same-chain inventory first");
 const NIGHT = "0".repeat(64);
 
 console.log(`give (shielded): ${giveColor.slice(0, 16)}…`);

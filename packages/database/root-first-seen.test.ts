@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // known_roots timing — the deterministic basis for shielded expiry.
 //
@@ -32,7 +33,7 @@ const {
 } = await import("@zswap-da/database");
 
 const PORT = 54347;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 /** Height of the chain tip in this file. Anything lower is superseded. */
@@ -65,9 +66,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 test("first_seen_ms is pinned on first insert and never moves; last_seen_ms advances", async () => {

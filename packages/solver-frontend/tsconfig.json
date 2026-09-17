@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "noUncheckedSideEffectImports": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowJs": true,
+    "checkJs": false
+  },
+  // The repository-root entrypoint is included explicitly. `start.solver.ts`
+  // is DISCOVERED by scripts/solver-typecheck.ts because it imports
+  // `packages/solver/src`; this one imports `packages/solver-frontend` and the
+  // discovery pattern deliberately matches the solver package exactly, so the
+  // deployment entrypoint whose option drift the gate exists to catch would
+  // otherwise be the one file outside it (00007 FR-017).
+  "include": ["./**/*.ts", "../../start.solver-frontend.ts"]
+}

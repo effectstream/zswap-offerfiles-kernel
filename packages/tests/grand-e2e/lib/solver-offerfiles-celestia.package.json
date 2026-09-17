@@ -1,0 +1,7 @@
+{
+  "name": "zswap-e1-celestia-runtime",
+  "private": true,
+  "dependencies": {
+    "@effectstream/celestia": "0.103.1"
+  }
+}

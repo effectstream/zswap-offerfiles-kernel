@@ -123,12 +123,16 @@ function shape(id: string, why: string, preProof: any): Shape {
 
 /** Decode back to a Transaction the same way the validator's ladder does. */
 export function decodeShape(blob: string): UnprovenTransaction {
+  // `as unknown as`, exactly as validate.ts does: these markers deserialize the
+  // proven shape, and `UnprovenTransaction` is the repo's alias for what the
+  // validator inspects. Keeping the two call sites identical is the point of
+  // this helper.
   return Transaction.deserialize(
     "signature",
     "proof",
     "binding",
     OfferFiles.decode(blob),
-  ) as UnprovenTransaction;
+  ) as unknown as UnprovenTransaction;
 }
 
 /**

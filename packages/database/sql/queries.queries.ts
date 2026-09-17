@@ -5,6 +5,8 @@ export type NumberOrString = number | string;
 
 /** 'InsertKnownToken' parameters type */
 export interface IInsertKnownTokenParams {
+  asset_id?: string | null | void;
+  decimals?: number | null | void;
   kind: string;
   name: string;
   token_color: string;
@@ -19,13 +21,17 @@ export interface IInsertKnownTokenQuery {
   result: IInsertKnownTokenResult;
 }
 
-const insertKnownTokenIR: any = {"usedParamSet":{"token_color":true,"name":true,"kind":true},"params":[{"name":"token_color","required":true,"transform":{"type":"scalar"},"locs":[{"a":59,"b":71}]},{"name":"name","required":true,"transform":{"type":"scalar"},"locs":[{"a":74,"b":79}]},{"name":"kind","required":true,"transform":{"type":"scalar"},"locs":[{"a":82,"b":87}]}],"statement":"INSERT INTO known_tokens (token_color, name, kind)\nVALUES (:token_color!, :name!, :kind!)\nON CONFLICT (token_color) DO NOTHING"};
+const insertKnownTokenIR: any = {"usedParamSet":{"token_color":true,"name":true,"kind":true,"decimals":true,"asset_id":true},"params":[{"name":"token_color","required":true,"transform":{"type":"scalar"},"locs":[{"a":372,"b":384}]},{"name":"name","required":true,"transform":{"type":"scalar"},"locs":[{"a":387,"b":392}]},{"name":"kind","required":true,"transform":{"type":"scalar"},"locs":[{"a":395,"b":400}]},{"name":"decimals","required":false,"transform":{"type":"scalar"},"locs":[{"a":412,"b":420}]},{"name":"asset_id","required":false,"transform":{"type":"scalar"},"locs":[{"a":436,"b":444}]}],"statement":"-- decimals/asset_id are optional for old clients. The defaults (6\n-- base-unit-per-coin, no asset -> priced by NAME through price-map.ts) retain\n-- compatibility for manually registered legacy rows. COALESCE rather than a\n-- column default so an explicit NULL from a caller still lands on 6.\nINSERT INTO known_tokens (token_color, name, kind, decimals, asset_id)\nVALUES (:token_color!, :name!, :kind!, COALESCE(:decimals::integer, 6), :asset_id)\nON CONFLICT (token_color) DO NOTHING"};
 
 /**
  * Query generated from SQL:
  * ```
- * INSERT INTO known_tokens (token_color, name, kind)
- * VALUES (:token_color!, :name!, :kind!)
+ * -- decimals/asset_id are optional for old clients. The defaults (6
+ * -- base-unit-per-coin, no asset -> priced by NAME through price-map.ts) retain
+ * -- compatibility for manually registered legacy rows. COALESCE rather than a
+ * -- column default so an explicit NULL from a caller still lands on 6.
+ * INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id)
+ * VALUES (:token_color!, :name!, :kind!, COALESCE(:decimals::integer, 6), :asset_id)
  * ON CONFLICT (token_color) DO NOTHING
  * ```
  */
@@ -37,6 +43,8 @@ export type IGetKnownTokensParams = void;
 
 /** 'GetKnownTokens' return type */
 export interface IGetKnownTokensResult {
+  asset_id: string | null;
+  decimals: number;
   id: number;
   kind: string;
   name: string;

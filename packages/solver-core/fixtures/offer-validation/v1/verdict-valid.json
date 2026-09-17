@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "profile": "offer-files-solver-v1",
+  "valid": true,
+  "live": true,
+  "claimedOfferId": "abababababababababababababababababababababababababababababababab",
+  "computedOfferId": "abababababababababababababababababababababababababababababababab",
+  "stateVersion": "42",
+  "validatedAt": "2026-08-14T12:34:56.000Z",
+  "status": "live",
+  "code": "VALID",
+  "computed": {
+    "gives": [
+      {
+        "token": "0101010101010101010101010101010101010101010101010101010101010101",
+        "amount": "100",
+        "kind": "SHIELDED"
+      }
+    ],
+    "wants": [
+      {
+        "token": "0202020202020202020202020202020202020202020202020202020202020202",
+        "amount": "200",
+        "kind": "SHIELDED"
+      }
+    ],
+    "inputNullifiers": [
+      "0303030303030303030303030303030303030303030303030303030303030303"
+    ],
+    "expiresAt": "2026-08-14T13:34:56.000Z"
+  }
+}

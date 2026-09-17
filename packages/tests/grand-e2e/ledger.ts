@@ -71,7 +71,7 @@ export interface SseLedgerEntry {
 class Ledger {
   readonly offers: OfferRecord[] = [];
   readonly garbage: GarbageRecord[] = [];
-  /** TokenKey → on-chain color (64-hex), set once minted in setup. */
+  /** TokenKey → externally issued on-chain color (64-hex), loaded during setup. */
   readonly colors: Partial<Record<TokenKey, string>> = {};
   /** Colors registered purely via POST /v1/known-tokens (excluded from the
    *  determinism diff — request-driven, instance B never sees the request). */

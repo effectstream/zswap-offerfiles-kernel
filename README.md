@@ -2,7 +2,9 @@
 
 A decentralized token swap platform that combines **Midnight Network** (privacy-preserving ZK contracts) with **Celestia** (data availability layer). Users create atomic swap offers that are published to Celestia, indexed by the sync node, and completed on Midnight.
 
-This repo is the **backend**: sync node, batcher, contracts, database, validator, and e2e tests. It is frontend-agnostic — an example browser frontend lives in the [effectstream monorepo](https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da) (see [Frontend](#frontend)).
+This repo is the **backend**: sync node, batcher, chain launchers, database, validator, the COW
+solver (a separate process that quotes and settles against a Midnight Intents relay), and
+e2e tests. It is frontend-agnostic — an example browser frontend lives in the [effectstream monorepo](https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da) (see [Frontend](#frontend)).
 
 - **Backend (this repo):** https://github.com/effectstream/zswap-offerfiles-kernel
 - **Example frontend:** https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da
@@ -14,13 +16,37 @@ Check deployed API playground: https://api-zswap.zkdojo.com/docs
 
 ```bash
 bun install
-bun run dev   # PGLite + Compact compile + Midnight + Celestia + sync + batcher
+bun run dev   # PGLite + Midnight + Celestia + sync + batcher
 ```
 
-On dev startup the `midnight-mint-test-tokens` process mints test tokens via the
-offer-files contract (two shielded colors + one unshielded color to the genesis
-wallet), so e2e swaps have real multi-token inventory and the unshielded
-liveness sets receive on-chain events.
+Use the compatible branch pairs: `effectstream:v-next` with this kernel's
+`ledger-v9`, and `effectstream:midnight-1` with kernel `main`. Do not mix the
+frontend and kernel protocol branches.
+
+After the database initializes, `start.dev.ts` runs the optional
+`canonical-token-registry` one-shot. It fetches the selected network's six
+canonical token records and applies them in one database transaction. Preprod
+is the default; an explicit `TOKEN_REGISTRY_NETWORK` or `MIDNIGHT_NETWORK_ID`
+selects Preview, Stagenet or local `undeployed` (which skips the public import). A timeout,
+HTTP/metadata error or database rejection logs a skip and the rest of the stack
+continues with the database's existing rows.
+
+A fresh database already contains the six canonical Preprod rows, together
+with NIGHT and Preprod SNIGHT, so this optional request is not required for an
+offline Preprod start. The seed is pinned to public registry revision
+`ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc`
+from `effectstream/mint-test-tokens` source commit
+`4a6aee1ed50dea17875f28b2d2cf398bfee315fb`. The complete source document and
+checksum are recorded in `packages/database/fixtures/`.
+
+The one-shot runs only in orchestration, after migrations. It does not add a
+server import endpoint or refresh job. A successful run upserts only the six
+canonical names; unrelated tokens, offer history and manual prices retain their
+existing colors. Editing `000-init.sql` affects only a fresh database, while the
+one-shot updates an existing operator-selected database to Preview, Preprod or
+Stagenet without resetting it. If that request fails, the existing database is
+left exactly as it was; it is not reset to the SQL defaults. This repository
+contains no faucet contract or local mint fallback.
 
 - API: http://localhost:9999
 - API playground: `bun run docs:dev` → http://localhost:10601/docs/ (or build + http://localhost:9999/docs)
@@ -47,10 +73,8 @@ monorepo (formerly `paima-engine`) at
 It runs against this stack and doubles as a reference for wiring your own UI to
 this backend.
 
-Check out the effectstream monorepo as a **sibling** of this repo (the frontend
-resolves `@zswap-da/contract-offer-files` via a relative `file:` dependency).
-Start this repo's dev stack first (it compiles the Compact contract), then start
-the frontend:
+Check out the effectstream monorepo as a **sibling** of this repo. Start this
+repo's dev stack, provide same-chain wallet inventory, then start the frontend:
 
 ```bash
 git clone git@github.com:effectstream/effectstream.git     # if not already checked out
@@ -59,25 +83,357 @@ bun install
 bun run dev   # vite on :10600
 ```
 
-The frontend fetches the API, the batcher, and all ZK assets from this backend:
-`GET /keys/*` and `GET /zkir/*` serve the contract circuit keys (from
-`packages/contracts-midnight/contract-offer-files/src/managed`) and the zswap +
-dust primitive keys (from the Midnight ZK-params cache,
-`~/.cache/midnight/zk-params`, override with `MIDNIGHT_ZK_PARAMS_DIR`). Without
-the primitive keys the browser mint fails with
-`GET /keys/midnight/zswap/output.prover 404` — run the proof server once (the
-dev stack does) to populate the cache.
+The frontend fetches the API's public network configuration and offer data,
+then constructs native Midnight offer transactions through its wallet. Test
+tokens for supported public test networks are obtained from
+[`mint-test-tokens`](https://mint-test-tokens.pages.dev/?network=preprod).
+Fresh local chains require a separately provisioned same-chain fixture.
 
 ## Environments
 
 | Layer | Dev (`bun run dev`) | Mainnet (`bun run start:mainnet`) |
 |-------|---------------------|------------------------------------|
 | DA | Local Celestia devnet (`packages/contracts-celestia`) | Celestia mainnet beta via local light node |
-| Privacy chain | Local Midnight devnet (`packages/contracts-midnight`) | Midnight (the `@effectstream/midnight-contracts` resolved networkId) |
+| Privacy chain | Local Midnight devnet (`packages/midnight-infra`) | Midnight (the `@effectstream/midnight-contracts` resolved networkId) |
 | Database | PGLite (in-memory) | PGLite (in-memory) |
 | Node entry | `packages/node/main.dev.ts` | `packages/node/main.mainnet.ts` |
 | Batcher entry | `packages/batcher/batcher.dev.ts` | `packages/batcher/batcher.mainnet.ts` |
 | Orchestrator | `start.dev.ts` | `start.mainnet.ts` |
+| COW solver | **separate process** — `bun run start:solver` (or `packages/solver/solver.dev.ts`) | **separate process** — `bun run start:solver` (or `packages/solver/solver.mainnet.ts`) |
+| Price feed | **separate process, optional** — `bun run --filter @zswap-da/price-feed start` (or `… once` for a single refresh) | same, plus the `price-feed` compose service (`--profile prices`) |
+
+**Neither orchestrator launches the solver.** `start.dev.ts` and `start.mainnet.ts`
+bring up chain, database, node and batcher only; see
+[Running the COW solver](#running-the-cow-solver).
+
+**The price feed is optional.** `start.dev.ts` registers it only when
+`COINGECKO_API_KEY` is set, and never as a system-dependency, because
+`packages/database/migrations/000-init.sql` **seeds** real reference prices
+(captured 2026-09-02): a stack that never runs it still quotes 1 WBTC ≈ 32 WETH
+rather than a colour-hash rate. See [Reference prices](#reference-prices).
+
+## Reference prices
+
+`GET /v1/prices?tokens=<color>[,<color>…]` serves the USD prices behind
+`GET /v1/quote` and behind the batcher's fee sponsorship. USD is the numeraire:
+every price is a USD price and no asset — stablecoins included — is assumed to be
+worth one dollar. `tokens` is **required** (1-50 colours) and there is no
+unfiltered form: callers ask about the colours in front of them, so the endpoint's
+cost does not grow with the registry. Three tables back it:
+
+| Table | Holds |
+|---|---|
+| `asset_prices` | USD **per coin** for a tradable asset, keyed by its CoinGecko id. Seeded in `000-init.sql` with values captured 2026-09-02 |
+| `known_tokens` | a colour's `decimals` (base units per coin) and optional `asset_id`. Prices are served **per base unit**, i.e. the asset price ÷ `10^decimals` |
+| `token_prices` | only operator overrides (`manual`) and the deterministic demo rows (`fallback`) for tokens with no asset behind them |
+
+Tokens without an explicit asset ID map to assets **by normalized name** —
+`WBTC`/`WSBTC`/`BTC` → `bitcoin`, `WETH`/`WSETH`/`ETH` → `ethereum`, `USDC` →
+`usd-coin`, `USDM` → `usdm-2`, `NIGHT` → `midnight-3`, `SNIGHT` → `midnight-3`.
+Token colors are opaque, network-specific external IDs, so the name map is only
+a fallback for manually registered rows. `known_tokens.asset_id` overrides it;
+canonical `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and `UTWBTC` records
+carry explicit asset IDs and are seeded from the pinned Preprod registry on a
+fresh database. `PRICE_FEED_MAP`
+(`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
+
+`SNIGHT` is the [shielded-night](https://github.com/effectstream/shielded-night)
+wrapper — NIGHT held as a shielded (Zswap) token, locked 1:1, so it prices off
+`midnight-3` like NIGHT and is seeded with NIGHT's `decimals`. It is the one seeded
+token whose colour depends on the network, because it derives from the contract
+address: `000-init.sql` seeds **Preprod** (`8fac382b…6819`) as the default and
+documents Preview beside it. Deploying to another network means patching that
+row before the database is created — or updating an already-live database
+deliberately, since `000-init.sql` only ever runs against an empty database.
+
+`decimals` here always means **base units per priced coin** — a token's asset
+price is divided by `10^decimals` to get the per-base-unit price this API
+serves — never the colour's own display decimals. NIGHT is seeded with
+`decimals: 6`: 1 NIGHT = 10⁶ Stars (its base unit; `STARS_PER_NIGHT` in
+`midnight-ledger/ledger/src/structure.rs`).
+
+The external canonical records state their real scales: BTC variants use 8,
+ETH uses 18, and stablecoins use 6 decimals. Legacy/local registrations still
+default to 6 when a caller omits the field; canonical import always supplies it.
+`coinsToBaseUnits` / `baseUnitsToCoins` in `packages/solver-core/amount.ts` are
+the one place the conversion lives; amounts on the wire and on chain stay
+integer base units.
+
+`packages/price-feed` refreshes `asset_prices` from CoinGecko. It is a process of
+its own — the node never makes an outbound price call:
+
+```bash
+bun run --filter @zswap-da/price-feed once    # one refresh, exit 0 (all) / 2 (partial)
+bun run --filter @zswap-da/price-feed start   # loop, one cycle a day
+docker compose run --rm price-feed --once     # the same, in deploy/
+```
+
+One cycle asks for up to `PRICE_FEED_BATCH_SIZE` ids per request, with at least
+`PRICE_FEED_REQUEST_SPACING_MS` between requests, stopping at the first `429`.
+Today's five assets (`bitcoin`, `ethereum`, `usd-coin`, `midnight-3`, `usdm-2`)
+are **one request a day**; credits scale with `ceil(assets / 50)`, not with the
+number of tokens.
+
+**It is not part of `bun run dev`.** Development runs on the seeded prices — real
+BTC/ETH ratios with no key, no network and no extra process — so the feed is never
+registered in `start.dev.ts`. Run it deliberately with `--once`, or with the
+opt-in compose service in `deploy/`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `COINGECKO_API_KEY` | — | Required to fetch. Sent as the `x-cg-demo-api-key` header, never in a query string. Without it the service only WARNS: `--once` exits 64, loop mode warns on every tick and does nothing |
+| `COINGECKO_BASE_URL` | `https://api.coingecko.com/api/v3` | Point at a stub in tests; blank and whitespace-only select the default |
+| `PRICE_FEED_INTERVAL_MS` | `86400000` | Loop period |
+| `PRICE_FEED_REQUEST_SPACING_MS` | `1000` | Minimum gap between two requests |
+| `PRICE_FEED_BATCH_SIZE` | `50` | Asset ids per `simple/price` request |
+| `PRICE_FEED_ASSETS` | the five seeded ids | Comma-separated CoinGecko ids |
+| `PRICE_FEED_MAP` | — | Node + feed: `NAME_OR_COLOR=<asset_id>[:decimals],…`. A malformed entry is a startup error, never a silent skip |
+| `SPONSOR_DISCOUNT_BPS` | `250` | How far below reference an offer must be priced to earn fee sponsorship. Published in `/v1/prices.sponsor_discount` |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PW` / `DB_NAME` | `127.0.0.1` / `5432` / `postgres` / `postgres` / `postgres` | Database used by the feed and optional token-registry import |
+| `TOKEN_REGISTRY_BASE_URL` | `https://mint-test-tokens.pages.dev/` | Base URL for the optional orchestrator-owned metadata import |
+| `TOKEN_REGISTRY_NETWORK` | explicit `MIDNIGHT_NETWORK_ID`, otherwise `preprod` | Registry selected after initialization: `preprod`, `preview`, `stagenet`, or local `undeployed` (skip) |
+| `TOKEN_REGISTRY_TIMEOUT_MS` | `5000` | Fetch, DB connection and DB statement bound; maximum 30000 ms |
+
+### Fee sponsorship
+
+Reference prices exist so the batcher can decide **which offers are worth a
+Celestia fee**. The rule (`evaluateSponsorship` in `@zswap-da/offer-guard`) is the
+one `GET /v1/quote` already shows the maker as `sponsored`, and it is applied in
+two places: the batcher's `validateInput` (authoritative — it holds the wallet,
+and anyone can POST to its `/send-input` directly) and `POST /v1/offers`, which
+answers `422 NOT_SPONSORED` with the numbers before forwarding.
+
+It is **not** applied at STM ingestion: the MIP-0006 namespace is permissionless,
+so an offer posted straight to Celestia is still indexed. The gate decides who
+rides the batcher's wallet for free, not what is a valid offer.
+
+The node and the batcher read the **same variable names**, so they cannot drift.
+An invalid value throws at startup rather than defaulting.
+
+| Variable | Default | Read by | Meaning |
+|---|---|---|---|
+| `BATCHER_SPONSOR_POLICY` | `warn` | node + batcher | `enforce` refuses; `warn` logs what `enforce` would have refused and lets it through; `off` skips the check |
+| `BATCHER_SPONSOR_UNPRICED` | `allow` | node + batcher | What to do when a leg's token has no market price (every test token). `allow` keeps them flowing |
+| `BATCHER_NODE_API_URL` | `http://127.0.0.1:9999` | batcher | Where it asks `/v1/prices?tokens=` for each offer's leg colours (compose: `http://kernel:9999`) — it has no database |
+| `BATCHER_PRICE_TTL_MS` | `600000` | batcher | How long a per-colour answer counts as current |
+| `BATCHER_PRICE_MAX_AGE_MS` | `172800000` | batcher | How old an answer may be and still be used when a re-ask fails. Must be ≥ the TTL |
+| `SPONSOR_DISCOUNT_BPS` | `250` | node + batcher | The threshold. On the batcher a bootstrap only: once the node answers, the node's `sponsor_discount` wins |
+
+Roll out with the defaults (`warn` + `allow`), read a day of
+`would refuse (policy=warn) — NOT_SPONSORED: …` lines from both processes, then
+switch `BATCHER_SPONSOR_POLICY=enforce`.
+
+## Running the COW solver
+
+The solver is a **component of its own**, not part of the backend command. It is
+one process that attaches to an already-running kernel API and to a Midnight
+Intents relay, mirrors the Offer Files book, publishes price ladders, and
+settles relay-dispatched swap jobs from its own wallet.
+
+```bash
+bun run start:solver          # the one documented deployment entrypoint
+```
+
+`bun run start:mainnet` deliberately does **not** start it. Trading must be an
+explicit act: folding the solver into the backend command would let an operator
+who only wanted an indexer end up with a wallet-spending process attached to a
+relay. The per-network entrypoints (`packages/solver/solver.{dev,preview,mainnet}.ts`)
+remain available for local work; `start.solver.ts` is the network-agnostic one a
+container runs.
+
+**Mandatory configuration.** `start:solver` resolves and validates everything
+below *before* it opens a wallet, a socket, or the journal, and a startup that
+is missing or malformed values exits non-zero listing **every** problem at once
+(one restart shows the whole list):
+
+| Variable | Why it is mandatory |
+|---|---|
+| `MIDNIGHT_NETWORK_ID` | The SDK silently defaults to `undeployed`; a deployment must declare its network. An unknown value is refused rather than turned into generated `https://rpc.<typo>.midnight.network` URLs. |
+| `ZSWAP_API` | Kernel Offer Files REST/SSE base. Otherwise defaults to `http://127.0.0.1:9999`, a developer default. |
+| `SOLVER_RELAY_WS_URL` | Outbound Midnight Intents solver socket (`ws://`/`wss://`, no embedded credentials). |
+| `SOLVER_RELAY_HTTP_URL` | The relay's public HTTP base for durable `GET /jobs/:jobId` recovery. Never derived from the websocket URL — deployed prefixes differ (for example `/api/v1`). |
+| `SOLVER_RELAY_AUTH_TOKEN` | Shared relay bearer, at least 32 characters (the relay refuses shorter). The kernel exact-files read stays unauthenticated. |
+| `SOLVER_JOURNAL_PATH` | Absolute path on a persistent per-instance volume. `:memory:` is impossible here. |
+| `SOLVER_SEED` | An unset seed silently selects the repository's public dev seed. That seed is accepted only on `MIDNIGHT_NETWORK_ID=undeployed`. |
+
+The relay URLs, the token and the journal are required **in dry-run too**: a
+rehearsal that leaves half the configuration unvalidated is not a rehearsal.
+`SOLVER_ENABLED=false` exits 0 without demanding any of it. On `mainnet`,
+`SOLVER_DRY_RUN` defaults to `true` and live settlement additionally requires the
+exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` — the same boundary
+`solver.mainnet.ts` enforces, so this entrypoint is not a cheaper route to live
+trading. Startup prints the resolved topology with no secret in it (the seed
+never appears; the bearer only as its length).
+
+A container deployment runs exactly this command as its solver service, with the
+journal path pointing into a mounted volume, and depends on the kernel and relay
+services rather than launching them.
+
+### Monitoring
+
+The solver has an optional **read-only status listener** and a separate
+**monitor site** that renders it. Both are opt-in and neither changes how the
+solver trades.
+
+```bash
+# on the solver process — unset SOLVER_STATUS_PORT means no listener at all
+SOLVER_STATUS_PORT=9100 \
+SOLVER_STATUS_HOST=127.0.0.1 \
+SOLVER_STATUS_AUTH_TOKEN=<at least 32 characters> \
+bun run start:solver
+
+# the site, as its own process (it must outlive the solver to be useful)
+SOLVER_FRONTEND_SOLVER_STATUS_URL=http://127.0.0.1:9100 \
+SOLVER_FRONTEND_SOLVER_STATUS_TOKEN=<the same token> \
+SOLVER_FRONTEND_ZSWAP_API=http://127.0.0.1:9999 \
+SOLVER_FRONTEND_RELAY_HTTP_URL=http://127.0.0.1:3000 \
+bun run start:solver-frontend            # http://127.0.0.1:8080
+```
+
+The listener serves `GET /health` (open, so a container healthcheck needs no
+secret), `GET /status/snapshot` and `GET /status/stream`. **Every `/status/*`
+route requires the bearer**: the snapshot carries the solver's whole internal
+state, so `SOLVER_STATUS_AUTH_TOKEN` is mandatory whenever the port is set and
+must be at least 32 characters — the same rule the relay applies to its own
+bearer. Collection reads in-memory state only: no wallet call, no proof, no
+network I/O, and a section that fails degrades to `{ error }` rather than taking
+the snapshot with it. **Never publish the status port to a public interface.**
+
+In the Compose stack both come up as the `solver-frontend` service and the
+solver's `SOLVER_STATUS_*` variables, with the bearer generated by
+`deploy/bootstrap.sh` — see `deploy/README.md` → "Observing the solver".
+
+The site answers "is the solver quoting, and if not, why" from one screen: a
+status pill, a six-stage health strip, alarms, and published ladders with
+direct/composed witnesses, token contributions, point-specific receipts and
+shared physical-file dependencies. Source eligibility failures are distinguished
+from limitations on another route that uses the same file. It aggregates the
+solver's status stream with the kernel's book and the
+relay's public token list, so it keeps rendering (and shows "last seen
+HH:MM:SS") while the solver is down. It has no authentication of its own; bind
+it to loopback and reverse-proxy it if it must be reachable more widely.
+
+**Breaking observability change: status and monitor contracts are v3.** Witness
+`input`/`output` are net external amounts; required `tokenBalances` rows carry
+decimal-string `gives`, `wants` and signed `net`, including zero-net intermediates.
+Witness accounting survives the separate 500-offer book display cap. Actual
+search limits/work and withholding reasons are exposed. Deploy producer and
+consumer together: the monitor labels old/unknown versions and does not interpret
+their incompatible payloads. See the [status contract](packages/solver-core/status-contract.ts).
+
+See [`packages/solver-frontend/README.md`](packages/solver-frontend/README.md)
+for the full environment contract, the routes, the reverse-proxy note and how to
+run the page against fixture data with no stack at all.
+
+
+### What the solver supports (and what it does not)
+
+- **Midnight 2.x / ledger-v9 only**, single-leg **shielded** offers with two
+  distinct token colors and positive amounts, at most **8 complete maker
+  files** per job. Unshielded legs, mixed value layers, multi-leg baskets and
+  legacy Midnight 1.x / ledger-v8 transactions are refused before admission.
+- Maker offers are built `payFees:false`, so the maker's offer carries no fee
+  payment: **the settling side pays**. The solver sizes and pays DUST for the
+  settlement it submits, under the `SOLVER_DUST_*` admission budget. Sizing that
+  fee requires **no swap-token inventory at all** — see
+  [`SOLVER_FEE_SIZING_TAKER_INPUTS`](#fee-sizing-solver_fee_sizing_taker_inputs).
+  The solver still needs NIGHT/DUST to pay the fee itself.
+- Published ladders are indicative data for the relay's own interpolation, not
+  reservations. Job admission is re-decided at job time against the current
+  book and policy, and the exact winning files are claimed atomically.
+
+### Whole-offer staircase pricing and settlement
+
+For each directed pair, the solver examines the current eligible Offer Files and
+uses one policy for direct and composed sets of at most eight complete physical
+files: maximize affordable **net taker output**, then break ties by lower genuine
+net input, fewer files and lexicographically sorted full hashes. Surplus is never
+a pricing reward, tie preference or reason to reduce advertised output. For each
+token, maker net supply is `sum(gives) - sum(wants)`; only the external input may
+be negative, the output must be positive, and all intermediate nets must be
+nonnegative. Endpoint allowlists apply to the taker pair, allowing internal legs
+whose own pairs are not advertised.
+
+For example, a maker giving **10 A for 3 B** and another giving **6 B for 5 D**
+support direct taker directions B→A and D→B, plus composed **5 D → 10 A**
+(`tokenIn=D`, `tokenOut=A`), retaining **3 B**. Both files execute once in the
+same atomic settlement. These quotes share physical files; their amounts cannot
+be added as independent inventory, and claiming a file affects every dependent
+quote. If the taker instead signs **16 D → 9 A** against that 10 A quote, the
+solver receives **11 D + 1 A + 3 B**.
+
+The unchanged relay wire encodes improvements as a staircase: flat sections end
+one input base unit before the next improvement; the last genuine threshold has
+a fixed **10x input** plateau, safely capped by numeric, wire-point or omitted-
+improvement bounds. Exact derivation has hard ceilings of 4,096 sources, eight
+selected files, 100,000 visited subsets per pair, 200,000 total, 64 wire points
+per pair and 64 published pairs. Lower-only controls additionally cap
+`maxCandidatePairs` at **4,096** and `maxDiscoveryWork` at **1,000,000**. Discovery
+and safe merge-order fallback share that work budget; `safeMergeOrderWork` is
+also reported separately. See the [canonical limits](packages/solver-core/ladder-derivation.ts).
+Work exhaustion withholds unproved pairs while retaining independently completed
+pairs; cancellation, an oversized source book or stale state withdraws the whole
+snapshot. No approximate or direct-only fallback replaces an incomplete search.
+
+A dispatched job may request less output than the selected files supply and may
+provide more input than those files require. Every selected maker file executes
+unchanged and in full. The taker receives exactly its signed output; excess
+input, excess output and every positive intermediate remainder go to the
+solver's shielded address through the existing residual transaction. Receipts
+are aggregated by token, and zero amounts create no outputs. The solver
+never partially consumes an offer and never pays a swap-token shortfall from
+pre-existing inventory, even a one-base-unit intermediate deficit. Funded and empty swap-token wallets therefore produce
+the same prices and route choices. The solver still needs NIGHT/DUST for fees.
+
+Jobs above the advertised output are still refused, as are jobs outside the
+published ladder, non-positive demands, stale routes, disallowed pairs,
+below-minimum outputs, incompatible maker sets and routes that exceed resource
+limits.
+
+**Numeric boundary clarification.** The supported ledger-v9 exposed source legs,
+taker input/output and individual receipts are bounded by **M = `2^127-1`**;
+**U = `2^128-1`** is the coin-format maximum only. This corrects the prior u128
+settlement-bound assumption: pinned ledger-v9 1.0.0-rc.3 SDK
+probes show singleton delta clamping above M and signed merge overflow. Those
+construction probes do not establish on-chain settlement at the boundary. Gross
+gives/wants use exact bigint arithmetic and may exceed U; a safe maker merge
+order must keep every per-token prefix within `[-M,M]`, with actual SDK deltas
+checked against exact arithmetic. The [accounting helper](packages/solver-core/whole-offer-balance.ts)
+and its [boundary tests](packages/solver-core/whole-offer-balance.test.ts) encode
+this supported domain.
+
+> **Breaking pricing/configuration change.** The former cumulative-prefix,
+> inventory-funded interpolation, direct-fill and crossing/cycle generators are
+> removed. `SOLVER_LADDER_CONFIG`, manual `pairs[].levels`,
+> `SOLVER_ENABLE_PATH_B`, `SOLVER_ENABLE_CYCLES`, and
+> `SOLVER_ENABLE_RESIDUAL_TOPUPS` are invalid upgrade leftovers and fail startup
+> with migration guidance. Delete them; there is no ladder file or pricing-mode
+> replacement. Token aliases come from the live book's actual token colors.
+
+### Fee sizing: `SOLVER_FEE_SIZING_TAKER_INPUTS`
+
+The solver never sees the taker's half — the relay merges it — so it cannot know
+how many zswap inputs the taker's own coin selection produced. It therefore
+models a fixed number, and that number is the one knob:
+
+| | |
+|---|---|
+| `SOLVER_FEE_SIZING_TAKER_INPUTS` | Optional. Integer in `[1, 64]`, default **1**. Malformed values are a listed `start:solver` launch problem, never a silent default. |
+
+**Coverage rule (measured).** A stand-in modelling `n` taker inputs funds a real
+taker half of up to **`n + 2`** zswap inputs. The default of 1 therefore covers
+takers paying from up to three coins, which is what the deployed E2E exercises,
+and it reserves exactly the DUST the previous mirror-based design did.
+
+**Raising it costs real DUST.** Each extra modelled input adds **12–14 %** to the
+reserved fee, and the DUST intent *spends* the estimate rather than merely
+holding it — so a higher value also consumes `SOLVER_DUST_MAX_PER_JOB` /
+`SOLVER_DUST_MAX_PER_WINDOW` budget faster. Raise it only if settlements start
+failing at submit time because a taker's balance is fragmented across many small
+coins; that failure is an availability failure (the chain rejects the merged
+transaction, the relay reports `submit-failed`, and the solver's contribution is
+reverted), not a loss of funds. The startup banner prints the effective model and
+its coverage.
 
 ## Mainnet environment
 
@@ -102,8 +458,112 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `CELESTIA_POLLING_INTERVAL_MS` | optional | Sync cadence. Defaults: devnet 6 000 ms, mainnet 30 000 ms. |
 | `MIDNIGHT_START_BLOCK` | yes | Numeric block height to start Midnight sync from. |
 | `NTP_START_TIME` | optional | NTP reference timestamp; resumed from DB when unset. |
+| `API_RATE_LIMIT_MAX`, `API_RATE_LIMIT_ALLOWLIST` | optional | Per-client-IP budget for `/v1/*` per minute (default 600; `/v1/health*` exempt) and comma-separated IPs exempt from it. Size it for a solver plus its console on one address (~450/min worst case); `deploy/` sets 6000. |
+| `BATCHER_SUBMIT_TIMEOUT_MS` | optional | Absolute batcher fetch + receipt-body deadline; default 310 000 ms, bounded to 1 000–600 000 ms. |
+| `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
+| `API_UPDATES_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/updates` websocket cap; default 100. Excess clients are refused the connection (this endpoint's refusals are disconnects, not HTTP statuses — see API.md). |
+| `OFFER_FILES_READ_TIMEOUT_MS` | optional | Exact-files read decision budget, default 15 000 ms and capped at 60 000 ms. Native synchronous proof work cannot be preempted; a retained concurrency slot bounds unfinished work. |
+| `ZSWAP_API` / `SOLVER_SEED` / `MIDNIGHT_NETWORK_ID` | **required by `start:solver`** | Kernel API base, solver wallet seed, and the declared network. Each has a silent developer default (`http://127.0.0.1:9999`, the public dev seed, `undeployed`) that `start:solver` refuses to assume — see [Running the COW solver](#running-the-cow-solver). |
+| `SOLVER_RELAY_WS_URL` / `SOLVER_RELAY_AUTH_TOKEN` | required for live solver mode (and by `start:solver` in every mode) | Outbound Midnight Intents solver WebSocket and its shared bearer (at least 32 characters). The backend exact-files read is unauthenticated. |
+| `SOLVER_RELAY_HTTP_URL` | **required for relay job execution** | Explicit public relay HTTP base for durable `GET /jobs/:jobId` recovery. It is validated independently and is never derived by rewriting the websocket URL. |
+| `SOLVER_JOURNAL_PATH` | **required for relay job execution** | Absolute path to the solver-local SQLite wallet-operation journal on a persistent mounted volume. Startup fails closed if it is missing, unwritable, corrupt, locked, full, or schema-incompatible. |
+| `SOLVER_RELAY_MAX_PARALLEL_SWAPS` | optional | Advertised and enforced concurrent proof-build bound; default 8. |
+| `SOLVER_RELAY_PUSH_INTERVAL_MS` / `SOLVER_RELAY_RECONNECT_DELAY_MS` | optional | Complete ladder replacement cadence (default 1 000 ms) and reconnect delay (default 2 000 ms). |
+| `SOLVER_STATUS_POLL_MS` / `SOLVER_SETTLE_TTL_MINUTES` | optional | Backend-consumption backstop cadence and chain-TTL wallet rollback window. |
+| `SOLVER_SUPPORTED_PAIRS` | optional (UNSET is OPEN + warning) | Strict JSON array of unique directed lowercase `64hex->64hex` taker endpoint pairs. SET is enforced in publication (including after a reconnect) and admission; internal maker legs may use other pairs. |
+| `SOLVER_MIN_JOB_OUTPUT` | optional (UNSET is OPEN + warning) | Strict JSON object from lowercase output-token `64hex` to positive canonical integer strings. A SET map omits tokens without a minimum and sub-minimum rungs/jobs. |
+| `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` / `SOLVER_DUST_WINDOW_MS` | optional as one group (UNSET is OPEN + warning) | All three must be SET together. Amounts are positive canonical decimal bigints; window is a positive safe integer in ms. Reservations are journal-durable and rolling-window bounded. |
+| `SOLVER_ADMISSION_WARNING_INTERVAL_MS` | optional | Startup/periodic warning cadence for every UNSET admission group; positive safe integer, default 900000. |
+| `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | Mainnet defaults to dry-run, which now requires and syncs the real funded wallet and loads read-only Stock while starting no relay jobs. Live settlement additionally requires the exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
 
 A complete dev → mainnet env template lives at `.env.mainnet.example`.
+
+> **BREAKING DEPLOYMENT REQUIREMENT (RF1/RF2):** relay job execution now requires
+> both a durable `SOLVER_JOURNAL_PATH` and an explicit
+> `SOLVER_RELAY_HTTP_URL`. Provision one persistent volume per solver
+> instance and mount it at a stable absolute path (for example,
+> `/var/lib/cow-solver/operations.sqlite`) before upgrading. Never share one
+> journal file between instances. `:memory:` is rejected by production code;
+> its explicit escape hatch exists only for isolated test harnesses. Configure
+> the relay's public HTTP base directly; do not infer it from the websocket URL.
+
+> **BREAKING DRY-RUN DEPLOYMENT CHANGE (RF3):** mainnet dry-run now refuses the
+> repository dev seed, opens and syncs the configured real wallet, and loads a
+> read-only inventory snapshot. It starts no relay socket/job executor and calls
+> no mutating wallet method. Operators must therefore provision `SOLVER_SEED`
+> and wallet/indexer/proof connectivity for dry-run as well as live mode.
+
+Admission groups deliberately preserve the pre-RF3 OPEN default when wholly
+UNSET, but log a contained `[ADMISSION]` warning at startup and every configured
+warning interval. Malformed or partially-set groups fail startup; there is no
+silent coercion. For real-funds rollout, SET all three policy groups explicitly.
+
+## Effectstream whole-block fail-stop operations
+
+This release accepts an availability limitation in the pinned Effectstream
+0.103.1 runtime: one scheduled application input that throws after a write, or
+one SQL statement that fails, rolls back the **entire L2 block** and leaves the
+scheduled input retained. This preserves database integrity—no partial block,
+pre-fault application write, or successful-input result commits—but progress
+halts at that block until an operator resolves the poison input. It is not
+per-input isolation and must be treated as an incident, not an automatic skip.
+
+Use this operating sequence:
+
+1. **Detect and contain.** Treat a repeatedly failing block, a stalled
+   `effectstream.effectstream_blocks` height, or an application-transition
+   failure followed by PostgreSQL `25P02` as a fail-stop incident. Stop the
+   affected node and its restart loop. Stop solver job execution that depends
+   on that backend and confirm it is no longer publishing routable ladders
+   before touching state.
+2. **Preserve evidence.** Record the deployed commit and Effectstream version,
+   the last committed and failing heights, the exception/SQLSTATE, and the
+   suspected scheduled-input identity and payload. Take a storage snapshot or
+   backup before any state-changing remediation.
+3. **Inspect read-only.** Against the stopped instance, use a read-only
+   transaction to inspect the committed boundary and retained inputs, for
+   example:
+
+   ```sql
+   BEGIN TRANSACTION READ ONLY;
+   SELECT block_height
+     FROM effectstream.effectstream_blocks
+    ORDER BY block_height DESC
+    LIMIT 5;
+   SELECT id, input_data
+     FROM effectstream.rollup_inputs
+    ORDER BY id;
+   ROLLBACK;
+   ```
+
+   Correlate the exact input with logs and inspect every application table the
+   transition could have written. The failed block and its pre-fault writes
+   must be absent, while the authoritative scheduled input remains.
+4. **Remediate deliberately.** Prefer correcting the application, runtime, or
+   configuration so the retained input can replay unchanged. If an invalid or
+   hostile input can never succeed, its quarantine or removal requires an
+   incident-specific, reviewed migration/tool that pins the exact input
+   identity and expected payload, checks the backup, runs transactionally, and
+   records the disposition. Do **not** run an ad-hoc `DELETE` against
+   `effectstream.rollup_inputs`; the direct deletion in the regression test is
+   test-only and is not a production procedure.
+5. **Recover in isolation.** Apply the reviewed fix while all writers remain
+   stopped. Start one node first, with solver execution still withdrawn, and
+   let it replay from the last committed boundary. Restore replicas only after
+   that node is current and stable; restore the solver only after its backend
+   mirror re-establishes currentness and its normal journal reconciliation
+   completes.
+6. **Verify replay before closing the incident.** Confirm the blocked height
+   commits exactly once and later heights advance; the retained input either
+   completes normally or has the reviewed disposition; no pre-fault partial
+   row or duplicate application event exists; and backend health, offer
+   liveness, solver empty-to-current ladder recovery, and durable wallet-job
+   reconciliation are all healthy. Archive the queries, logs, backup identity,
+   remediation artifact, and verification results with the incident.
+
+The long-term fix is upstream savepoint-based per-input database and rejected-
+promise isolation. This branch deliberately does not fork Effectstream or
+pretend the current whole-block mode provides that availability guarantee.
 
 ## Testing
 
@@ -111,7 +571,16 @@ A complete dev → mainnet env template lives at `.env.mainnet.example`.
 bun run test
 ```
 
-Boots the same undeployed stack as `bun run dev` (PGlite `:5432`, Midnight
+The live Phase B suite no longer creates token identities. Before running it,
+provision the deterministic wallets with same-chain externally issued
+inventory and set the token-color variables used by each case:
+`E2E_SHIELDED_TOKEN_A/B`, `E2E_TOKEN_0/1`, `E2E_MULTI_TOKEN_0/1/2`,
+`E2E_UNSHIELDED_TOKEN_0/1`, and `E2E_ROOT_GIVE_TOKEN/E2E_ROOT_ADVANCE_TOKEN`.
+A freshly reset local chain has no such issuer, so this live gate cannot pass
+until an external same-chain fixture has funded it. The public faucet supports
+Preview, Preprod and Stagenet; it does not fund the local `undeployed` chain.
+
+The runner boots the undeployed stack (PGLite `:5432`, Midnight
 node/indexer/proof-server, Celestia, sync `:9999`, batcher `:3334`) via
 `packages/tests/start.test.ts`, then runs:
 
@@ -158,14 +627,19 @@ and skipping safely when the offer comes out give-only.
 
 ```
 zswap-offerfile-kernel/
-├── start.dev.ts                              # Local orchestrator config
-├── start.mainnet.ts                          # Mainnet orchestrator (+ light-node pre-flight)
+├── start.dev.ts                              # Local orchestrator config (no solver)
+├── start.mainnet.ts                          # Mainnet orchestrator (+ light-node pre-flight; no solver)
+├── start.solver.ts                           # COW solver component (bun run start:solver)
 ├── packages/
 │   ├── node/                                 # @zswap-da/node
 │   ├── database/                             # @zswap-da/database
 │   ├── validator/                            # @zswap-da/validator (shared offer validation)
 │   ├── batcher/                              # @zswap-da/batcher
-│   ├── contracts-midnight/                   # @zswap-da/contracts-midnight (+ contract-offer-files subworkspace)
+│   ├── solver/                               # @zswap-da/solver (book mirror, ladders, swap-job settlement)
+│   ├── solver-core/                          # @zswap-da/solver-core (shared clients and ladder derivation)
+│   ├── offer-guard/                          # @zswap-da/offer-guard (checks node + batcher must agree on)
+│   ├── price-feed/                           # @zswap-da/price-feed (daily CoinGecko refresh; optional process)
+│   ├── midnight-infra/                       # Midnight node/indexer/proof-server launch scripts
 │   ├── contracts-celestia/                   # @zswap-da/contracts-celestia (bridge + fund scripts)
 │   └── tests/                                # @zswap-da/tests
 ```
@@ -178,12 +652,16 @@ monorepo at
 
 | Package | Files |
 |---------|-------|
-| `node/` | `main.{dev,mainnet}.ts`, `config.{dev,mainnet}.ts`, `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `docs.ts` (`GET /docs` serves Vite playground dist), `zk-assets.ts` (`/keys/*`, `/zkir/*` static ZK assets), `zswap-logic.ts`, `batcher-client.ts`, `event-bus.ts` |
-| `database/` | `mod.ts` (re-exports), `migration-order.ts`, `migrations/000-init.sql`, `migrations/001-spent-sets.sql` (`spent_*` liveness sets), `migrations/002-liveness-sets.sql` (`created_unshielded` + windowed `known_roots`), `sql/queries.sql` (+ generated `queries.queries.ts`) |
+| `node/` | `main.{dev,mainnet}.ts`, `config.{dev,mainnet}.ts`, `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `prices.ts` (price resolution + `GET /v1/prices`), `docs.ts` (`GET /docs` serves Vite playground dist), `batcher-client.ts`, `event-bus.ts` |
+| `database/` | `mod.ts` (re-exports), `migration-order.ts`, `migrations/000-init.sql` (THE schema — one file applied from zero; there is no numbered chain, and the 001/002 files this table used to list are gone), `migrations/local-migration.sql` (local-only additions), `price-map.ts` (token NAME → reference asset, per-base-unit conversion), `sql/queries.sql` (+ generated `queries.queries.ts`), `sql/queries.app.ts` |
 | `validator/` | `validate.ts` (pipeline), `derive.ts`, `refstate.ts`, `types.ts`, `README.md`, `scripts/check-preview-indexer.ts` |
 | `batcher/` | `batcher.{dev,mainnet}.ts`, `config.ts`, `midnight-balancing.ts`, `celestia.ts` (`ZswapCelestiaAdapter.validateInput` — pre-fee offer gate) |
-| `contracts-midnight/` | `package.json` (scripts for `launchMidnight`), `deploy.ts`, `contract-offer-files/` (Compact source + compiled output) |
+| `midnight-infra/` | `package.json` (Midnight node, indexer and proof-server process scripts) |
 | `contracts-celestia/` | `package.json` (`celestia-{node,bridge,fund}:*` scripts), `fund-bridge.ts` |
+| `solver/` | `solver.{dev,preview,mainnet}.ts` (per-network entrypoints), `env.ts`, `src/launch.ts` (the `start:solver` configuration contract), `src/run.ts` (`runSolver`), `src/book-sync.ts`, `src/ladder-source.ts`, `src/relay-client.ts`, `src/swap-job-executor.ts`, `src/stock.ts`, `src/operation-journal.ts` |
+| `solver-core/` | `api-client.ts` (kernel REST/SSE + exact files), `ladder-derivation.ts`, `admission-policy.ts` (one typed policy for publication and admission), `relay-ws-contract.ts`, `receipt-client.ts`, `batcher.ts`, `wallet.ts` |
+| `offer-guard/` | `mod.ts` (offer hash, guard ladder, dedup store), `sponsorship.ts` (`evaluateSponsorship()` — the ONE fee-sponsorship rule, shared by the quote, the node pre-check and the batcher) |
+| `price-feed/` | `price-feed.{dev,preview,mainnet}.ts`, `src/config.ts`, `src/coingecko.ts` (one asset per request, key as a header), `src/cycle.ts` (spacing, 429 stop, status row), `src/run.ts` (`--once` vs loop, retry ladder, exit codes) |
 | `tests/` | `run-tests.ts`, `start.test.ts` (test orchestrator), `helpers.ts`, `lib/db.ts`, `infra/{celestia,midnight}-ready.test.ts`, `stm/{zswap-flow,api,multi-token,unshielded-only,root-unknown}.test.ts` |
 
 ## Services & ports
@@ -199,13 +677,14 @@ monorepo at
 | Midnight node | 9944 |
 | Midnight indexer | 8088 |
 | Midnight proof server | 6300 |
+| COW solver | Trading is outbound (kernel API + relay websocket); optional read-only status listener on `SOLVER_STATUS_HOST` / `SOLVER_STATUS_PORT` |
+| Price feed | **none** — outbound only (CoinGecko) plus the database; it listens on no port |
 
 ## Grammar / state-machine inputs
 
 | Key | Source | Purpose |
 |-----|--------|---------|
 | `celestia-zswap` | Celestia DA primitive | Validate a published offer blob (structure + ZK proofs + spent-set liveness), then index it (gives/wants, nullifiers, unshielded spends; schedule TTL cleanup) or drop + emit `offer_rejected`. |
-| `midnight-zswap` | Midnight ledger primitive | Snapshot contract state. |
 | `midnight-nullifier` | Midnight nullifier primitive | Record the nullifier in `spent_nullifiers` (liveness) and archive any offer whose shielded nullifier is consumed on chain. |
 | `midnight-unshielded-spend` | Midnight unshielded-spend primitive | Record the UTXO in `spent_unshielded` (liveness) and archive any offer whose unshielded UTXO is spent. |
 | `midnight-unshielded-create` | Midnight unshielded-create primitive | Record every created unshielded UTXO in `created_unshielded` (existence liveness). |
@@ -214,11 +693,14 @@ monorepo at
 
 ## API
 
-**Interactive playground (try upload / settle / wallet mint live):**
+**Interactive playground (try upload / settle / wallet balances live):**
 `bun run docs:dev` → [http://localhost:10601/docs/](http://localhost:10601/docs/)
 (Vite + React). After `bun run docs:build`, the node also serves it at
 [http://localhost:9999/docs](http://localhost:9999/docs). Proof server URL comes
 from `VITE_PROOF_SERVER_URL` (local default `http://localhost:6300`).
+The Wallet panel links to the external faucet. `VITE_FAUCET_URL` overrides its
+base and `VITE_FAUCET_NETWORK` overrides the selected network; otherwise an
+explicit `VITE_MIDNIGHT_NETWORK_ID` is preserved and Preprod is the default.
 **Full request/response reference with curl examples: [API.md](API.md).**
 The table below is a quick index; API.md documents every field, error code, the
 batcher endpoints, and direct Celestia access.
@@ -240,11 +722,13 @@ There are **two ways** to post and read offers:
 | `GET` | `/v1/offers/:offerId` | One offer **including its `swapoffer1…` string** (`offerBech32`), by content hash. Resolves archived offers with their final status. |
 | `GET` | `/v1/offers/:offerId/status` | Lightweight status probe by content hash. |
 | `POST` | `/v1/offers/status` | Status by blob (`{offer}` or `{offers: […]}`, max 50) — POST body because real blobs are 16–25 KB. |
+| `POST` | `/v1/offers/files` | Exact-files read: 1–8 content identities in, exact indexed bytes out for the live+valid ones and a stable verdict for the rest. Side-effect-free; current state is re-read after proof verification. |
 | `GET` | `/v1/known-tokens` | Token color → name registry. |
 | `POST` | `/v1/known-tokens` | Register a token name/color/kind (dev/e2e only; off in production). |
-| `GET` | `/v1/midnight/config` | Public Midnight config the browser contract client needs. |
+| `GET` | `/v1/midnight/config` | Public Midnight network config the browser wallet needs. |
 | `POST` | `/v1/offers` | Fully validate an offer (structure + ZK proofs + liveness); `400 {error, reason}` on failure, `409` on duplicate, else forward to the batcher → Celestia. Returns the offer's `offerId`. |
 | `GET` | `/v1/offers/stream` | Server-Sent Events stream for offer lifecycle (indexed / consumed / expired). |
+| `GET` | `/v1/offers/updates` | Websocket update stream carrying the same lifecycle events, plus a per-subscription sequence number so a consumer mirroring the book can prove it missed nothing. |
 
 Beyond the above, the node also serves `GET /health`, `GET /v1/health/sync`,
 `GET /v1/pairs`, `GET /v1/quote`, and

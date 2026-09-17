@@ -5,8 +5,12 @@
    named query after its @name declaration. */
 
 /* @name InsertKnownToken */
-INSERT INTO known_tokens (token_color, name, kind)
-VALUES (:token_color!, :name!, :kind!)
+-- decimals/asset_id are optional for old clients. The defaults (6
+-- base-unit-per-coin, no asset -> priced by NAME through price-map.ts) retain
+-- compatibility for manually registered legacy rows. COALESCE rather than a
+-- column default so an explicit NULL from a caller still lands on 6.
+INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id)
+VALUES (:token_color!, :name!, :kind!, COALESCE(:decimals::integer, 6), :asset_id)
 ON CONFLICT (token_color) DO NOTHING;
 
 /* @name GetKnownTokens */

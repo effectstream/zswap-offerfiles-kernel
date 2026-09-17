@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "profile": "offer-files-solver-v1",
+  "valid": false,
+  "live": false,
+  "claimedOfferId": "abababababababababababababababababababababababababababababababab",
+  "computedOfferId": "abababababababababababababababababababababababababababababababab",
+  "stateVersion": "42",
+  "validatedAt": "2026-08-14T13:34:56.001Z",
+  "status": "live",
+  "code": "EXPIRED",
+  "reason": "the indexed offer expired before its cleanup transition archived the row"
+}

@@ -9,6 +9,9 @@ console.log(`Node: ${config.nodeUrl}  Network: ${config.networkId}`);
 const liveness = await fetch(`${config.nodeUrl}/health`);
 print("/health", { status: liveness.status, ok: liveness.ok });
 
+const readiness = await get("/v1/health");
+print("/v1/health", readiness);
+
 const sync = await get("/v1/health/sync");
 print("/v1/health/sync", sync);
 

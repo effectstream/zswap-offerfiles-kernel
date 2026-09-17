@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { closeTestPglite } from "./test-pglite.ts";
 
 // Item #19 phase 1: fill-vs-cancel classification from nullifier tx grouping.
 // Settlement is atomic — a fill consumes ALL of an offer's inputs in ONE
@@ -40,7 +41,7 @@ const {
 } = await import("@zswap-da/database");
 
 const PORT = 54343;
-let handle: { close: () => Promise<void> };
+let handle: Awaited<ReturnType<typeof startPglite>>;
 let client: InstanceType<typeof pg.Client>;
 
 const BASE = "b".repeat(64);
@@ -188,9 +189,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try {
-    await handle?.close();
-  } catch { /* noop */ }
+  await closeTestPglite(handle, client);
 });
 
 test("tx_hash is captured and first-seen wins on replay", async () => {

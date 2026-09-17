@@ -2,7 +2,7 @@
 // the BATCHER, so NO swap participant needs dust (only the batcher does).
 //
 //   N independent maker wallets, each holding a distinct shielded token Ti
-//   (minted by genesis and transferred in). Each maker posts an UNBALANCED
+//   (externally issued to genesis and transferred in). Each maker posts an UNBALANCED
 //   offer  give Ti / want T(i+1)  (payFees:false → no dust). The offers form a
 //   cycle  P0→P1→…→P(N-1)→P0.  A SOLVER (this script) merges the N proven
 //   offers into ONE token-balanced transaction and hands it to the batcher's
@@ -21,7 +21,7 @@ import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
-import { joinOfferFiles, mintShielded } from "./lib/offer-files.ts";
+import { requireDistinctTokenColors } from "./lib/prefunded.ts";
 import {
   buildWallet,
   shieldedBalances,
@@ -40,8 +40,6 @@ const TAG = `[ring-${N}]`;
 const API = "http://127.0.0.1:9999";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const SEP_BASE = 0x70; // token domain separators 0x70..; distinct from prior tests
-const MINT_AMOUNT = 1_000_000_000n;
 const TRANSFER_AMOUNT = 5_000_000n; // genesis → each maker
 const SWAP_AMOUNT = 1_000n; // each maker gives/wants this much
 // Fresh maker seeds — distinct from genesis (…0001) and batcher (…0003/0004).
@@ -89,14 +87,16 @@ async function submitOffer(blob: string): Promise<{ status: number; body: any }>
 }
 
 const before = {
-  spent_nullifiers: await count("spent_nullifiers"),
+  nullifiers: await count("nullifiers"),
   offers: await count("offer_file"),
 };
 console.log(`${TAG} before:`, JSON.stringify(before));
 
-// ── 1. Genesis (minter / token source — the only wallet that needs dust, for
-//        minting + the setup transfers; it is NOT a swap participant). ──
-console.log(`${TAG} building genesis (minter) + ${N} maker wallets…`);
+// ── 1. Genesis (prefunded token source; not a swap participant). ──
+const tokens = requireDistinctTokenColors(
+  Array.from({ length: N }, (_, i) => `E2E_RING_TOKEN_${i}`),
+);
+console.log(`${TAG} building prefunded genesis + ${N} maker wallets…`);
 const genesis = await buildWallet(net.walletSeed);
 const makers = await Promise.all(Array.from({ length: N }, (_, i) => buildWallet(makerSeed(i))));
 try {
@@ -109,16 +109,9 @@ try {
 
   const makerAddrs = await Promise.all(makers.map((m) => m.wallet.shielded.getAddress()));
 
-  // ── 2. Mint N distinct shielded tokens to genesis ──
-  console.log(`${TAG} minting ${N} shielded tokens…`);
-  const deployed = await joinOfferFiles(genesis);
-  const nonce = BigInt(Date.now());
-  const tokens: string[] = [];
-  for (let i = 0; i < N; i++) {
-    tokens.push(await mintShielded(deployed, SEP_BASE + i, MINT_AMOUNT, nonce + BigInt(i)));
-  }
+  // ── 2. Use N distinct externally issued shielded tokens ──
   console.log(`${TAG} tokens: ${tokens.map((t, i) => `T${i}=${t.slice(0, 10)}…`).join(" ")}`);
-  check(`${N} shielded tokens minted`, tokens.every(Boolean));
+  check(`${N} external token colors configured`, tokens.every(Boolean));
 
   // ── 3. Transfer Ti → maker i ──
   for (let i = 0; i < N; i++) {
@@ -171,8 +164,8 @@ try {
   check("batcher accepted + settled merged ring tx (batcher pays dust)", settle.ok, `status=${settle.status} ${JSON.stringify(settle.body)?.slice(0, 160)}`);
 
   // ── 7. Settlement effects ──
-  const spentOk = await waitFor(`spent_nullifiers += ${N}`, async () => (await count("spent_nullifiers")) >= before.spent_nullifiers + N, 36);
-  check(`spent_nullifiers grew by ${N} (all offer inputs consumed)`, spentOk, `before=${before.spent_nullifiers} now=${await count("spent_nullifiers")}`);
+  const spentOk = await waitFor(`nullifiers += ${N}`, async () => (await count("nullifiers")) >= before.nullifiers + N, 36);
+  check(`nullifiers grew by ${N} (all offer inputs consumed)`, spentOk, `before=${before.nullifiers} now=${await count("nullifiers")}`);
 
   const archivedOk = await waitFor("all offers archived", async () => {
     const active = await db<{ id: number }>(`SELECT id FROM offer_file WHERE id IN (${offerIds.join(",")})`);

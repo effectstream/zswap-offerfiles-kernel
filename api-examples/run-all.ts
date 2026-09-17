@@ -2,7 +2,7 @@
 //
 // Usage:
 //   bun run api-examples/run-all.ts              # read-only: 01–06
-//   WALLET_OPS=1 bun run api-examples/run-all.ts # also runs 08–11 (wallet + mint + offer + settle)
+//   WALLET_OPS=1 bun run api-examples/run-all.ts # also runs wallet + offer + settle
 //
 // The batcher and Midnight node cannot handle concurrent calls — every step
 // runs sequentially, with a configurable pause between wallet operations.
@@ -10,7 +10,7 @@
 // Env overrides (passed through to child scripts):
 //   MIDNIGHT_NETWORK_ID  NODE_URL  BATCHER_URL
 //   WALLET_SEED  TAKER_SEED  WALLET_OPS
-//   GIVE_TOKEN  WANT_TOKEN  GIVE_AMOUNT  WANT_AMOUNT  TTL_MINUTES  MINT_AMOUNT
+//   GIVE_TOKEN  WANT_TOKEN  GIVE_AMOUNT  WANT_AMOUNT  TTL_MINUTES
 
 import { readFileSync } from "node:fs";
 import { config, header, get, post } from "./config.ts";
@@ -77,24 +77,15 @@ if (!walletOk) {
   process.exit(1);
 }
 
-// Mint test tokens (maker wallet → on-chain contract circuits)
-// Domain separators are fixed so re-runs top up the same token colors.
-await sleep(PAUSE_MS);
-const mintOk = await run("09 · Mint test tokens", "api-examples/09-mint.ts", {
-  WALLET_SEED: config.walletSeed,
-});
-if (!mintOk) {
-  console.error("Mint failed — check WALLET_SEED has NIGHT for dust fees and proof server is reachable.");
-  process.exit(1);
-}
-
-// Submit offer using the freshly minted tokens (maker wallet → Celestia via batcher)
+// Submit an offer from externally prefunded inventory (maker → Celestia).
 await sleep(PAUSE_MS);
 const submitOk = await run("10 · Build + submit offer", "api-examples/10-submit-offer.ts", {
   WALLET_SEED: config.walletSeed,
+  ...(process.env.GIVE_TOKEN ? { GIVE_TOKEN: process.env.GIVE_TOKEN } : {}),
+  ...(process.env.WANT_TOKEN ? { WANT_TOKEN: process.env.WANT_TOKEN } : {}),
 });
 if (!submitOk) {
-  console.error("Offer submission failed — check WALLET_SEED balance and node sync status.");
+  console.error("Offer submission failed — prefund WALLET_SEED, set GIVE_TOKEN/WANT_TOKEN, and check node sync.");
   process.exit(1);
 }
 

@@ -24,7 +24,7 @@ import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
-import { joinOfferFiles, mintShielded, mintUnshielded } from "./lib/offer-files.ts";
+import { requireDistinctTokenColors } from "./lib/prefunded.ts";
 import { buildWallet, shieldedKeys, transferShielded, waitForShielded, waitForSync } from "./lib/wallet.ts";
 import { describeImbalances, mergeFinalized, nonDustImbalances, settleViaBatcher } from "./lib/batcher.ts";
 
@@ -35,8 +35,6 @@ const TAG = "[unshielded]";
 const API = "http://127.0.0.1:9999";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const SEP = { T0: 0x90, U: 0x91 } as const;
-const MINT_AMOUNT = 1_000_000_000n;
 const FUND = 5_000_000n;
 const AMT = 1_000n;
 const P0_SEED = "0000000000000000000000000000000000000000000000000000000000000020";
@@ -94,13 +92,14 @@ const unshieldedBalance = async (w: any, color: string): Promise<bigint> => {
 };
 
 const before = {
-  spent_nullifiers: await count("spent_nullifiers"),
+  spent_nullifiers: await count("nullifiers"),
   spent_unshielded: await count("spent_unshielded"),
   offers: await count("offer_file"),
 };
 console.log(`${TAG} before:`, JSON.stringify(before));
 
 console.log(`${TAG} building genesis + P0 (shielded side) + P1 (unshielded side)…`);
+const [T0, U] = requireDistinctTokenColors(["E2E_SHIELDED_TOKEN", "E2E_UNSHIELDED_TOKEN"]);
 const genesis = await buildWallet(net.walletSeed);
 const p0 = await buildWallet(P0_SEED);
 const p1 = await buildWallet(P1_SEED);
@@ -117,13 +116,7 @@ try {
   const p1ShieldedAddr = await p1.wallet.shielded.getAddress();
   const p0UnshieldedAddr = UnshieldedAddress.codec.decode(net.id as any, p0.unshieldedKeystore.getBech32Address());
 
-  // Mint T0 (shielded → genesis) and U (unshielded → directly to P1)
-  console.log(`${TAG} minting T0 (shielded) + U (unshielded → P1)…`);
-  const deployed = await joinOfferFiles(genesis);
-  const nonce = BigInt(Date.now());
-  const T0 = await mintShielded(deployed, SEP.T0, MINT_AMOUNT, nonce);
-  const U = await mintUnshielded(deployed, SEP.U, MINT_AMOUNT, p1.unshieldedAddress);
-  console.log(`${TAG} T0=${T0.slice(0, 12)}… (shielded)  U=${U.slice(0, 12)}… (unshielded → P1)`);
+  console.log(`${TAG} T0=${T0.slice(0, 12)}… (shielded)  U=${U.slice(0, 12)}… (P1 must be prefunded)`);
 
   // Fund P0 with T0
   const gT0 = await waitForShielded(genesis, T0, FUND, 24);
@@ -133,7 +126,7 @@ try {
   check("P0 funded with shielded T0", p0HasT0);
 
   const p1HasU = await waitFor("P1 sees unshielded U", async () => (await unshieldedBalance(p1, U)) >= AMT, 36);
-  check("P1 funded with unshielded U (minted directly)", p1HasU, `U=${await unshieldedBalance(p1, U)}`);
+  check("P1 externally prefunded with unshielded U", p1HasU, `U=${await unshieldedBalance(p1, U)}`);
 
   // P0 offer: give shielded T0, want unshielded U (no special signing)
   console.log(`${TAG} P0 building shielded-give / unshielded-want offer…`);
@@ -209,7 +202,7 @@ try {
   check("batcher settled merged shielded↔unshielded tx", settle.ok, `status=${settle.status} ${JSON.stringify(settle.body)?.slice(0, 200)}`);
 
   if (settle.ok) {
-    const spentN = await waitFor("spent_nullifiers grew", async () => (await count("spent_nullifiers")) > before.spent_nullifiers, 36);
+    const spentN = await waitFor("spent_nullifiers grew", async () => (await count("nullifiers")) > before.spent_nullifiers, 36);
     check("spent_nullifiers grew (shielded leg consumed)", spentN);
     const spentU = await waitFor("spent_unshielded grew", async () => (await count("spent_unshielded")) > before.spent_unshielded, 36);
     check("spent_unshielded grew (UnshieldedSpend primitive — unshielded leg consumed)", spentU, `before=${before.spent_unshielded} now=${await count("spent_unshielded")}`);

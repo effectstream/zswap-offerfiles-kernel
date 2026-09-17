@@ -29,7 +29,7 @@ const NAV: { group: string; items: { id: PanelId; label: string; hint: string }[
     group: 'Start',
     items: [
       { id: 'overview', label: 'Overview', hint: 'Lifecycle & ports' },
-      { id: 'wallet', label: 'Wallet', hint: 'Connect · balances · mint' },
+      { id: 'wallet', label: 'Wallet', hint: 'Connect · balances · faucet' },
       { id: 'health', label: 'Health', hint: '/health · sync' },
     ],
   },

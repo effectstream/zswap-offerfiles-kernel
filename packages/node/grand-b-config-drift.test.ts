@@ -16,6 +16,7 @@
 // deeper fix is to delete the duplication: export a `buildConfig(startTime)`
 // from config.dev.ts and have both entrypoints call it.
 
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

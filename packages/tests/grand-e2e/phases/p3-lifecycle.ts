@@ -12,6 +12,7 @@ import {
   CANCEL_COIN,
   amountsFor,
   buildOffer,
+  genesisFanOut,
   cancelGiveToken,
   cancelWantToken,
   makeRefill,
@@ -27,12 +28,10 @@ import {
 } from "../actors/wallets.ts";
 import { buildWallet } from "../../lib/wallet.ts";
 import { unshieldedAddressObj, waitForSync, waitForUnshielded } from "../../lib/wallet.ts";
-import { mintUnshielded } from "../../lib/offer-files.ts";
 import { PoolWallet as PW } from "../actors/wallets.ts";
 import { getChartHistory, getOfferByHash, getOfferStatus } from "../lib/api2.ts";
 import { historyRowByHash, offerRowByHash } from "../lib/db2.ts";
 import { beginPhase, check, note, waitUntil } from "../lib/util.ts";
-import { TOKEN_SEPS } from "../config.ts";
 
 async function waitArchived(db: Client, hash: string): Promise<boolean> {
   return waitUntil(
@@ -86,7 +85,7 @@ async function settleAndAssert(db: Client, taker: PoolWallet, rec: OfferRecord, 
 
 export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
   beginPhase("p3-lifecycle");
-  const { makers, takers, cancelSingles, cancelDoubles, genesisPw, deployed } = actors;
+  const { makers, takers, cancelSingles, cancelDoubles, genesisPw } = actors;
 
   // ── consumed: unshielded↔unshielded ──────────────────────────────────────
   {
@@ -168,13 +167,15 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
         return new PW(`GAP-${s.shape}`, seed, wr, await wr.wallet.shielded.getAddress(), unshieldedAddressObj(wr));
       })();
       const total = GAP_COIN * BigInt(s.coins);
-      // Separate mints so the wallet really holds `coins` distinct UTXOs — a
-      // single mint of the total would be one coin and the split shapes would
-      // silently degrade into the single-input case.
+      // Separate transfer outputs ensure the wallet really holds `coins`
+      // distinct UTXOs; setup never mints locally.
       await genesisPw.run(async () => {
-        for (let i = 0; i < s.coins; i++) {
-          await mintUnshielded(deployed, TOKEN_SEPS.UA, GAP_COIN, pw.wr.unshieldedAddress);
-        }
+        await genesisFanOut(genesisPw.wr, false, ledger.colors.UA!,
+          Array.from({ length: s.coins }, () => ({
+            receiverAddress: pw.unshieldedObj,
+            amount: GAP_COIN,
+          })),
+        );
       });
       const landed = await waitForUnshielded(pw.wr, ledger.colors.UA!, total, 36);
       if (landed < total) {

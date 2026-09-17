@@ -40,7 +40,7 @@ export function AcceptPanel({
       setBuildErr('Connect a wallet first (Wallet tab).')
       return
     }
-    if (!wallet.canMint || !wallet.connected.connectedApi) {
+    if (!wallet.canBuildOffers || !wallet.connected.connectedApi) {
       setBuildErr('Building settlements requires Lace (browser wallet), not the local seed wallet.')
       return
     }
@@ -105,7 +105,7 @@ export function AcceptPanel({
                   <td className="truncate" title={o.offerId ?? ''}>{short(o.offerId ?? '', 12)}</td>
                   <td>{legs(o.computed?.gives)}</td>
                   <td>{legs(o.computed?.wants)}</td>
-                  <td>{o.celestiaHeight ?? ''}</td>
+                  <td>{o.blockHeight ?? ''}</td>
                   <td>{o.blobChars ? `${o.blobChars} chars` : '—'}</td>
                 </tr>
               ))}
@@ -121,7 +121,7 @@ export function AcceptPanel({
         </p>
         {wallet.status !== 'connected' ? (
           <div className="callout warn">Connect a wallet on the Wallet tab first.</div>
-        ) : !wallet.canMint ? (
+        ) : !wallet.canBuildOffers ? (
           <div className="callout warn">Settlement building needs Lace. Local seed wallet can only show balances.</div>
         ) : (
           <>

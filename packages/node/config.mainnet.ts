@@ -5,7 +5,6 @@ import {
 } from "@effectstream/config";
 import {
   PrimitiveTypeCelestiaGeneric,
-  PrimitiveTypeMidnightGeneric,
   PrimitiveTypeMidnightNullifierAndCommitment,
   PrimitiveTypeMidnightUnshieldedSpend,
   PrimitiveTypeMidnightUnshieldedCreate,
@@ -13,7 +12,6 @@ import {
 } from "@effectstream/sm/builtin";
 import type { BlockNumber } from "@effectstream/utils";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
-import { OfferFilesContract } from "@zswap-da/contract-offer-files";
 import { getConnection } from "@effectstream/db";
 
 import {
@@ -26,7 +24,6 @@ import {
   CELESTIA_RPC_URL,
   CELESTIA_START_HEIGHT,
   CELESTIA_STEP_SIZE,
-  midnightContract,
 } from "./env.ts";
 
 if (CELESTIA_NETWORK !== "mainnet") {
@@ -175,17 +172,6 @@ export const config = new ConfigBuilder()
         startBlockHeight: celestiaStartHeight,
         namespace: CELESTIA_NAMESPACE,
         stateMachinePrefix: "celestia-zswap",
-      }),
-    ).addPrimitive(
-      (syncProtocols) => (syncProtocols as any).parallelMidnight,
-      () => ({
-        name: "ZswapMidnightState",
-        type: PrimitiveTypeMidnightGeneric,
-        startBlockHeight: MIDNIGHT_START_BLOCK,
-        contractAddress: midnightContract!.contractAddress,
-        stateMachinePrefix: "midnight-zswap",
-        contract: { ledger: OfferFilesContract.ledger },
-        networkId: midnightNetworkConfig.id,
       }),
     ).addPrimitive(
       (syncProtocols) => (syncProtocols as any).parallelMidnight,

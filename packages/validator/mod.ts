@@ -23,6 +23,11 @@ export {
   extractOfferInputRoots,
   RootExtractError,
 } from "./extract-root.ts";
+export {
+  evaluateOfferLiveness,
+  offerLivenessFailure,
+  orderedOfferLivenessDescriptors,
+} from "./liveness.ts";
 export type {
   OfferRejectCode,
   OfferValidation,
@@ -31,6 +36,13 @@ export type {
   UnshieldedSpendRef,
   ValidateOpts,
 } from "./types.ts";
+export type {
+  OfferLivenessDescriptor,
+  OfferLivenessFailure,
+  OfferLivenessProbe,
+  OfferLivenessVerdict,
+  UnshieldedFailureMode,
+} from "./liveness.ts";
 
 // Re-export MIP-0005 codec so API consumers can encode/decode without a
 // separate dependency (see API.md).

@@ -7,7 +7,7 @@ from memory. The backend will be **redeployed from zero** with these changes —
 is no compatibility window and no legacy fallback: the old API simply stops existing.
 
 Base URL: `http://<host>:9999`. All offer-related endpoints moved from `/api/*` to
-`/v1/*`. Rate limit: **60 requests/min per IP** across all routes → HTTP 429
+`/v1/*`. Rate limit: **600 requests/min per IP** (`API_RATE_LIMIT_MAX`) across all routes → HTTP 429
 `{ "error": "RATE_LIMITED", "reason": "..." }`. On 429, back off; do not retry-loop.
 
 ---
@@ -56,17 +56,19 @@ indexer from the transaction itself; nothing in `computed` is maker-supplied).
 | field `blob` / `transaction_hex` | `offerBech32` |
 | field `next_cursor` | `nextCursor` |
 | field `blob_chars` | `blobChars` |
-| field `celestia_height` | `celestiaHeight` |
+| field `celestia_height` | `blockHeight` (Effectstream L2 height; not a Celestia height) |
 | leg field `kind` | `type` (values unchanged: `SHIELDED` \| `UNSHIELDED`) |
 | top-level `gives`/`wants` | `computed.gives` / `computed.wants` |
 | `metadata_expires_at` | `computed.expiresAt` |
 | numeric `id` anywhere | gone — use `offerId` |
 
-Statuses: `live | consumed | cancelled | expired | not_found`.
-`consumed` = all inputs spent in one settlement tx (a fill). `cancelled` = inputs
-spent across different txs / partially (the maker spent the coins elsewhere —
-definitive, settlement is atomic). Treat both as "off the book"; show them
-differently if the UI distinguishes fills from cancels.
+Statuses: `live | consumed | cancelled | expired | unknown | not_found`.
+`consumed` = a fill verified by the offer's stored output commitments.
+`cancelled` = inputs spent across transactions / partially, or a one-transaction
+spend that is proven to be missing at least one stored marker. `unknown` = archived
+without enough complete transaction-bound proof (including markerless rows and offers with unshielded inputs)
+to distinguish a fill from a maker cancellation; never show it as a successful
+fill. All three are off the book.
 
 ---
 
@@ -86,7 +88,7 @@ Query params (all optional): `limit` (default & max 100), `token` (64-hex color)
       "version": 1,
       "offerId": "9f2c4a…64 hex…e1",
       "blobChars": 24781,
-      "celestiaHeight": "12231800",
+      "blockHeight": "12231800",
       "computed": {
         "gives": [ { "token": "0000…0000", "amount": "1000000", "type": "UNSHIELDED" } ],
         "wants": [ { "token": "70ce…b569", "amount": "500000", "type": "SHIELDED" } ],
@@ -109,11 +111,12 @@ Query params (all optional): `limit` (default & max 100), `token` (64-hex color)
   unknown colors as truncated hex, never hide them.
 - Legs are **layer-tagged** (`type`). Two legs of the same token but different
   `type` are different assets for netting purposes — never merge them.
-- `expiresAt` is a **conservative floor**, not an exact deadline: for shielded
-  offers the chain may keep the offer fillable longer (the proof-root window
-  refreshes while the chain is quiet). Safe UI: "expires ≥ …" or a countdown that
-  flips to "may still be live" at zero; the authoritative end state is the status
-  flipping to `expired`/`consumed`.
+- `expiresAt` is the earliest applicable constraint: proof-root
+  last-seen + root window and earliest Intent TTL are both considered for mixed
+  transactions; publication TTL is used only if neither exists. The root-derived
+  value is deliberately conservative because the chain can refresh a current
+  root after ingestion, but the indexer archives at its persisted cutoff. Treat
+  the REST status as authoritative and refetch when a countdown reaches zero.
 - Pagination loop: request with `after_hash=<previous nextCursor>` until
   `nextCursor` is `null`. A full page can be the last one — the next request then
   returns `{ "offers": [], "nextCursor": null }`. A fabricated/stale cursor gets
@@ -134,7 +137,7 @@ resolves **archived** offers (with their terminal status):
   "version": 1,
   "offerId": "9f2c4a…",
   "offerBech32": "swapoffer1q…(16–25 KB)",
-  "celestiaHeight": "12231800",
+  "blockHeight": "12231800",
   "ttlSeconds": "3600",
   "computed": {
     "gives": [ … ], "wants": [ … ],
@@ -150,6 +153,7 @@ resolves **archived** offers (with their terminal status):
 ```json
 { "offerId": "9f2c4a…", "status": "live" }
 ```
+`unknown` = archived but not safely classifiable as a fill or cancellation.
 `not_found` (in the 200 body) = never indexed under that id.
 
 ### `POST /v1/offers/status` — status when you only have a blob
@@ -212,17 +216,23 @@ heartbeat every 30 s, every frame carries `timestamp` (ms). Events:
 
 ```
 { "type": "connected", "timestamp": … }                     // on open
-{ "type": "offer_indexed",  "offerId": <number>, "offerHash": "…", "celestiaHeight": …, "gives": […], "wants": […] }
-{ "type": "offer_consumed", "offerId": <number>, "nullifier": "…" }
-{ "type": "offer_expired",  "offerId": <number> }
-{ "type": "offer_rejected", "code": "…", "reason": "…", "offerHash": "…", "celestiaHeight": … }
-{ "type": "token_minted",   "name": "…", "color": "…", "kind": "SHIELDED|UNSHIELDED" }
+{ "type": "offer_indexed",  "offerId": <number>, "offerHash": "…", "blockHeight": …, "gives": […], "wants": […] }
+{ "type": "offer_consumed", "offerId": <number>, "offerHash": "…", "nullifier": "…" }
+{ "type": "offer_expired",  "offerId": <number>, "offerHash": "…" }
+{ "type": "offer_rejected", "code": "…", "reason": "…", "offerHash": "…", "blockHeight": … }
+{ "type": "token_minted",   "name": "…", "color": "…", "kind": "shielded|unshielded" }
 ```
+
+The node caps concurrent streams (default 100). Capacity exhaustion returns
+`503 SSE_CAPACITY` plus `Retry-After: 5`; a slow consumer is disconnected when
+its response buffer applies backpressure. Reconnect with backoff and refetch
+`GET /v1/offers` after every reconnect because SSE has no replay cursor.
 
 ⚠️ Known wart: in SSE events `offerId` is still the **internal numeric row id**,
 not the content hash — the hash is in `offerHash`. Correlate SSE ↔ REST via
 `offerHash` only. Simplest robust strategy: treat any `offer_*` event as a
-"refetch the book" signal rather than patching state from event fields.
+"refetch the book" signal rather than patching state from event fields. The hash
+can be absent only for legacy rows or a rejection too malformed to hash.
 
 ---
 
@@ -231,16 +241,58 @@ not the content hash — the hash is in `offerHash`. Correlate SSE ↔ REST via
 These serve DB/registry rows and did **not** get the camelCase treatment. Take
 their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
 
-- `GET /v1/known-tokens` → `[{ "id": 1, "token_color": "70ce…", "name": "tDUST", "kind": "SHIELDED" }]`
+- `GET /v1/known-tokens` → `[{ "id": 1, "token_color": "70ce…", "name": "tDUST", "kind": "shielded", "decimals": 6, "asset_id": null }]`
+  (`decimals` and `asset_id` are new: base units per PRICED coin — never the
+  colour's own display decimals — and the reference asset a price comes from.
+  `POST /v1/known-tokens` accepts both, optionally, and defaults `decimals` to
+  **`6`** for legacy/local registrations. Canonical registry records state
+  their published scales (BTC variants 8, ETH 18, stablecoins 6). `NIGHT` is
+  seeded with 6 — 1 NIGHT is 10⁶ Stars, its base
+  unit. **A UI must divide by `10^decimals` before showing an amount**, and
+  multiply the number a user types before putting it on the wire; a node too old
+  to send the field is one of these tokens, so read a missing `decimals` as 6.)
+- `GET /v1/prices?tokens=<color>[,<color>…]` → `{ "sponsor_discount", "feed": { "provider", "last_run_at", "last_ok_at", "last_error" }, "assets": [...], "tokens": [...] }`.
+  The reference prices behind every quote. **`tokens` is required**: 1-50 64-hex
+  colours, comma-separated; without it (or with a malformed or over-long list) the
+  answer is `400 { "error": "VALIDATION", "reason" }`. There is no unfiltered form —
+  ask for the pair on screen. Colours are matched case-insensitively and duplicates
+  collapse. A colour this node cannot price is **silently absent** from `tokens`
+  rather than an error, and `assets` carries only the assets the returned prices
+  came from; `sponsor_discount` and `feed` are always present, even when nothing
+  matched.
+  Every price is in **USD** and nothing is
+  pinned to a dollar — the stablecoins are quoted from the provider too, so a depeg
+  shows. `price_usd` is a decimal **string** and is **per base unit** (a dollar-ish
+  stablecoin with 6 decimals reads about `0.000001`). Each entry carries a `source`:
+  `feed` (CoinGecko), `seed` (shipped in the schema), `manual` (an operator
+  override) or `fallback` (**a demo price derived from the token colour — not
+  market data; label it**). `feed` is all-nulls when the
+  refresh service has never run.
 - `GET /v1/pairs` → `[{ "pair_key": "…", "base_color": "…", "quote_color": "…", "trade_count": 3, "last_price": "2.0", "last_traded_at": "…", "open_count": 1 }]`
 - `GET /v1/quote?from_token=…&to_token=…&from_amount=…[&to_amount=…]` →
-  `{ "from_token", "to_token", "from_amount", "market_rate", "suggested_to_amount", "to_amount", "implied_rate", "discount", "sponsored", "from_usd", "to_usd" }`.
+  `{ "from_token", "to_token", "from_amount", "market_rate", "suggested_to_amount", "to_amount", "implied_rate", "discount", "sponsored", "from_usd", "to_usd", "source", "sponsor_discount", "from_source", "to_source", "prices_updated_at" }`.
+  Tokens must be distinct 64-hex colors (no `0x`). Amounts are canonical decimal
+  u256 strings: `from_amount` is positive; neither amount accepts signs, leading
+  zeroes, separators, decimals, or exponents. Invalid input is `400 VALIDATION`
+  and is never sanitized into a different amount.
+  `source` is `"token-prices"` or `"demo-fallback"`. This is market data, not a
+  reservation/executable quote.
+  The four new fields are what a UI needs to explain a rate rather than just show it:
+  `sponsor_discount` is the threshold `sponsored` was decided against (a fraction,
+  `0.025` = 2.5%); `from_source`/`to_source` are the per-leg provenance
+  (`feed|seed|manual|fallback|demo-fallback`) so one leg can be labelled a demo
+  rate while the other is real; `prices_updated_at` is the **older** of the two legs'
+  timestamps — a quote is only as fresh as its stalest side — and is `null` when
+  either leg is `demo-fallback`. `market_rate` now comes from real reference prices
+  (BTC/ETH ≈ 32), not from a hash of the token colour.
   Unregistered colors do NOT error: they quote at a $1 demo fallback (two unknowns ⇒ 1:1). Don't render fallback quotes as real market prices — check the token against `/v1/known-tokens` if the UI needs to distinguish.
 - `GET /v1/chart/stats?base=…&quote=…` → `{ "base", "quote", "last", "change24", "high", "low", "volume_base", "volume_quote" }` (numbers; `change24` in %).
 - `GET /v1/chart/history?base=…&quote=…` → newest-first `[{ "price": n, "amt": n, "up": bool, "at": ms }]`. Derived **only from genuine fills** (consumed, not cancelled) — expect it to be sparser than the old data if the old one counted cancels.
 - `GET /v1/midnight/config` → `{ "contractAddress", "indexerUri", "indexerWsUri", "proofServerUri", "networkId" }` (already camelCase).
-- `GET /v1/health` → `{ "status": "ok" }` (liveness only). `GET /v1/health/sync` →
-  rich sync object; gate "the book is current" UI on it rather than on `/v1/health`.
+- `GET /v1/health` → `{ "status": "ok|syncing|error", "synced": bool }`, aggregate
+  protocol readiness across NTP, Midnight, and Celestia. `GET /v1/health/sync`
+  returns the same overall status plus per-chain positions/lag and set diagnostics.
+  Gate "the book is current" UI on `synced` or either endpoint's `status === "ok"`.
 - `POST /v1/known-tokens` `{ color, name, kind }` — **dev/e2e only**; disabled in
   production (`ENABLE_TOKEN_REGISTRY=false`) → don't build UI that requires it.
 

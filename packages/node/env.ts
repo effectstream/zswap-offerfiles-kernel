@@ -1,11 +1,19 @@
 import { getEnv } from "@effectstream/utils/runtime";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
-import { readMidnightContract } from "@effectstream/midnight-contracts/read-contract";
 import {
   resolveOfferTtlSeconds,
   resolveRootWindowSeconds,
 } from "./network-windows.ts";
-import { MIP6_NAMESPACE_ID_SUFFIX_HEX } from "@zswap-da/offer-guard";
+import {
+  MIP6_NAMESPACE_ID_SUFFIX_HEX,
+  parseSponsorPolicy,
+  parseUnpricedPolicy,
+  sponsorDiscountFromBps,
+  type SponsorPolicy,
+  type UnpricedPolicy,
+} from "@zswap-da/offer-guard";
+import { parsePriceMapEnv, type PriceMapEntry } from "@zswap-da/database";
+import { DEFAULT_SPONSOR_DISCOUNT_BPS } from "./market-mock.ts";
 
 // Instance name of the Celestia blob primitive. This is the value the
 // framework writes to effectstream.primitive_accounting.primitive_name, and
@@ -111,6 +119,124 @@ export const OFFER_MAX_BYTES = parseInt(
   getEnv("OFFER_MAX_BYTES") ?? String(1024 * 1024),
 );
 
+// Per-IP request budget for the /v1 API, and IPs exempt from it. A co-located
+// automated client (a solver mirroring the book) bursts well past the shared
+// default during an initial page-through plus a settlement's status polls, so
+// its host is allowlisted rather than the global budget being raised for
+// everyone. Empty allowlist by default — an operator opts in per deployment.
+//
+// Read per call, not once at import, so a caller that sets the vars before
+// building a router gets them — the same reason isTokenRegistryEnabled below
+// is a function.
+export const apiRateLimitMax = (): number =>
+  parseInt(getEnv("API_RATE_LIMIT_MAX") ?? "600");
+
+export const apiRateLimitAllowList = (): string[] =>
+  (getEnv("API_RATE_LIMIT_ALLOWLIST") ?? "")
+    .split(",")
+    .map((ip) => ip.trim())
+    .filter((ip) => ip.length > 0);
+
+// SSE requests remain open, so the per-minute request limiter cannot bound
+// their steady-state memory/socket cost. Cap concurrent streams per node.
+export const apiSseMaxConnections = (): number => {
+  const raw = getEnv("API_SSE_MAX_CONNECTIONS") ?? "100";
+  if (!/^[1-9][0-9]*$/.test(raw)) return 100;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 10_000 ? parsed : 100;
+};
+
+// The websocket update stream (`GET /v1/offers/updates`) never reaches the
+// router-wide request budget — an upgrade request bypasses Fastify's routing
+// entirely — so, exactly as for SSE, concurrent subscriptions are what has to
+// be capped. Excess clients are refused the upgrade with `503 UPDATES_CAPACITY`.
+export const apiUpdatesMaxConnections = (): number => {
+  const raw = getEnv("API_UPDATES_MAX_CONNECTIONS") ?? "100";
+  if (!/^[1-9][0-9]*$/.test(raw)) return 100;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 10_000 ? parsed : 100;
+};
+
+// Decision budget for one exact-files read. Keep a hard upper bound so an
+// operator typo cannot silently permit unbounded async read work. The route
+// observes it at async yields and between validation stages. The ledger's
+// synchronous native proof call blocks the event loop and therefore cannot be
+// preempted (or notice an elapsed timer) mid-call, so the route retains its
+// concurrency slot until any post-deadline read really settles.
+export const exactFilesReadTimeoutMs = (): number => {
+  const raw = getEnv("OFFER_FILES_READ_TIMEOUT_MS") ?? "15000";
+  if (!/^[1-9][0-9]*$/.test(raw)) return 15_000;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 60_000 ? parsed : 15_000;
+};
+
+// Unit tests can disable upstream's post-commit event gate poll (0358d9e)
+// explicitly. Its 1 s tick issues a getLatestEffectstreamBlock on the API's own
+// connection, which is indistinguishable from validation-path work to a test
+// that counts queries on that connection — and could even be the query a test
+// intends to hold. Deployed nodes keep it on: without the poll nothing the
+// state machine emits is ever published.
+export const isEventGatePollEnabled = (): boolean =>
+  (getEnv("EVENT_GATE_POLL_ENABLED") ?? "true") === "true";
+
+// ── Sponsorship threshold ──────────────────────────────────────────────────
+//
+// How far below the reference price an offer must be priced before this
+// deployment will pay the Celestia fee for it. Basis points, not a fraction:
+// the quote's suggested amount is exact bigint arithmetic and 0.025 as a
+// double is not 25/1000, so the wire format has to be an integer.
+//
+// The batcher reads the SAME variable name (packages/batcher/config.ts) but
+// prefers the value the node publishes in GET /v1/prices, so a mismatch
+// between the two processes cannot make the UI promise what the batcher
+// refuses. Read per call, not at import, for the same reason as the knobs
+// above: a test (or a router built after the env was set) must see it.
+export const sponsorDiscountBps = (): number => {
+  const raw = getEnv("SPONSOR_DISCOUNT_BPS") ?? String(DEFAULT_SPONSOR_DISCOUNT_BPS);
+  if (!/^[0-9]{1,4}$/.test(raw)) return DEFAULT_SPONSOR_DISCOUNT_BPS;
+  const parsed = Number(raw);
+  return parsed < 10_000 ? parsed : DEFAULT_SPONSOR_DISCOUNT_BPS;
+};
+
+/** The same threshold as a fraction, for evaluateSponsorship(). */
+export const sponsorDiscount = (): number => sponsorDiscountFromBps(sponsorDiscountBps());
+
+// ── Sponsorship policy — the SAME two variables the batcher reads (Q-6 = A) ──
+//
+// The node's POST /v1/offers pre-check exists so a maker learns "this offer
+// will not be sponsored" from a 422 with numbers, instead of from an opaque
+// failure after the blob has already crossed the network. It is a MIRROR of
+// the batcher's gate, never a second opinion: the batcher holds the wallet and
+// remains authoritative (anyone can POST to /send-input directly), and both
+// evaluate the same `evaluateSponsorship`.
+//
+// Sharing the variable names is what makes that mirror honest. A node that
+// answered 422 while the batcher was still in `warn` would close the site on
+// day one — exactly what D7's `warn`/`allow` defaults exist to prevent — so
+// the node reads the policy too and, at `warn`, logs and forwards.
+//
+// Parsing (including the throw on a typo) is in @zswap-da/offer-guard so the
+// two processes cannot disagree about what a value means. Read per call, like
+// every knob above, so a router built after the env was set sees it.
+export const sponsorPolicy = (): SponsorPolicy => parseSponsorPolicy(getEnv("BATCHER_SPONSOR_POLICY"));
+
+export const sponsorUnpriced = (): UnpricedPolicy =>
+  parseUnpricedPolicy(getEnv("BATCHER_SPONSOR_UNPRICED"));
+
+// Default asset map overrides — `NAME_OR_COLOR=<asset_id>[:decimals],…`,
+// merged over the built-in map in @zswap-da/database. Parsed once per distinct
+// raw value: parsePriceMapEnv throws on a typo, and re-throwing that on every
+// quote would turn one bad character into an outage instead of a startup
+// failure.
+let priceMapCache: { raw: string; parsed: ReadonlyMap<string, PriceMapEntry> } | null = null;
+export const priceMapOverrides = (): ReadonlyMap<string, PriceMapEntry> => {
+  const raw = getEnv("PRICE_FEED_MAP") ?? "";
+  if (priceMapCache === null || priceMapCache.raw !== raw) {
+    priceMapCache = { raw, parsed: parsePriceMapEnv(raw) };
+  }
+  return priceMapCache.parsed;
+};
+
 // Demo token registry (POST /api/known-tokens). known_tokens is a manually
 // curated convenience table: the Midnight token-metadata standard is not live,
 // so any name written here is unverified and any operator can claim any name
@@ -125,16 +251,3 @@ export const isTokenRegistryEnabled = (): boolean =>
 // Unshielded liveness needs no TTL either: created_unshielded is a live-set
 // (create inserts, spend deletes), so it is self-trimming. Only known_roots is
 // TTL-limited, because root validity genuinely expires — ROOT_WINDOW_SECONDS.
-
-
-export const midnightContract = (() => {
-  try {
-    return readMidnightContract("contract-offer-files", {
-      baseDir: new URL("../contracts-midnight/", import.meta.url).pathname,
-      networkId: midnightNetworkConfig.id,
-    });
-  } catch (error) {
-    console.error("[Midnight contract read error]", error);
-    return null;
-  }
-})();

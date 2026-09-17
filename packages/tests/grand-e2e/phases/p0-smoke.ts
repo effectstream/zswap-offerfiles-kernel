@@ -21,6 +21,8 @@ const REQUIRED_TABLES = [
   "known_tokens",
   "offer_rejections",
   "token_prices",
+  "asset_prices",
+  "price_feed_status",
 ];
 
 export async function p0Smoke(db: Client): Promise<void> {

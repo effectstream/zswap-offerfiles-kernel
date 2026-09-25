@@ -8,3 +8,4 @@ export * from "./ladder-schema.ts";
 export * from "./wallet.ts";
 export * from "./validation-contract.ts";
 export * from "./exact-files-contract.ts";
+export * from "./whole-offer-balance.ts";

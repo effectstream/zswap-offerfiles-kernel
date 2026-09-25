@@ -59,6 +59,15 @@ import {
   type LadderPairProvenance,
 } from "@zswap-da/solver-core/ladder-derivation";
 import {
+  accountWholeOfferBalances,
+  buildWholeOfferReceipts,
+  findSafeWholeOfferMergeOrder,
+  MAX_SAFE_MERGE_ORDER_WORK,
+  serializeWholeOfferTokenBalances,
+  type WholeOfferReceipt,
+  type WholeOfferTokenBalance,
+} from "@zswap-da/solver-core/whole-offer-balance";
+import {
   interpolateQuote,
   type JobErrorMessage,
   type SubmitFailedMessage,
@@ -359,13 +368,18 @@ export interface SwapJobExecutorHandle {
   stats: () => SwapJobExecutorStats;
 }
 
-/** Exact maker witness and value received by the solver for one new job.
- * Neither surplus is an inventory obligation. Journal recovery reads its
- * persisted claims/artifacts independently of this new-admission route. */
+/** Exact maker witness and every value received by the solver for one new job.
+ * Receipts are outputs, never inventory obligations. Journal recovery reads
+ * its persisted claims/artifacts independently of this new-admission route. */
 interface ResolvedRoute {
+  /** Sorted physical identity used by claims, journals, and exact-file reads. */
   offers: BookOffer[];
-  surplusIn: bigint;
-  surplusOut: bigint;
+  /** Exact canonical maker accounting reconstructed from the current book. */
+  tokenBalances: WholeOfferTokenBalance[];
+  /** Sorted positive per-token solver outputs; zero balances are absent. */
+  receipts: WholeOfferReceipt[];
+  /** Deterministic numeric-safe order used only for actual SDK merges. */
+  mergeOrder: string[];
   claim: Claim;
 }
 
@@ -540,37 +554,71 @@ export function resolveSwapJobRoute(
     new Set(witness.offerHashes).size !== witness.offerHashes.length) {
     throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "missing or invalid complete-offer witness");
   }
-  const offers = witness.offerHashes.map((hash) => {
+  const offers = [...witness.offerHashes].sort().map((hash) => {
     const offer = cache.book.get(hash);
     if (offer === undefined) throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "route offer disappeared");
     return snapshotOffer(offer);
   });
-  let makerInput = 0n;
-  let makerOutput = 0n;
   for (const offer of offers) {
     const give = offer.gives[0];
     const want = offer.wants[0];
     if (offer.gives.length !== 1 || offer.wants.length !== 1 ||
       give?.kind !== "SHIELDED" || want?.kind !== "SHIELDED" ||
-      give.token.toLowerCase() !== tokenOut || want.token.toLowerCase() !== tokenIn ||
       give.amount <= 0n || want.amount <= 0n) {
       throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "maker terms no longer match the witness");
     }
-    makerInput += want.amount;
-    makerOutput += give.amount;
   }
-  const surplusIn = amountIn - makerInput;
-  const surplusOut = makerOutput - amountOut;
-  if (makerInput !== BigInt(witness.input) || makerOutput !== BigInt(witness.output) ||
-    makerOutput !== quoted || surplusIn < 0n || surplusOut < 0n ||
-    surplusIn > MAX_SETTLEMENT_AMOUNT || surplusOut > MAX_SETTLEMENT_AMOUNT) {
+
+  let tokenBalances: WholeOfferTokenBalance[];
+  try {
+    tokenBalances = accountWholeOfferBalances(offers);
+  } catch (error) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, `invalid maker accounting: ${errorMessage(error)}`);
+  }
+  if (
+    JSON.stringify(serializeWholeOfferTokenBalances(tokenBalances)) !==
+      JSON.stringify(witness.tokenBalances)
+  ) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "current maker accounting differs from the witness");
+  }
+  const receiptResult = buildWholeOfferReceipts(tokenBalances, {
+    tokenIn,
+    tokenOut,
+    input: amountIn,
+    output: amountOut,
+  });
+  if (!receiptResult.ok ||
+    receiptResult.requiredInput !== BigInt(witness.input) ||
+    receiptResult.availableOutput !== BigInt(witness.output) ||
+    receiptResult.availableOutput !== quoted) {
     throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "complete maker totals do not back the exact job");
+  }
+
+  const mergeOrder = findSafeWholeOfferMergeOrder(
+    offers.map((offer) => ({
+      offerHash: offer.offerHash,
+      gives: offer.gives,
+      wants: offer.wants,
+    })),
+    {
+      maxSources: derived.limits.maxMakersPerCombination,
+      maxWork: Math.min(MAX_SAFE_MERGE_ORDER_WORK, derived.limits.maxDiscoveryWork),
+    },
+  );
+  if (!mergeOrder.ok) {
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, `maker merge order is unavailable: ${mergeOrder.reason}`);
   }
   const claim = claimFor(offers, new Map());
   if (!stock.reserve(claim)) {
     throw new JobRefusal(JOB_ROUTE_UNAVAILABLE, "route is already claimed");
   }
-  return { offers, surplusIn, surplusOut, claim };
+  return {
+    offers,
+    tokenBalances,
+    receipts: receiptResult.receipts,
+    mergeOrder: mergeOrder.offerHashes,
+    claim,
+  };
 }
 
 const canonicalAmount = (value: string | bigint): bigint => BigInt(value);
@@ -605,6 +653,41 @@ const aggregateTokenImbalances = (imbalances: Imbalance[]): Map<string, bigint> 
   for (const [token, amount] of result) if (amount === 0n) result.delete(token);
   return result;
 };
+
+const balanceNetMap = (
+  balances: Iterable<Pick<WholeOfferTokenBalance, "token" | "net">>,
+): Map<string, bigint> => new Map(
+  [...balances]
+    .filter((balance) => balance.net !== 0n)
+    .map((balance) => [balance.token.toLowerCase(), balance.net]),
+);
+
+const receiptHalfNetMap = (receipts: readonly WholeOfferReceipt[]): Map<string, bigint> =>
+  new Map(receipts.map((receipt) => [receipt.token.toLowerCase(), -receipt.amount]));
+
+/** Inspect the real SDK object after each construction/merge. Exact bigint
+ * planning is necessary but cannot detect ledger-v9's unchecked i128 wrap. */
+function assertTransactionNet(
+  transaction: unknown,
+  expected: ReadonlyMap<string, bigint>,
+  readImbalances: typeof tokenImbalances,
+  refusalReason: string,
+  label: string,
+): void {
+  let actual: Map<string, bigint>;
+  try {
+    actual = aggregateTokenImbalances(readImbalances(transaction as FinalizedTransaction));
+  } catch (error) {
+    throw new JobRefusal(refusalReason, `${label} could not be inspected: ${errorMessage(error)}`);
+  }
+  const outsideDomain = [...actual, ...expected].find(([, amount]) =>
+    amount < -MAX_SETTLEMENT_AMOUNT || amount > MAX_SETTLEMENT_AMOUNT
+  );
+  if (outsideDomain !== undefined || actual.size !== expected.size ||
+    [...expected].some(([token, amount]) => actual.get(token) !== amount)) {
+    throw new JobRefusal(refusalReason, `${label} has an unexpected shielded delta vector`);
+  }
+}
 
 /**
  * The half handed to the relay must be exactly the numeric inverse of the job:
@@ -1243,7 +1326,12 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, "response does not match the requested route");
     }
 
-    const transactions: FinalizedTransaction[] = [];
+    const transactions = new Map<string, FinalizedTransaction>();
+    const exactSources: Array<{
+      offerHash: string;
+      gives: Array<{ token: string; amount: bigint }>;
+      wants: Array<{ token: string; amount: bigint }>;
+    }> = [];
     for (let index = 0; index < route.offers.length; index += 1) {
       const cached = route.offers[index]!;
       const exact = response.files[index]!;
@@ -1280,9 +1368,48 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       if (!exactSemanticsMatch(cached, semantics)) {
         throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, cached.offerHash);
       }
-      transactions.push(transaction);
+      const exactSource = {
+        offerHash: cached.offerHash,
+        gives: semantics.gives.map((leg) => ({
+          token: leg.token,
+          amount: canonicalAmount(leg.amount),
+        })),
+        wants: semantics.wants.map((leg) => ({
+          token: leg.token,
+          amount: canonicalAmount(leg.amount),
+        })),
+      };
+      const sourceBalances = accountWholeOfferBalances([exactSource]);
+      assertTransactionNet(
+        transaction,
+        balanceNetMap(sourceBalances),
+        dependencies.tokenImbalances,
+        JOB_EXACT_FILE_MISMATCH,
+        `exact maker ${cached.offerHash}`,
+      );
+      exactSources.push(exactSource);
+      transactions.set(cached.offerHash, transaction);
     }
-    return transactions;
+
+    const exactBalances = accountWholeOfferBalances(exactSources);
+    if (
+      JSON.stringify(serializeWholeOfferTokenBalances(exactBalances)) !==
+        JSON.stringify(serializeWholeOfferTokenBalances(route.tokenBalances))
+    ) {
+      throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, "exact maker accounting changed");
+    }
+    const exactOrder = findSafeWholeOfferMergeOrder(exactSources);
+    if (!exactOrder.ok ||
+      JSON.stringify(exactOrder.offerHashes) !== JSON.stringify(route.mergeOrder)) {
+      throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, "exact maker merge order changed");
+    }
+    return route.mergeOrder.map((offerHash) => {
+      const transaction = transactions.get(offerHash);
+      if (transaction === undefined) {
+        throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, `missing exact maker ${offerHash}`);
+      }
+      return transaction;
+    });
   };
 
   const assertRouteCurrent = (route: ResolvedRoute): void => {
@@ -1311,9 +1438,25 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
     const ttlExpiresAt = record.ttlExpiresAt;
     const ttl = new Date(ttlExpiresAt);
     const receiverAddress = await options.wallet.shielded.getAddress();
+    assertRouteCurrent(route);
     const walletTransactions: FinalizedTransaction[] = [];
     const finalized: Array<{ key: string; sourceKey: string; transaction: FinalizedTransaction }> = [];
     const pendingUnproven: Array<{ key: string; transaction: unknown }> = [];
+    const transferPendingToFinalized = (
+      sourceKey: string,
+      key: string,
+      transaction: FinalizedTransaction,
+    ): void => {
+      const pendingIndex = pendingUnproven.findIndex((entry) => entry.key === sourceKey);
+      if (pendingIndex < 0) {
+        throw new JobRefusal(JOB_WALLET_FAILED, `missing pending artifact for ${sourceKey}`);
+      }
+      // The finalized artifact is already durable at this point. Update local
+      // cleanup ownership without an await: catch must see exactly one form of
+      // the wallet mutation and can never double-revert raw + finalized forms.
+      finalized.push({ key, sourceKey, transaction });
+      pendingUnproven.splice(pendingIndex, 1);
+    };
 
     try {
       assertRouteCurrent(route);
@@ -1342,18 +1485,15 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
         }),
       );
 
-      // Complete makers fund the exact taker payout. This leg receives only
-      // positive input/output surplus with no swap-token wallet inputs.
+      // Complete makers fund the exact taker payout. This leg receives every
+      // positive endpoint/intermediate receipt with no swap-token wallet input.
       // Keep RESIDUAL_BUILD/:residual journal identities so historical wallet
       // artifacts recover using their original pairing and commitments.
-      const legOutputs = [
-        ...(route.surplusIn > 0n
-          ? [{ type: job.tokenIn.toLowerCase(), amount: route.surplusIn, receiverAddress }]
-          : []),
-        ...(route.surplusOut > 0n
-          ? [{ type: job.tokenOut.toLowerCase(), amount: route.surplusOut, receiverAddress }]
-          : []),
-      ];
+      const legOutputs = route.receipts.map((receipt) => ({
+        type: receipt.token,
+        amount: receipt.amount,
+        receiverAddress,
+      }));
       if (legOutputs.length > 0) {
         const residualKey = prepareMutation(record, "RESIDUAL_BUILD", "residual");
         const residual = await options.wallet.initSwap(
@@ -1363,17 +1503,71 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
           { ttl, payFees: false },
         );
         applyArtifact(residualKey, "UNPROVEN_TRANSACTION", dependencies.serializeUnproven(residual.transaction));
+        pendingUnproven.push({ key: residualKey, transaction: residual.transaction });
+        assertRouteCurrent(route);
+        assertTransactionNet(
+          residual.transaction,
+          receiptHalfNetMap(route.receipts),
+          dependencies.tokenImbalances,
+          JOB_WALLET_FAILED,
+          "unproven residual receipt half",
+        );
         const finalizedKey = prepareMutation(record, "FINALIZED_CONTRIBUTION", "residual");
         const residualFinal = await options.wallet.finalizeTransaction(residual.transaction);
         applyArtifact(finalizedKey, "FINALIZED_TRANSACTION", dependencies.serializeFinalized(residualFinal));
+        transferPendingToFinalized(residualKey, finalizedKey, residualFinal);
+        assertRouteCurrent(route);
+        assertTransactionNet(
+          residualFinal,
+          receiptHalfNetMap(route.receipts),
+          dependencies.tokenImbalances,
+          JOB_WALLET_FAILED,
+          "finalized residual receipt half",
+        );
         walletTransactions.push(residualFinal);
-        finalized.push({ key: finalizedKey, sourceKey: residualKey, transaction: residualFinal });
       }
 
-      const base = dependencies.mergeFinalized([
-        ...offerTransactions,
-        ...walletTransactions,
-      ]);
+      const offersByHash = new Map(route.offers.map((offer) => [offer.offerHash, offer]));
+      let base: FinalizedTransaction | undefined;
+      const prefixOffers: BookOffer[] = [];
+      for (let index = 0; index < route.mergeOrder.length; index += 1) {
+        const offerHash = route.mergeOrder[index]!;
+        const source = offersByHash.get(offerHash);
+        const transaction = offerTransactions[index];
+        if (source === undefined || transaction === undefined) {
+          throw new JobRefusal(JOB_EXACT_FILE_MISMATCH, "safe maker merge inputs are incomplete");
+        }
+        prefixOffers.push(source);
+        base = base === undefined
+          ? transaction
+          : dependencies.mergeFinalized([base, transaction]);
+        assertTransactionNet(
+          base,
+          balanceNetMap(accountWholeOfferBalances(prefixOffers)),
+          dependencies.tokenImbalances,
+          JOB_WALLET_FAILED,
+          `maker merge prefix ${index + 1}`,
+        );
+      }
+      if (base === undefined) {
+        throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "maker witness is empty");
+      }
+      for (const receiptTransaction of walletTransactions) {
+        base = dependencies.mergeFinalized([base, receiptTransaction]);
+      }
+      const expectedBase = balanceNetMap(route.tokenBalances);
+      for (const receipt of route.receipts) {
+        const next = (expectedBase.get(receipt.token) ?? 0n) - receipt.amount;
+        if (next === 0n) expectedBase.delete(receipt.token);
+        else expectedBase.set(receipt.token, next);
+      }
+      assertTransactionNet(
+        base,
+        expectedBase,
+        dependencies.tokenImbalances,
+        JOB_WALLET_FAILED,
+        "maker and receipt half",
+      );
       const dustKey = prepareMutation(record, "DUST_BALANCE", "fees");
       const dustTransaction = await options.wallet.dust.balanceTransactions(
         options.keys.dustSecretKey,
@@ -1382,6 +1576,7 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       );
       applyArtifact(dustKey, "UNPROVEN_TRANSACTION", dependencies.serializeUnproven(dustTransaction));
       pendingUnproven.push({ key: dustKey, transaction: dustTransaction });
+      assertRouteCurrent(route);
       if (options.dustAdmission != null) {
         const amount = estimateDustAmount(dustTransaction, dependencies.tokenImbalances);
         const reserved = journal.reserveDust({
@@ -1403,9 +1598,9 @@ export function startSwapJobExecutor(options: SwapJobExecutorOptions): SwapJobEx
       const finalizedDustKey = prepareMutation(record, "FINALIZED_CONTRIBUTION", "dust");
       const finalizedDust = await options.wallet.finalizeTransaction(dustTransaction);
       applyArtifact(finalizedDustKey, "FINALIZED_TRANSACTION", dependencies.serializeFinalized(finalizedDust));
-      pendingUnproven.splice(0, pendingUnproven.length);
+      transferPendingToFinalized(dustKey, finalizedDustKey, finalizedDust);
+      assertRouteCurrent(route);
       walletTransactions.push(finalizedDust);
-      finalized.push({ key: finalizedDustKey, sourceKey: dustKey, transaction: finalizedDust });
 
       const walletTransaction = dependencies.mergeFinalized(walletTransactions);
       const relayTransaction = dependencies.mergeFinalized([base, finalizedDust]);

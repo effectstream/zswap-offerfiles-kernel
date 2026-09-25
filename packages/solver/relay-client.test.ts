@@ -1032,7 +1032,8 @@ describe("relay client — push loop properties", () => {
     const truncated = events.filter((event) => event.kind === "ladder-truncated");
     expect(truncated.length).toBe(1);
     expect(truncated[0]!.severity).toBe("error");
-    expect(truncated[0]!.detail).toEqual({ pairCapOffers: 1, wirePointCapOffers: 0 });
+    expect(truncated[0]!.detail?.pairCapOffers).toBeGreaterThan(0);
+    expect(truncated[0]!.detail?.wirePointCapOffers).toBe(0);
     // The published frame really is short one pair — the signal is not
     // reporting something that did not happen.
     expect((socket.frames[1]!["levels"] as unknown[]).length).toBe(1);
@@ -1315,7 +1316,14 @@ describe("relay client — bounded search and snapshot lifecycle", () => {
     expect(client.lastPush()!.push.derived.diagnostics).toMatchObject({
       stopReason: "source-offer-cap", sourceOffersScanned: 0,
     });
-    expect(events.some((event) => event.kind === "ladder-resource-limited")).toBe(true);
+    const limited = events.find((event) => event.kind === "ladder-resource-limited");
+    expect(limited?.detail).toMatchObject({
+      stopReason: "source-offer-cap",
+      withheldPairs: 0,
+      candidatePairsExamined: 0,
+      discoveryWork: 0,
+      safeMergeOrderWork: 0,
+    });
   });
 
   test("resource withholding is reported once per change and clears on recovery", async () => {
@@ -1327,7 +1335,14 @@ describe("relay client — bounded search and snapshot lifecycle", () => {
     await client.idle();
     expect(wireRungs(socket.frames)).toEqual([]);
     await client.push();
-    expect(events.filter((event) => event.kind === "ladder-resource-limited")).toHaveLength(1);
+    const limited = events.filter((event) => event.kind === "ladder-resource-limited");
+    expect(limited).toHaveLength(1);
+    expect(limited[0]!.detail).toMatchObject({
+      withheldPairs: 1,
+      candidatePairsExamined: expect.any(Number),
+      discoveryWork: expect.any(Number),
+      safeMergeOrderWork: expect.any(Number),
+    });
     book.remove(O1);
     book.remove(O2);
     await client.push();

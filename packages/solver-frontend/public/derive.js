@@ -30,6 +30,64 @@
  */
 export const DEFAULT_TOKEN_DECIMALS = 6;
 
+// Local browser capabilities, mirrored from server.ts / status-contract.ts.
+// A monitor's expectedContractVersion cannot define what this loaded page understands.
+export const SUPPORTED_MONITOR_CONTRACT_VERSION = 3;
+export const SUPPORTED_STATUS_CONTRACT_VERSION = 3;
+
+const validVersion = (version) => Number.isSafeInteger(version) && version > 0;
+
+function versionProblem(kind, reported, supported) {
+  if (reported === supported) return null;
+  const description = !validVersion(reported)
+    ? `does not report a valid ${kind} contract version`
+    : reported < supported
+      ? `reports older ${kind} contract v${reported}`
+      : `reports unknown newer ${kind} contract v${reported}`;
+  return {
+    tone: "warn",
+    key: "contract",
+    message: `The ${kind === "monitor" ? "monitor" : "solver"} ${description}; ` +
+      `this page requires v${supported}. The incompatible ${kind} snapshot is not rendered; ` +
+      "redeploy the monitor and solver together and reload this page.",
+  };
+}
+
+function solverVersion(snapshot) {
+  const solver = snapshot?.solver;
+  // null with no payload means the monitor has never received solver status.
+  if (solver?.contractVersion == null && solver?.snapshot == null) return null;
+  if (solver?.contractVersion !== SUPPORTED_STATUS_CONTRACT_VERSION) return solver?.contractVersion ?? 0;
+  return solver?.snapshot == null ? solver.contractVersion : solver.snapshot.contractVersion ?? 0;
+}
+
+/** Local compatibility judgement, before reading any version-dependent fields. */
+export function contractProblem(snapshot) {
+  const monitor = versionProblem("monitor", snapshot?.monitor?.contractVersion, SUPPORTED_MONITOR_CONTRACT_VERSION);
+  if (monitor) return monitor;
+  const reported = solverVersion(snapshot);
+  return reported === null ? null : versionProblem("status", reported, SUPPORTED_STATUS_CONTRACT_VERSION);
+}
+
+/** Shared poll/SSE ingress. Replace incompatible data so a reconnect clears old UI. */
+export function snapshotForPage(snapshot, now = Date.now()) {
+  if (snapshot?.monitor?.contractVersion !== SUPPORTED_MONITOR_CONTRACT_VERSION) {
+    const reported = snapshot?.monitor?.contractVersion;
+    return {
+      now,
+      monitor: { contractVersion: validVersion(reported) ? reported : null },
+      solver: { state: "incompatible", snapshot: null, lastSeenAt: null },
+      kernel: { book: null, sync: null, knownTokens: null },
+      relay: null,
+      history: [],
+    };
+  }
+  if (contractProblem(snapshot)) {
+    return { ...snapshot, solver: { ...snapshot.solver, contractVersion: solverVersion(snapshot) ?? 0, snapshot: null } };
+  }
+  return snapshot;
+}
+
 // ── small formatters ─────────────────────────────────────────────────────────
 
 /** A section that failed to collect, on either side of the hop. */
@@ -204,9 +262,25 @@ export function amountView(amount, colour, registry) {
   };
 }
 
+/** Signed companion used only for maker net provenance. Wallet and settlement
+ * amounts remain nonnegative everywhere else. */
+export function signedAmountView(amount, colour, registry) {
+  const text = String(amount ?? "");
+  if (!/^-?[0-9]+$/.test(text)) return { base: text, coins: null, decimals: null };
+  const negative = text.startsWith("-");
+  const magnitude = negative ? text.slice(1) : text;
+  const view = amountView(magnitude, colour, registry);
+  return {
+    ...view,
+    base: negative ? `-${view.base}` : view.base,
+    coins: negative && view.coins !== null ? `-${view.coins}` : view.coins,
+  };
+}
+
 // ── snapshot accessors ───────────────────────────────────────────────────────
 
 const section = (snapshot, name) => {
+  if (contractProblem(snapshot)) return null;
   const status = snapshot?.solver?.snapshot;
   if (!status) return null;
   const value = status[name];
@@ -226,6 +300,7 @@ export const solverSection = (snapshot, name) => ok(section(snapshot, name));
  * its socket up → is it publishing.
  */
 export function pillState(snapshot) {
+  if (contractProblem(snapshot)) return { text: "INCOMPATIBLE CONTRACT", tone: "warn" };
   const solver = snapshot?.solver;
   if (!solver || solver.state !== "reachable") {
     return { text: "SOLVER UNREACHABLE", tone: "bad" };
@@ -482,6 +557,8 @@ export function stageStates(snapshot) {
 
 /** Only present when something is wrong; the page hides the block otherwise. */
 export function alarms(snapshot) {
+  const problem = contractProblem(snapshot);
+  if (problem) return [problem];
   const out = [];
   const solver = snapshot?.solver;
   if (!solver) return out;
@@ -505,20 +582,6 @@ export function alarms(snapshot) {
         `The solver's status listener at ${solver.host} has not answered since ` +
         `${clockLabel(solver.lastSeenAt)} (${durationLabel(now - solver.since)}). ` +
         `Showing the last snapshot it sent, greyed. The kernel and relay reads below are live.`,
-    });
-  }
-
-  if (
-    solver.contractVersion !== null &&
-    solver.contractVersion !== solver.expectedContractVersion
-  ) {
-    out.push({
-      tone: "warn",
-      key: "contract",
-      message:
-        `The solver reports status contract v${solver.contractVersion} and this page renders ` +
-        `v${solver.expectedContractVersion}. The incompatible solver snapshot is not rendered; ` +
-        `redeploy both sides together.`,
     });
   }
 
@@ -666,7 +729,8 @@ export function tileValues(snapshot) {
   const kernelBook = snapshot?.kernel?.book;
   const kernelOffers = kernelBook && !isError(kernelBook) ? kernelBook.count : null;
   const relayTokens = snapshot?.relay?.tokens;
-  const monitor = snapshot?.monitor;
+  const monitor = snapshot?.monitor?.contractVersion === SUPPORTED_MONITOR_CONTRACT_VERSION
+    ? snapshot.monitor : null;
 
   const advertised = push ? push.tokenIds.length : null;
   const relayAgrees =
@@ -771,6 +835,32 @@ export function exponential(value) {
 
 // ── ladders, exclusions, book, jobs, inventory (FR-012) ──────────────────────
 
+/** An empty receipt list is meaningful only with complete, consistent net rows. */
+function witnessAccountingError(combination, pair) {
+  const rows = combination?.tokenBalances;
+  if (!Array.isArray(rows) || rows.length === 0) return "unknown receipts: missing token accounting";
+  const seen = new Set();
+  const unsigned = /^(0|[1-9][0-9]*)$/;
+  const signed = /^(0|-?[1-9][0-9]*)$/;
+  try {
+    for (const row of rows) {
+      if (!row || typeof row.token !== "string" || !/^[0-9a-f]{64}$/.test(row.token) || seen.has(row.token) ||
+          typeof row.gives !== "string" || !unsigned.test(row.gives) ||
+          typeof row.wants !== "string" || !unsigned.test(row.wants) ||
+          typeof row.net !== "string" || !signed.test(row.net)) throw new Error();
+      seen.add(row.token);
+      const net = BigInt(row.net);
+      if (BigInt(row.gives) - BigInt(row.wants) !== net) throw new Error();
+      if (row.token === pair.tokenIn ? net !== -BigInt(combination.input)
+        : row.token === pair.tokenOut ? net !== BigInt(combination.output) : net < 0n) throw new Error();
+    }
+    if (!seen.has(pair.tokenIn) || !seen.has(pair.tokenOut)) throw new Error();
+  } catch {
+    return "unknown receipts: invalid token accounting";
+  }
+  return null;
+}
+
 /**
  * One entry per published directed pair: protocol wire points joined to the
  * latest affordable genuine winning combination. Synthetic plateau endpoints
@@ -784,6 +874,9 @@ export function ladderPairs(snapshot, registry) {
   for (const pair of push.provenance ?? []) {
     provenanceFor.set(`${pair.tokenIn}|${pair.tokenOut}`, pair);
   }
+  const dependencyFor = new Map(
+    (push.physicalDependencies ?? []).map((dependency) => [dependency.offerHash, dependency]),
+  );
   return (push.levels ?? []).map((pair) => {
     const provenance = provenanceFor.get(`${pair.tokenIn}|${pair.tokenOut}`) ?? null;
     const combinations = provenance?.combinations ?? [];
@@ -798,6 +891,53 @@ export function ladderPairs(snapshot, registry) {
         activeCombination = combinations[combinationIndex];
       }
       const genuine = activeCombination !== null && activeCombination.input === level.input;
+      let receiptError = witnessAccountingError(activeCombination, pair);
+      const accountingRows = receiptError === null ? activeCombination.tokenBalances : [];
+      const tokenBalances = accountingRows.map((balance) => {
+        const role = balance.token === pair.tokenIn
+          ? "external input"
+          : balance.token === pair.tokenOut
+            ? "external output"
+            : "intermediate";
+        return {
+          ...balance,
+          role,
+          label: tokenLabel(balance.token, registry),
+          givesView: amountView(balance.gives, balance.token, registry),
+          wantsView: amountView(balance.wants, balance.token, registry),
+          netView: signedAmountView(balance.net, balance.token, registry),
+        };
+      });
+      const receipts = [];
+      for (const balance of accountingRows) {
+        try {
+          let amount = BigInt(balance.net);
+          if (balance.token === pair.tokenIn) amount += BigInt(level.input);
+          if (balance.token === pair.tokenOut) amount -= BigInt(level.output);
+          if (amount < 0n) {
+            receiptError = `negative ${tokenLabel(balance.token, registry)} remainder`;
+          } else if (amount > 0n) {
+            const text = amount.toString();
+            receipts.push({
+              token: balance.token,
+              amount: text,
+              label: tokenLabel(balance.token, registry),
+              view: amountView(text, balance.token, registry),
+            });
+          }
+        } catch {
+          receiptError = "invalid token accounting";
+        }
+      }
+      const dependencies = (activeCombination?.offerHashes ?? []).map((offerHash) => {
+        const dependency = dependencyFor.get(offerHash);
+        return {
+          offerHash,
+          combinations: dependency?.combinations ?? 1,
+          pairs: [...(dependency?.pairs ?? [])],
+          shared: (dependency?.combinations ?? 1) > 1 || (dependency?.pairs?.length ?? 1) > 1,
+        };
+      });
       return {
         index: index + 1,
         input: level.input,
@@ -815,6 +955,13 @@ export function ladderPairs(snapshot, registry) {
         makerOutputView: activeCombination === null
           ? null
           : amountView(activeCombination.output, pair.tokenOut, registry),
+        routeKind: activeCombination?.kind ?? null,
+        tokenBalances,
+        receipts,
+        receiptError,
+        dependencies,
+        sharedOfferHashes: dependencies.filter((dependency) => dependency.shared)
+          .map((dependency) => dependency.offerHash),
         offerHashes: [...(activeCombination?.offerHashes ?? [])],
       };
     });
@@ -837,6 +984,11 @@ export function ladderPairs(snapshot, registry) {
       capReasons: [...(provenance?.capReasons ?? [])],
       winningCombinations: combinations.length,
       uniqueMakers: uniqueMakers.size,
+      sharedMakers: [...uniqueMakers].filter((offerHash) => {
+        const dependency = dependencyFor.get(offerHash);
+        return dependency !== undefined &&
+          (dependency.combinations > 1 || dependency.pairs.length > 1);
+      }).length,
       points,
     };
   });
@@ -867,10 +1019,36 @@ export function admissionRows(snapshot, registry) {
       offerHash: exclusion.offerHash,
       pair,
       reason: exclusion.reason,
-      tone: exclusion.reason === "unavailable" ? "acc" : "warn",
+      tone: exclusion.reason === "unavailable" || isRouteLimitationReason(exclusion.reason)
+        ? "acc"
+        : "warn",
+      scope: isRouteLimitationReason(exclusion.reason) ? "route limit" : "source eligibility",
       detail: exclusion.detail ?? exclusionDetail(exclusion.reason, unavailable.has(exclusion.offerHash)),
     };
   });
+}
+
+const ROUTE_LIMITATION_REASONS = new Set([
+  "pair-search-cap",
+  "global-search-cap",
+  "wire-point-cap",
+  "pair-cap",
+  "candidate-pair-cap",
+  "discovery-work-cap",
+  "unsafe-merge-order",
+  "merge-order-work-cap",
+  "minimum-output",
+  "unsupported-pair",
+  "aborted",
+  "abort-check-failed",
+  "invalid-pair",
+  // This may describe a combination total even when the physical file remains
+  // usable in a smaller witness, so never label it globally unusable.
+  "settlement-amount-cap",
+]);
+
+export function isRouteLimitationReason(reason) {
+  return ROUTE_LIMITATION_REASONS.has(reason);
 }
 
 /** One sentence per reason the solver can report, so the page never shows a
@@ -901,6 +1079,14 @@ export function exclusionDetail(reason, claimed) {
       return "outside the longest exact staircase prefix that fits the wire-point cap";
     case "pair-cap":
       return "outside the maximum directed pairs carried by one frame";
+    case "candidate-pair-cap":
+      return "pair discovery reached its exact candidate-pair bound";
+    case "discovery-work-cap":
+      return "pair discovery or safe merge planning reached its shared work bound";
+    case "unsafe-merge-order":
+      return "no physical-maker merge order keeps every ledger delta prefix representable";
+    case "merge-order-work-cap":
+      return "safe physical-maker merge ordering exhausted its bounded fallback search";
     case "aborted":
       return "the derivation was superseded or cancelled before exactness was established";
     case "abort-check-failed":
@@ -951,20 +1137,37 @@ export function bookRows(snapshot, registry) {
   }
   const excludedBy = new Map();
   for (const exclusion of ladder?.last?.excluded ?? []) {
-    excludedBy.set(exclusion.offerHash, exclusion.reason);
+    const reasons = excludedBy.get(exclusion.offerHash) ?? [];
+    if (!reasons.includes(exclusion.reason)) reasons.push(exclusion.reason);
+    excludedBy.set(exclusion.offerHash, reasons);
   }
-  return kernelBook.offers.map((offer) => ({
-    offerId: offer.offerId,
-    status: offer.status,
-    gives: offer.gives.map((leg) => ({ ...leg, label: tokenLabel(leg.token, registry), view: amountView(leg.amount, leg.token, registry) })),
-    wants: offer.wants.map((leg) => ({ ...leg, label: tokenLabel(leg.token, registry), view: amountView(leg.amount, leg.token, registry) })),
-    blockHeight: offer.blockHeight,
-    expiresAt: offer.expiresAt,
-    // `cache` is null while the solver is unreachable — "unknown", never "out".
-    inCache: cache === null ? null : cached.has(offer.offerId),
-    winningSets: winningSetsByOffer.get(offer.offerId) ?? [],
-    excludedReason: excludedBy.get(offer.offerId) ?? null,
-  }));
+  return kernelBook.offers.map((offer) => {
+    const winningSets = winningSetsByOffer.get(offer.offerId) ?? [];
+    const reasons = excludedBy.get(offer.offerId) ?? [];
+    // A physical file used by any published witness is demonstrably eligible.
+    // Reasons attached while considering other pairs are route limitations,
+    // not a global statement that the file cannot be spent.
+    const sourceExclusionReasons = winningSets.length > 0
+      ? []
+      : reasons.filter((reason) => !isRouteLimitationReason(reason));
+    const routeLimitReasons = winningSets.length > 0
+      ? reasons
+      : reasons.filter(isRouteLimitationReason);
+    return {
+      offerId: offer.offerId,
+      status: offer.status,
+      gives: offer.gives.map((leg) => ({ ...leg, label: tokenLabel(leg.token, registry), view: amountView(leg.amount, leg.token, registry) })),
+      wants: offer.wants.map((leg) => ({ ...leg, label: tokenLabel(leg.token, registry), view: amountView(leg.amount, leg.token, registry) })),
+      blockHeight: offer.blockHeight,
+      expiresAt: offer.expiresAt,
+      // `cache` is null while the solver is unreachable — "unknown", never "out".
+      inCache: cache === null ? null : cached.has(offer.offerId),
+      winningSets,
+      sourceExclusionReasons,
+      routeLimitReasons,
+      excludedReason: sourceExclusionReasons[0] ?? null,
+    };
+  });
 }
 
 /** The journal tail (User Story 3). Newest first, as the solver serves it. */
@@ -1119,15 +1322,30 @@ export function configRows(snapshot) {
     rows.push(["derivation makers / combination", String(limits.maxMakersPerCombination)]);
     rows.push(["derivation wire points / pair", String(limits.maxWirePointsPerPair)]);
     rows.push(["derivation pairs / frame", String(limits.maxPairs)]);
+    rows.push([
+      "candidate pairs / derivation",
+      `${diagnostics?.candidatePairsExamined ?? "?"} / ${limits.maxCandidatePairs}`,
+    ]);
+    rows.push([
+      "discovery work / derivation",
+      `${diagnostics?.discoveryWork ?? "?"} / ${limits.maxDiscoveryWork}`,
+    ]);
+    rows.push(["safe merge order work", String(diagnostics?.safeMergeOrderWork ?? "?")]);
     rows.push(["derivation result", diagnostics?.stopReason ?? "complete"]);
     rows.push(["peak exact input states", String(diagnostics?.peakStoredExactInputs ?? "?")]);
     for (const pair of diagnostics?.pairs ?? []) {
       if (pair.status !== "withheld") continue;
       rows.push([
         `withheld pair ${shortColour(pair.tokenIn)} → ${shortColour(pair.tokenOut)}`,
-        pair.reason ?? "unspecified",
+        `${pair.reason ?? "unspecified"} · discovery ${pair.discoveryWork ?? "?"} · ` +
+          `safe merge ${pair.safeMergeOrderWork ?? "?"} · subsets ${pair.visitedSubsets ?? "?"}`,
       ]);
     }
+  }
+  const amountBounds = ladder?.last?.amountBounds ?? null;
+  if (amountBounds) {
+    rows.push(["max supported settlement amount", amountBounds.maxSettlementAmount]);
+    rows.push(["coin format maximum", amountBounds.maxCoinAmount]);
   }
   if (process) {
     rows.push(["relay token", `${process.relayAuthTokenLength} chars (never shown)`]);

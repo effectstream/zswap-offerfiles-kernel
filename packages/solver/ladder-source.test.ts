@@ -11,6 +11,7 @@ import { deriveLadderPush, type LadderCache } from "./src/ladder-source.ts";
 // comparable with the pinned relay contract.
 const A = `01${"00".repeat(31)}`;
 const B = `02${"00".repeat(31)}`;
+const C = `03${"00".repeat(31)}`;
 
 const NOW = Date.parse("2026-06-01T12:00:00.000Z");
 const EXPIRES = "2026-06-01T13:00:00.000Z";
@@ -68,12 +69,16 @@ describe("whole-offer ladder source", () => {
     expect(push.capabilities).toEqual({ type: "solver-capabilities", tokenIds: [A, B], maxParallelSwaps: 8 });
     expect(parsePriceLevels(push.priceLevels)).toEqual(push.priceLevels);
     expect(parseSolverCapabilities(push.capabilities)).toEqual(push.capabilities);
-    expect(push.derived.provenance[0]!.combinations).toEqual([
+    expect(push.derived.provenance[0]!.combinations.map(({ tokenBalances: _, ...entry }) => entry)).toEqual([
       { input: "5", output: "5", offerHashes: [O2] },
       { input: "10", output: "20", offerHashes: [O3] },
       { input: "15", output: "25", offerHashes: [O2, O3] },
       { input: "20", output: "30", offerHashes: [O1, O3] },
       { input: "25", output: "35", offerHashes: [O1, O2, O3] },
+    ]);
+    expect(push.derived.provenance[0]!.combinations[0]!.tokenBalances).toEqual([
+      { token: A, gives: "5", wants: "0", net: "5" },
+      { token: B, gives: "0", wants: "5", net: "-5" },
     ]);
   });
   test("forwards admission policy and retains only admitted thresholds", () => {
@@ -99,7 +104,7 @@ describe("whole-offer ladder source", () => {
   test("deletion and reservations replace witnesses on the next derivation", () => {
     const book = seed(CANONICAL_ROWS);
     const reserved = deriveLadderPush(cache(book), { ...OPTIONS, unavailableOfferHashes: [O3] });
-    expect(reserved.derived.provenance[0]!.combinations).toEqual([
+    expect(reserved.derived.provenance[0]!.combinations.map(({ tokenBalances: _, ...entry }) => entry)).toEqual([
       { input: "5", output: "5", offerHashes: [O2] },
       { input: "10", output: "10", offerHashes: [O1] },
       { input: "15", output: "15", offerHashes: [O1, O2] },
@@ -113,6 +118,11 @@ describe("whole-offer ladder source", () => {
     const stale = deriveLadderPush(cache(seed(CANONICAL_ROWS), false), OPTIONS);
     expect(stale.withheld).toBe("cache-not-current");
     expect(stale.capabilities.tokenIds).toEqual([]);
+    expect(stale.derived.diagnostics).toMatchObject({
+      candidatePairsExamined: 0,
+      discoveryWork: 0,
+      safeMergeOrderWork: 0,
+    });
     const expired = deriveLadderPush(cache(seed(CANONICAL_ROWS)), { ...OPTIONS, nowMs: Date.parse(EXPIRES) - 60_000 });
     expect(expired.priceLevels.levels).toEqual([]);
     expect(expired.derived.excluded.every((entry) => entry.reason === "expiring")).toBe(true);
@@ -137,5 +147,42 @@ describe("whole-offer ladder source", () => {
     book.all = () => { throw new Error("invalid controls must not read the book"); };
     const invalid = deriveLadderPush(cache(book), { ...OPTIONS, resourceLimits: { maxWirePointsPerPair: 65 } });
     expect(invalid.derived.diagnostics.stopReason).toBe("invalid-resource-limit");
+  });
+  test("candidate-pair and discovery controls produce explicit empty diagnostics", () => {
+    const book = new Book();
+    book.upsert({
+      offerHash: O1,
+      gives: [{ token: A, amount: 10n, kind: "SHIELDED" }],
+      wants: [{ token: B, amount: 5n, kind: "SHIELDED" }],
+      expiresAt: Date.parse(EXPIRES),
+      firstSeenAt: NOW,
+      inputNullifiers: [O1],
+    });
+    book.upsert({
+      offerHash: O2,
+      gives: [{ token: C, amount: 7n, kind: "SHIELDED" }],
+      wants: [{ token: A, amount: 4n, kind: "SHIELDED" }],
+      expiresAt: Date.parse(EXPIRES),
+      firstSeenAt: NOW,
+      inputNullifiers: [O2],
+    });
+    const candidateLimited = deriveLadderPush(cache(book), {
+      ...OPTIONS,
+      resourceLimits: { maxCandidatePairs: 1 },
+    });
+    // A global candidate cap may preserve an independently completed first
+    // pair while withholding the unexamined remainder.
+    expect(candidateLimited.withheld).toBeNull();
+    expect(candidateLimited.derived.diagnostics.stopReason).toBe("candidate-pair-cap");
+    expect(candidateLimited.derived.diagnostics.candidatePairsExamined).toBe(1);
+    expect(candidateLimited.priceLevels.levels).toHaveLength(1);
+
+    const discoveryLimited = deriveLadderPush(cache(book), {
+      ...OPTIONS,
+      resourceLimits: { maxDiscoveryWork: 1 },
+    });
+    expect(discoveryLimited.withheld).toBe("derivation-failed");
+    expect(discoveryLimited.derived.diagnostics.stopReason).toBe("discovery-work-cap");
+    expect(discoveryLimited.derived.diagnostics.discoveryWork).toBe(1);
   });
 });

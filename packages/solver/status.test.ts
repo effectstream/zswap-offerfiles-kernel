@@ -69,6 +69,7 @@ const N1 = "31".repeat(32);
 const N2 = "32".repeat(32);
 const H1 = "11".repeat(32);
 const H2 = "22".repeat(32);
+const H3 = "33".repeat(32);
 const TOKEN_A = "aa".repeat(32);
 
 const hash = (byte: string): string => byte.repeat(32);
@@ -284,7 +285,7 @@ describe("status collector — the snapshot's shape (FR-003)", () => {
     const { collector } = fixture();
     const snapshot = collector.snapshot();
 
-    expect(statusContractVersion).toBe(2);
+    expect(statusContractVersion).toBe(3);
     expect(snapshot.contractVersion).toBe(statusContractVersion);
     expect(snapshot.now).toBe(1_000);
 
@@ -334,9 +335,15 @@ describe("status collector — the snapshot's shape (FR-003)", () => {
     // plateau points, and preserves true maker totals at the 10x terminal.
     expect(ladder.last!.provenance[0]!.combinations[0]!.offerHashes).toEqual([offerIdAt(0)]);
     expect(ladder.last!.provenance[0]!.combinations.at(-1)).toEqual({
+      kind: "direct",
       input: "33",
       output: "33",
       offerHashes: [offerIdAt(0), offerIdAt(1), offerIdAt(2)],
+      tokenBalances: [
+        { token: A, gives: "33", wants: "0", net: "33" },
+        { token: B, gives: "0", wants: "33", net: "-33" },
+      ],
+      receipts: [],
     });
     expect(ladder.last!.provenance[0]!.terminalInput).toBe("330");
     expect(ladder.last!.provenance[0]!.nominalTerminalInput).toBe("330");
@@ -348,12 +355,21 @@ describe("status collector — the snapshot's shape (FR-003)", () => {
       maxMakersPerCombination: 8,
       maxWirePointsPerPair: 64,
       maxPairs: 64,
+      maxCandidatePairs: 4096,
+      maxDiscoveryWork: 1000000,
+    });
+    expect(ladder.last!.amountBounds).toEqual({
+      maxSettlementAmount: ((1n << 127n) - 1n).toString(),
+      maxCoinAmount: ((1n << 128n) - 1n).toString(),
     });
     expect(ladder.last!.diagnostics).toMatchObject({
       stopReason: null,
       sourceOffersScanned: 3,
       visitedSubsets: 7,
     });
+    expect(typeof ladder.last!.diagnostics.candidatePairsExamined).toBe("number");
+    expect(typeof ladder.last!.diagnostics.discoveryWork).toBe("number");
+    expect(typeof ladder.last!.diagnostics.safeMergeOrderWork).toBe("number");
 
     const executor = ok(snapshot.executor);
     expect(executor.state).toBe("running");
@@ -457,6 +473,80 @@ describe("status collector — the snapshot's shape (FR-003)", () => {
     expect(ladder.last!.uniqueMakers).toBe(0);
   });
 
+  test("composed provenance exposes exact receipts and shared physical dependencies", () => {
+    const record = pushRecordFor(seededBook());
+    record.push.derived.provenance = [
+      {
+        tokenIn: B,
+        tokenOut: A,
+        combinations: [
+          {
+            input: "2",
+            output: "9",
+            offerHashes: [H3],
+            tokenBalances: [
+              { token: A, gives: "10", wants: "1", net: "9" },
+              { token: B, gives: "3", wants: "5", net: "-2" },
+            ],
+          },
+          {
+            input: "5",
+            output: "10",
+            offerHashes: [H1, H2],
+            tokenBalances: [
+              { token: A, gives: "10", wants: "0", net: "10" },
+              { token: B, gives: "0", wants: "5", net: "-5" },
+              { token: TOKEN_A, gives: "6", wants: "3", net: "3" },
+            ],
+          },
+        ],
+        terminalInput: "50",
+        nominalTerminalInput: "50",
+        capReasons: [],
+      },
+      {
+        tokenIn: TOKEN_A,
+        tokenOut: A,
+        combinations: [{
+          input: "7",
+          output: "10",
+          offerHashes: [H2, H3],
+          tokenBalances: [
+            { token: A, gives: "10", wants: "0", net: "10" },
+            { token: B, gives: "6", wants: "3", net: "3" },
+            { token: TOKEN_A, gives: "0", wants: "7", net: "-7" },
+          ],
+        }],
+        terminalInput: "70",
+        nominalTerminalInput: "70",
+        capReasons: [],
+      },
+    ];
+    const collector = createStatusCollector(baseDeps({ relay: () => relayOf(record) }));
+    const push = ok(collector.snapshot().ladder).last!;
+
+    expect(push.provenance[0]!.combinations[0]).toMatchObject({
+      kind: "composed",
+      input: "2",
+      output: "9",
+      receipts: [],
+    });
+    expect(push.provenance[0]!.combinations[1]).toMatchObject({
+      kind: "composed",
+      input: "5",
+      output: "10",
+      receipts: [{ token: TOKEN_A, amount: "3" }],
+    });
+    expect(push.physicalDependencies.find((row) => row.offerHash === H2)).toEqual({
+      offerHash: H2,
+      combinations: 2,
+      pairs: [
+        { tokenIn: B, tokenOut: A },
+        { tokenIn: TOKEN_A, tokenOut: A },
+      ],
+    });
+  });
+
   test("health() reports readiness and survives a throwing readiness probe", () => {
     const { collector } = fixture();
     expect(collector.health().ready).toBe(true);
@@ -487,6 +577,36 @@ describe("status collector — bounded collection (FR-005)", () => {
     // Newest first: the offer an operator is diagnosing is the one that just
     // arrived, not the one that has been sitting there.
     expect(section.offers[0]!.firstSeenAt).toBeGreaterThan(section.offers[1]!.firstSeenAt!);
+  });
+
+  test("winning witness accounting survives the separate 500-offer book display cap", () => {
+    const largeBook = seededBook(STATUS_BOOK_OFFER_CAP + 25);
+    const oldWitnessBook = new Book();
+    const oldWitnessHash = offerIdAt(STATUS_BOOK_OFFER_CAP + 24);
+    oldWitnessBook.upsert(bookOfferFromApi(row(
+      oldWitnessHash,
+      { token: A, amount: "10" },
+      { token: B, amount: "5" },
+      new Date(NOW - (STATUS_BOOK_OFFER_CAP + 24) * 1_000).toISOString(),
+    ))!);
+    const collector = createStatusCollector(baseDeps({
+      sync: () => syncOf(largeBook),
+      relay: () => relayOf(pushRecordFor(oldWitnessBook)),
+    }));
+    const snapshot = collector.snapshot();
+    const book = ok(snapshot.book);
+    const push = ok(snapshot.ladder).last!;
+
+    expect(book.truncated).toBe(25);
+    expect(book.offers.some((offer) => offer.offerHash === oldWitnessHash)).toBe(false);
+    expect(push.provenance[0]!.combinations[0]).toMatchObject({
+      kind: "direct",
+      offerHashes: [oldWitnessHash],
+      tokenBalances: [
+        { token: A, gives: "10", wants: "0", net: "10" },
+        { token: B, gives: "0", wants: "5", net: "-5" },
+      ],
+    });
   });
 
   test("consecutive identical events fold into one ring entry with a count", () => {

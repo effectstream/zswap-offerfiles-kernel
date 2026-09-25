@@ -60,7 +60,7 @@ export const HELP = {
     source: "solver last push + book",
   },
   "tile-rungs": {
-    text: "Protocol price points, with distinct maker files and winning complete-file sets counted separately.",
+    text: "Protocol price points; shared physical maker files are counted once across alternative winning sets.",
     source: "solver last push",
   },
   "tile-tokens": {
@@ -98,15 +98,15 @@ export const HELP = {
 
   // ── sections ──────────────────────────────────────────────────────────────
   "section-ladders": {
-    text: "Per pair: genuine thresholds and synthetic plateau points beside each winning set's true maker totals.",
+    text: "Per pair: direct/composed witnesses, net endpoints, token contributions, point receipts, and shared files.",
     source: "solver last push",
   },
   "section-exclusions": {
-    text: "Book offers the ladder left out, with the solver's own reason.",
+    text: "Solver reasons labelled as source eligibility failures or limits on one candidate route.",
     source: "solver last push exclusions",
   },
   "section-book": {
-    text: "The kernel's offers, with whether each is cached and on the wire.",
+    text: "The kernel's offers, with published witness use separated from limitations on other candidate routes.",
     source: "kernel /v1/offers + solver",
   },
   "section-jobs": {

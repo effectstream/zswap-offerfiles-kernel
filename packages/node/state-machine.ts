@@ -696,14 +696,15 @@ addTransition("celestia-zswap", function* (data) {
   // INTENT → the earliest intent TTL. Not a fallback: `UnshieldedOffer`
   //   exists only inside `Intent`, and `Intent.ttl` is non-optional, so an
   //   unshielded offer structurally ALWAYS has a TTL (bounded by the
-  //   on-chain `global_ttl`, 1 h by default, so the inclusion window is
+  //   on-chain `global_ttl`, so the inclusion window is
   //   [ttl − global_ttl, ttl]). The indexer-TTL branch below is defensive
   //   only — it should be unreachable for a well-formed offer.
   //
-  // The two windows are INDEPENDENT despite both defaulting to 1 h: the
-  // root window is fixed in the zswap crate (parameterized from node 2.x),
-  // while `global_ttl` is an on-chain LedgerParameters field changeable by
-  // governance. Moving one does not move the other.
+  // On ledger 9 both windows are the same parameter: `global_ttl` bounds
+  // intent TTLs AND is the `past_roots` retention the zswap post-block
+  // update prunes by (14 days on every network; see network-windows.ts).
+  // They are still separate constraints here, because an intent TTL is
+  // chosen per offer and can be shorter.
   // ONE deadline, used for BOTH the advertised expiry and the scheduled
   // cleanup. They were computed separately before, which meant they could
   // disagree in either direction: a stale root window advertised an expiry in

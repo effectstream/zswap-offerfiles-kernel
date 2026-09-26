@@ -201,6 +201,18 @@ export function resolveStagenetNodeProfile(env: EnvMap): StagenetNodeProfile {
     );
   }
 
+  // @effectstream/db defaults PGLITE to TRUE (single-connection PGlite mode,
+  // and DB_PW is then never sent). The stagenet deploy uses an external
+  // Postgres (00050 Q4), which needs PGLITE=false; PGlite stays possible.
+  const pglite = read(env, "PGLITE");
+  if (pglite === undefined || truthy(pglite)) {
+    warnings.push(
+      `PGLITE is ${pglite === undefined ? "unset (the runtime defaults it to true)" : `"${pglite}"`}: ` +
+        "the node runs in single-connection PGlite mode and does not send DB_PW — set PGLITE=false " +
+        "for an external Postgres",
+    );
+  }
+
   const rootWindowSeconds = resolveRootWindowSeconds(
     networkId || "stagenet",
     read(env, "ROOT_WINDOW_SECONDS"),

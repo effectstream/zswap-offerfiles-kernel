@@ -25,6 +25,7 @@ const complete = (): Record<string, string | undefined> => ({
   CELESTIA_START_HEIGHT: "9000000",
   CELESTIA_RPC_URL: "https://mocha.example.invalid:26658",
   CELESTIA_AUTH_TOKEN: "bearer-for-tests",
+  PGLITE: "false",
 });
 
 describe("stagenet node profile — constants (00050 FR-001)", () => {
@@ -162,6 +163,15 @@ describe("stagenet node profile — resolution", () => {
     expect(text).not.toContain("pa55");
     expect(text).not.toContain("bearer-for-tests");
     expect(profile.resolved.celestiaRpcOrigin).toBe("https://abc.celestia-mocha.quiknode.pro");
+  });
+
+  test("PGLITE unset or true is a warning (external Postgres needs PGLITE=false), never a refusal", () => {
+    for (const value of [undefined, "true", "1"]) {
+      const profile = resolveStagenetNodeProfile({ ...complete(), PGLITE: value });
+      expect(profile.problems).toEqual([]);
+      expect(profile.warnings.join("\n")).toContain("set PGLITE=false for an external Postgres");
+    }
+    expect(resolveStagenetNodeProfile({ ...complete(), PGLITE: "false" }).warnings).toEqual([]);
   });
 
   test("redactedOrigin keeps only protocol, host and port", () => {

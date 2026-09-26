@@ -196,3 +196,101 @@ describe("wallet and logging", () => {
     expect(cfg.kernelBase).toBe("http://kernel-alt");
   });
 });
+
+describe("endpoint defaults per network (00050 FR-003)", () => {
+  test("undeployed keeps the loopback defaults, byte for byte", async () => {
+    expect((await parse({ MIDNIGHT_NETWORK_ID: "undeployed" })).networkUrls).toEqual({
+      id: "undeployed",
+      indexer: "http://127.0.0.1:8088/api/v4/graphql",
+      indexerWS: "ws://127.0.0.1:8088/api/v4/graphql/ws",
+      node: "http://127.0.0.1:9944",
+      proofServer: "http://127.0.0.1:6300",
+    });
+  });
+
+  test.each(["preview", "preprod"])("%s keeps the *.<id>.midnight.network defaults", async (id) => {
+    expect((await parse({ MIDNIGHT_NETWORK_ID: id })).networkUrls).toEqual({
+      id,
+      indexer: `https://indexer.${id}.midnight.network/api/v4/graphql`,
+      indexerWS: `wss://indexer.${id}.midnight.network/api/v4/graphql/ws`,
+      node: `https://rpc.${id}.midnight.network`,
+      proofServer: "http://127.0.0.1:6300",
+    });
+  });
+
+  test("stagenet defaults to the Shielded Tools hosts, not *.stagenet.midnight.network", async () => {
+    const cfg = await parse({ MIDNIGHT_NETWORK_ID: "stagenet" });
+    expect(cfg.networkUrls).toEqual({
+      id: "stagenet",
+      indexer: "https://indexer.stagenet.shielded.tools/api/v4/graphql",
+      indexerWS: "wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws",
+      node: "wss://rpc.stagenet.shielded.tools",
+      proofServer: "http://127.0.0.1:6300",
+    });
+    expect(JSON.stringify(cfg.networkUrls)).not.toContain("midnight.network");
+  });
+
+  test("explicit endpoint env wins on stagenet too", async () => {
+    const cfg = await parse({
+      MIDNIGHT_NETWORK_ID: "stagenet",
+      MIDNIGHT_NODE_HTTP: "https://rpc.stagenet.shielded.tools",
+      MIDNIGHT_INDEXER_HTTP: "http://indexer:8088/api/v4/graphql",
+      MIDNIGHT_INDEXER_WS: "ws://indexer:8088/api/v4/graphql/ws",
+      MIDNIGHT_PROOF_SERVER_URL: "http://proof-server:6300",
+    });
+    expect(cfg.networkUrls).toEqual({
+      id: "stagenet",
+      node: "https://rpc.stagenet.shielded.tools",
+      indexer: "http://indexer:8088/api/v4/graphql",
+      indexerWS: "ws://indexer:8088/api/v4/graphql/ws",
+      proofServer: "http://proof-server:6300",
+    });
+  });
+});
+
+describe("public dev seeds on stagenet (00050 US1)", () => {
+  const DEV = "0".repeat(63) + "1";
+
+  test("POSTER_SEED set to a repository dev seed is refused by name on stagenet", async () => {
+    await expect(parse({ MIDNIGHT_NETWORK_ID: "stagenet", POSTER_SEED: DEV })).rejects.toMatchObject({
+      code: "PUBLIC_DEV_SEED",
+      variable: "POSTER_SEED",
+    });
+    await expect(
+      parse({ MIDNIGHT_NETWORK_ID: "stagenet", POSTER_SEED: `0x${"0".repeat(62)}05` }),
+    ).rejects.toMatchObject({ code: "PUBLIC_DEV_SEED" });
+  });
+
+  test("the refusal message never contains the seed", async () => {
+    try {
+      await parse({ MIDNIGHT_NETWORK_ID: "stagenet", POSTER_SEED: DEV });
+      throw new Error("expected a refusal");
+    } catch (error) {
+      expect((error as Error).message).toContain("POSTER_SEED is a public dev seed");
+      expect((error as Error).message).not.toContain(DEV);
+    }
+  });
+
+  test("unchanged elsewhere: the same seed is still accepted on undeployed and preview", async () => {
+    expect((await parse({ POSTER_SEED: DEV })).seed).toBe(DEV);
+    expect((await parse({ MIDNIGHT_NETWORK_ID: "preview", POSTER_SEED: DEV })).seed).toBe(DEV);
+  });
+
+  test("a real seed and a mnemonic are accepted on stagenet", async () => {
+    expect((await parse({ MIDNIGHT_NETWORK_ID: "stagenet" })).seed).toBe(SEED);
+    const phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const cfg = await parsePosterConfig({
+      MIDNIGHT_NETWORK_ID: "stagenet",
+      POSTER_MNEMONIC: phrase,
+      GIVE_TOKEN: GIVE,
+      WANT_TOKEN: WANT,
+    });
+    expect(cfg.seedSource).toBe("POSTER_MNEMONIC");
+  });
+
+  test("a missing wallet is still named first (MISSING), on stagenet as elsewhere", async () => {
+    await expect(
+      parsePosterConfig({ MIDNIGHT_NETWORK_ID: "stagenet", GIVE_TOKEN: GIVE, WANT_TOKEN: WANT }),
+    ).rejects.toMatchObject({ code: "MISSING" });
+  });
+});

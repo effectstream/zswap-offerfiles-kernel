@@ -81,8 +81,8 @@ export const CELESTIA_MAX_GAS_PRICE = _maxGasPrice ? parseFloat(_maxGasPrice) : 
 export const CELESTIA_TX_PRIORITY = _txPriority ? parseInt(_txPriority) : undefined;
 
 // Root-recency window and offer TTL — per-network defaults live in
-// network-windows.ts (1 h on all current networks; STAGENET placeholder at
-// 2 weeks, not publicly available yet). Env vars override both.
+// network-windows.ts (1 h on the other networks; stagenet 14 days, its
+// ledger-9 `global_ttl`). Env vars override both.
 //
 // OFFER_TTL_SECONDS defaults to the root window: a shielded offer is fillable
 // only while the Merkle root its `Input`/`Transient` proves against is still

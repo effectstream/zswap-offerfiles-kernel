@@ -248,10 +248,11 @@ CREATE TABLE offer_file (
     -- NOT NULL because every writer sets it and a missing chain-derived
     -- timestamp should fail loudly, not serve null to a client.
     first_seen_at TIMESTAMPTZ NOT NULL,
-    -- TTL in seconds for how long this offer should remain active.
-    -- Default = 1 hour (matches the Midnight reference Merkle-root window
-    -- on the shielded path; see packages/node/env.ts for the full rationale).
-    ttl_seconds BIGINT NOT NULL DEFAULT 3600,
+    -- TTL in seconds for how long this offer should remain active. The
+    -- writer always passes OFFER_TTL_SECONDS; the default mirrors its own
+    -- default, the root window = ledger-9 `global_ttl` = 14 days (see
+    -- packages/node/network-windows.ts for the full rationale).
+    ttl_seconds BIGINT NOT NULL DEFAULT 1209600,
     -- When THIS node inserted the row — a local observation, deliberately not
     -- chain-derived, and excluded from the determinism diff for that reason.
     -- Never sort or filter on it: see excluded-columns-are-write-only.test.ts.

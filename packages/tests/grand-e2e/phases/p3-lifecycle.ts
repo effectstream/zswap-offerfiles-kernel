@@ -272,7 +272,7 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
         const ttlMs = intentTtl ? Date.parse(String(intentTtl)) : NaN;
         const ingestMs = Date.parse(d.body?.computed?.firstSeenAt ?? "");
         if (!Number.isFinite(servedMs) || !Number.isFinite(ttlMs) || !Number.isFinite(ingestMs)) return false;
-        const policyMs = Number(process.env["OFFER_TTL_SECONDS"] ?? 3600) * 1000;
+        const policyMs = Number(process.env["OFFER_TTL_SECONDS"] ?? 1_209_600) * 1000;
         const expectedMs = Math.min(ttlMs, ingestMs + policyMs);
         // Exact contract, 2s slack for ISO-string round-tripping.
         return Math.abs(servedMs - expectedMs) < 2000;

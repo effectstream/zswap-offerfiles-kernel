@@ -2,4 +2,5 @@ export * from "./sql/queries.queries.ts";
 export * from "./sql/queries.app.ts";
 export * from "./price-map.ts";
 export * from "./token-registry.ts";
+export * from "./known-roots-indexes.ts";
 export { migrationTable } from "./migration-order.ts";

@@ -102,6 +102,9 @@ Fresh local chains require a separately provisioned same-chain fixture.
 | COW solver | **separate process** — `bun run start:solver` (or `packages/solver/solver.dev.ts`) | **separate process** — `bun run start:solver` (or `packages/solver/solver.mainnet.ts`) |
 | Price feed | **separate process, optional** — `bun run --filter @zswap-da/price-feed start` (or `… once` for a single refresh) | same, plus the `price-feed` compose service (`--profile prices`) |
 
+**Stagenet** runs from the kernel image rather than an orchestrator — see
+[Running against stagenet](#running-against-stagenet).
+
 **Neither orchestrator launches the solver.** `start.dev.ts` and `start.mainnet.ts`
 bring up chain, database, node and batcher only; see
 [Running the COW solver](#running-the-cow-solver).
@@ -434,6 +437,148 @@ coins; that failure is an availability failure (the chain rejects the merged
 transaction, the relay reports `submit-failed`, and the solver's contribution is
 reverted), not a loss of funds. The startup banner prints the effective model and
 its coverage.
+
+## Running against stagenet
+
+The `ledger-v9` line runs the kernel image's API node, batcher and offer
+poster on Midnight **stagenet**, plus a one-shot that imports the stagenet
+token registry into the kernel database. This repository does not deploy
+it: there is no compose file and no database service for stagenet. You run
+the containers, the proof server and the Postgres.
+
+The env contract is [`.env.stagenet.example`](.env.stagenet.example), one
+file for all four services; every variable is tagged with the services that
+read it, and secrets are left empty. A test
+(`deploy/scripts/lib/stagenet-env-contract.test.ts`) fails if a stagenet
+service starts reading a variable that the file does not list. Check a
+filled-in copy with:
+
+```bash
+cp .env.stagenet.example .env   # fill in the secrets, never commit it
+bun check-env.ts                # static checks plus a live Celestia probe
+```
+
+### Stagenet constants
+
+| What | Value | Source |
+|------|-------|--------|
+| Midnight node | `2.0.0-d9729c13` (ledger 9.1 rc.3, `dust/9` keys) | `system_version` |
+| RPC / indexer | `https://rpc.stagenet.shielded.tools`, `https://indexer.stagenet.shielded.tools/api/v4/graphql` (`wss://…/api/v4/graphql/ws`) | `@effectstream/midnight-contracts` stagenet profile |
+| NTP anchor | `1786638294000` = stagenet block 1, 2026-08-13T16:24:54Z | chain |
+| NTP block time | `600000` ms, preview's | `packages/node/env.ts` |
+| Celestia | **mocha**, on the MIP-0006 shared namespace `6d6e2d737761702d7631` (`mn-swap-v1`), **not overridden** | owner decision (00050 Q1) |
+| Root window / offer TTL | `1209600` s (14 days) | ledger 9 prunes zswap roots by the `global_ttl` ledger parameter; stagenet's is 1209600 (midnight-node `d9729c13` `res/stagenet/ledger-parameters-config.json`, and the live parameters) |
+| Token registry | `mint-test-tokens` `metadata.stagenet.json`, revision `59041d2f…`: shielded TWBTC (8), TWETH (18), TWUSDC (6), TWUSDM (6); unshielded UTWUSDC (6), UTWBTC (8) | vendored fixture `packages/database/fixtures/mint-test-tokens.stagenet.json` |
+
+Several networks share the MIP-0006 namespace. A stagenet kernel ingests
+their blobs too and drops them in validation: the offer's proof root is
+unknown to its own chain, or its proofs fail against the stagenet network
+id. Rejected blobs are scrubbed and counted in `offer_rejections`.
+
+### Services
+
+Every service below is selected by `MIDNIGHT_NETWORK_ID=stagenet`. The image
+entrypoints pick the entry from that variable: `undeployed` → the `*.dev.ts`
+entries (unchanged), `preview`, `stagenet`; any other value exits 78. The
+kernel and batcher run a network-free configuration preflight before their
+readiness waits. Every service refuses a missing required variable, or a
+repository dev seed, with exit 78 and names it.
+
+| Service | Image entrypoint → entry | Required | Secrets |
+|---------|--------------------------|----------|---------|
+| Kernel (sync node + API, `:9999`) | `entrypoint-kernel.sh` → `packages/node/main.stagenet.ts` | `MIDNIGHT_NODE_HTTP`, `MIDNIGHT_INDEXER_HTTP`, `MIDNIGHT_INDEXER_WS`, `MIDNIGHT_PROOF_SERVER_URL`, `CELESTIA_RPC_URL`, `CELESTIA_START_HEIGHT`, Celestia auth, `DB_HOST`, `DB_PORT` (+ `DB_USER`, `DB_NAME`, `PGLITE=false`), `BATCHER_SUBMIT_URL` | `CELESTIA_AUTH_TOKEN`, `DB_PW` |
+| Batcher (`:3334`) | `entrypoint-batcher.sh` → `packages/batcher/batcher.stagenet.ts` | the four `MIDNIGHT_*` endpoints, `CELESTIA_RPC_URL`, Celestia auth, `BATCHER_WALLET_SEED`, `BATCHER_STORAGE_DIR` (+ `BATCHER_NODE_API_URL`) | `BATCHER_WALLET_SEED`, `CELESTIA_AUTH_TOKEN` |
+| Offer poster | `entrypoint-offer-poster.sh` → `deploy/scripts/offer-poster.ts` | `ZSWAP_API`, `GIVE_TOKEN`, `WANT_TOKEN`, `POSTER_SEED` or `POSTER_MNEMONIC`, `MIDNIGHT_PROOF_SERVER_URL` (endpoints default to stagenet's) | `POSTER_SEED` / `POSTER_MNEMONIC` |
+| Token registry (one-shot) | `entrypoint-token-registry.sh` → `import-token-registry.ts --required` | `TOKEN_REGISTRY_NETWORK=stagenet`, `DB_HOST`, `DB_PORT` (+ `ZSWAP_API` to wait for the kernel) | `DB_PW` |
+
+- **Celestia auth** means `CELESTIA_AUTH_TOKEN`, the RPC bearer token. If the
+  RPC URL embeds its own credential, as preview's QuickNode URL does, set
+  `CELESTIA_AUTH_IN_URL=true` instead. The logs show only the URL's origin.
+- **Without the image**, from a checkout: `bun run start:stagenet` (node),
+  `bun run --filter @zswap-da/batcher start:stagenet`, and the preflights
+  `bun run packages/node/stagenet-profile.ts` and
+  `bun run packages/batcher/batcher.stagenet.ts --check`.
+- **The batcher's DUST-state cache** lives in
+  `${BATCHER_STORAGE_DIR}/dust-state`. Put `BATCHER_STORAGE_DIR` on a volume,
+  so a restart resumes the DUST sync instead of rescanning.
+
+### Start heights: pin them
+
+- `CELESTIA_START_HEIGHT` is **required**; there is no fallback to 1. Use
+  the mocha height at, or a little before, the first stagenet offer you
+  care about. For a fresh deployment with no history, that is the current
+  head (`header.NetworkHead` on your mocha RPC).
+- `MIDNIGHT_START_BLOCK` defaults to 1, which matches the NTP anchor, so the
+  node indexes stagenet from genesis on its first start.
+- The runtime snapshots these start values and the NTP anchor on the first
+  boot. A later change is refused unless `USE_DB_STARTHEIGHT` is set, and
+  then the database's snapshot wins. Choose the start heights once.
+
+### Database: your Postgres
+
+The kernel talks to Postgres through `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PW`
+and `DB_NAME`. **Set `PGLITE=false`.** The runtime defaults `PGLITE` to
+true, which means single-connection PGlite mode and never sending `DB_PW`;
+the stagenet node logs a warning while it is unset. The kernel applies its
+own migrations when it processes its first block, and a fresh database
+comes up with the **Preprod** token rows and Preprod SNIGHT. The next step
+replaces them. This repository's tests and CI run on PGlite; no gate here
+exercises a real Postgres.
+
+### Token registry
+
+Run the `entrypoint-token-registry.sh` one-shot once, after the kernel's
+first start, with `TOKEN_REGISTRY_NETWORK=stagenet`. It replaces the six
+seeded Preprod rows with the stagenet tokens listed above, and it removes
+the Preprod SNIGHT (stagenet has no shielded-night deployment), all in one
+transaction. It retries while a fresh database has no schema yet. It then
+**fails loudly** (exit 1) rather than skipping. Re-running it is idempotent.
+
+Extra tokens, such as project 00053's stk tokens, are registered with
+`POST /v1/known-tokens`, which works on stagenet exactly as on a devnet.
+The route is off unless `ENABLE_TOKEN_REGISTRY=true`, and it has **no
+authentication**. Enable it only if you accept that, or insert the rows in
+your Postgres instead.
+
+### Funding runbook
+
+The stagenet faucet has a CAPTCHA, so every step below is done by hand.
+
+1. **Batcher DUST.** Send NIGHT to the unshielded address of
+   `BATCHER_WALLET_SEED`, then register it for DUST **with the batcher
+   stopped**, because only one wallet facade may run per seed. The existing
+   provision script does it, reading the seed from `SOLVER_SEED`:
+
+   ```bash
+   MIDNIGHT_NETWORK_ID=stagenet \
+   MIDNIGHT_NODE_HTTP=https://rpc.stagenet.shielded.tools \
+   MIDNIGHT_INDEXER_HTTP=https://indexer.stagenet.shielded.tools/api/v4/graphql \
+   MIDNIGHT_INDEXER_WS=wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws \
+   MIDNIGHT_PROOF_SERVER_URL=http://127.0.0.1:6300 \
+   SOLVER_SEED="$BATCHER_WALLET_SEED" SOLVER_PROVISION_RECEIPT=/tmp/batcher-dust.json \
+   bun run deploy/scripts/provision-solver-fees.ts
+   ```
+
+   It fails if the wallet holds no NIGHT, and it waits until the DUST is
+   usable. Each registered NIGHT UTXO is one concurrent fee slot. The default
+   off `undeployed` is `BATCHER_MAX_SLOTS_PER_WALLET=1`; split the NIGHT into
+   several UTXOs before raising it.
+2. **Celestia signer.** Fund the mocha account behind `CELESTIA_RPC_URL` /
+   `CELESTIA_AUTH_TOKEN` with testnet TIA from the mocha faucet. On a light
+   node, `state.AccountAddress` prints the address. The batcher pays one blob
+   fee per sponsored offer.
+3. **Poster coins.** Send the poster's shielded address coins of `GIVE_TOKEN`
+   in the configured size (`GIVE_AMOUNT`, or `GIVE_MIN`..`GIVE_MAX`), minted on
+   the stagenet faucet. The address is printed at startup, and `DRY_RUN=true`
+   prints it without posting. The poster pays no fees: the batcher sponsors
+   them.
+
+### Not covered here
+
+- No live stagenet test runs in this repository's gates. The profile is
+  proven offline (configuration preflights and refusals) and end to end on
+  `undeployed`.
+- The COW solver does not support stagenet.
 
 ## Mainnet environment
 

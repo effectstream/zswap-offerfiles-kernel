@@ -47,6 +47,12 @@ describe("root window = ledger global_ttl (14 days) on every network", () => {
     expect(ROOT_WINDOW_STAGENET_S).toBe(ROOT_WINDOW_DEFAULT_S);
   });
 
+  test("stagenet defaults to its 14-day global_ttl (00050 FR-006)", () => {
+    expect(ROOT_WINDOW_STAGENET_S).toBe(1_209_600);
+    expect(rootWindowDefaultSeconds("stagenet")).toBe(60 * 60 * 24 * 14);
+    expect(rootWindowDefaultSeconds("STAGENET")).toBe(ROOT_WINDOW_STAGENET_S);
+  });
+
   test("env override wins over the default", () => {
     expect(resolveRootWindowSeconds("preview", "7200")).toBe(7200);
     expect(resolveRootWindowSeconds("stagenet", "3600")).toBe(3600);
@@ -64,6 +70,7 @@ describe("offer TTL tracks the root window", () => {
   test("defaults to the resolved window: 14 days with no env set", () => {
     const window = resolveRootWindowSeconds("preprod", undefined);
     expect(resolveOfferTtlSeconds(window, undefined)).toBe(1_209_600);
+    expect(resolveOfferTtlSeconds(ROOT_WINDOW_STAGENET_S, undefined)).toBe(ROOT_WINDOW_STAGENET_S);
   });
 
   test("follows a ROOT_WINDOW_SECONDS override when OFFER_TTL_SECONDS is unset", () => {

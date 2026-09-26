@@ -294,8 +294,22 @@ export function validateCanonicalRegistry(value: unknown, expectedNetwork: Regis
 }
 
 /**
+ * The PREPROD shielded-night (sNight) colour 000-init.sql seeds as `SNIGHT`.
+ * Its colour is derived from the preprod contract address, so it names a token
+ * that exists on preprod only. asset-prices.test.ts re-derives it.
+ */
+export const PREPROD_SNIGHT_TOKEN_COLOR =
+  "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
+
+/**
  * Replace only the six canonical registry rows in one transaction.
  * Historical offers, unrelated known tokens and token_prices are never touched.
+ *
+ * One stagenet-only exception (00050 FR-005): stagenet has no shielded-night
+ * deployment, so a stagenet import also removes the seeded SNIGHT row — but
+ * only while it still carries the PREPROD colour. A known token that exists
+ * on another network would otherwise be quoted and listed on stagenet; an
+ * operator-set stagenet SNIGHT colour is left alone.
  */
 export async function applyCanonicalRegistry(
   client: RegistryDbClient,
@@ -395,6 +409,12 @@ export async function applyCanonicalRegistry(
            registry_revision = EXCLUDED.registry_revision,
            updated_at = NOW()`,
         [token.name, token.tokenColor, registry.network, registry.revision],
+      );
+    }
+    if (registry.network === "stagenet") {
+      await client.query(
+        "DELETE FROM known_tokens WHERE name = 'SNIGHT' AND token_color = $1",
+        [PREPROD_SNIGHT_TOKEN_COLOR],
       );
     }
     await client.query("COMMIT");

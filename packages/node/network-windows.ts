@@ -34,7 +34,11 @@ export const ROOT_WINDOW_DEFAULT_S = 1_209_600;
 
 /**
  * @deprecated Every network uses ROOT_WINDOW_DEFAULT_S. This alias (same
- * value) only keeps existing importers compiling.
+ * value) keeps existing importers compiling (the stagenet profile and its
+ * tests). Stagenet's own sources agree (00050 FR-006): midnight-node d9729c13
+ * `res/stagenet/ledger-parameters-config.json:179` `"global_ttl": 1209600`,
+ * and the live ledger parameters read from the stagenet indexer on 2026-09-26
+ * (block 632,090: `global_ttl` = 1209600 s).
  */
 export const ROOT_WINDOW_STAGENET_S = ROOT_WINDOW_DEFAULT_S;
 

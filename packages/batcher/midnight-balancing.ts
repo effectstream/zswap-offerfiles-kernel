@@ -6,8 +6,19 @@ import {
   ensureBatcherNightUtxos,
 } from "./night-utxo-bootstrap.ts";
 
+export interface MidnightBalancingOptions {
+  /**
+   * Where the DUST wallet state is cached between restarts. Unset keeps the
+   * SDK default, a cwd-relative `dust-state/` folder (what the dev and preview
+   * entries have always used); the stagenet entry passes a directory under
+   * BATCHER_STORAGE_DIR so the cache lives on the batcher's volume (00050).
+   */
+  dustStateDir?: string;
+}
+
 export function createMidnightBalancingAdapter(
   batcherConfig: BatcherConfig,
+  options: MidnightBalancingOptions = {},
 ): MidnightBalancingAdapter {
   // Why this approach instead of passing a `walletResult` built by buildWalletFacade:
   //
@@ -44,6 +55,7 @@ export function createMidnightBalancingAdapter(
       syncMode: devBootstrap ? "all" : "dust-only",
       stallTimeoutMs: 7_200_000,  // 2h per attempt — enough for the full 81-min scan
       maxRetries: 3,
+      ...(options.dustStateDir !== undefined && { dustStateDir: options.dustStateDir }),
     },
   ).then(async ({ walletResult }) => {
     if (devBootstrap) {

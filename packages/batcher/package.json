@@ -9,7 +9,8 @@
   "scripts": {
     "start": "bun run batcher.dev.ts",
     "start:mainnet": "bun run batcher.mainnet.ts",
-    "start:preview": "bun run batcher.preview.ts"
+    "start:preview": "bun run batcher.preview.ts",
+    "start:stagenet": "bun run batcher.stagenet.ts"
   },
   "dependencies": {
     "@effectstream/batcher-sdk": "0.200.6",

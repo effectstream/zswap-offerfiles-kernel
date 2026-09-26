@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "bun run main.dev.ts",
     "start:mainnet": "bun run main.mainnet.ts",
-    "start:preview": "bun run main.preview.ts"
+    "start:preview": "bun run main.preview.ts",
+    "start:stagenet": "bun run main.stagenet.ts"
   },
   "dependencies": {
     "@effectstream/config": "0.200.6",

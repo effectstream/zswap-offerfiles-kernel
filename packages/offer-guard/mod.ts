@@ -275,3 +275,11 @@ export {
   type SponsorshipVerdict,
   type UnpricedPolicy,
 } from "./sponsorship.ts";
+
+// Repository dev seeds, refused by every entry that runs on a network with real
+// users (00050). Re-exported for the same one-import reason as above.
+export {
+  isPublicDevSeed,
+  KNOWN_PUBLIC_DEV_SEEDS,
+  normalizeSeedHex,
+} from "./public-dev-seeds.ts";

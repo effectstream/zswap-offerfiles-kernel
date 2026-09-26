@@ -710,6 +710,15 @@ CREATE TABLE known_roots (
 -- Default window is 14 days at 1 root/6 s = ~201 600 rows — must be indexed.
 CREATE INDEX idx_known_roots_last_seen_ms ON known_roots (last_seen_ms);
 CREATE INDEX idx_known_roots_height       ON known_roots (height);
+-- The prune's two predicates in one index. PGlite runs no autovacuum, so
+-- known_roots is never ANALYZEd there; without statistics the planner served
+-- `height < MAX(height)` — true for every row but the tip — from
+-- idx_known_roots_height, and the per-block prune walked the whole window:
+-- ~17-20 ms at 201,600 roots against ~0.2 ms with this index (00054 scale
+-- bench, known-roots-window-scale.bench.ts). Here the range scan starts at
+-- last_seen_ms and touches only the rows that aged out. A database created
+-- before this line gets the index at startup (known-roots-indexes.ts).
+CREATE INDEX idx_known_roots_last_seen_height ON known_roots (last_seen_ms, height);
 
 -- ── Market data ───────────────────────────────────────────────────────────
 

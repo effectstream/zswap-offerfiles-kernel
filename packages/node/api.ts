@@ -20,6 +20,7 @@ import {
   resolveOfferCursor,
   findActiveOfferByCommitment,
   findActiveOfferByUnshieldedOutput,
+  ensureKnownRootsIndexes,
 } from "@zswap-da/database";
 
 import {
@@ -163,6 +164,17 @@ export const apiRouter: StartConfigApiRouter = async function (
   // BATCHER_SPONSOR_POLICY throws HERE — before the server is ready — instead
   // of on the first submission.
   console.log(`[API] ${describeSponsorshipPolicy()}`);
+
+  // known_roots holds up to ~201,600 roots at the 14-day root window. A
+  // database that synced before idx_known_roots_last_seen_height existed
+  // never re-runs 000-init.sql, so ensure the index here (idempotent; a no-op
+  // before the schema exists). Best effort: a failure costs prune speed, not
+  // correctness.
+  try {
+    await ensureKnownRootsIndexes(dbConn);
+  } catch (error) {
+    console.error("[API] could not ensure the known_roots indexes:", error);
+  }
 
   // GET /docs — interactive API playground (upload + accept/settle debugger).
   registerDocsRoutes(server);

@@ -17,8 +17,8 @@ LOG=packages/tests/grand-e2e/out/stack.log
 export BATCHER_MAX_SLOTS_PER_WALLET="${BATCHER_MAX_SLOTS_PER_WALLET:-5}"
 
 # The suite asserts against these two windows (config.ts), and the node only
-# reads them at startup. Without them the node uses its per-network defaults
-# (3600s), and the run fails four checks that look unrelated: p1's
+# reads them at startup. Without them the node uses its default (1209600 s, the
+# ledger's 14-day global_ttl), and the run fails four checks that look unrelated: p1's
 # `ttl_seconds=600`, and three p4 root checks — see the ROOT_UNKNOWN note in
 # p4-adversarial.ts for why a wide window makes the "foreign" fixture pass.
 export ROOT_WINDOW_SECONDS="${ROOT_WINDOW_SECONDS:-600}"

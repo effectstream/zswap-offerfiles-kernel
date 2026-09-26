@@ -30,6 +30,13 @@
 
 import { Buffer } from "node:buffer";
 import { mnemonicToSeed } from "@scure/bip39";
+// Endpoint defaults are the SAME function the wallet facade's config comes
+// from, so the poster can never log one endpoint and dial another (00050
+// FR-003). It is pure: it maps a network id to its default URLs.
+import { defaultMidnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
+// Relative, like offer-poster.ts's first-party imports: `deploy/` is not a
+// workspace member, so `@zswap-da/*` specifiers do not resolve from here.
+import { isPublicDevSeed } from "../../../packages/offer-guard/public-dev-seeds.ts";
 
 export interface GiveRange {
   minBase: bigint;
@@ -108,6 +115,7 @@ export type ConfigErrorCode =
   | "CONFLICT"
   | "MALFORMED"
   | "SEED_COLLISION"
+  | "PUBLIC_DEV_SEED"
   | "UNSUPPORTED_TOKEN";
 
 /** Every refusal in this module. `code` lets the caller pick an exit status
@@ -397,37 +405,36 @@ function resolveLeg(env: EnvMap, key: string): ResolvedLeg {
 export async function parsePosterConfig(env: EnvMap): Promise<PosterConfig> {
   const { seed, source: seedSource } = await resolveSeed(env);
 
-  // Endpoint defaults MUST match `@effectstream/midnight-contracts`'s
-  // `midnightNetworkConfig`, which is what the wallet facade reads. The poster resolves them
-  // itself as well so the startup log can show them and a mismatch is visible.
+  // Endpoint defaults come from `@effectstream/midnight-contracts`'
+  // `defaultMidnightNetworkConfig`, the function behind the
+  // `midnightNetworkConfig` the wallet facade reads: loopback for `undeployed`,
+  // the Shielded Tools hosts for `stagenet`, `*.<id>.midnight.network` for
+  // every other id. Explicit env always wins. The poster resolves them itself
+  // as well so the startup log can show them and a mismatch is visible.
   const networkId = readString(env, "MIDNIGHT_NETWORK_ID", "undeployed");
-  const isUndeployed = networkId === "undeployed";
+  const defaults = defaultMidnightNetworkConfig(networkId as never);
   const networkUrls: PosterNetworkUrls = {
     id: networkId,
-    indexer: readString(
-      env,
-      "MIDNIGHT_INDEXER_HTTP",
-      isUndeployed
-        ? "http://127.0.0.1:8088/api/v4/graphql"
-        : `https://indexer.${networkId}.midnight.network/api/v4/graphql`,
-    ),
-    indexerWS: readString(
-      env,
-      "MIDNIGHT_INDEXER_WS",
-      isUndeployed
-        ? "ws://127.0.0.1:8088/api/v4/graphql/ws"
-        : `wss://indexer.${networkId}.midnight.network/api/v4/graphql/ws`,
-    ),
-    node: readString(
-      env,
-      "MIDNIGHT_NODE_HTTP",
-      isUndeployed ? "http://127.0.0.1:9944" : `https://rpc.${networkId}.midnight.network`,
-    ),
+    indexer: readString(env, "MIDNIGHT_INDEXER_HTTP", defaults.indexer),
+    indexerWS: readString(env, "MIDNIGHT_INDEXER_WS", defaults.indexerWS),
+    node: readString(env, "MIDNIGHT_NODE_HTTP", defaults.node),
     proofServer:
       readEnv(env, "MIDNIGHT_PROOF_SERVER_URL") ??
       readEnv(env, "MIDNIGHT_PROOF_SERVER") ??
-      "http://127.0.0.1:6300",
+      defaults.proofServer,
   };
+
+  // A repository dev seed is anyone's wallet. On stagenet (a network with
+  // real users) the poster refuses it by name instead of posting coins that
+  // whoever reads the repository can take (00050, US1).
+  if (networkId === "stagenet" && isPublicDevSeed(seed)) {
+    throw new ConfigError(
+      "PUBLIC_DEV_SEED",
+      `${seedSource} is a public dev seed from this repository; on stagenet the poster needs its own ` +
+        `funded seed (generate one with: openssl rand -hex 32)`,
+      seedSource,
+    );
+  }
 
   const kernelBase = (readEnv(env, "ZSWAP_API") ?? readEnv(env, "NODE_URL") ?? "http://kernel:9999").replace(
     /\/$/,

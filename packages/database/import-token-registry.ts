@@ -147,7 +147,18 @@ export async function runOptionalRegistryImport(
   }
 }
 
-export async function runRegistryImportCli(): Promise<RegistryImportOutcome> {
+/**
+ * The CLI. By default the import is OPTIONAL (the dev orchestrator runs it as
+ * a non-critical step): every unavailable path reports a skip and exits 0.
+ *
+ * `--required` (the image's token-registry one-shot, 00050 FR-004/FR-005)
+ * turns a skip into a loud failure: the reason goes to stderr and the process
+ * exits 1, so a deployment step that did not replace the seeded Preprod rows
+ * never looks like one that did.
+ */
+export async function runRegistryImportCli(
+  options: { required?: boolean } = {},
+): Promise<RegistryImportOutcome> {
   let outcome: RegistryImportOutcome;
   try {
     outcome = await runOptionalRegistryImport(loadRegistryImportConfig());
@@ -156,10 +167,13 @@ export async function runRegistryImportCli(): Promise<RegistryImportOutcome> {
   }
   if (outcome.status === "applied") {
     console.log(`[token-registry] applied network=${outcome.network} revision=${outcome.revision}`);
+  } else if (options.required) {
+    console.error(`[token-registry] FAILED (required import did not apply): ${outcome.reason}`);
+    process.exitCode = 1;
   } else {
     console.warn(`[token-registry] skipped: ${outcome.reason}`);
   }
   return outcome;
 }
 
-if (import.meta.main) await runRegistryImportCli();
+if (import.meta.main) await runRegistryImportCli({ required: process.argv.includes("--required") });

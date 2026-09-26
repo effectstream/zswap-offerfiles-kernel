@@ -4,7 +4,7 @@
 export const MAX_COIN_AMOUNT = (1n << 128n) - 1n;
 
 /**
- * Ledger-v8 transaction deltas are i128 and reject i128::MIN. Every exposed
+ * Ledger-v9 transaction deltas are i128 and reject i128::MIN. Every exposed
  * source, endpoint, receipt, and safe merge prefix therefore uses this bound.
  */
 export const MAX_SETTLEMENT_AMOUNT = (1n << 127n) - 1n;
@@ -96,7 +96,7 @@ export type WholeOfferReceiptResult =
   | { ok: false; reason: WholeOfferReceiptFailureReason; token?: string };
 
 export interface WholeOfferMergeOrderOptions {
-  /** Defaults to the supported ledger-v8 signed-delta maximum. */
+  /** Defaults to the supported ledger-v9 signed-delta maximum. */
   maximumDelta?: bigint;
   /** Defaults to the inherited eight-physical-maker settlement limit. */
   maxSources?: number;
@@ -329,7 +329,7 @@ const addNetRows = (
 
 /**
  * Find a deterministic physical-maker merge order whose every token prefix is
- * representable as a supported ledger-v8 signed delta.
+ * representable as a supported ledger-v9 signed delta.
  *
  * The common sorted-hash order is checked first. Extreme books use a memoized
  * subset-mask DFS: aggregate state is unique per mask, so at most n*2^(n-1)

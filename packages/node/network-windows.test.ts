@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 // Guards item #21: the root window is a LEDGER parameter mirrored per
-// network — all currently deployed networks run ~1 h; STAGENET (placeholder,
-// not publicly available) runs the next release's 2 weeks. The regression
+// network — the other networks default to ~1 h; stagenet runs 14 days, its
+// ledger-9 `global_ttl` (00050 FR-006). The regression
 // this prevents: the old 14-day default silently shipping on a 1 h network,
 // where the book then lists offers whose roots the chain dropped up to two
 // weeks ago — phantom, unfillable offers.
@@ -22,7 +22,8 @@ describe("root window per network", () => {
     expect(ROOT_WINDOW_CURRENT_NETWORKS_S).toBe(3600);
   });
 
-  test("STAGENET placeholder defaults to 2 weeks", () => {
+  test("stagenet defaults to its 14-day global_ttl (00050 FR-006)", () => {
+    expect(ROOT_WINDOW_STAGENET_S).toBe(1_209_600);
     expect(rootWindowDefaultSeconds("stagenet")).toBe(60 * 60 * 24 * 14);
     expect(rootWindowDefaultSeconds("STAGENET")).toBe(ROOT_WINDOW_STAGENET_S);
   });

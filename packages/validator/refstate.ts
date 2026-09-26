@@ -1,4 +1,4 @@
-import { LedgerState, WellFormedStrictness } from "@midnight-ntwrk/ledger-v8";
+import { LedgerState, WellFormedStrictness } from "@midnightntwrk/ledger-v9";
 
 // Reference state for `Transaction.wellFormed`. The security-critical
 // `stateless_check` (ZK proof + signature verification) is STATE-INDEPENDENT —
@@ -37,11 +37,12 @@ export function getBlankRefState(networkId: string): LedgerState {
 //   enforceLimits = false     ← the ledger byte-limit check reads a blank-state
 //                               parameter; we cap size ourselves via maxBytes,
 //                               so leave it off to avoid that dependency.
-export function buildStrictness(): WellFormedStrictness {
+export function buildStrictness(opts?: { verifyContractProofs?: boolean }): WellFormedStrictness {
   const s = new WellFormedStrictness();
   s.enforceBalancing = false;
   s.verifyNativeProofs = true;
-  s.verifyContractProofs = true;
+  // false ONLY on the contract-maker retry lane — see ValidateOpts.contractMakerRetry.
+  s.verifyContractProofs = opts?.verifyContractProofs ?? true;
   s.verifySignatures = true;
   s.enforceLimits = false;
   return s;

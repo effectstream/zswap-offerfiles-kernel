@@ -17,7 +17,7 @@ import {
   type SwapJobExecutorHandle,
   type SwapJobWallet,
 } from "./src/swap-job-executor.ts";
-import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
+import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 
 const A = "aa".repeat(32);
 const B = "bb".repeat(32);

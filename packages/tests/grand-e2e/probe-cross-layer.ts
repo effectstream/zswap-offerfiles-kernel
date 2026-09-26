@@ -18,7 +18,7 @@
 //   bun run packages/tests/grand-e2e/probe-cross-layer.ts
 
 import { readFileSync } from "node:fs";
-import { Transaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 import { getBlankRefState, validateZswapOfferBytes } from "@zswap-da/validator";

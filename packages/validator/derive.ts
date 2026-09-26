@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
-import { addressFromKey } from "@midnight-ntwrk/ledger-v8";
-import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
+import { addressFromKey } from "@midnightntwrk/ledger-v9";
+import type { UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 import { P2pAtomicSwaps, UnknownTokenTagError } from "@effectstream/mip-zswap-offer/mip6";
 
 import type {
@@ -26,7 +26,7 @@ import type {
 export { UnknownTokenTagError };
 
 // Normalize a value that may be a Uint8Array or a hex string into lowercase
-// hex (no `0x` prefix). ledger-v8 returns nullifiers / owner keys / intent
+// hex (no `0x` prefix). The ledger returns nullifiers / owner keys / intent
 // hashes as either form depending on the field. Mirrors the helper in the
 // node's state-machine so indexing and validation agree byte-for-byte.
 export function bytesOrStringToHex(value: unknown): string {
@@ -73,9 +73,12 @@ export function collectNullifiers(tx: UnprovenTransaction): string[] {
 }
 
 // Collect the (owner, intentHash, outputNo) triples for every unshielded UTXO
-// the offer spends. `UtxoSpend.owner` is a raw SignatureVerifyingKey; apply
-// `addressFromKey` so it matches the 32-byte address the indexer reports on
-// consumption (the `midnight-unshielded-spend` path).
+// the offer spends. `UtxoSpend.owner` is a SignatureVerifyingKey — in v9 a
+// TAGGED object `{ tag: 'schnorr' | 'ecdsa', value: hex }`, no longer v8's
+// bare hex string. `addressFromKey` takes the tagged object and returns the
+// 32-byte address the indexer reports on consumption (the
+// `midnight-unshielded-spend` path). Bare-string owners (old fixtures) are
+// wrapped as schnorr, v8's only kind.
 export function collectUnshieldedSpends(
   tx: UnprovenTransaction,
 ): UnshieldedSpendRef[] {
@@ -89,7 +92,9 @@ export function collectUnshieldedSpends(
       ].filter(Boolean);
       for (const offer of unshieldedOffers) {
         for (const spend of offer.inputs ?? []) {
-          const ownerSvk = bytesOrStringToHex(spend.owner);
+          const ownerSvk = typeof spend.owner === "object" && spend.owner !== null
+            ? spend.owner
+            : { tag: "schnorr" as const, value: bytesOrStringToHex(spend.owner) };
           spends.push({
             owner: addressFromKey(ownerSvk).toLowerCase(),
             intentHash: bytesOrStringToHex(spend.intentHash).toLowerCase(),

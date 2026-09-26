@@ -159,6 +159,8 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
       refState: getBlankRefState(this.networkId),
       tblock: new Date(),
       maxBytes: OFFER_MAX_BYTES,
+      // Same lane as the node — see ValidateOpts.contractMakerRetry.
+      contractMakerRetry: /^(1|true|yes)$/i.test(process.env["ALLOW_CONTRACT_MAKER_OFFERS"] ?? ""),
     });
     if (!result.ok) {
       return { valid: false, error: `${result.code}: ${result.reason ?? ""}` };

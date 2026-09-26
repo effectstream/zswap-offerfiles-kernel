@@ -1068,7 +1068,7 @@ export function exclusionDetail(reason, claimed) {
     case "shared-coin":
       return "shares an input coin with another admitted maker file";
     case "settlement-amount-cap":
-      return "its amount or combination total exceeds the ledger-v8 settlement bound";
+      return "its amount or combination total exceeds the ledger-v9 settlement bound";
     case "source-offer-cap":
       return "the source snapshot exceeded the bounded derivation scan";
     case "pair-search-cap":

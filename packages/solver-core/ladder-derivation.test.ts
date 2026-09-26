@@ -653,7 +653,8 @@ describe("wire and numeric bounds", () => {
     expect(derived.diagnostics.pairs[0]!.reason).toBe("wire-point-cap");
   });
 
-  test("applies the supported ledger i128 ceiling while retaining u256 wire grammar", () => {
+  test("applies the ledger-v9 signed-delta ceiling while retaining u256 wire grammar", () => {
+    expect(MAX_SETTLEMENT_AMOUNT).toBe((1n << 127n) - 1n);
     const cappedInput = MAX_SETTLEMENT_AMOUNT / 10n + 1n;
     const capped = deriveLadder([offer(2_300, cappedInput, 1n)], OPTIONS);
     expect(capped.provenance[0]!.terminalInput).toBe(MAX_SETTLEMENT_AMOUNT.toString());
@@ -669,11 +670,52 @@ describe("wire and numeric bounds", () => {
     expect(tooLarge.excluded).toEqual([
       { offerHash: hash(2_302), reason: "settlement-amount-cap" },
     ]);
+    const tooLargeOutput = deriveLadder([
+      offer(2_307, 1n, MAX_SETTLEMENT_AMOUNT + 1n),
+    ], OPTIONS);
+    expect(tooLargeOutput.levels).toEqual([]);
+    expect(tooLargeOutput.excluded).toEqual([
+      { offerHash: hash(2_307), reason: "settlement-amount-cap" },
+    ]);
 
     const wireU256 = (1n << 256n) - 1n;
     expect(rejectLevels([{ input: wireU256.toString(), output: wireU256.toString() }])).toBeNull();
     expect(rejectLevels([{ input: (wireU256 + 1n).toString(), output: "1" }]))
       .toBe("malformed-rung");
+  });
+
+  test("prunes individually valid makers whose combined signed delta exceeds the ceiling", () => {
+    const outputOverflow = deriveLadder([
+      offer(2_303, 1n, MAX_SETTLEMENT_AMOUNT),
+      offer(2_304, 1n, 1n),
+    ], OPTIONS);
+    expect(outputOverflow.diagnostics.pairs[0]!.amountCappedSubsets).toBe(1);
+    expect(outputOverflow.provenance[0]!.combinations.map((combination) => ({
+      input: combination.input,
+      output: combination.output,
+      offerHashes: combination.offerHashes,
+    }))).toEqual([
+      {
+        input: "1",
+        output: MAX_SETTLEMENT_AMOUNT.toString(),
+        offerHashes: [hash(2_303)],
+      },
+    ]);
+    expect(outputOverflow.levels[0]!.levels.every((level) =>
+      BigInt(level.output) <= MAX_SETTLEMENT_AMOUNT)).toBe(true);
+
+    const half = MAX_SETTLEMENT_AMOUNT / 2n;
+    const inputOverflow = deriveLadder([
+      offer(2_305, half + 1n, 1n),
+      offer(2_306, half + 2n, 2n),
+    ], OPTIONS);
+    expect(inputOverflow.diagnostics.pairs[0]!.amountCappedSubsets).toBe(1);
+    expect(inputOverflow.provenance[0]!.combinations.map((entry) => entry.input)).toEqual([
+      (half + 1n).toString(),
+      (half + 2n).toString(),
+    ]);
+    expect(inputOverflow.levels[0]!.levels.every((level) =>
+      BigInt(level.input) <= MAX_SETTLEMENT_AMOUNT)).toBe(true);
   });
 
   test("numeric-only prefix fallback preserves its cause with the default wire limit", () => {

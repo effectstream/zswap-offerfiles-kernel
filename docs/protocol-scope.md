@@ -14,7 +14,7 @@
 > **Authoritative documentation** for what actually exists:
 > [`README.md` → "Running the COW solver"](../README.md#running-the-cow-solver)
 > and [`API.md` → "The COW solver (Midnight Intents side)"](../API.md#the-cow-solver-midnight-intents-side)
-> — executable topology, supported domain (Midnight 1.x / ledger-v8, single-leg
+> — executable topology, supported domain (Midnight 2.x / ledger-v9, single-leg
 > distinct-token shielded, ≤ 8 complete makers), `payFees:false` fee ownership,
 > both-surplus job semantics, no swap-token inventory subsidy, the fixed 10x
 > terminal plateau, and the resource bounds on published liquidity.
@@ -32,7 +32,7 @@
 | Field | Value |
 |---|---|
 | Project | `00001-zswap-posted-price-solver` |
-| Midnight target | 1.+ / ledger-v8 |
+| Midnight target | 2.x / ledger-v9 |
 | Drafted | 2026-08-13 |
 | Approver | **UNASSIGNED** |
 | Approval date | **UNAPPROVED** |

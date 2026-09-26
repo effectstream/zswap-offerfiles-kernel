@@ -36,7 +36,7 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ['@midnight-ntwrk/onchain-runtime'],
+    exclude: ['@midnightntwrk/onchain-runtime-v4'],
     esbuildOptions: {
       target: 'esnext',
       plugins: [

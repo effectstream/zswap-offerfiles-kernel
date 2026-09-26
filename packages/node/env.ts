@@ -24,6 +24,13 @@ import { DEFAULT_SPONSOR_DISCOUNT_BPS } from "./market-mock.ts";
 // rejected-blob cleanup can never drift apart.
 export const CELESTIA_PRIMITIVE_NAME = "ZswapBlob";
 
+// Accept offers whose maker is a CONTRACT CALL (e.g. an AA-Manager open swap).
+// Default OFF. See ValidateOpts.contractMakerRetry in @zswap-da/validator for
+// exactly what is and is not verified on this lane.
+export const ALLOW_CONTRACT_MAKER_OFFERS = /^(1|true|yes)$/i.test(
+  getEnv("ALLOW_CONTRACT_MAKER_OFFERS") ?? "",
+);
+
 export const CELESTIA_RPC_URL = getEnv("CELESTIA_RPC_URL") ?? "http://127.0.0.1:26658";
 // MIP-0006 shared namespace by default — see MIP6_NAMESPACE_ID_SUFFIX_HEX in
 // @zswap-da/offer-guard for why overriding re-silos liquidity (dev/e2e only).
@@ -74,8 +81,8 @@ export const CELESTIA_MAX_GAS_PRICE = _maxGasPrice ? parseFloat(_maxGasPrice) : 
 export const CELESTIA_TX_PRIORITY = _txPriority ? parseInt(_txPriority) : undefined;
 
 // Root-recency window and offer TTL — per-network defaults live in
-// network-windows.ts (1 h on all current networks; STAGENET placeholder at
-// 2 weeks, not publicly available yet). Env vars override both.
+// network-windows.ts (1 h on the other networks; stagenet 14 days, its
+// ledger-9 `global_ttl`). Env vars override both.
 //
 // OFFER_TTL_SECONDS defaults to the root window: a shielded offer is fillable
 // only while the Merkle root its `Input`/`Transient` proves against is still

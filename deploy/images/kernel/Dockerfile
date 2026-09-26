@@ -13,8 +13,10 @@
 # the container's PID 1 is the real workload and Compose signals reach it.
 #
 #   entrypoint-pglite.sh    the Postgres-wire server the kernel talks to
-#   entrypoint-kernel.sh    exec bun run packages/node/main.dev.ts      (:9999)
-#   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.dev.ts (:3334)
+#   entrypoint-kernel.sh    exec bun run packages/node/main.<network>.ts (:9999)
+#   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.<network>.ts (:3334)
+#                           (<network> from MIDNIGHT_NETWORK_ID: undeployed → .dev.ts,
+#                           preview, stagenet; anything else exits 78)
 #   entrypoint-solver.sh    exec bun run start.solver.ts
 #   entrypoint-solver-frontend.sh  exec bun run start.solver-frontend.ts (:8080)
 #   entrypoint-price-feed.sh  daily CoinGecko refresh of asset_prices
@@ -22,6 +24,8 @@
 #   entrypoint-solver-provision.sh  one-shot: validate prefunding + write config
 #   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
 #   entrypoint-offer-poster.sh      loop: post prefunded coins, reuse on release
+#   entrypoint-token-registry.sh    one-shot: import the network's canonical token
+#                                   registry (TOKEN_REGISTRY_NETWORK); loud failure
 #
 # `solver-provision` and `maker-offer` are devnet SEEDING steps, and they are
 # services rather than README steps for one reason: without them every container
@@ -89,6 +93,9 @@ COPY deploy/images/kernel/entrypoint-solver-provision.sh /usr/local/bin/entrypoi
 COPY deploy/images/kernel/entrypoint-maker-offer.sh      /usr/local/bin/entrypoint-maker-offer.sh
 # The 00007 offer poster: a LOOP, opt-in behind the `poster` compose profile.
 COPY deploy/images/kernel/entrypoint-offer-poster.sh     /usr/local/bin/entrypoint-offer-poster.sh
+# 00050: the canonical token-registry import for a public network's database —
+# a one-shot whose failure is an exit code, not a logged skip.
+COPY deploy/images/kernel/entrypoint-token-registry.sh   /usr/local/bin/entrypoint-token-registry.sh
 COPY deploy/images/kernel/wait-for.sh            /usr/local/bin/wait-for.sh
 RUN chmod +x /usr/local/bin/entrypoint-*.sh /usr/local/bin/wait-for.sh
 

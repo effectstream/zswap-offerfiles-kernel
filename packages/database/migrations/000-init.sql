@@ -248,10 +248,11 @@ CREATE TABLE offer_file (
     -- NOT NULL because every writer sets it and a missing chain-derived
     -- timestamp should fail loudly, not serve null to a client.
     first_seen_at TIMESTAMPTZ NOT NULL,
-    -- TTL in seconds for how long this offer should remain active.
-    -- Default = 1 hour (matches the Midnight reference Merkle-root window
-    -- on the shielded path; see packages/node/env.ts for the full rationale).
-    ttl_seconds BIGINT NOT NULL DEFAULT 3600,
+    -- TTL in seconds for how long this offer should remain active. The
+    -- writer always passes OFFER_TTL_SECONDS; the default mirrors its own
+    -- default, the root window = ledger-9 `global_ttl` = 14 days (see
+    -- packages/node/network-windows.ts for the full rationale).
+    ttl_seconds BIGINT NOT NULL DEFAULT 1209600,
     -- When THIS node inserted the row — a local observation, deliberately not
     -- chain-derived, and excluded from the determinism diff for that reason.
     -- Never sort or filter on it: see excluded-columns-are-write-only.test.ts.
@@ -709,6 +710,15 @@ CREATE TABLE known_roots (
 -- Default window is 14 days at 1 root/6 s = ~201 600 rows — must be indexed.
 CREATE INDEX idx_known_roots_last_seen_ms ON known_roots (last_seen_ms);
 CREATE INDEX idx_known_roots_height       ON known_roots (height);
+-- The prune's two predicates in one index. PGlite runs no autovacuum, so
+-- known_roots is never ANALYZEd there; without statistics the planner served
+-- `height < MAX(height)` — true for every row but the tip — from
+-- idx_known_roots_height, and the per-block prune walked the whole window:
+-- ~17-20 ms at 201,600 roots against ~0.2 ms with this index (00054 scale
+-- bench, known-roots-window-scale.bench.ts). Here the range scan starts at
+-- last_seen_ms and touches only the rows that aged out. A database created
+-- before this line gets the index at startup (known-roots-indexes.ts).
+CREATE INDEX idx_known_roots_last_seen_height ON known_roots (last_seen_ms, height);
 
 -- ── Market data ───────────────────────────────────────────────────────────
 

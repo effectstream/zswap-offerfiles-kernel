@@ -92,7 +92,7 @@ Query params (all optional): `limit` (default & max 100), `token` (64-hex color)
       "computed": {
         "gives": [ { "token": "0000…0000", "amount": "1000000", "type": "UNSHIELDED" } ],
         "wants": [ { "token": "70ce…b569", "amount": "500000", "type": "SHIELDED" } ],
-        "expiresAt": "2026-06-01T13:00:00.000Z",
+        "expiresAt": "2026-06-15T12:00:00.000Z",
         "inputNullifiers": ["7c1d9b…"],
         "firstSeenAt": "2026-06-01T12:00:00.000Z",
         "status": "live"
@@ -138,7 +138,7 @@ resolves **archived** offers (with their terminal status):
   "offerId": "9f2c4a…",
   "offerBech32": "swapoffer1q…(16–25 KB)",
   "blockHeight": "12231800",
-  "ttlSeconds": "3600",
+  "ttlSeconds": "1209600",
   "computed": {
     "gives": [ … ], "wants": [ … ],
     "expiresAt": "…", "inputNullifiers": [ "…" ],

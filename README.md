@@ -903,9 +903,12 @@ What this means here:
   share commitment is recomputable from the bytes (self-verifying integrity);
   the inclusion proof must be captured **within the 7-day window**
   (`blob.GetProof`) for provable on-chain history after pruning.
-- Note the window asymmetry: with Midnight's next-release root window (~14d),
-  an offer can still be **fillable after its Celestia blob is pruned** — takers
-  depend on our API/mirror for the blob, not on Celestia.
+- Note the window asymmetry: the kernel's root window is the ledger's
+  `global_ttl`, 14 days on every network (`ROOT_WINDOW_SECONDS`, default
+  1209600), about twice mocha's ~7-day blob retention. An offer can still be
+  **fillable after its Celestia blob is pruned** — takers depend on our
+  API/mirror for the blob, not on Celestia, and a kernel syncing from scratch
+  cannot re-read offers older than the retention window.
 
 ## Stopping
 

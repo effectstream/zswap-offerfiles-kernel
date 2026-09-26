@@ -67,7 +67,7 @@ import {
   type QualifiedShieldedCoinInfo,
   type UnprovenOffer,
   type UnprovenTransaction,
-} from "@midnight-ntwrk/ledger-v8";
+} from "@midnightntwrk/ledger-v9";
 import { randomBytes } from "node:crypto";
 
 /**

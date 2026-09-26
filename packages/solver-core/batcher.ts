@@ -2,7 +2,7 @@
 // Midnight Intents relay. No network request or legacy batcher acknowledgement
 // parser belongs on this exported surface.
 
-import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
+import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 
 /** Merge N independently-proven offers into one atomic, token-balanced tx.
  *  Each offer must already be finalized (proven + bound) by its own owner —
@@ -42,7 +42,7 @@ export class ImbalanceUnreadableError extends Error {
 
 const MAX_LEDGER_SEGMENT = 0xffff;
 
-/** ledger-v8 declares token-bearing segments in three places: guaranteed
+/** ledger-v9 declares token-bearing segments in three places: guaranteed
  * segment 0, intent keys, and fallible-offer keys. Segment IDs are arbitrary
  * u16 values (they are not a dense 0..N range), so guessing 0/1 is unsafe. */
 export function declaredLedgerSegments(tx: FinalizedTransaction): number[] {

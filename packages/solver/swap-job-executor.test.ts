@@ -1002,7 +1002,7 @@ test("sorted physical identity uses the helper's distinct safe order for actual 
     const result = await h.executor.onSwap(swapJob("safe-order", D, A, "1", "2"));
     expect(result.type).toBe("swap-tx");
     // Exact-file identity stays sorted, while H3 cancels H1 before H2 adds the
-    // final A unit. H1+H2 would overflow ledger-v8's signed A delta.
+    // final A unit. H1+H2 would overflow ledger-v9's signed A delta.
     expect(h.exactRequests).toEqual([[H1, H2, H3]]);
     expect(h.dustBalanceInputs[0]![0]).toBe(`maker:${H1}+maker:${H3}+maker:${H2}`);
     expect(h.imbalanceReads.some((read) =>
@@ -1963,12 +1963,14 @@ test("maker deletion during exact read and expiry during address read cause zero
   await expired.executor.stop();
 });
 
-test("signed-delta terminal cap keeps surplus buildable and rejects larger inputs", () => {
-  const cost = MAX_SETTLEMENT_AMOUNT / 2n;
-  const sources = [offer(H1, N1, cost, 10n)];
+test("signed-delta terminal cap keeps receipts buildable and rejects M+1 jobs", () => {
+  const cost = MAX_SETTLEMENT_AMOUNT / 10n + 1n;
+  const sources = [offer(H1, N1, cost, MAX_SETTLEMENT_AMOUNT)];
   const { route } = routeFor(MAX_SETTLEMENT_AMOUNT.toString(), "1", { offers: sources, balances: {} });
   expect(receiptAmount(route, A)).toBe(MAX_SETTLEMENT_AMOUNT - cost);
-  expect(receiptAmount(route, B)).toBe(9n);
+  expect(receiptAmount(route, B)).toBe(MAX_SETTLEMENT_AMOUNT - 1n);
   expect(refusalReason(() => routeFor((MAX_SETTLEMENT_AMOUNT + 1n).toString(), "1", { offers: sources })))
+    .toBe(JOB_ROUTE_NOT_CURRENT);
+  expect(refusalReason(() => routeFor("1", (MAX_SETTLEMENT_AMOUNT + 1n).toString(), { offers: sources })))
     .toBe(JOB_ROUTE_NOT_CURRENT);
 });

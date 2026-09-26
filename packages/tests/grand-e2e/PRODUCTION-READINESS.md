@@ -104,11 +104,8 @@ run. See §2.4 and §2.5 for the measurements.
   merge route, so the probe's construction is the one under test.
 - **Multi-leg (T-D5).** The same merged transaction has 2 gives × 2 wants and
   would register as **four** trades at four different prices. CLOSED by PR-#7;
-  the fixture is
-  also unblocked independently: `mintShielded(deployed, sepByte, …)`
-  parameterizes the color by domain separator on the already-deployed contract,
-  so a third shielded color is one `TOKEN_SEPS` entry plus a funding grant — no
-  new contract needed.
+  the fixture requires three distinct externally issued colors already funded
+  to its same-chain wallets. The kernel has no contract or local mint fallback.
 - **`NO_SPENDABLE_INPUT` / `UNKNOWN_TOKEN` (T-A2).** Still unbuilt. The SDK will not build an
   input-free swap, and every token tag it can emit is
   `shielded`/`unshielded`/`dust`. Both stay covered at validator-unit level
@@ -463,10 +460,9 @@ wrongly exclude those.
 book, so a taker can only find it through `/v1/offers` with token filters —
 effectively OTC. That is the intent, not a side effect.
 
-The fixture is also no longer blocked. `mintShielded(deployed, sepByte, …)`
-parameterizes the color by domain separator on the ALREADY-DEPLOYED contract, so
-a third shielded color is one entry in `TOKEN_SEPS` plus a funding grant — no
-new contract and no contract change.
+The fixture requires three distinct externally issued colors already funded to
+its same-chain wallets; a two-color public faucet response is insufficient for
+this basket case. The kernel has no contract or local mint fallback.
 
 MIP-0006 types `gives`/`wants` as arrays; ≥1 each is the only constraint. But
 `getTradeHistory` and `getPairStats24h` join per `(offer, color)` filtered to

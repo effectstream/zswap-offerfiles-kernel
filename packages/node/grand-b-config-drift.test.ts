@@ -96,7 +96,7 @@ describe("main.grand-b.ts config must not drift from config.dev.ts", () => {
   test("the ZswapChainState.tryApply guard is on every entrypoint", () => {
     // Not cosmetic: without it a tryApply throw propagates and the STF diverges,
     // so an entrypoint missing it would process the same chain differently.
-    for (const f of ["main.dev.ts", "main.preview.ts", "main.mainnet.ts", "main.grand-b.ts"]) {
+    for (const f of ["main.dev.ts", "main.preview.ts", "main.stagenet.ts", "main.mainnet.ts", "main.grand-b.ts"]) {
       expect(read(`./${f}`), `${f} is missing the tryApply guard`).toContain(
         "ZswapChainState.prototype.tryApply",
       );

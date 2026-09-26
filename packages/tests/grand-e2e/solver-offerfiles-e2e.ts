@@ -6457,7 +6457,7 @@ async function prepareRealInvalidCorpus(
   // transaction's hash into `consumingFundingTxHash`. What remains for this
   // site is the LAST link — that the manifest names that same transaction, once
   // — which the hash equality below establishes. The former nullifiers-in-
-  // `identifiers` clause was impossible by construction: ledger-v8's
+  // `identifiers` clause was impossible by construction: ledger-v9's
   // `Transaction::identifiers()` returns value and intent-binding commitments,
   // never nullifiers (e2e open questions E1-Q1 and E1-Q6).
   assert(

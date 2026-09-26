@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
-import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
+import type { UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 
 // Extracts a shielded input's merkle_tree_root from a serialized ZswapInput,
-// pinned to the `zswap-input[v2]` layout. The ledger-v8 binding does not expose
+// pinned to the `zswap-input[v2]` layout. The ledger binding (v8 and v9 alike) does not expose
 // the root as a getter, so we read it from the serialized bytes.
 //
 // Layout (verified empirically against the live devnet — see
@@ -76,7 +76,7 @@ export function canonicalRootHex(hexOrBytes: string | Uint8Array): string {
   return Buffer.from(hexOrBytes).toString("hex");
 }
 
-// Extract one shielded input's root as canonical hex. `input` is a ledger-v8
+// Extract one shielded input's root as canonical hex. `input` is a ledger
 // `ZswapInput` (we only use `serialize()` + the `nullifier` getter).
 export function extractInputRoot(input: {
   serialize(): Uint8Array;

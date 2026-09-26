@@ -50,7 +50,7 @@ combination carries required sorted `{token,gives,wants,net}` rows, where only
 `net` may be signed, plus exact-threshold receipts and sorted physical hashes.
 The snapshot also carries a bounded reverse index of shared physical files,
 the actual candidate-pair/discovery/safe-merge work and limits, and separate
-ledger-v8 settlement (`2^127-1`) and coin-format (`2^128-1`) maxima. A route is
+ledger-v9 settlement (`2^127-1`) and coin-format (`2^128-1`) maxima. A route is
 `direct` only when it has no intermediate row and no endpoint counterflow;
 otherwise it is `composed`, including two-token counterflow.
 

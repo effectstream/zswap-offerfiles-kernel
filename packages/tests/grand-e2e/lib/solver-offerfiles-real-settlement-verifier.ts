@@ -561,7 +561,7 @@ function parseActorArtifact(artifact: SealedJson, config: RealSettlementVerifier
     throw new Error("actor artifact has the wrong schema or run ID");
   }
   const networkId = stringAt(root["networkId"], "actor artifact.networkId", /^[a-zA-Z0-9_.-]+$/, 64);
-  if (networkId !== "undeployed") throw new Error("actor artifact must target Midnight undeployed/ledger-v8");
+  if (networkId !== "undeployed") throw new Error("actor artifact must target Midnight undeployed/ledger-v9");
   const createdAt = canonicalIso(root["createdAt"], "actor artifact.createdAt");
 
   const actors = recordAt(root["actors"], "actor artifact.actors");

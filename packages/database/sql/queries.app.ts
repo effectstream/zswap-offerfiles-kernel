@@ -1118,7 +1118,7 @@ export const insertOfferFileWithHash = prepared<IInsertOfferFileWithHashParams, 
            :metadata_created_at!,
            :metadata_expires_at!,
            :first_seen_at!,
-           COALESCE(:ttl_seconds!, 3600)
+           COALESCE(:ttl_seconds!, 1209600)
        ) RETURNING id`,
 );
 

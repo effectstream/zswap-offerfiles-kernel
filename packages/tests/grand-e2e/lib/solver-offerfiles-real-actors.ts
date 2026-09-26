@@ -162,7 +162,7 @@ function txIdentifiers(transaction: unknown): string[] {
 /**
  * The shielded input nullifiers a finalized transaction actually consumes.
  *
- * NOT `identifiers()`. ledger-v8's `Transaction::identifiers()`
+ * NOT `identifiers()`. ledger-v9's `Transaction::identifiers()`
  * (`structure.rs:1454`) returns the Pedersen VALUE commitments of inputs,
  * outputs and transients plus the intent binding commitments — a different
  * cryptographic domain from a nullifier, so a nullifier can never appear in
@@ -1044,7 +1044,7 @@ async function submitTransferOnce(
   try {
     const signed = layer === "unshielded"
       ? await (from.wallet as any).signRecipe(recipe, (payload: Uint8Array) =>
-          from.unshieldedKeystore.signData(payload),
+          from.unshieldedKeystore.signDataAsync(payload),
         )
       : recipe;
     finalized = await from.wallet.finalizeRecipe(signed as never);

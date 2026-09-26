@@ -30,7 +30,7 @@ const HISTORY_BASE = 9_000_000;
 const BOOK_BASE = 9_500_000;
 const NIGHT = "0000000000000000000000000000000000000000000000000000000000000000";
 
-// Two pairs built from the dev mint-test-tokens colors (base traded vs NIGHT).
+// Two pairs built from externally issued token colors (base traded vs NIGHT).
 const TOKENS = [
   { color: NIGHT, name: "NIGHT", kind: "unshielded" },
   { color: "70ce552eaec9be6e009189bffbb69184b2dd008ba9bdaec6da5305fc505eb569", name: "TESTTOKENA", kind: "shielded" },

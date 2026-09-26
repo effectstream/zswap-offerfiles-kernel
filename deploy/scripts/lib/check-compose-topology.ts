@@ -10,7 +10,7 @@ interface ComposeModel {
   services?: Record<string, ComposeService>;
 }
 
-type DependencyCondition = "service_healthy" | "service_completed_successfully";
+type DependencyCondition = "service_started" | "service_healthy" | "service_completed_successfully";
 
 const REMOVED_SERVICES = ["offerfiles-deploy", "mint-test-tokens", "register-minted-tokens"];
 
@@ -22,13 +22,13 @@ const REQUIRED_EDGES: ReadonlyArray<
   ["kernel", "celestia", "service_healthy"],
   ["batcher", "celestia", "service_healthy"],
   ["solver-provision", "midnight-node", "service_healthy"],
-  ["solver-provision", "proof-server", "service_healthy"],
+  ["solver-provision", "proof-server", "service_started"],
   ["solver-provision", "indexer", "service_healthy"],
   ["maker-offer", "kernel", "service_healthy"],
   ["offer-poster", "kernel", "service_healthy"],
   ["relay", "midnight-node", "service_healthy"],
   ["relay", "indexer", "service_healthy"],
-  ["relay", "proof-server", "service_healthy"],
+  ["relay", "proof-server", "service_started"],
   ["solver", "kernel", "service_healthy"],
   ["solver", "relay", "service_healthy"],
   ["solver", "solver-provision", "service_completed_successfully"],

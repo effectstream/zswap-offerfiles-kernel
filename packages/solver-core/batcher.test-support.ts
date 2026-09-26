@@ -2,7 +2,7 @@
 // and manual test-support probe. This module is deliberately absent from the
 // package exports map and must never be imported by production source.
 
-import type { FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
+import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import { nonDustImbalances } from "./batcher.ts";
 
 const BALANCER_URL = process.env["BATCHER_SUBMIT_URL"] ?? "http://127.0.0.1:3334";

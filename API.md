@@ -29,11 +29,10 @@ and `bun run typecheck` runs both.
   longer accepts) lived in a test file.
 
 Neither gate is a workspace-wide typecheck: each reports, but does not fail on,
-diagnostics in dependencies outside its own roots — including the gitignored
-Compact output, which CI stubs as declarations for both gates. CI also bundles
-API examples 01, 03, 05, 07, and 11 before running the docs playground
-typecheck. Example 11's Midnight network-id and ledger-v8 imports are direct
-root dependencies, not transitive assumptions.
+diagnostics in dependencies outside its own roots. CI also bundles API examples
+01, 03, 05, 07, and 11 before running the docs playground typecheck. Example
+11's Midnight network-id and ledger-v9 imports are direct root dependencies,
+not transitive assumptions.
 
 ---
 
@@ -49,13 +48,13 @@ Three configurations ship out of the box. All endpoints and env-var names are id
 | `CELESTIA_POLLING_INTERVAL_MS` | `6000` | `3000` | `30000` |
 | `CELESTIA_START_HEIGHT` | `1` | `10620000` ¹ | set to your deployment block |
 | `MIDNIGHT_START_BLOCK` | `1` | `1` | set to your deployment block |
-| `OFFER_TTL_SECONDS` | default = root window (1 h) | default = root window (1 h) ² | default = root window (1 h) ² |
+| `OFFER_TTL_SECONDS` | default = root window (14 days) ² | default = root window (14 days) ² | default = root window (14 days) ² |
 | Node API port | `9999` | `9999` | `9999` |
 | Batcher port | `3334` | `3334` | `3334` |
 | Config file | `config.dev.ts` | `config.preview.ts` | `config.mainnet.ts` |
 
 ¹ Mocha-4 block equivalent to Midnight Preview genesis (2026-03-25T01:05:42 UTC).  
-² Preview and Mainnet use a ~1-hour Merkle-root window. Offers proving against an expired root cannot settle; matching `OFFER_TTL_SECONDS` to the root window prevents the indexer from serving un-fillable offers.
+² The root window is the ledger's `global_ttl`: 1,209,600 s (14 days) on every network. Ledger 9 keeps past zswap Merkle roots for exactly `global_ttl`, which is static (changing it is a hard fork). Offers proving against an expired root cannot settle; matching `OFFER_TTL_SECONDS` to the root window prevents the indexer from serving un-fillable offers. Celestia mocha prunes blobs after about 7 days, so a kernel that syncs from scratch cannot re-read offers older than that, although they stay fillable on chain for 14 days (see README, "Celestia data retention").
 
 ### Environment variables (complete reference)
 
@@ -94,16 +93,13 @@ OFFER_TTL_SECONDS=                      # offer lifetime; DEFAULTS to ROOT_WINDO
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
 OFFER_FILES_READ_TIMEOUT_MS=15000        # exact-files read decision budget; max 60000
-ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
-                                        # 3600 (1 h) on all currently deployed networks;
-                                        # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
-                                        # placeholder, network not publicly available yet).
-                                        # Must mirror the zswap crate's past_roots window
-                                        # (hardcoded through node 1.x, parameterized from
-                                        # 2.x) — NOT the on-chain global_ttl, which bounds
-                                        # intent TTLs and moves independently. Too wide ⇒
-                                        # phantom unfillable offers on the book; too narrow
-                                        # ⇒ valid offers rejected ROOT_UNKNOWN.
+ROOT_WINDOW_SECONDS=                    # known-roots retention window. Default 1209600
+                                        # (14 days) on every network: the ledger-9
+                                        # global_ttl, which is also the zswap past_roots
+                                        # retention (static; changing it is a hard fork).
+                                        # Override only for tests. Too wide ⇒ phantom
+                                        # unfillable offers on the book; too narrow ⇒
+                                        # valid offers rejected ROOT_UNKNOWN.
 
 # ── Solver process (packages/solver, started by `bun run start:solver`) ────────
 # The seven values below are MANDATORY for that entrypoint, in dry-run as well
@@ -141,7 +137,7 @@ SOLVER_FEE_SIZING_TAKER_INPUTS=1          # taker zswap inputs the fee estimate 
 |---|---|---|
 | `nullifiers` | **Forever** | A shielded spend is permanent. Coin commitments stay in the Merkle tree after being spent, so a maker can always build a valid current-root proof for a long-spent coin — the nullifier is the only thing that catches it. There is intentionally no TTL. |
 | `created_unshielded` | **Live-set** | Create inserts, spend deletes; absence means "spent or never existed". Self-trimming, so no TTL is needed. |
-| `known_roots` | **TTL-limited** (`ROOT_WINDOW_SECONDS`) | Unlike a spend, a root's validity genuinely expires. The ledger's `past_roots` is a *TimeFilterMap*: the current root is re-inserted every block and entries older than `tblock − window` are evicted — so a root stays valid while it keeps being current, and our prune mirrors that by aging on **last-seen**. Independent from the on-chain `global_ttl` (which bounds intent TTLs) despite both being 1 h. |
+| `known_roots` | **TTL-limited** (`ROOT_WINDOW_SECONDS`) | Unlike a spend, a root's validity genuinely expires. The ledger's `past_roots` is a *TimeFilterMap*: the current root is re-inserted every block and entries older than `tblock − window` are evicted — so a root stays valid while it keeps being current, and our prune mirrors that by aging on **last-seen**. On ledger 9 the window is the `global_ttl` ledger parameter (which also bounds intent TTLs): 14 days on every network. |
 
 ---
 
@@ -199,7 +195,7 @@ curl http://host:9999/health
 
 #### `GET /v1/health`
 
-Compact protocol-readiness probe. It uses the same aggregate state as the
+Aggregate protocol-readiness probe. It uses the same state as the
 detailed endpoint below and returns `{ "status": "ok|syncing|error", "synced":
 true|false }`. Unlike `/health`, this is not merely HTTP-process liveness.
 
@@ -288,7 +284,7 @@ Returns the current live offer book — offers published to Celestia, validated,
       "wants": [
         { "token": "70ce…b569", "amount": "500000", "type": "SHIELDED" }
       ],
-      "expiresAt": "2026-06-01T13:00:00.000Z",
+      "expiresAt": "2026-06-15T12:00:00.000Z",
       "inputNullifiers": ["7c1d9b…"],
       "firstSeenAt": "2026-06-01T12:00:00.000Z",
       "status": "live"
@@ -348,11 +344,11 @@ curl "http://host:9999/v1/offers/9f2c4a...e1"
   "offerId": "9f2c4a…e1",
   "offerBech32": "swapoffer1...",
   "blockHeight": "1281600",
-  "ttlSeconds": "3600",
+  "ttlSeconds": "1209600",
   "computed": {
     "gives": [ { "token": "00…00", "amount": "1000000", "type": "UNSHIELDED" } ],
     "wants": [ { "token": "70ce…69", "amount": "500000", "type": "SHIELDED" } ],
-    "expiresAt": "2026-06-01T13:00:00.000Z",
+    "expiresAt": "2026-06-15T12:00:00.000Z",
     "inputNullifiers": ["7c1d9b…"],
     "firstSeenAt": "2026-06-01T12:00:00.000Z",
     "status": "live"
@@ -732,7 +728,7 @@ current HTTP route does not emit directly.
 | `NULLIFIER_SPENT` | A shielded input coin is already spent on Midnight |
 | `UTXO_SPENT` | Optional validator callback found an already-spent unshielded UTXO; the HTTP route folds this and unknown UTXOs into `UTXO_NOT_LIVE` |
 | `UTXO_UNKNOWN` | Optional validator callback found a UTXO never created on-chain; the HTTP route folds this into `UTXO_NOT_LIVE` |
-| `ROOT_UNKNOWN` | The shielded input proves against a Merkle root outside the `ROOT_WINDOW_SECONDS` retention window |
+| `ROOT_UNKNOWN` | The shielded input proves against a Merkle root outside the `ROOT_WINDOW_SECONDS` retention window (default 14 days = the ledger's `global_ttl`) |
 | `ROOT_UNREADABLE` | The input's Merkle root could not be extracted (fail-closed) |
 | `DUPLICATE` | Optional validator dedup callback found an existing identity; production HTTP/STM content dedup reports `DUPLICATE_OFFER` instead |
 
@@ -1190,12 +1186,12 @@ the solver mirrors the kernel's book and owns its own wallet, journal and relay
 connection. A container deployment gives each of them its own service, with the
 solver depending on the kernel and relay rather than starting them.
 
-**Supported domain.** Midnight 1.x / ledger-v8 only. The solver settles offers
+**Supported domain.** Midnight 2.x / ledger-v9 only. The solver settles offers
 that normalize to **one shielded give leg and one shielded want leg** with
 distinct token colors and positive amounts, using at most **8 complete maker
 files per job**. Unshielded legs, mixed value layers, multi-leg baskets, and
-Midnight 2.x are refused before admission. A maker file is never partially
-consumed.
+legacy Midnight 1.x / ledger-v8 transactions are refused before admission. A
+maker file is never partially consumed.
 
 **Fees.** Maker offers are constructed with `payFees:false` (see
 [Encoding offers](#encoding-offers-swapoffer1)), so a maker's offer pays no fee

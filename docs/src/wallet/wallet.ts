@@ -108,8 +108,8 @@ export async function connectLocal(seed?: string): Promise<Connected> {
   const httpScheme = secure ? 'https' : 'http'
   const wsScheme = secure ? 'wss' : 'ws'
   const networkUrls = {
-    indexer: cfg?.indexerUri ?? `${httpScheme}://${host}:8088/api/v3/graphql`,
-    indexerWS: cfg?.indexerWsUri ?? `${wsScheme}://${host}:8088/api/v3/graphql/ws`,
+    indexer: cfg?.indexerUri ?? `${httpScheme}://${host}:8088/api/v4/graphql`,
+    indexerWS: cfg?.indexerWsUri ?? `${wsScheme}://${host}:8088/api/v4/graphql/ws`,
     node: (cfg as any)?.nodeUri ?? `${httpScheme}://${host}:9944`,
     proofServer: PROOF_SERVER_URL || cfg?.proofServerUri || `${httpScheme}://${host}:6300`,
   }

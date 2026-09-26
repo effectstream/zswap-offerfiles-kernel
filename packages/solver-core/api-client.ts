@@ -3,7 +3,7 @@
 // is the faithful path — it exercises the Celestia fetch + validate + index +
 // serve primitives, not an in-memory shortcut.
 
-import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction, type FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { createHash } from "node:crypto";
 

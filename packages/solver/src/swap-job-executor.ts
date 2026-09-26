@@ -28,7 +28,7 @@
 //     recovery filters still READ those kinds so pre-existing rows recover
 //     (FR-004).
 
-import { Transaction, type FinalizedTransaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction, type FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import { createHash } from "node:crypto";
 
 import {
@@ -460,7 +460,7 @@ const requireCanonicalJob = (job: SwapMessage): void => {
   const amountIn = BigInt(job.amountIn);
   const amountOut = BigInt(job.amountOut);
   if (amountIn <= 0n || amountOut <= 0n || amountIn > MAX_SETTLEMENT_AMOUNT || amountOut > MAX_SETTLEMENT_AMOUNT) {
-    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "amount is outside the supported ledger-v8 signed-delta settlement domain");
+    throw new JobRefusal(JOB_ROUTE_NOT_CURRENT, "amount exceeds the positive ledger-v9 signed-delta domain");
   }
 };
 
@@ -666,7 +666,7 @@ const receiptHalfNetMap = (receipts: readonly WholeOfferReceipt[]): Map<string, 
   new Map(receipts.map((receipt) => [receipt.token.toLowerCase(), -receipt.amount]));
 
 /** Inspect the real SDK object after each construction/merge. Exact bigint
- * planning is necessary but cannot detect ledger-v8's unchecked i128 wrap. */
+ * planning is necessary but cannot detect ledger-v9's unchecked i128 wrap. */
 function assertTransactionNet(
   transaction: unknown,
   expected: ReadonlyMap<string, bigint>,

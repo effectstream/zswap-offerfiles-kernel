@@ -6,6 +6,7 @@ import { migrationTable } from "./migration-order.ts";
 import { tokenPriceFromAsset } from "./price-map.ts";
 import {
   applyCanonicalRegistry,
+  PREPROD_SNIGHT_TOKEN_COLOR,
   validateCanonicalRegistry,
   type RegistryNetwork,
 } from "./token-registry.ts";
@@ -518,5 +519,132 @@ describe("optional fetch failure", () => {
       reason: "undeployed is a local network with no public canonical registry",
     });
     expect(fetched).toBe(false);
+  });
+});
+
+const snight = async (client: InstanceType<typeof pg.Client>) =>
+  (await client.query("SELECT token_color FROM known_tokens WHERE name = 'SNIGHT'")).rows;
+
+describe("stagenet imports and SNIGHT (00050 FR-005)", () => {
+
+  test("the seeded SNIGHT is the Preprod colour", async () => {
+    await withFreshDatabase(async (client) => {
+      expect(await snight(client)).toEqual([{ token_color: PREPROD_SNIGHT_TOKEN_COLOR }]);
+    });
+  });
+
+  test("a stagenet import removes the Preprod SNIGHT in the same transaction", async () => {
+    await withFreshDatabase(async (client) => {
+      await applyCanonicalRegistry(client, validateCanonicalRegistry(await pinnedRegistry("stagenet"), "stagenet"));
+      expect(await snight(client)).toEqual([]);
+      // The rest of the non-canonical seed is untouched.
+      expect((await client.query("SELECT name FROM known_tokens WHERE name = 'NIGHT'")).rows).toHaveLength(1);
+    });
+  });
+
+  test("Preview and Preprod imports leave SNIGHT alone (unchanged behaviour)", async () => {
+    await withFreshDatabase(async (client) => {
+      for (const network of ["preprod", "preview"] as const) {
+        await applyCanonicalRegistry(client, validateCanonicalRegistry(await pinnedRegistry(network), network));
+        expect(await snight(client)).toEqual([{ token_color: PREPROD_SNIGHT_TOKEN_COLOR }]);
+      }
+    });
+  });
+
+  test("an operator-set (non-Preprod) SNIGHT colour survives a stagenet import", async () => {
+    await withFreshDatabase(async (client) => {
+      await client.query("UPDATE known_tokens SET token_color = $1 WHERE name = 'SNIGHT'", ["c".repeat(64)]);
+      await applyCanonicalRegistry(client, validateCanonicalRegistry(await pinnedRegistry("stagenet"), "stagenet"));
+      expect(await snight(client)).toEqual([{ token_color: "c".repeat(64) }]);
+    });
+  });
+
+  test("a rejected stagenet import rolls the SNIGHT removal back with everything else", async () => {
+    await withFreshDatabase(async (client) => {
+      await client.query(
+        "INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES ($1, 'LOCALONLY', 'shielded', 6, NULL)",
+        ["e".repeat(64)],
+      );
+      const colliding = clone((await pinnedRegistry("stagenet")) as any);
+      colliding.tokens[0].deployments.find((d: any) => d.status === "active").tokenId = "e".repeat(64);
+      await expect(
+        applyCanonicalRegistry(client, validateCanonicalRegistry(colliding, "stagenet")),
+      ).rejects.toThrow(/collision.*LOCALONLY/);
+      expect(await snight(client)).toEqual([{ token_color: PREPROD_SNIGHT_TOKEN_COLOR }]);
+    });
+  });
+});
+
+describe("import-token-registry CLI --required (00050 FR-004)", () => {
+  const cli = new URL("./import-token-registry.ts", import.meta.url);
+  const run = async (args: string[], vars: Record<string, string>) => {
+    const proc = Bun.spawn([process.execPath, "run", Bun.fileURLToPath(cli), ...args], {
+      env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", ...vars },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, code };
+  };
+
+  test("without --required an unreachable registry is a skip and exits 0 (dev orchestrator unchanged)", async () => {
+    const port = await freePort();
+    const result = await run([], {
+      TOKEN_REGISTRY_NETWORK: "stagenet",
+      TOKEN_REGISTRY_BASE_URL: `http://127.0.0.1:${port}/`,
+      TOKEN_REGISTRY_TIMEOUT_MS: "200",
+    });
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain("[token-registry] skipped:");
+  });
+
+  test("with --required the same skip is a loud failure (exit 1)", async () => {
+    const port = await freePort();
+    const result = await run(["--required"], {
+      TOKEN_REGISTRY_NETWORK: "stagenet",
+      TOKEN_REGISTRY_BASE_URL: `http://127.0.0.1:${port}/`,
+      TOKEN_REGISTRY_TIMEOUT_MS: "200",
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("[token-registry] FAILED (required import did not apply)");
+  });
+
+  test("with --required, undeployed (no public registry) fails loudly too", async () => {
+    const result = await run(["--required"], { TOKEN_REGISTRY_NETWORK: "undeployed" });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("undeployed is a local network with no public canonical registry");
+  });
+
+  test("with --required a served stagenet registry applies to the database and exits 0", async () => {
+    const fixture = await pinnedRegistry("stagenet");
+    const registry = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) =>
+        new URL(request.url).pathname === "/metadata.stagenet.json"
+          ? Response.json(fixture)
+          : new Response("not found", { status: 404 }),
+    });
+    try {
+      await withFreshDatabase(async (client, databasePort) => {
+        const result = await run(["--required"], {
+          TOKEN_REGISTRY_NETWORK: "stagenet",
+          TOKEN_REGISTRY_BASE_URL: `http://127.0.0.1:${registry.port}/`,
+          DB_HOST: "127.0.0.1",
+          DB_PORT: String(databasePort),
+        });
+        expect(result.code, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          "[token-registry] applied network=stagenet revision=59041d2fd2acfdad53e437e5a4d2ba88a6f24e4f9e55869b66f465f3da11a0d1",
+        );
+        expect(await snight(client)).toEqual([]);
+      });
+    } finally {
+      registry.stop(true);
+    }
   });
 });

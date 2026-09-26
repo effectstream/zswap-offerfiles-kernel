@@ -7,7 +7,7 @@ import { assert } from "../helpers.ts";
 import { count, offerArchivedConsumed, waitFor } from "../lib/db.ts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
+import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
@@ -16,6 +16,7 @@ import {
   unshieldedAddressObj,
   waitForSync,
   waitForUnshielded,
+  waitForWalletSettlement,
 } from "../lib/wallet.ts";
 import {
   describeImbalances,
@@ -106,7 +107,7 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const signedRecipe = await (m0.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
-      m0.unshieldedKeystore.signData(p),
+      m0.unshieldedKeystore.signDataAsync(p),
     );
     const offer0 = await m0.wallet.finalizeRecipe(signedRecipe);
     console.log(`${TAG} offer imbalances: ${describeImbalances(offer0 as any)}`);
@@ -141,6 +142,9 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
     if (!offerRow) return;
 
     console.log(`${TAG} M1 balancing unshielded-only…`);
+    // Same error-170 guard as zswap-flow: M1 made the offer above; let its
+    // wallet replay it before the second prove+submit.
+    await waitForWalletSettlement(m1, { label: `${TAG} pre-settle` });
     const balRecipe = await (m1.wallet as any).balanceFinalizedTransaction(
       offer0,
       shieldedKeys(m1),
@@ -150,7 +154,7 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
       },
     );
     const balSigned = await (m1.wallet as any).signRecipe(balRecipe, (p: Uint8Array) =>
-      m1.unshieldedKeystore.signData(p),
+      m1.unshieldedKeystore.signDataAsync(p),
     );
     const balancedTx = await m1.wallet.finalizeRecipe(balSigned);
     await assert(

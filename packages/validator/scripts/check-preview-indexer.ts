@@ -13,7 +13,7 @@
 // would have to be reconstructed.
 
 const net = process.argv[2] ?? "preview";
-const URL = `https://indexer.${net}.midnight.network/api/v3/graphql`;
+const URL = `https://indexer.${net}.midnight.network/api/v4/graphql`;
 
 async function gql(query: string, variables?: unknown) {
   const res = await fetch(URL, {
@@ -77,10 +77,10 @@ try {
   console.log(`RPC check skipped (${String(e).slice(0, 80)})`);
 }
 
-// 6) Root-check blocker, demonstrated at runtime: the installed ledger-v8
+// 6) Root-check blocker, demonstrated at runtime: the installed ledger (v8-era note)
 //    binding exposes ZswapInput.nullifier but NOT the input's merkleTreeRoot,
 //    so a roots-set membership check has nothing to compare against.
-const { ZswapInput } = await import("@midnight-ntwrk/ledger-v8");
+const { ZswapInput } = await import("@midnightntwrk/ledger-v9");
 const desc = (p: string) => !!Object.getOwnPropertyDescriptor((ZswapInput as any).prototype, p);
 console.log(`\n${ok(desc("nullifier"))} ZswapInput.nullifier getter exists (binding pattern works)`);
 console.log(`${ok(!desc("merkleTreeRoot"))} ZswapInput.merkleTreeRoot getter ABSENT — root-check blocker confirmed at runtime`);

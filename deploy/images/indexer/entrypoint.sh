@@ -3,7 +3,7 @@
 #
 # Two things the raw binary needs that its npm wrapper normally does for it:
 #
-# 1. A STARTUP GATE ON BLOCK #1. v4.3.3 bundles an spo-indexer that, on a fresh
+# 1. A STARTUP GATE ON BLOCK #1. The 4.x line bundles an spo-indexer that, on a fresh
 #    database, reads block #1 to anchor the first epoch and `exit(1)`s — taking
 #    the whole indexer with it — if that block does not exist yet. That is why
 #    `@effectstream/npm-midnight-indexer`'s `waitForNodeBlock()` exists, and the

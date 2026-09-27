@@ -47,7 +47,7 @@ const {
   markBlockCommitted,
   __resetEventGateForTests,
 } = await import("./event-bus.ts");
-const { getBlankRefState, validateZswapOffer } = await import("@zswap-da/validator");
+const { getReferenceState, validateZswapOffer } = await import("@zswap-da/validator");
 const {
   bytesToLatin1,
   offerHashFromBlob,
@@ -84,7 +84,7 @@ const DECODABLE_JUNK = bech32m.encode(
 );
 
 const probe = validateZswapOffer(VALID_OFFER, {
-  refState: getBlankRefState("undeployed"),
+  refState: getReferenceState("undeployed"),
   tblock: new Date(BLOCK_TIME_MS),
   maxBytes: 1024 * 1024,
   crypto: "defer",

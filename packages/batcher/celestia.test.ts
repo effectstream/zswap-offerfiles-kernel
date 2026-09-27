@@ -134,9 +134,9 @@ describe("node/batcher parity on shared fixtures", () => {
   ];
 
   test.each(cases)("both reject %#: %s", async (blob, code) => {
-    const { validateZswapOffer, getBlankRefState } = await import("@zswap-da/validator");
+    const { validateZswapOffer, getReferenceState } = await import("@zswap-da/validator");
     const nodeVerdict = validateZswapOffer(blob, {
-      refState: getBlankRefState("undeployed"),
+      refState: getReferenceState("undeployed"),
       tblock: new Date(),
       maxBytes: 1024 * 1024,
     });

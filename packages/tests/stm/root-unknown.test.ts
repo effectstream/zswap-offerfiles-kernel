@@ -8,7 +8,7 @@ import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { getReferenceState, validateZswapOffer } from "@zswap-da/validator";
 import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
   buildWallet,
@@ -67,7 +67,7 @@ export async function rootUnknownTest(db: Client): Promise<void> {
     const blob = OfferFiles.encode(finalized.serialize());
 
     const v = validateZswapOffer(blob, {
-      refState: getBlankRefState(net.id),
+      refState: getReferenceState(net.id),
       tblock: new Date(),
       maxBytes: 4 * 1024 * 1024,
     });

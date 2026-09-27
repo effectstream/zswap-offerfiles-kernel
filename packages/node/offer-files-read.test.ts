@@ -31,7 +31,7 @@ const {
 } = await import("@zswap-da/database");
 const { closeTestPglite } = await import("../database/test-pglite.ts");
 const {
-  getBlankRefState,
+  getReferenceState,
   validateZswapOffer,
 } = await import("@zswap-da/validator");
 const { offerHashFromBlob } = await import("@zswap-da/offer-guard");
@@ -63,7 +63,7 @@ const EXPIRES_AT = "2026-08-14T13:34:56.000Z";
 const UNKNOWN_ID = "ab".repeat(32);
 
 const deferred = validateZswapOffer(FIXTURE, {
-  refState: getBlankRefState("undeployed"),
+  refState: getReferenceState("undeployed"),
   tblock: new Date(BLOCK_AT),
   maxBytes: OFFER_MAX_BYTES,
   crypto: "defer",
@@ -83,7 +83,7 @@ const TAMPERED = bech32m.encode(
 );
 const TAMPERED_ID = offerHashFromBlob(TAMPERED);
 const tamperedDeferred = validateZswapOffer(TAMPERED, {
-  refState: getBlankRefState("undeployed"),
+  refState: getReferenceState("undeployed"),
   tblock: new Date(BLOCK_AT),
   maxBytes: OFFER_MAX_BYTES,
   crypto: "defer",

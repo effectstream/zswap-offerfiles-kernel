@@ -1,13 +1,27 @@
 // @zswap-da/validator — shared, pure ZSwap offer validation.
 //
 // One deterministic routine used by the state-machine ingestion path and the
-// batcher / submit fee-gate. No I/O of its own: callers supply `refState`,
+// batcher / submit fee-gate. No I/O of its own: callers supply `refState`
+// (getReferenceState(networkId): the network's pinned ledger parameters),
 // `tblock`, and (optionally) liveness checks. See validate.ts for the pipeline.
 //
 // Encoding: MIP-0005 (@effectstream/mip-zswap-offer/mip5). Two-sided / derive:
 // MIP-0006 (@effectstream/mip-zswap-offer/mip6).
-export { validateZswapOffer, validateZswapOfferBytes, verifyOfferCrypto } from "./validate.ts";
-export { getBlankRefState, buildStrictness } from "./refstate.ts";
+export {
+  validateZswapOffer,
+  validateZswapOfferBytes,
+  verifyOfferCrypto,
+  wellFormedFailureCode,
+} from "./validate.ts";
+export {
+  buildStrictness,
+  getBlankRefState,
+  getReferenceState,
+  referenceDustGracePeriodSeconds,
+  requireReferenceParameters,
+  UnknownNetworkParametersError,
+} from "./refstate.ts";
+export { REFERENCE_PARAMETERS, type ReferenceParametersSnapshot } from "./reference-parameters.ts";
 export {
   bytesOrStringToHex,
   collectNullifiers,

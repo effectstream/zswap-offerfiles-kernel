@@ -12,7 +12,7 @@ import { OfferFiles, OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
 
 import {
   buildStrictness,
-  getBlankRefState,
+  getReferenceState,
   validateZswapOffer,
   validateZswapOfferBytes,
   verifyOfferCrypto,
@@ -121,9 +121,9 @@ describe("config helpers", () => {
     expect((s as unknown as { enforceLimits: boolean }).enforceLimits).toBe(false);
   });
 
-  test("getBlankRefState returns a LedgerState and caches per network id", () => {
-    const a = getBlankRefState("undeployed");
-    const b = getBlankRefState("undeployed");
+  test("getReferenceState returns a LedgerState and caches per network id", () => {
+    const a = getReferenceState("undeployed");
+    const b = getReferenceState("undeployed");
     expect(a).toBeInstanceOf(LedgerState);
     expect(a).toBe(b); // cached
   });
@@ -142,7 +142,7 @@ const hasFixture = existsSync(FIXTURE);
 describe.skipIf(!hasFixture)("validateZswapOffer — crypto + liveness (real fixture)", () => {
   const blob = hasFixture ? readFileSync(FIXTURE, "utf8").trim() : "";
   const opts = () => ({
-    refState: getBlankRefState(NETWORK_ID),
+    refState: getReferenceState(NETWORK_ID),
     tblock: TBLOCK,
     maxBytes: 1_000_000,
   });
@@ -155,7 +155,7 @@ describe.skipIf(!hasFixture)("validateZswapOffer — crypto + liveness (real fix
     for (const c of markers) expect(c).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  test("a valid open offer passes with a BLANK refState (the #1 risk)", () => {
+  test("a valid open offer passes with the reference state (the #1 risk)", () => {
     const r = validateZswapOffer(blob, opts());
     expect(r.ok).toBe(true);
     expect(r.gives!.length).toBeGreaterThan(0);
@@ -173,7 +173,7 @@ describe.skipIf(!hasFixture)("validateZswapOffer — crypto + liveness (real fix
     strict.verifyContractProofs = true;
     strict.verifySignatures = true;
     (strict as unknown as { enforceLimits: boolean }).enforceLimits = true;
-    expect(() => tx.wellFormed(getBlankRefState(NETWORK_ID), strict, TBLOCK)).toThrow();
+    expect(() => tx.wellFormed(getReferenceState(NETWORK_ID), strict, TBLOCK)).toThrow();
   });
 
   test("tampered proof bytes are rejected (PROOF_INVALID or BAD_DESERIALIZE)", () => {

@@ -59,6 +59,19 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * The reject code for a `wellFormed` failure message. The ledger's intent TTL
+ * check (`ttl_check_weak`, run first in `wellFormed`) reports "Intent TTL has
+ * expired" / "Intent TTL is too far in the future" (midnight-ledger
+ * `ledger-9.1.0.0-rc.3` ledger/src/error.rs:1172-1181); those get their own
+ * codes instead of PROOF_INVALID (00056 FR-004). Exported for tests.
+ */
+export function wellFormedFailureCode(message: string): OfferRejectCode {
+  if (/Intent TTL has expired/i.test(message)) return "INTENT_TTL_EXPIRED";
+  if (/Intent TTL is too far in the future/i.test(message)) return "INTENT_TTL_TOO_FAR";
+  return /signature/i.test(message) ? "SIGNATURE_INVALID" : "PROOF_INVALID";
+}
+
 // `identifiers()` is only needed for dedup; never let it sink a validation.
 function safeIdentifiers(tx: UnprovenTransaction): string[] {
   try {
@@ -101,8 +114,9 @@ export function verifyOfferCrypto(
   } catch (e) {
     const m = errMsg(e);
     // Contract-maker lane (see ValidateOpts.contractMakerRetry): strict ran
-    // first, and ONLY the exact missing-contract failure class widens — a
-    // blank reference state cannot hold the maker contract's verifier keys.
+    // first, and ONLY the exact missing-contract failure class widens — the
+    // reference state (parameters only, no contracts) cannot hold the maker
+    // contract's verifier keys.
     // Native proofs and signatures are still verified on the retry; the
     // contract-call proof is verified by the node at settlement.
     if (opts.contractMakerRetry && /non-existant contract|non-existent contract/i.test(m)) {
@@ -113,14 +127,14 @@ export function verifyOfferCrypto(
         const m2 = errMsg(e2);
         return {
           ok: false,
-          code: /signature/i.test(m2) ? "SIGNATURE_INVALID" : "PROOF_INVALID",
+          code: wellFormedFailureCode(m2),
           reason: `wellFormed failed (contract-maker retry): ${m2}`,
         };
       }
     }
     return {
       ok: false,
-      code: /signature/i.test(m) ? "SIGNATURE_INVALID" : "PROOF_INVALID",
+      code: wellFormedFailureCode(m),
       reason: `wellFormed failed: ${m}`,
     };
   }

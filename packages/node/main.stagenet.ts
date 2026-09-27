@@ -47,6 +47,7 @@ import {
   ROOT_WINDOW_SECONDS,
 } from "./env.ts";
 import { migrationTable } from "@zswap-da/database";
+import { REFERENCE_PARAMETERS } from "@zswap-da/validator";
 import { apiRouter } from "./api.ts";
 import { gameStateTransitions } from "./state-machine.ts";
 import { grammar } from "./grammar.ts";
@@ -60,7 +61,8 @@ main(function* () {
   console.log(
     `[stagenet] resolved: network=${midnightNetworkConfig.id} ntpStartTime=${NTP_START_TIME} ` +
       `blockTimeMs=${BLOCK_TIME_MS} celestiaNetwork=${CELESTIA_NETWORK} namespace=${CELESTIA_NAMESPACE} ` +
-      `rootWindowSeconds=${ROOT_WINDOW_SECONDS} offerTtlSeconds=${OFFER_TTL_SECONDS}`,
+      `rootWindowSeconds=${ROOT_WINDOW_SECONDS} offerTtlFallbackSeconds=${OFFER_TTL_SECONDS} ` +
+      `referenceParameters=${REFERENCE_PARAMETERS[midnightNetworkConfig.id]?.sha256.slice(0, 16) ?? "none"}`,
   );
   console.log(
     `[stagenet] endpoints: node=${midnightNetworkConfig.node} indexer=${midnightNetworkConfig.indexer} ` +

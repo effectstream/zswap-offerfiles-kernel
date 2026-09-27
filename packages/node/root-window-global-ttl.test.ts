@@ -13,7 +13,8 @@ import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 //     3 h old — ROOT_UNKNOWN under the old 1 h window — is indexed; a root
 //     older than 14 days is rejected ROOT_UNKNOWN.
 //   - Offer deadline: the stored expiry (and the scheduled cleanup) is the
-//     root's window anchor + 14 days, and ttl_seconds is 14 days.
+//     root's window anchor + 14 days, and ttl_seconds is that per-offer
+//     lifetime from the block time (14 days minus the root's age; 00056).
 //   - Prune (`midnight-zswap-root`): roots older than 14 days are deleted,
 //     younger ones (2 h, 3 h, 14 d - 1 s) are kept.
 //   - The API submit gate and the exact-files read compute their cutoff as
@@ -32,7 +33,7 @@ const effectstreamDb = await import("@effectstream/db");
 const { migrationTable } = database;
 const { closeTestPglite } = await import("../database/test-pglite.ts");
 const { eventBus, markBlockCommitted, __resetEventGateForTests } = await import("./event-bus.ts");
-const { getBlankRefState, validateZswapOffer } = await import("@zswap-da/validator");
+const { getReferenceState, validateZswapOffer } = await import("@zswap-da/validator");
 const { bytesToLatin1, offerHashFromBlob } = await import("@zswap-da/offer-guard");
 const { gameStateTransitions } = await import("./state-machine.ts");
 const { evaluateOfferLivenessFromDatabase } = await import("./offer-liveness.ts");
@@ -50,7 +51,7 @@ const VALID_OFFER = readFileSync(FIXTURE_PATH, "utf8").trim();
 const VALID_BYTES = OfferFiles.decode(VALID_OFFER);
 const OFFER_ID = offerHashFromBlob(VALID_OFFER);
 const probe = validateZswapOffer(VALID_OFFER, {
-  refState: getBlankRefState("undeployed"),
+  refState: getReferenceState("undeployed"),
   tblock: new Date(BLOCK_TIME_MS),
   maxBytes: 1024 * 1024,
   crypto: "defer",
@@ -192,7 +193,7 @@ const rootGateCutoffs = (o: Observation): number[] =>
     .map(({ params }) => Number(params.cutoff_ms));
 
 describe("the default root window is the 14-day global_ttl", () => {
-  test("env.ts resolves ROOT_WINDOW_SECONDS and OFFER_TTL_SECONDS to 1209600 with no env set", () => {
+  test("env.ts resolves ROOT_WINDOW_SECONDS (and the OFFER_TTL_SECONDS fallback) to 1209600 with no env set", () => {
     expect(process.env["ROOT_WINDOW_SECONDS"]).toBeUndefined();
     expect(process.env["OFFER_TTL_SECONDS"]).toBeUndefined();
     expect(ROOT_WINDOW_SECONDS).toBe(1_209_600);
@@ -218,14 +219,16 @@ describe("STM ingestion validates proof roots against 14 days", () => {
         expect(cutoffs.length).toBeGreaterThan(0);
         for (const cutoff of cutoffs) expect(cutoff).toBe(BLOCK_TIME_MS - FOURTEEN_DAYS_MS);
 
-        // Deadline: the root's window anchor (its last-seen time) + 14 days,
-        // under the 14-day OFFER_TTL ceiling; the cleanup is scheduled there.
+        // Deadline: the root's window anchor (its last-seen time) + 14 days —
+        // a shielded offer has no TTL of its own; the cleanup is scheduled
+        // there. ttl_seconds is the per-offer lifetime from the block time.
         const expectedExpiryMs = BLOCK_TIME_MS - ageMs + FOURTEEN_DAYS_MS;
         const row = (await client!.query(
           `SELECT id, ttl_seconds, metadata_expires_at FROM offer_file WHERE offer_hash = $1`,
           [OFFER_ID],
         )).rows[0];
-        expect(Number(row.ttl_seconds)).toBe(1_209_600);
+        expect(Number(row.ttl_seconds)).toBe((expectedExpiryMs - BLOCK_TIME_MS) / 1000);
+        expect(Number(row.ttl_seconds)).toBe(1_209_600 - ageMs / 1000);
         expect(new Date(row.metadata_expires_at).getTime()).toBe(expectedExpiryMs);
         const scheduled = (await client!.query(
           `SELECT f.future_ms_timestamp

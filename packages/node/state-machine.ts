@@ -8,7 +8,7 @@ import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
 import {
-  getBlankRefState,
+  getReferenceState,
   validateZswapOfferBytes,
   verifyOfferCrypto,
   collectOutputCommitments,
@@ -83,6 +83,7 @@ import { failStopAppInput } from "./app-input-savepoint.ts";
 import { evaluateOfferLivenessInStateMachine } from "./offer-liveness.ts";
 import {
   CELESTIA_PRIMITIVE_NAME,
+  DUST_GRACE_PERIOD_SECONDS,
   MIDNIGHT_NETWORK_ID,
   OFFER_MAX_BYTES,
   OFFER_TTL_SECONDS,
@@ -149,7 +150,7 @@ function expiryTimestamp(label: string, value: OfferExpiryCandidate): number | n
  * failed to produce a timestamp. The latter is an ingestion invariant failure
  * and must never fall through to a later expiry. */
 export function requireApplicableOfferExpiry(
-  label: "root" | "intent",
+  label: "root" | "intent" | "dust",
   applies: boolean,
   value: OfferExpiryCandidate,
 ): Date | null {
@@ -176,29 +177,74 @@ export function hasTransactionIntents(tx: unknown): boolean {
 }
 
 /**
- * Choose the earliest ledger constraint that applies to an offer.
- *
- * Shielded roots and Intent TTLs are independent and can coexist in mixed
- * transactions, so neither is a fallback for the other. The publication TTL
- * is used only when the transaction carries neither constraint. Invalid
- * applicable constraints fail closed instead of silently extending an offer.
+ * The earliest DUST deadline of a transaction: `ctime + graceSeconds` over
+ * every intent whose DUST actions carry at least one spend (the ledger refuses
+ * a DUST spend once `tblock > ctime + dust_grace_period`, midnight-ledger
+ * `ledger-9.1.0.0-rc.3` ledger/src/dust.rs:815-824). `null` when no intent
+ * spends DUST. Registrations alone impose no deadline on the offer here.
  */
-export function deriveOfferExpiry(
-  rootExpiry: OfferExpiryCandidate,
-  earliestIntentTtl: OfferExpiryCandidate,
-  fallbackExpiry: OfferExpiryCandidate,
-): Date {
-  const rootTimestamp = expiryTimestamp("root", rootExpiry);
-  const intentTimestamp = expiryTimestamp("intent", earliestIntentTtl);
-  if (rootTimestamp !== null || intentTimestamp !== null) {
-    return new Date(Math.min(
-      rootTimestamp ?? Number.POSITIVE_INFINITY,
-      intentTimestamp ?? Number.POSITIVE_INFINITY,
-    ));
+export function earliestDustSpendDeadline(tx: unknown, graceSeconds: number): Date | null {
+  if (!hasTransactionIntents(tx)) return null;
+  const intents = (tx as { intents: { values(): Iterable<unknown> } }).intents;
+  let earliestMs: number | null = null;
+  for (const intent of intents.values()) {
+    const dust = (intent as { dustActions?: { ctime?: unknown; spends?: unknown } } | null)?.dustActions;
+    if (dust == null) continue;
+    const spends = dust.spends;
+    if (!Array.isArray(spends) || spends.length === 0) continue;
+    const ctimeMs = expiryTimestamp("dust", dust.ctime as OfferExpiryCandidate);
+    if (ctimeMs === null) throw new Error("dust offer expiry was not derived");
+    const deadlineMs = ctimeMs + graceSeconds * 1000;
+    if (earliestMs === null || deadlineMs < earliestMs) earliestMs = deadlineMs;
   }
-  const fallbackTimestamp = expiryTimestamp("fallback", fallbackExpiry);
+  return earliestMs === null ? null : new Date(earliestMs);
+}
+
+export interface OfferExpiryConstraints {
+  /** Shielded inputs: the earliest root window anchor + ROOT_WINDOW_SECONDS. */
+  root?: OfferExpiryCandidate;
+  /** Intents: the earliest intent TTL. */
+  intent?: OfferExpiryCandidate;
+  /** DUST spends: the earliest `ctime + dust_grace_period`. */
+  dust?: OfferExpiryCandidate;
+  /** Only when none of the above applies: block time + OFFER_TTL_SECONDS. */
+  fallback: OfferExpiryCandidate;
+}
+
+/**
+ * Choose the earliest ledger limit that applies to an offer (00056 FR-002).
+ *
+ * The limits are independent and a mixed transaction can carry several, so
+ * none is a fallback for another: shielded inputs expire with their proof
+ * root (they carry no TTL), intents with their TTL, DUST spends with their
+ * grace period. The fallback is used only when no limit applies. There is no
+ * cap on top. Invalid applicable limits fail closed instead of silently
+ * extending an offer.
+ */
+export function deriveOfferExpiry(constraints: OfferExpiryConstraints): Date {
+  const applicable: number[] = [];
+  for (const label of ["root", "intent", "dust"] as const) {
+    const timestamp = expiryTimestamp(label, constraints[label]);
+    if (timestamp !== null) applicable.push(timestamp);
+  }
+  if (applicable.length > 0) return new Date(Math.min(...applicable));
+  const fallbackTimestamp = expiryTimestamp("fallback", constraints.fallback);
   if (fallbackTimestamp === null) throw new Error("offer expiry was not derived");
   return new Date(fallbackTimestamp);
+}
+
+/**
+ * The per-offer lifetime served as `ttl_seconds` / `ttlSeconds` (00056
+ * FR-003): whole seconds from the offer's creation (its Celestia block time,
+ * `metadata_created_at`) to its derived expiry, rounded down so it never
+ * over-promises, and never negative. `expiresAt` stays the authoritative
+ * value.
+ */
+export function offerLifetimeSeconds(expiresAtMs: number, createdAtMs: number): number {
+  if (!Number.isFinite(expiresAtMs) || !Number.isFinite(createdAtMs)) {
+    throw new Error(`invalid offer lifetime bounds: ${expiresAtMs}, ${createdAtMs}`);
+  }
+  return Math.max(0, Math.floor((expiresAtMs - createdAtMs) / 1000));
 }
 
 function cleanupBlockTimestamp(blockTimestamp: unknown): Date {
@@ -530,8 +576,10 @@ addTransition("celestia-zswap", function* (data) {
   //
   // Deterministic throughout: the verdict is a pure function of
   // (raw, refState, tblock, indexed sets). `tblock` is the Celestia block time
-  // and `refState` is a blank ledger state for the configured network, so it
-  // replays identically.
+  // and `refState` carries the configured network's PINNED ledger parameters
+  // (packages/validator/reference-parameters.ts — never a live read), so it
+  // replays identically. Those parameters matter: their `global_ttl` bounds
+  // every intent TTL (a blank state's 1 h bound refused valid offers).
   const rejectOffer = function* (code: string, reason: string, extra: object = {}) {
     console.warn("[ZSWAP] Rejected offer", {
       code,
@@ -562,7 +610,7 @@ addTransition("celestia-zswap", function* (data) {
   };
 
   const result = validateZswapOfferBytes(rawBytes, {
-    refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
+    refState: getReferenceState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(data.blockTimestamp),
     maxBytes: OFFER_MAX_BYTES,
     crypto: "defer", // verified below, after the indexed checks
@@ -629,7 +677,7 @@ addTransition("celestia-zswap", function* (data) {
   // duplicate, and stale blobs are all discarded before paying for proof
   // verification — but nothing is indexed without it.
   const crypto = verifyOfferCrypto(result.tx!, {
-    refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
+    refState: getReferenceState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(data.blockTimestamp),
     contractMakerRetry: ALLOW_CONTRACT_MAKER_OFFERS,
   });
@@ -673,51 +721,51 @@ addTransition("celestia-zswap", function* (data) {
     }
   }
 
-  // ── Derive expires_at (MIP-0006) ──
-  // Computed once at ingestion. The constraints have genuinely different
-  // ledger semantics and a mixed transaction can carry BOTH, so expiry is the
-  // earliest applicable constraint rather than a root-vs-intent branch:
+  // ── Derive expires_at (MIP-0006; 00056 FR-002) ──
+  // Computed once at ingestion, from the ledger's REAL limits: the earliest
+  // one that applies, because a mixed transaction can carry several.
   //
-  // SHIELDED (offer has input roots) → earliest root last_seen + ROOT_WINDOW.
-  //   A Zswap offer carries NO ttl field: `ttl_check_weak` only iterates
-  //   intents, so a pure Zswap partial tx passes well-formedness forever.
-  //   It dies at APPLY time, when `apply_input` rejects an input whose
-  //   merkle root is no longer in `past_roots` (UnknownMerkleRoot) — or
-  //   sooner if a nullifier lands first. `past_roots` is a TimeFilterMap
-  //   that re-inserts the CURRENT root every block and evicts entries older
-  //   than `tblock − window`, so the clock runs from the last block whose
-  //   tree state the offer proved against, not from offer creation.
+  // SHIELDED inputs (the offer has input roots) → root last-seen + ROOT_WINDOW.
+  //   A Zswap offer carries NO TTL: `ttl_check_weak` only iterates intents,
+  //   so a pure Zswap partial tx passes well-formedness forever. It dies at
+  //   APPLY time, when `apply_input` rejects an input whose merkle root is no
+  //   longer in `past_roots` (UnknownMerkleRoot) — or sooner if a nullifier
+  //   lands first. `past_roots` is a TimeFilterMap that re-inserts the
+  //   CURRENT root every block and evicts entries older than
+  //   `tblock − window`, so the clock runs from the last block whose tree
+  //   state the offer proved against, not from offer creation.
   //   NOTE: this value is therefore a conservative FLOOR — on a quiet chain
   //   segment the same root keeps refreshing and the real expiry extends.
   //   Serving the exact current value would mean persisting each offer's
   //   roots and recomputing at read time; the floor never over-promises
-  //   fillability, and our own TTL cleanup archives at OFFER_TTL anyway.
+  //   fillability.
   //
-  // INTENT → the earliest intent TTL. Not a fallback: `UnshieldedOffer`
-  //   exists only inside `Intent`, and `Intent.ttl` is non-optional, so an
-  //   unshielded offer structurally ALWAYS has a TTL (bounded by the
-  //   on-chain `global_ttl`, so the inclusion window is
-  //   [ttl − global_ttl, ttl]). The indexer-TTL branch below is defensive
-  //   only — it should be unreachable for a well-formed offer.
+  // INTENTS (unshielded legs, fee intents) → the earliest intent TTL.
+  //   `Intent.ttl` is non-optional and the validator above enforced
+  //   `tblock <= ttl <= tblock + global_ttl` with the network's parameters
+  //   (14 days). It applies to shielded transactions too: an intent on a
+  //   mixed offer can end it before its root window does.
   //
-  // On ledger 9 both windows are the same parameter: `global_ttl` bounds
-  // intent TTLs AND is the `past_roots` retention the zswap post-block
-  // update prunes by (14 days on every network; see network-windows.ts).
-  // They are still separate constraints here, because an intent TTL is
-  // chosen per offer and can be shorter.
+  // DUST spends → the earliest `ctime + dust_grace_period` (3 h). Defensive:
+  //   an offer carrying a DUST spend cannot pass the proof check against the
+  //   reference state today (it holds no DUST root history), so none gets here.
+  //
+  // FALLBACK → block time + OFFER_TTL_SECONDS, only when none of the above
+  //   applies — no well-formed two-sided offer is in that case. There is no
+  //   kernel-side cap on top of the ledger limits any more (00056).
+  //
+  // On ledger 9 the root window and the intent TTL bound are the same
+  // parameter, `global_ttl` (14 days on every network; network-windows.ts).
+  // They are still separate limits here, because an intent TTL is chosen per
+  // offer and can be shorter.
+  //
   // ONE deadline, used for BOTH the advertised expiry and the scheduled
   // cleanup. They were computed separately before, which meant they could
   // disagree in either direction: a stale root window advertised an expiry in
   // the offer's own past while cleanup sat an hour out (§2.6), and a short
   // policy TTL would delete an offer while the API still advertised a later
   // expiry. Two calculations that happen to agree is not the same fact.
-  //
-  // PORT NOTE (merge of 8244283): upstream's derivation replaces ours here. It
-  // consumes `getOfferRootTiming`'s anchor semantics, which S-1 obliges us to
-  // adopt, so our `requireApplicableOfferExpiry` / `deriveOfferExpiry` pair is
-  // superseded ON THIS PATH by 774b363. Both helpers remain exported and are
-  // still covered by offer-expiry.test.ts.
-  let layerDeadlineMs: number | null = null;
+  let rootDeadlineMs: number | null = null;
   // firstSeenAt (MIP-0006): shielded → the moment the offer became provable
   // on this chain (earliest proof-root first-seen); otherwise the Celestia
   // block time. Deterministic on replay — never wall-clock.
@@ -739,28 +787,20 @@ addTransition("celestia-zswap", function* (data) {
     // The anchor is already the MIN over per-root anchors, with the
     // current-root escape applied per row — see getOfferRootTiming.
     if (anchorMs != null) {
-      layerDeadlineMs = Number(anchorMs) + ROOT_WINDOW_SECONDS * 1000;
+      rootDeadlineMs = Number(anchorMs) + ROOT_WINDOW_SECONDS * 1000;
     }
   }
-  if (layerDeadlineMs == null) {
-    // UNSHIELDED: the earliest intent TTL. Structurally always present for a
-    // well-formed unshielded offer; the block-time fallback is defensive.
-    const intentTtl = P2pAtomicSwaps.earliestIntentTtl(result.tx!);
-    layerDeadlineMs = intentTtl
-      ? Number(new Date(intentTtl))
-      : data.blockTimestamp + OFFER_TTL_SECONDS * 1000;
-  }
-  if (layerDeadlineMs == null) {
-    throw new Error("offer expiry deadline was not derived");
-  }
-  // The indexer's retention policy is a CEILING, never an extension: an offer
-  // whose layer deadline falls sooner dies sooner, and one that would outlive
-  // the policy is still swept at the policy horizon.
-  const effectiveExpiryMs = Math.min(
-    layerDeadlineMs,
-    data.blockTimestamp + OFFER_TTL_SECONDS * 1000,
-  );
-  const expiresAt = new Date(effectiveExpiryMs).toISOString();
+  const expiry = deriveOfferExpiry({
+    root: rootDeadlineMs,
+    intent: P2pAtomicSwaps.earliestIntentTtl(result.tx!),
+    dust: earliestDustSpendDeadline(result.tx!, DUST_GRACE_PERIOD_SECONDS),
+    fallback: data.blockTimestamp + OFFER_TTL_SECONDS * 1000,
+  });
+  const effectiveExpiryMs = expiry.getTime();
+  const expiresAt = expiry.toISOString();
+  // Per-offer lifetime (00056 FR-003): seconds from the Celestia block time
+  // (metadata_created_at) to the derived expiry — no longer a constant.
+  const ttlSeconds = offerLifetimeSeconds(effectiveExpiryMs, data.blockTimestamp);
 
   try {
     // ── Insert offer ──
@@ -771,7 +811,7 @@ addTransition("celestia-zswap", function* (data) {
       metadata_created_at: new Date(data.blockTimestamp).toISOString(),
       metadata_expires_at: expiresAt,
       first_seen_at: firstSeenAt,
-      ttl_seconds: OFFER_TTL_SECONDS,
+      ttl_seconds: ttlSeconds,
     });
 
     const offerFileId = offerFileRes[0].id;
@@ -885,11 +925,11 @@ addTransition("celestia-zswap", function* (data) {
 
     // Sweep at EXACTLY the advertised expiry — the same effectiveExpiryMs
     // stored in metadata_expires_at, not a second computation that happens to
-    // agree. Recomputing `blockTimestamp + OFFER_TTL_SECONDS` here is what let
-    // the two drift: an offer whose root window closed sooner stayed in the
-    // live book, served as `live`, long past the expiry the API itself
-    // reported. If the deadline is already behind us the scheduler fires at
-    // once, which is correct — the offer was never fillable.
+    // agree. A separate policy deadline here is what once let the two drift:
+    // an offer whose root window closed sooner stayed in the live book,
+    // served as `live`, long past the expiry the API itself reported. If the
+    // deadline is already behind us the scheduler fires at once, which is
+    // correct — the offer was never fillable.
     yield* World.resolve(newScheduledTimestampData, {
       from_address: "0x0",
       from_address_type: AddressType.NONE,

@@ -8,9 +8,13 @@ import { describe, expect, test } from "bun:test";
 // the chain still accepts and rejects fills whose root is only hours old
 // (ROOT_UNKNOWN). The opposite mistake (14 days on a 1 h chain) is why the
 // value is pinned here rather than made a tunable per network.
+import { LedgerParameters } from "@midnightntwrk/ledger-v9";
+import { REFERENCE_PARAMETERS } from "@zswap-da/validator";
+
 import {
   ROOT_WINDOW_DEFAULT_S,
   ROOT_WINDOW_STAGENET_S,
+  offerTtlSecondsNotice,
   resolveOfferTtlSeconds,
   resolveRootWindowSeconds,
   rootWindowDefaultSeconds,
@@ -66,7 +70,7 @@ describe("root window = ledger global_ttl (14 days) on every network", () => {
   });
 });
 
-describe("offer TTL tracks the root window", () => {
+describe("OFFER_TTL_SECONDS is only the no-root/no-intent fallback (00056)", () => {
   test("defaults to the resolved window: 14 days with no env set", () => {
     const window = resolveRootWindowSeconds("preprod", undefined);
     expect(resolveOfferTtlSeconds(window, undefined)).toBe(1_209_600);
@@ -78,8 +82,29 @@ describe("offer TTL tracks the root window", () => {
     expect(resolveOfferTtlSeconds(window, undefined)).toBe(600);
   });
 
-  test("env override wins (e.g. unshielded-heavy books)", () => {
+  test("an env value still parses (it feeds the fallback only)", () => {
     expect(resolveOfferTtlSeconds(ROOT_WINDOW_DEFAULT_S, "86400")).toBe(86400);
     expect(resolveOfferTtlSeconds(ROOT_WINDOW_DEFAULT_S, "0")).toBe(ROOT_WINDOW_DEFAULT_S);
+  });
+
+  test("setting it produces a startup warning; unset or blank does not", () => {
+    expect(offerTtlSecondsNotice(undefined)).toBeNull();
+    expect(offerTtlSecondsNotice("")).toBeNull();
+    expect(offerTtlSecondsNotice("  ")).toBeNull();
+    const notice = offerTtlSecondsNotice("600");
+    expect(notice).toContain("OFFER_TTL_SECONDS=600 no longer caps offer lifetimes (00056)");
+    expect(notice).toContain("ROOT_WINDOW_SECONDS");
+    expect(notice).toContain("intent TTL");
+  });
+});
+
+describe("the root window equals the pinned reference parameters' global_ttl", () => {
+  test("every ledger-9 snapshot's global_ttl is ROOT_WINDOW_DEFAULT_S", () => {
+    for (const snapshot of Object.values(REFERENCE_PARAMETERS)) {
+      const parameters = LedgerParameters.deserialize(Buffer.from(snapshot.hex, "hex"));
+      const m = parameters.toString().match(/global_ttl:\s*Duration\(\s*([0-9]+)/);
+      expect({ network: snapshot.networkId, globalTtl: Number(m?.[1]) })
+        .toEqual({ network: snapshot.networkId, globalTtl: ROOT_WINDOW_DEFAULT_S });
+    }
   });
 });

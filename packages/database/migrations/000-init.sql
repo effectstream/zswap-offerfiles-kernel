@@ -248,10 +248,13 @@ CREATE TABLE offer_file (
     -- NOT NULL because every writer sets it and a missing chain-derived
     -- timestamp should fail loudly, not serve null to a client.
     first_seen_at TIMESTAMPTZ NOT NULL,
-    -- TTL in seconds for how long this offer should remain active. The
-    -- writer always passes OFFER_TTL_SECONDS; the default mirrors its own
-    -- default, the root window = ledger-9 `global_ttl` = 14 days (see
-    -- packages/node/network-windows.ts for the full rationale).
+    -- The offer's derived lifetime in whole seconds: metadata_expires_at −
+    -- metadata_created_at, rounded down (00056). Per offer, not a constant:
+    -- the writer (state-machine.ts) derives expiry from the ledger's limits —
+    -- root last-seen + root window for shielded inputs (which carry no TTL),
+    -- the earliest intent TTL for intents. The default is only a fallback
+    -- for writers that pass nothing: the root window = ledger-9 `global_ttl`
+    -- = 14 days (packages/node/network-windows.ts).
     ttl_seconds BIGINT NOT NULL DEFAULT 1209600,
     -- When THIS node inserted the row — a local observation, deliberately not
     -- chain-derived, and excluded from the determinism diff for that reason.
@@ -389,7 +392,7 @@ CREATE TABLE offer_file_history (
     -- offer_hash, both also copied.) NOT NULL as on the live table.
     first_seen_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ,
-    -- Copy of the TTL (in seconds) that was active for the original offer.
+    -- Copy of the original offer's derived lifetime (ttl_seconds, 00056).
     ttl_seconds BIGINT,
     -- Why this offer left the live table:
     --   'CONSUMED' — one of the offer's inputs was spent on Midnight. Whether

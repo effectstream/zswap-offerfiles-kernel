@@ -15,7 +15,7 @@
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import {
-  getBlankRefState,
+  getReferenceState,
   validateZswapOfferBytes,
   type OfferValidation,
 } from "@zswap-da/validator";
@@ -45,7 +45,7 @@ const MAX_BYTES = 1024 * 1024;
  */
 export function fullyValidate(raw: Uint8Array, acceptedAt: Date): OfferValidation {
   return validateZswapOfferBytes(raw, {
-    refState: getBlankRefState(net.id),
+    refState: getReferenceState(net.id),
     tblock: acceptedAt,
     maxBytes: MAX_BYTES,
     crypto: "verify",

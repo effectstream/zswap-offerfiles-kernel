@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { getReferenceState, validateZswapOffer } from "@zswap-da/validator";
 
 const FIXTURE_PATH = join(
   import.meta.dir,
@@ -103,16 +103,16 @@ async function main(): Promise<void> {
     console.log(`[fixture] offer blob: ${blob.slice(0, 48)}… (${raw.length} bytes)`);
 
     // The point of the exercise: a real proven offer must pass the shipped
-    // validator with a BLANK reference state.
+    // validator with its reference state (the network's pinned parameters).
     const verdict = validateZswapOffer(blob, {
-      refState: getBlankRefState(net.id),
+      refState: getReferenceState(net.id),
       tblock: new Date(),
       maxBytes: 4 * 1024 * 1024,
     });
     if (!verdict.ok) {
       throw new Error(`validator REJECTED the real offer: ${verdict.code} — ${verdict.reason}`);
     }
-    console.log("[fixture] ✅ validator accepts the offer (blank refState)");
+    console.log("[fixture] ✅ validator accepts the offer (reference refState)");
     console.log("[fixture]   gives:", JSON.stringify(verdict.gives));
     console.log("[fixture]   wants:", JSON.stringify(verdict.wants));
     console.log("[fixture]   nullifiers:", verdict.nullifiers?.length, "unshielded spends:", verdict.unshieldedSpends?.length);

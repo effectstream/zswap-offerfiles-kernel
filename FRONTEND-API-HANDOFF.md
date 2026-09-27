@@ -111,12 +111,15 @@ Query params (all optional): `limit` (default & max 100), `token` (64-hex color)
   unknown colors as truncated hex, never hide them.
 - Legs are **layer-tagged** (`type`). Two legs of the same token but different
   `type` are different assets for netting purposes — never merge them.
-- `expiresAt` is the earliest applicable constraint: proof-root
-  last-seen + root window and earliest Intent TTL are both considered for mixed
-  transactions; publication TTL is used only if neither exists. The root-derived
-  value is deliberately conservative because the chain can refresh a current
-  root after ingestion, but the indexer archives at its persisted cutoff. Treat
-  the REST status as authoritative and refetch when a countdown reaches zero.
+- `expiresAt` is the earliest of the offer's real ledger limits (00056):
+  shielded (zswap) inputs carry **no TTL** and end when their proof root leaves
+  the root window (root last-seen + 14 days); intents (unshielded legs, fee
+  intents) end at their **mandatory TTL**, at most 14 days ahead of the chain's
+  clock. A mixed offer gets the earlier one; there is no kernel cap on top. The
+  root-derived value is deliberately conservative because the chain can refresh
+  a current root after ingestion, but the indexer archives at its persisted
+  cutoff. Treat the REST status as authoritative and refetch when a countdown
+  reaches zero.
 - Pagination loop: request with `after_hash=<previous nextCursor>` until
   `nextCursor` is `null`. A full page can be the last one — the next request then
   returns `{ "offers": [], "nextCursor": null }`. A fabricated/stale cursor gets
@@ -147,6 +150,10 @@ resolves **archived** offers (with their terminal status):
   }
 }
 ```
+
+`ttlSeconds` is **this offer's** lifetime in whole seconds (`expiresAt` minus
+its creation time), a string; it differs per offer since 00056 (it used to be
+the same constant for every offer). Prefer `computed.expiresAt` for countdowns.
 
 ### `GET /v1/offers/:offerId/status` — cheap poll
 
@@ -186,6 +193,7 @@ Errors — all bodies are `{ "error": CODE, "reason": "human text", …extras }`
 | 400 | `NOT_A_SWAP`, `NO_SPENDABLE_INPUT` | Valid tx, but not a takeable offer. |
 | 400 | `CROSS_LAYER` | The offer mixes shielded and unshielded legs. Unfillable by construction — no shielded↔unshielded settlement path exists. Terminal; the user must rebuild both legs on one layer. |
 | 400 | `NULLIFIER_SPENT`, `UTXO_NOT_LIVE` | An input coin is already spent/unknown — the offer can never settle. Terminal; don't offer retry. (`UTXO_SPENT` and `UTXO_UNKNOWN` are library-level distinctions folded into `UTXO_NOT_LIVE` by this route.) |
+| 400 | `INTENT_TTL_EXPIRED`, `INTENT_TTL_TOO_FAR` | The offer's intent TTL (unshielded legs or a fee intent) is already past, or more than 14 days (`global_ttl`) ahead of the chain's clock. Rebuild with a TTL inside that window. Shielded-only offers carry no TTL and never get these. |
 | 400 | `ROOT_UNKNOWN` | The wallet proved against a Merkle root this node hasn't synced. Body includes `hint` + `diagnostics` (node's indexer URI vs the wallet's). **Show `hint` verbatim** — it names the exact Lace misconfiguration. Retrying the same blob will not help. |
 | 400 | `VALIDATION` | Malformed request body. |
 | 429 | `RATE_LIMITED` | Back off. |
@@ -193,6 +201,7 @@ Errors — all bodies are `{ "error": CODE, "reason": "human text", …extras }`
 For completeness, the validator union is: `BAD_ENCODING`, `TOO_LARGE`,
 `BAD_DESERIALIZE`, `WRONG_TX_VARIANT`, `NO_SPENDABLE_INPUT`, `NOT_A_SWAP`,
 `CROSS_LAYER`, `UNKNOWN_TOKEN`, `PROOF_INVALID`, `SIGNATURE_INVALID`,
+`INTENT_TTL_EXPIRED`, `INTENT_TTL_TOO_FAR`,
 `NULLIFIER_SPENT`, `UTXO_SPENT`, `UTXO_UNKNOWN`, `ROOT_UNKNOWN`,
 `ROOT_UNREADABLE`, `DUPLICATE`. `WRONG_TX_VARIANT` is reserved;
 `UNKNOWN_TOKEN` and `ROOT_UNREADABLE` are fail-closed guards not reachable from

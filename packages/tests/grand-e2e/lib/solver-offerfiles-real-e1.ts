@@ -575,7 +575,6 @@ export function realE1AcceptanceComposeSource(input: RealE1AcceptanceComposeInpu
       EN2_RELAY_AUTH_TOKEN: "\${N6_RELAY_AUTH_TOKEN:?N6_RELAY_AUTH_TOKEN must be set}"
       EN2_TARGET_OFFER_HASH: "\${N6_TARGET_OFFER_HASH:?N6_TARGET_OFFER_HASH must be set}"
       EN2_RESULT_PATH: /outputs/en2/result.json
-      OFFER_TTL_SECONDS: "28800"
       SOLVER_EXPIRY_MARGIN_SECONDS: "30"
       SOLVER_RESYNC_INTERVAL_MS: "2000"
       SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS: "500"
@@ -916,7 +915,6 @@ ${input.n6RelayNodeHostPort === undefined ? "" : `    ports:\n      - "127.0.0.1
       ENABLE_DEV_AND_DEBUG_ENDPOINTS: "true"
       API_RATE_LIMIT_MAX: "10000"
       ROOT_WINDOW_SECONDS: "28800"
-      OFFER_TTL_SECONDS: "28800"
       OFFER_FILES_READ_TIMEOUT_MS: "30000"
       BATCHER_SUBMIT_URL: http://batcher-sink:8080
     healthcheck:
@@ -1091,7 +1089,6 @@ ${input.includeN6Services ? "      E1_SOLVER_RELAY_WS_URL: ws://relay-fixture:90
       E1_SOLVER_STARTUP_TIMEOUT_MS: "300000"
       E1_SOLVER_WALLET_OPERATION_TIMEOUT_MS: "300000"
       E1_SOLVER_STOP_TIMEOUT_MS: "60000"
-      OFFER_TTL_SECONDS: "3600"
       SOLVER_EXPIRY_MARGIN_SECONDS: "30"
       SOLVER_RESYNC_INTERVAL_MS: "2000"
       SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS: "500"

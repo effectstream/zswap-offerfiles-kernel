@@ -184,10 +184,20 @@ test("throwing memory-journal warning sink is contained", () => {
   ).not.toThrow();
 });
 
-test("runtime config validates expiry and health cross-field bounds", () => {
-  expect(() =>
-    loadSolverRuntimeEnv(reader({ SOLVER_EXPIRY_MARGIN_SECONDS: "3600", OFFER_TTL_SECONDS: "3600" })),
-  ).toThrow(/SOLVER_EXPIRY_MARGIN_SECONDS.*OFFER_TTL_SECONDS/);
+test("runtime config does not read the kernel's OFFER_TTL_SECONDS (00056 FR-006)", () => {
+  // The solver used it only for a startup comparison with its expiry margin,
+  // and the kernel no longer caps offers by it. A shared env file carrying the
+  // kernel's value (or anything else) must not affect the solver.
+  for (const value of ["3600", "1209600", "not-an-integer"]) {
+    const env = loadSolverRuntimeEnv(
+      reader({ SOLVER_EXPIRY_MARGIN_SECONDS: "3600", OFFER_TTL_SECONDS: value }),
+    );
+    expect(env.expiryMarginSeconds).toBe(3_600);
+    expect(Object.keys(env)).not.toContain("offerTtlSeconds");
+  }
+});
+
+test("runtime config validates health cross-field bounds", () => {
   expect(() =>
     loadSolverRuntimeEnv(
       reader({
@@ -217,7 +227,6 @@ test("every bounded runtime variable rejects malformed startup input by name", (
     "SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS",
     "SOLVER_BACKEND_HEALTH_MAX_AGE_MS",
     "SOLVER_EXPIRY_MARGIN_SECONDS",
-    "OFFER_TTL_SECONDS",
     "SOLVER_SETTLE_TTL_MINUTES",
     "SOLVER_STATUS_POLL_MS",
   ]) {

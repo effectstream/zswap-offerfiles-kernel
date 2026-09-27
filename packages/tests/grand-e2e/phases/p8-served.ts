@@ -24,7 +24,7 @@
 import type { Client } from "pg";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { createHash } from "node:crypto";
-import { OFFER_TTL_SECONDS, ROOT_WINDOW_SECONDS, type TokenKey } from "../config.ts";
+import { ROOT_WINDOW_SECONDS, type TokenKey } from "../config.ts";
 import { ledger } from "../ledger.ts";
 import {
   amountsFor,
@@ -299,15 +299,10 @@ export async function p8Served(db: Client, actors: Actors): Promise<void> {
     return past.length === 0;
   }, "an expired-but-listed offer is a phantom the book should have swept");
 
-  // Config invariant, not behaviour: the two windows are independent env knobs
-  // (network-windows.ts) whose DEFAULT ties them together. A deployment that
-  // widens the TTL past the root window serves dead shielded offers for the
-  // difference — invisibly, because the grand run only ever sets them equal.
-  await check(
-    "OFFER_TTL_SECONDS <= ROOT_WINDOW_SECONDS (a shielded book cannot outlive its roots)",
-    async () => OFFER_TTL_SECONDS <= ROOT_WINDOW_SECONDS,
-    `ttl=${OFFER_TTL_SECONDS} window=${ROOT_WINDOW_SECONDS}`,
-  );
+  // (A config invariant OFFER_TTL_SECONDS <= ROOT_WINDOW_SECONDS lived here.
+  // Since 00056 OFFER_TTL_SECONDS no longer shapes any offer's lifetime — a
+  // shielded offer's expiry IS its root deadline — so there is nothing to
+  // keep in step.)
 
   // ── 5. The list route serves ONLY live offers ────────────────────────────
   // p7b's live-set audit compares against the suite's own ledger and so cannot

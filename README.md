@@ -467,7 +467,8 @@ bun check-env.ts                # static checks plus a live Celestia probe
 | NTP anchor | `1786638294000` = stagenet block 1, 2026-08-13T16:24:54Z | chain |
 | NTP block time | `600000` ms, preview's | `packages/node/env.ts` |
 | Celestia | **mocha**, on the MIP-0006 shared namespace `6d6e2d737761702d7631` (`mn-swap-v1`), **not overridden** | owner decision (00050 Q1) |
-| Root window / offer TTL | `1209600` s (14 days) | ledger 9 prunes zswap roots by the `global_ttl` ledger parameter; stagenet's is 1209600 (midnight-node `d9729c13` `res/stagenet/ledger-parameters-config.json`, and the live parameters) |
+| Root window | `1209600` s (14 days) | ledger 9 prunes zswap roots by the `global_ttl` ledger parameter; stagenet's is 1209600 (midnight-node `d9729c13` `res/stagenet/ledger-parameters-config.json`, and the live parameters). Shielded offers carry no TTL: they expire when their root leaves this window |
+| Offer validator parameters | stagenet `LedgerParameters` at indexer block 637,700 (`global_ttl` 1209600 s, so intent TTLs up to 14 days are accepted) | pinned in `packages/validator/reference-parameters.ts` (00056); an unknown `MIDNIGHT_NETWORK_ID` fails at startup |
 | Token registry | `mint-test-tokens` `metadata.stagenet.json`, revision `59041d2f…`: shielded TWBTC (8), TWETH (18), TWUSDC (6), TWUSDM (6); unshielded UTWUSDC (6), UTWBTC (8) | vendored fixture `packages/database/fixtures/mint-test-tokens.stagenet.json` |
 
 Several networks share the MIP-0006 namespace. A stagenet kernel ingests
@@ -834,7 +835,7 @@ monorepo at
 | `midnight-unshielded-spend` | Midnight unshielded-spend primitive | Record the UTXO in `spent_unshielded` (liveness) and archive any offer whose unshielded UTXO is spent. |
 | `midnight-unshielded-create` | Midnight unshielded-create primitive | Record every created unshielded UTXO in `created_unshielded` (existence liveness). |
 | `midnight-zswap-root` | Midnight zswap-root primitive | Record the coin-tree root in `known_roots` and prune to `ROOT_WINDOW_SECONDS` (root-known liveness). |
-| `zswap-ttl-cleanup` | Scheduled timestamp data | Archive offers whose TTL elapsed without on-chain consumption. |
+| `zswap-ttl-cleanup` | Scheduled timestamp data | Archive offers whose derived expiry passed without on-chain consumption (root deadline for shielded inputs, intent TTL for intents; see API.md "Offer expiry"). |
 
 ## API
 

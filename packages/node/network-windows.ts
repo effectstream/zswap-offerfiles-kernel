@@ -23,7 +23,15 @@
 // The value is static on purpose: changing `global_ttl` is a hard fork, so the
 // kernel uses one constant for every network instead of reading the parameter
 // at startup. ROOT_WINDOW_SECONDS still overrides it for tests and special
-// deployments.
+// deployments. The same `global_ttl` also bounds intent TTLs
+// (`tblock <= ttl <= tblock + global_ttl`); the validator reads that bound
+// from the network's pinned ledger parameters
+// (packages/validator/reference-parameters.ts), whose `global_ttl` equals this
+// constant (reference-parameters.test.ts checks it).
+//
+// Shielded (zswap) offers carry NO TTL of their own: this window — counted
+// from the last block in which the offer's root was still current — is their
+// only expiry.
 //
 // Ledger 8 (node 1.x, the kernel's `main` line) is different: its zswap crate
 // hardcodes a 3600 s window (zswap/src/ledger.rs:253 at ledger-8.1.x) and
@@ -62,11 +70,20 @@ export function resolveRootWindowSeconds(
 }
 
 /**
- * Offer TTL default: tracks the root window. A shielded offer is fillable
- * only while its proof root stays inside the window, so keeping indexed
- * offers alive longer only serves offers that can no longer settle.
- * Env (`OFFER_TTL_SECONDS`) wins for deployments that want a different bound
- * (e.g. unshielded-heavy books, where fillability is not root-bound).
+ * OFFER_TTL_SECONDS since 00056: the FALLBACK lifetime of an offer that has
+ * neither a shielded input root, nor an intent, nor a DUST spend — the only
+ * case with no ledger expiry to derive. It is unreachable for a well-formed
+ * two-sided offer (unshielded spends live inside intents, whose TTL is
+ * mandatory; shielded inputs carry a root), so it shapes no real offer.
+ *
+ * It is NOT a cap any more. Offer expiry is the earliest REAL limit
+ * (state-machine.ts deriveOfferExpiry):
+ *   - shielded (zswap) inputs: no TTL exists; the offer dies when its proof
+ *     root leaves `past_roots` — root last-seen + ROOT_WINDOW_SECONDS;
+ *   - intents (unshielded legs, fee intents): the earliest intent `ttl`,
+ *     which the ledger bounds by `tblock + global_ttl`;
+ *   - DUST spends: `ctime + dust_grace_period`.
+ * Default: the root window. Env (`OFFER_TTL_SECONDS`) wins.
  */
 export function resolveOfferTtlSeconds(
   rootWindowSeconds: number,
@@ -75,4 +92,20 @@ export function resolveOfferTtlSeconds(
   const parsed = Number.parseInt(envValue ?? "", 10);
   if (Number.isFinite(parsed) && parsed > 0) return parsed;
   return rootWindowSeconds;
+}
+
+/**
+ * The startup warning for an explicitly set OFFER_TTL_SECONDS, or null when it
+ * is unset/blank. Before 00056 the variable capped every offer's lifetime;
+ * now it is only the no-root/no-intent fallback, so an operator who set it to
+ * shorten offers must hear that it no longer does (no silent change).
+ */
+export function offerTtlSecondsNotice(envValue: string | undefined): string | null {
+  if (envValue === undefined || envValue.trim() === "") return null;
+  return (
+    `OFFER_TTL_SECONDS=${envValue.trim()} no longer caps offer lifetimes (00056): ` +
+    "expiry is derived from the ledger — root last-seen + ROOT_WINDOW_SECONDS for " +
+    "shielded inputs, the earliest intent TTL for intents, ctime + DUST grace for " +
+    "DUST spends. The value applies only to an offer with none of these."
+  );
 }

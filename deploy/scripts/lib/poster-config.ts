@@ -488,6 +488,10 @@ export async function parsePosterConfig(env: EnvMap): Promise<PosterConfig> {
     forcedWantAmount,
 
     postIntervalMs: readInt(env, "POST_INTERVAL_MS", 60_000, { min: 1 }),
+    // The initSwap `ttl`: an INTENT TTL (unshielded legs / payFees:true fee
+    // intents). The poster's shielded-only payFees:false offers carry no
+    // intent, so it does not change their bytes or expiry (00056; see
+    // deploy/README.md "Offer TTL knobs apply to intents only").
     offerTtlMinutes: readInt(env, "OFFER_TTL_MINUTES", 60, { min: 1 }),
     reconcileIntervalMs: readInt(env, "RECONCILE_INTERVAL_MS", 60_000, { min: 1 }),
     maxReoffersPerTick: readInt(env, "POSTER_MAX_REOFFERS_PER_TICK", 1, { min: 1 }),

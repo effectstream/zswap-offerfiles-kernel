@@ -27,7 +27,7 @@ import { Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { collectUnshieldedOutputs, getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { collectUnshieldedOutputs, getReferenceState, validateZswapOffer } from "@zswap-da/validator";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
 import { offerHashFromBlob } from "@zswap-da/offer-guard";
 
@@ -727,7 +727,7 @@ async function buildOfferOnce(pw: PoolWallet, rec: OfferRecord): Promise<BuiltOf
     // to construction. Failing here instead makes buildOffer's retry loop
     // surface the real reason.
     const built = validateZswapOffer(blob, {
-      refState: getBlankRefState(net.id),
+      refState: getReferenceState(net.id),
       tblock: new Date(),
       maxBytes: 1024 * 1024,
       crypto: "defer", // proofs are the node's job; we only check structure
@@ -803,7 +803,7 @@ export async function buildOneSidedOffer(
       await (pw.wr.wallet as any).revert(finalized).catch(() => {});
 
       const v = validateZswapOffer(blob, {
-        refState: getBlankRefState(net.id),
+        refState: getReferenceState(net.id),
         tblock: new Date(),
         maxBytes: 1024 * 1024,
         crypto: "defer",
@@ -916,7 +916,7 @@ export async function buildCrossLayerOffer(
       // particular would mean a leg got dropped and the assertion downstream
       // would be passing for the wrong reason.
       const v = validateZswapOffer(blob, {
-        refState: getBlankRefState(net.id),
+        refState: getReferenceState(net.id),
         tblock: new Date(),
         maxBytes: 1024 * 1024,
         crypto: "defer",
@@ -1091,7 +1091,7 @@ export async function buildBasketOffer(
       const blob = OfferFiles.encode(merged.serialize());
 
       const v = validateZswapOffer(blob, {
-        refState: getBlankRefState(net.id),
+        refState: getReferenceState(net.id),
         tblock: new Date(),
         maxBytes: 1024 * 1024,
         crypto: "defer",

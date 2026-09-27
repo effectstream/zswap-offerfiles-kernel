@@ -15,7 +15,7 @@ import {
   EXPIRY_SLACK_MS,
   FATE_SPLIT,
   MAX_CASUALTY_RATE,
-  OFFER_TTL_SECONDS,
+  MAX_OFFER_LIFETIME_MS,
   STORM_API_INVALID_COUNT,
   STORM_API_P95_MS,
   STORM_CELESTIA_GARBAGE_COUNT,
@@ -610,7 +610,7 @@ export async function p5Load(db: Client, actors: Actors, art: P1Artifacts): Prom
     // ── mass-expiry sweep ───────────────────────────────────────────────────
     const expiredRecs = ledger.offers.filter((o) => o.fate === "expired" && o.state === "indexed");
     const lastIndexed = Math.max(...expiredRecs.map((o) => o.indexedAt ?? 0), 0);
-    const sweepDeadline = lastIndexed + OFFER_TTL_SECONDS * 1000 + EXPIRY_SLACK_MS;
+    const sweepDeadline = lastIndexed + MAX_OFFER_LIFETIME_MS + EXPIRY_SLACK_MS;
     note("expiry", `waiting for TTL sweep until ${new Date(sweepDeadline).toISOString()} (${expiredRecs.length} offers)`);
     while (Date.now() < sweepDeadline) await sleep(15_000);
 

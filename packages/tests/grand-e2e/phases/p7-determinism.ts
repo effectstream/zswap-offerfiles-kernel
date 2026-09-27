@@ -21,6 +21,7 @@ import {
   NODE_B_DB_PORT,
   NODE_B_MQTT_PORTS,
   NODE_B_SYNC_TIMEOUT_MS,
+  MAX_OFFER_LIFETIME_MS,
   OFFER_TTL_SECONDS,
   OUT_DIR,
   ROOT_WINDOW_SECONDS,
@@ -43,7 +44,7 @@ async function waitForChainQuiesce(): Promise<void> {
   // of them is past its sweep, so instance B's replay has no moving targets.
   const liveRecs = ledger.offers.filter((o) => o.fate === "live" && o.state === "indexed");
   const lastIndexed = Math.max(...liveRecs.map((o) => o.indexedAt ?? 0), 0);
-  const deadline = lastIndexed + OFFER_TTL_SECONDS * 1000 + EXPIRY_SLACK_MS;
+  const deadline = lastIndexed + MAX_OFFER_LIFETIME_MS + EXPIRY_SLACK_MS;
   if (Date.now() < deadline) {
     note("quiesce", `waiting for live-batch TTL sweep until ${new Date(deadline).toISOString()}`);
     while (Date.now() < deadline) await sleep(15_000);

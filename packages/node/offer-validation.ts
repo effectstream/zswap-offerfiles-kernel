@@ -26,7 +26,7 @@ import {
   type ValidatedOfferSemantics,
 } from "@zswap-da/solver-core/validation-contract";
 import {
-  getBlankRefState,
+  getReferenceState,
   validateZswapOffer,
   verifyOfferCrypto,
   type OfferValidation,
@@ -144,6 +144,16 @@ export function canonicalValidatorCode(validation: OfferValidation): OfferValida
     // forwards `structural.reason`, which already carries layerSummary()'s text.
     case "CROSS_LAYER":
       return "UNSUPPORTED_SHAPE";
+    // 00056 FR-004 split the intent TTL failures out of PROOF_INVALID. The v1
+    // wire enum stays closed (same reasoning as CROSS_LAYER above), so they
+    // map onto codes it already has: an expired intent TTL is EXPIRED; a TTL
+    // too far ahead cannot reach this route for an indexed offer (ingestion
+    // refused it, and the bound only loosens as time passes), and keeps the
+    // pre-00056 PROOF_INVALID. The caller forwards the ledger's reason text.
+    case "INTENT_TTL_EXPIRED":
+      return "EXPIRED";
+    case "INTENT_TTL_TOO_FAR":
+      return "PROOF_INVALID";
     default:
       throw new OfferValidationUnavailableError(
         `validator returned an unsupported boundary code: ${String(validation.code)}`,
@@ -393,7 +403,7 @@ export async function validateOfferForUse(
 
   checkSignal(signal);
   const structural = validateZswapOffer(request.offer, {
-    refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
+    refState: getReferenceState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(initialAnchor.atMs),
     maxBytes: OFFER_MAX_BYTES,
     crypto: "defer",
@@ -474,7 +484,7 @@ export async function validateOfferForUse(
 
   checkSignal(signal);
   const crypto = verifyOfferCrypto(structural.tx, {
-    refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
+    refState: getReferenceState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(initialState.anchor.atMs),
   });
   checkSignal(signal);
@@ -506,12 +516,16 @@ export async function validateOfferForUse(
     return stateVerdict(request, computedOfferId, finalState);
   }
   if (!crypto.ok) {
+    const code = canonicalValidatorCode({ ok: false, code: crypto.code });
     return checkedVerdict(request.profile, request.offerId, finalState.anchor, {
       valid: false,
-      live: true,
+      // An expired intent TTL (row indexed before 00056 derived expiry from
+      // intents) means the offer is no longer usable; the contract requires
+      // EXPIRED to be reported not-live.
+      live: code !== "EXPIRED",
       computedOfferId,
       status: "live",
-      code: crypto.code as OfferValidationCode,
+      code,
       reason: crypto.reason,
     });
   }

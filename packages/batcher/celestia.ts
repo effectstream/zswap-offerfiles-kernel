@@ -3,7 +3,12 @@ import {
   type CelestiaAdapterConfig,
   type DefaultBatcherInput,
 } from "@effectstream/batcher-sdk";
-import { getBlankRefState, validateZswapOffer, type OfferLeg } from "@zswap-da/validator";
+import {
+  getReferenceState,
+  requireReferenceParameters,
+  validateZswapOffer,
+  type OfferLeg,
+} from "@zswap-da/validator";
 import {
   DedupStore,
   evaluateSponsorship,
@@ -90,6 +95,11 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
     gate: SponsorshipGate = NO_GATE,
   ) {
     super(config);
+    // Fail at startup, not on the first offer: the pre-fee gate validates
+    // against the network's pinned reference ledger parameters (00056
+    // FR-001), and an id without a snapshot must never fall back to blank
+    // defaults (whose 1 h global_ttl would refuse valid intent TTLs).
+    requireReferenceParameters(networkId);
     this.networkId = networkId;
     this.gate = gate;
     this.gateNow = gate.now ?? (() => Date.now());
@@ -137,8 +147,9 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
 
     // Structure + cryptographic proofs (steps 1–5): rejects malformed, forged,
     // and non-swap offers — the bulk of fee-wasting "bad" blobs. This is
-    // self-contained (blank reference state + bundled verifier keys; no network
-    // call), so the fee gate has no live dependency.
+    // self-contained (the network's pinned reference ledger parameters +
+    // bundled verifier keys; no network call), so the fee gate has no live
+    // dependency.
     //
     // Liveness (already-spent coins) is NOT repeated here: the batcher has no DB
     // access and the indexer has no point-lookup ("is X spent?") query — only
@@ -156,7 +167,7 @@ export class ZswapCelestiaAdapter extends CelestiaAdapter {
     // the network as a whole: makers can post to the namespace directly, so
     // the STM ingestion ladder remains the authoritative filter.
     const result = validateZswapOffer(input.input, {
-      refState: getBlankRefState(this.networkId),
+      refState: getReferenceState(this.networkId),
       tblock: new Date(),
       maxBytes: OFFER_MAX_BYTES,
       // Same lane as the node — see ValidateOpts.contractMakerRetry.

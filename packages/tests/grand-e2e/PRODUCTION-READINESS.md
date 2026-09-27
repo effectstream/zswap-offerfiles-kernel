@@ -731,12 +731,12 @@ row can be hash-correct and semantically garbage.
 ```ts
 // lib/verify.ts — the shared "re-validate these bytes independently" helper,
 // used by T-A5, T-A6, T-B1 and T-D2 so the audit never grades the API with the API.
-import { getBlankRefState, validateZswapOfferBytes } from "@zswap-da/validator";
+import { getReferenceState, validateZswapOfferBytes } from "@zswap-da/validator";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 export function fullyValidate(raw: Uint8Array) {
   return validateZswapOfferBytes(raw, {
-    refState: getBlankRefState(net.id),
+    refState: getReferenceState(net.id),
     tblock: new Date(),
     maxBytes: 1024 * 1024,
     crypto: "verify",           // the whole point: proofs and signatures too

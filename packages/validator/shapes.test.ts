@@ -26,7 +26,7 @@ import {
 } from "./shapes.testkit.ts";
 import { collectUnshieldedOutputs, collectUnshieldedSpends } from "./derive.ts";
 import { validateZswapOfferBytes } from "./validate.ts";
-import { getBlankRefState } from "./refstate.ts";
+import { getReferenceState } from "./refstate.ts";
 
 const shapes = allShapes();
 const byId = new Map(shapes.map((s) => [s.id, s]));
@@ -208,7 +208,7 @@ describe("phase (a) — byte-surgery census (#20 absorbed)", () => {
       return;
     }
     const opts = {
-      refState: getBlankRefState("undeployed" as any),
+      refState: getReferenceState("undeployed" as any),
       tblock: new Date(),
       maxBytes: 1 << 20,
       crypto: "defer" as const,

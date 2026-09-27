@@ -17,6 +17,14 @@ export type OfferRejectCode =
   | "UNKNOWN_TOKEN"
   | "PROOF_INVALID"
   | "SIGNATURE_INVALID"
+  // An intent's TTL is outside the ledger's window `tblock <= ttl <= tblock +
+  // global_ttl` (midnight-ledger verify.rs `ttl_check_weak`), measured with
+  // the network's reference parameters (`global_ttl` = 14 days). Only intents
+  // carry a TTL — unshielded legs and fee intents; shielded (zswap) inputs
+  // have none. Split out of PROOF_INVALID (00056 FR-004): the offer is not
+  // forged, its TTL is simply expired or too far ahead.
+  | "INTENT_TTL_EXPIRED"
+  | "INTENT_TTL_TOO_FAR"
   // Liveness — supplied by the caller's async checks against the node's
   // ingested sets / the indexer; see ValidateOpts. ROOT_UNKNOWN means the
   // input's merkle root is not a real recent chain root (fabricated or aged
@@ -83,7 +91,9 @@ export interface OfferValidation {
 
 export interface ValidateOpts {
   // Reference ledger state for `Transaction.wellFormed`. Use
-  // `getBlankRefState(networkId)` unless you have a real state to pass.
+  // `getReferenceState(networkId)`: a blank state carrying the network's
+  // pinned ledger parameters. Never a bare `LedgerState.blank` — its
+  // `global_ttl` is 3600 s, so it refuses intent TTLs the chain accepts.
   refState: LedgerState;
   // Deterministic block timestamp for `wellFormed` time checks. In the STM use
   // `new Date(data.blockTimestamp)`; in request/response paths `new Date()`.

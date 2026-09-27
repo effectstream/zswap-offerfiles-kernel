@@ -21,7 +21,7 @@ import {
   collectUnshieldedOutputs,
   deriveLegs,
 } from "./derive.ts";
-import { getBlankRefState } from "./refstate.ts";
+import { getReferenceState } from "./refstate.ts";
 import { validateZswapOfferBytes } from "./validate.ts";
 
 const shapes = allShapes();
@@ -31,7 +31,7 @@ const offerHashFromBlob = (blob: string) =>
 
 function verdict(id: string) {
   return validateZswapOfferBytes(OfferFiles.decode(byId.get(id)!.blob), {
-    refState: getBlankRefState("undeployed" as any),
+    refState: getReferenceState("undeployed" as any),
     tblock: new Date(),
     maxBytes: 1 << 20,
     crypto: "defer",

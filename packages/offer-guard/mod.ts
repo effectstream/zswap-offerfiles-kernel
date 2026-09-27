@@ -24,7 +24,7 @@ import { createHash } from "node:crypto";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import {
   evaluateOfferLiveness,
-  getBlankRefState,
+  getReferenceState,
   validateZswapOffer,
   verifyOfferCrypto,
   type OfferValidation,
@@ -149,7 +149,7 @@ export async function guardOffer(
   opts: GuardOpts,
 ): Promise<GuardResult> {
   const validation = validateZswapOffer(blob, {
-    refState: getBlankRefState(opts.networkId),
+    refState: getReferenceState(opts.networkId),
     tblock: opts.tblock ?? new Date(),
     maxBytes: opts.maxBytes,
     crypto: "defer",
@@ -205,7 +205,7 @@ export async function guardOffer(
   }
 
   const crypto = verifyOfferCrypto(validation.tx!, {
-    refState: getBlankRefState(opts.networkId),
+    refState: getReferenceState(opts.networkId),
     tblock: opts.tblock ?? new Date(),
   });
   if (!crypto.ok) {

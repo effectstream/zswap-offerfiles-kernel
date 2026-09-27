@@ -38,7 +38,7 @@ import {
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/solver-core/amount";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
-import { getBlankRefState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
+import { getReferenceState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
 import {
   eventBus,
   emitAppEvent,
@@ -852,7 +852,7 @@ export const apiRouter: StartConfigApiRouter = async function (
       // stale blob never costs a `wellFormed` (the pipeline's dominant cost).
       // Same ordering as the STM; see the celestia-zswap transition.
       const validation = validateZswapOffer(blob, {
-        refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
+        refState: getReferenceState(MIDNIGHT_NETWORK_ID),
         tblock: new Date(),
         maxBytes: OFFER_MAX_BYTES,
         crypto: "defer",
@@ -969,7 +969,7 @@ export const apiRouter: StartConfigApiRouter = async function (
       // claimed data out of an unverified transaction; nothing is forwarded to
       // the batcher (and so to a paid Celestia post) without this.
       const crypto = verifyOfferCrypto(validation.tx!, {
-        refState: getBlankRefState(MIDNIGHT_NETWORK_ID),
+        refState: getReferenceState(MIDNIGHT_NETWORK_ID),
         tblock: new Date(),
       });
       if (!crypto.ok) {

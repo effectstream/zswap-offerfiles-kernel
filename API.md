@@ -49,13 +49,13 @@ Three configurations ship out of the box. All endpoints and env-var names are id
 | `CELESTIA_POLLING_INTERVAL_MS` | `6000` | `3000` | `30000` |
 | `CELESTIA_START_HEIGHT` | `1` | `10620000` ¹ | set to your deployment block |
 | `MIDNIGHT_START_BLOCK` | `1` | `1` | set to your deployment block |
-| `OFFER_TTL_SECONDS` | default = root window (1 h) | default = root window (1 h) ² | default = root window (1 h) ² |
+| `OFFER_TTL_SECONDS` | fallback only; default = root window (1 h) ² | fallback only; default = root window (1 h) ² | fallback only; default = root window (1 h) ² |
 | Node API port | `9999` | `9999` | `9999` |
 | Batcher port | `3334` | `3334` | `3334` |
 | Config file | `config.dev.ts` | `config.preview.ts` | `config.mainnet.ts` |
 
 ¹ Mocha-4 block equivalent to Midnight Preview genesis (2026-03-25T01:05:42 UTC).  
-² Preview and Mainnet use a ~1-hour Merkle-root window. Offers proving against an expired root cannot settle; matching `OFFER_TTL_SECONDS` to the root window prevents the indexer from serving un-fillable offers.
+² Ledger 8 (node 1.x: preview, preprod, mainnet) hardcodes a ~1-hour zswap Merkle-root window. **Offer expiry follows the ledger** (see "Offer expiry" under `GET /v1/offers`): shielded (zswap) inputs carry **no TTL** and expire when their proof root leaves that window; intents (unshielded legs, fee intents) carry a **mandatory TTL**, which the ledger accepts while `tblock ≤ ttl ≤ tblock + global_ttl`, and `global_ttl` is 1,209,600 s (14 days) on every network. `OFFER_TTL_SECONDS` no longer caps offers: it is only the fallback for an offer with no root and no intent (no well-formed two-sided offer is in that case), and setting it logs a startup warning.
 
 ### Environment variables (complete reference)
 
@@ -89,21 +89,20 @@ BATCHER_SUBMIT_URL=http://127.0.0.1:3334
 BATCHER_SUBMIT_TIMEOUT_MS=310000        # absolute fetch + receipt-body deadline
 API_SSE_MAX_CONNECTIONS=100             # persistent stream cap; excess gets 503
 API_UPDATES_MAX_CONNECTIONS=100         # websocket update-stream cap; excess is refused
-OFFER_TTL_SECONDS=                      # offer lifetime; DEFAULTS to ROOT_WINDOW_SECONDS
-                                        # (shielded fillability tracks the root window)
+OFFER_TTL_SECONDS=                      # FALLBACK lifetime only, for an offer with no root and
+                                        # no intent (none in practice); NOT a cap. Defaults to
+                                        # ROOT_WINDOW_SECONDS; setting it logs a startup warning
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
 OFFER_FILES_READ_TIMEOUT_MS=15000        # exact-files read decision budget; max 60000
 ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
-                                        # 3600 (1 h) on all currently deployed networks;
-                                        # MIDNIGHT_NETWORK_ID=stagenet → 1209600 (2 weeks —
-                                        # placeholder, network not publicly available yet).
-                                        # Must mirror the zswap crate's past_roots window
-                                        # (hardcoded through node 1.x, parameterized from
-                                        # 2.x) — NOT the on-chain global_ttl, which bounds
-                                        # intent TTLs and moves independently. Too wide ⇒
-                                        # phantom unfillable offers on the book; too narrow
-                                        # ⇒ valid offers rejected ROOT_UNKNOWN.
+                                        # 3600 (1 h) on the ledger-8 networks this line
+                                        # serves. Must mirror the zswap crate's past_roots
+                                        # window (hardcoded 1 h through node 1.x; ledger 9 /
+                                        # node 2.x uses global_ttl) — NOT the on-chain
+                                        # global_ttl (14 days), which bounds intent TTLs.
+                                        # Too wide ⇒ phantom unfillable offers on the book;
+                                        # too narrow ⇒ valid offers rejected ROOT_UNKNOWN.
 
 # ── Solver process (packages/solver, started by `bun run start:solver`) ────────
 # The seven values below are MANDATORY for that entrypoint, in dry-run as well
@@ -141,7 +140,7 @@ SOLVER_FEE_SIZING_TAKER_INPUTS=1          # taker zswap inputs the fee estimate 
 |---|---|---|
 | `nullifiers` | **Forever** | A shielded spend is permanent. Coin commitments stay in the Merkle tree after being spent, so a maker can always build a valid current-root proof for a long-spent coin — the nullifier is the only thing that catches it. There is intentionally no TTL. |
 | `created_unshielded` | **Live-set** | Create inserts, spend deletes; absence means "spent or never existed". Self-trimming, so no TTL is needed. |
-| `known_roots` | **TTL-limited** (`ROOT_WINDOW_SECONDS`) | Unlike a spend, a root's validity genuinely expires. The ledger's `past_roots` is a *TimeFilterMap*: the current root is re-inserted every block and entries older than `tblock − window` are evicted — so a root stays valid while it keeps being current, and our prune mirrors that by aging on **last-seen**. Independent from the on-chain `global_ttl` (which bounds intent TTLs) despite both being 1 h. |
+| `known_roots` | **TTL-limited** (`ROOT_WINDOW_SECONDS`) | Unlike a spend, a root's validity genuinely expires. The ledger's `past_roots` is a *TimeFilterMap*: the current root is re-inserted every block and entries older than `tblock − window` are evicted — so a root stays valid while it keeps being current, and our prune mirrors that by aging on **last-seen**. Independent from the on-chain `global_ttl`, which bounds intent TTLs and is 14 days on every network; ledger 8 hardcodes this root window at 1 h. |
 
 ---
 
@@ -171,7 +170,7 @@ Celestia DA                    Midnight
 2. The node validates it, then forwards it to the batcher which publishes it as a Celestia blob.
 3. The Celestia indexer picks up the blob and re-validates it deterministically. On success the offer lands in `offer_file`.
 4. When any input coin is spent on Midnight (nullifier seen or unshielded UTXO consumed), the offer moves to `offer_file_history` with `archive_reason = 'CONSUMED'`.
-5. If no consumption is observed before the TTL, a scheduled cleanup archives it with `archive_reason = 'TTL'`.
+5. If no consumption is observed before the offer's expiry (its proof root leaving the root window for shielded inputs, its intent TTL for intents), a scheduled cleanup archives it with `archive_reason = 'TTL'`.
 
 ---
 
@@ -300,13 +299,20 @@ Returns the current live offer book — offers published to Celestia, validated,
 
 Each row is a MIP-0006 `OffchainOfferPayload`. **`offerBech32` is omitted in list responses** — the spec's presence rule is "at least one of `offerId`/`offerBech32`", and a real offer's string is 16–25 KB, so a 100-row page carrying strings would be megabytes. Fetch the string per offer via `GET /v1/offers/:offerId`, which always includes it. `blobChars` sizes that fetch.
 
-`computed.expiresAt` is the earliest applicable ledger constraint: the
-proof-root last-seen time plus the root window and the earliest Intent TTL are
-both considered, including for mixed transactions. The publication TTL is a
-defensive fallback only when neither constraint exists. Cleanup executes on an
-L2 block and archives only when this persisted timestamp is at or before that
-block's timestamp, so an early or duplicate scheduled input cannot expire the
-offer prematurely.
+**Offer expiry.** `computed.expiresAt` is the earliest of the offer's real
+ledger limits, computed once at ingestion:
+
+| Offer part | Ledger limit | `expiresAt` contribution |
+|---|---|---|
+| Shielded (zswap) inputs | **No TTL.** The input proves against a Merkle root, which ledger 8 keeps in `past_roots` for 1 h after the last block in which it was current | root last-seen + `ROOT_WINDOW_SECONDS` (a conservative floor) |
+| Intents (unshielded legs, fee intents) | **Mandatory TTL**, valid while `tblock ≤ ttl ≤ tblock + global_ttl` (14 days) | the earliest intent `ttl` |
+| DUST fee spends | valid while `ctime ≤ tblock ≤ ctime + dust_grace_period` (3 h) | earliest `ctime` + grace (such offers cannot pass validation today) |
+
+A mixed transaction gets the minimum. There is no kernel-side cap on top;
+`OFFER_TTL_SECONDS` is only the fallback for an offer with none of these.
+Cleanup executes on an L2 block and archives only when this persisted timestamp
+is at or before that block's timestamp, so an early or duplicate scheduled input
+cannot expire the offer prematurely.
 
 | Field | Description |
 |---|---|
@@ -315,7 +321,7 @@ offer prematurely.
 | `blobChars` | Length of the bech32m string served by `GET /v1/offers/:offerId` |
 | `gives` | Tokens the maker is offering. Each leg carries `kind` (`SHIELDED`/`UNSHIELDED`, MIP-0006 `TokenLeg.type`) — the same color on different value layers is two distinct legs, never netted |
 | `wants` | Tokens the maker is requesting (same leg shape) |
-| `ttl_seconds` | Offer lifetime in seconds from `metadata_created_at`, as a **string** |
+| `ttl_seconds` | This offer's derived lifetime: whole seconds from `metadata_created_at` (its Celestia block time) to its expiry, rounded down, as a **string**. Per offer, not a constant; `expiresAt` is authoritative |
 
 All string/number fields are returned as-is from the DB; numeric-looking values (`blockHeight`, `ttl_seconds`, token `amount`) are **strings** to preserve full precision.
 
@@ -360,7 +366,7 @@ curl "http://host:9999/v1/offers/9f2c4a...e1"
 }
 ```
 
-`computed.status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND", "offerId": "…" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
+`ttlSeconds` is this offer's own lifetime (`expiresAt` − its creation time, whole seconds; see "Offer expiry" above) — the example is a shielded offer whose root was current at publication. `computed.status` is `"live"` | `"consumed"` | `"cancelled"` | `"expired"`. Unknown hashes → `404 { "error": "NOT_FOUND", "offerId": "…" }`; malformed hashes → `400 { "error": "INVALID_HASH" }`.
 
 #### `GET /v1/offers/:hash/status`
 
@@ -507,7 +513,10 @@ transition runs, producing `code:"EXPIRED"`, `status:"live"`, and
 
 Stable refusal codes include `UNSUPPORTED_PROFILE`, `HASH_MISMATCH`,
 `NOT_INDEXED`, `NOT_LIVE`, `EXPIRED`, `UNSUPPORTED_SHAPE`, and the canonical
-structure/crypto/liveness codes documented for submission. `HASH_MISMATCH`
+structure/crypto/liveness codes documented for submission. This contract's
+code set is closed, so the submission codes `INTENT_TTL_EXPIRED` and
+`INTENT_TTL_TOO_FAR` arrive here as `EXPIRED` (`live:false`) and
+`PROOF_INVALID`, with the ledger's message in `reason`. `HASH_MISMATCH`
 means the indexed row's stored bytes do not hash to the identity it is filed
 under — index corruption, reported per identity instead of as an outage. Every
 per-identity outcome uses `200`; malformed envelopes use `400`, oversized
@@ -727,8 +736,10 @@ current HTTP route does not emit directly.
 | `NOT_A_SWAP` | Not two-sided: needs ≥1 give **and** ≥1 want (MIP-0006) |
 | `CROSS_LAYER` | Gives and wants span both value layers. Nothing moves value between shielded and unshielded, so no taker could ever fill it |
 | `UNKNOWN_TOKEN` | Fail-closed unknown ledger token tag; current wire bytes deserialize-fail before reaching it |
-| `PROOF_INVALID` | ZK proof verification failed |
+| `PROOF_INVALID` | ZK proof verification failed (or another `wellFormed` failure not listed here) |
 | `SIGNATURE_INVALID` | Signature verification failed |
+| `INTENT_TTL_EXPIRED` | An intent's TTL is before the block time (`ttl < tblock`). Only intents carry a TTL; rebuild the offer with a later TTL |
+| `INTENT_TTL_TOO_FAR` | An intent's TTL is beyond `tblock + global_ttl` (14 days on every network). Rebuild with a TTL at most 14 days ahead of the chain's clock |
 | `NULLIFIER_SPENT` | A shielded input coin is already spent on Midnight |
 | `UTXO_SPENT` | Optional validator callback found an already-spent unshielded UTXO; the HTTP route folds this and unknown UTXOs into `UTXO_NOT_LIVE` |
 | `UTXO_UNKNOWN` | Optional validator callback found a UTXO never created on-chain; the HTTP route folds this into `UTXO_NOT_LIVE` |

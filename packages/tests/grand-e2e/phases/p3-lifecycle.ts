@@ -255,34 +255,26 @@ export async function p3Lifecycle(db: Client, actors: Actors): Promise<void> {
     const ok = await check("unshielded expiry-fated offer indexed", () => publishAndIndex(db, rec, built));
     if (ok) {
       const intentTtl = P2pAtomicSwaps.earliestIntentTtl(OfferFiles.fromBech32(built.blob) as any);
-      // PR-G: served expiry is min(intent TTL, ingestion + OFFER_TTL) — the
-      // indexer's retention policy is a CEILING, never an extension, and the
-      // sweep fires at this same value. The assertion this replaces demanded
-      // expiresAt === intentTtl VERBATIM, which pinned the pre-PR-G behaviour:
-      // a long-TTL offer ADVERTISED its full intent TTL while the sweep still
-      // deleted it at the policy horizon — the served-later-than-deleted half
-      // of §2.6. For an unshielded offer, computed.firstSeenAt IS the
-      // ingestion block time (state-machine.ts), so the expected value is
-      // computable from the served payload alone. OFFER_TTL_SECONDS default
-      // matches the node's (env.ts); override the env var for both processes
-      // together or not at all.
-      await check("unshielded expiresAt is min(intent TTL, ingestion + OFFER_TTL)", async () => {
+      // 00056: served expiry is the intent TTL itself. An unshielded offer's
+      // only ledger limit is its intent TTL (bounded by `global_ttl`, which
+      // the validator enforces with the network's reference parameters); the
+      // kernel no longer caps it at ingestion + OFFER_TTL_SECONDS, and the
+      // sweep fires at this same value. (PR-G's min(intent TTL, ingestion +
+      // OFFER_TTL) cap is gone; OFFER_TTL_SECONDS is now only the fallback
+      // for an offer with no root and no intent.)
+      await check("unshielded expiresAt is the intent TTL (no kernel cap)", async () => {
         const d = await getOfferByHash(built.hash);
         const servedMs = Date.parse(d.body?.computed?.expiresAt ?? "");
         const ttlMs = intentTtl ? Date.parse(String(intentTtl)) : NaN;
-        const ingestMs = Date.parse(d.body?.computed?.firstSeenAt ?? "");
-        if (!Number.isFinite(servedMs) || !Number.isFinite(ttlMs) || !Number.isFinite(ingestMs)) return false;
-        const policyMs = Number(process.env["OFFER_TTL_SECONDS"] ?? 3600) * 1000;
-        const expectedMs = Math.min(ttlMs, ingestMs + policyMs);
+        if (!Number.isFinite(servedMs) || !Number.isFinite(ttlMs)) return false;
         // Exact contract, 2s slack for ISO-string round-tripping.
-        return Math.abs(servedMs - expectedMs) < 2000;
+        return Math.abs(servedMs - ttlMs) < 2000;
       }, `intentTtl=${intentTtl}`);
 
-      // state-machine.ts calls the OFFER_TTL_SECONDS branch "defensive only —
-      // it should be unreachable for a well-formed offer", because
-      // UnshieldedOffer exists only inside an Intent and Intent.ttl is
-      // non-optional. Never checked. If this fails, that comment is wrong and
-      // some unshielded offers are getting an invented expiry.
+      // state-machine.ts calls the OFFER_TTL_SECONDS fallback unreachable for
+      // a well-formed offer, because UnshieldedOffer exists only inside an
+      // Intent and Intent.ttl is non-optional. If this fails, that comment is
+      // wrong and some unshielded offers are getting an invented expiry.
       await check(
         "the OFFER_TTL fallback branch is unreachable for a well-formed unshielded offer",
         async () => intentTtl !== undefined,

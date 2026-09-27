@@ -45,6 +45,8 @@ export type Offer = {
   blobChars?: number
   /** Effectstream L2 block that indexed the offer; this is not a Celestia height. */
   blockHeight: number | string
+  /** This offer's own lifetime in whole seconds (expiresAt − creation); per
+   *  offer, not a network constant. Prefer `computed.expiresAt`. */
   ttlSeconds?: number | string
   computed: OfferComputed
 }

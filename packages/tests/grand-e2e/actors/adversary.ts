@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { bech32m } from "@scure/base";
 import { OfferFiles, OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
-import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { getReferenceState, validateZswapOffer } from "@zswap-da/validator";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { offerHashFromBytes } from "@zswap-da/offer-guard";
 
@@ -46,7 +46,7 @@ export interface ApiFixture {
 /** Validate that a structural fixture rejects locally for the right reason. */
 function preVerify(fix: ApiFixture): ApiFixture {
   const v = validateZswapOffer(fix.blob, {
-    refState: getBlankRefState(net.id),
+    refState: getReferenceState(net.id),
     tblock: new Date(),
     maxBytes: OFFER_MAX_BYTES,
     crypto: "defer",

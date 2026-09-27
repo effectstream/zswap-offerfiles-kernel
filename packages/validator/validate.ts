@@ -59,6 +59,19 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * The reject code for a `wellFormed` failure message. The ledger's intent TTL
+ * check (`ttl_check_weak`, run first in `wellFormed`) reports "Intent TTL has
+ * expired" / "Intent TTL is too far in the future" (midnight-ledger
+ * `ledger-8.1.0` ledger/src/error.rs:1116,1121); those get their own codes
+ * instead of PROOF_INVALID (00056 FR-004). Exported for tests.
+ */
+export function wellFormedFailureCode(message: string): OfferRejectCode {
+  if (/Intent TTL has expired/i.test(message)) return "INTENT_TTL_EXPIRED";
+  if (/Intent TTL is too far in the future/i.test(message)) return "INTENT_TTL_TOO_FAR";
+  return /signature/i.test(message) ? "SIGNATURE_INVALID" : "PROOF_INVALID";
+}
+
 // `identifiers()` is only needed for dedup; never let it sink a validation.
 function safeIdentifiers(tx: UnprovenTransaction): string[] {
   try {
@@ -102,7 +115,7 @@ export function verifyOfferCrypto(
     const m = errMsg(e);
     return {
       ok: false,
-      code: /signature/i.test(m) ? "SIGNATURE_INVALID" : "PROOF_INVALID",
+      code: wellFormedFailureCode(m),
       reason: `wellFormed failed: ${m}`,
     };
   }

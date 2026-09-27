@@ -685,7 +685,7 @@ monorepo at
 | `midnight-unshielded-spend` | Midnight unshielded-spend primitive | Record the UTXO in `spent_unshielded` (liveness) and archive any offer whose unshielded UTXO is spent. |
 | `midnight-unshielded-create` | Midnight unshielded-create primitive | Record every created unshielded UTXO in `created_unshielded` (existence liveness). |
 | `midnight-zswap-root` | Midnight zswap-root primitive | Record the coin-tree root in `known_roots` and prune to `ROOT_WINDOW_SECONDS` (root-known liveness). |
-| `zswap-ttl-cleanup` | Scheduled timestamp data | Archive offers whose TTL elapsed without on-chain consumption. |
+| `zswap-ttl-cleanup` | Scheduled timestamp data | Archive offers whose derived expiry passed without on-chain consumption (root deadline for shielded inputs, intent TTL for intents; see API.md "Offer expiry"). |
 
 ## API
 

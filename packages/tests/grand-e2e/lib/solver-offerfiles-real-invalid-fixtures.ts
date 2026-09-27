@@ -14,7 +14,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { getReferenceState, validateZswapOffer } from "@zswap-da/validator";
 
 const SCHEMA = "zswap-offer-files-real-invalid-fixtures/v1";
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
@@ -180,7 +180,7 @@ export async function buildRealInvalidFixtures(): Promise<Record<string, unknown
   const proofInvalidRaw = tamperProofBytes(raw);
   const proofInvalidBlob = OfferFiles.encode(proofInvalidRaw);
   const proofVerdict = validateZswapOffer(proofInvalidBlob, {
-    refState: getBlankRefState(net.id),
+    refState: getReferenceState(net.id),
     tblock: new Date(),
     maxBytes: MAX_OFFER_BYTES,
     crypto: "verify",

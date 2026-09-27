@@ -1,14 +1,18 @@
 import { describe, expect, test } from "bun:test";
 
-// Guards item #21: the root window is a LEDGER parameter mirrored per
-// network — all currently deployed networks run ~1 h; STAGENET (placeholder,
-// not publicly available) runs the next release's 2 weeks. The regression
+// Guards item #21: the root window mirrors the ledger per network — the
+// ledger-8 networks this line serves run ~1 h (hardcoded in the zswap crate);
+// STAGENET runs ledger 9's 2 weeks (served by the kernel's ledger-v9 line). The regression
 // this prevents: the old 14-day default silently shipping on a 1 h network,
 // where the book then lists offers whose roots the chain dropped up to two
 // weeks ago — phantom, unfillable offers.
+import { LedgerParameters } from "@midnight-ntwrk/ledger-v8";
+import { REFERENCE_PARAMETERS } from "@zswap-da/validator";
+
 import {
   ROOT_WINDOW_CURRENT_NETWORKS_S,
   ROOT_WINDOW_STAGENET_S,
+  offerTtlSecondsNotice,
   resolveOfferTtlSeconds,
   resolveRootWindowSeconds,
   rootWindowDefaultSeconds,
@@ -41,15 +45,37 @@ describe("root window per network", () => {
   });
 });
 
-describe("offer TTL tracks the root window", () => {
-  test("defaults to the resolved window (shielded fillability bound)", () => {
+describe("OFFER_TTL_SECONDS is only the no-root/no-intent fallback (00056)", () => {
+  test("defaults to the resolved window", () => {
     expect(resolveOfferTtlSeconds(3600, undefined)).toBe(3600);
     expect(resolveOfferTtlSeconds(ROOT_WINDOW_STAGENET_S, undefined)).toBe(
       ROOT_WINDOW_STAGENET_S,
     );
   });
 
-  test("env override wins (e.g. unshielded-heavy books)", () => {
+  test("an env value still parses (it feeds the fallback only)", () => {
     expect(resolveOfferTtlSeconds(3600, "86400")).toBe(86400);
+  });
+
+  test("setting it produces a startup warning; unset or blank does not", () => {
+    expect(offerTtlSecondsNotice(undefined)).toBeNull();
+    expect(offerTtlSecondsNotice("")).toBeNull();
+    expect(offerTtlSecondsNotice("  ")).toBeNull();
+    const notice = offerTtlSecondsNotice("600");
+    expect(notice).toContain("OFFER_TTL_SECONDS=600 no longer caps offer lifetimes (00056)");
+    expect(notice).toContain("ROOT_WINDOW_SECONDS");
+    expect(notice).toContain("intent TTL");
+  });
+});
+
+describe("ledger 8: the root window (1 h) is NOT global_ttl (14 days)", () => {
+  test("every pinned snapshot's global_ttl is 14 days, while the root window stays 1 h", () => {
+    for (const snapshot of Object.values(REFERENCE_PARAMETERS)) {
+      const parameters = LedgerParameters.deserialize(Buffer.from(snapshot.hex, "hex"));
+      const m = parameters.toString().match(/global_ttl:\s*Duration\(\s*([0-9]+)/);
+      expect({ network: snapshot.networkId, globalTtl: Number(m?.[1]) })
+        .toEqual({ network: snapshot.networkId, globalTtl: 1_209_600 });
+      expect(rootWindowDefaultSeconds(snapshot.networkId)).toBe(ROOT_WINDOW_CURRENT_NETWORKS_S);
+    }
   });
 });

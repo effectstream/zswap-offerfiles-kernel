@@ -1,9 +1,11 @@
 import { getEnv } from "@effectstream/utils/runtime";
 import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
 import {
+  offerTtlSecondsNotice,
   resolveOfferTtlSeconds,
   resolveRootWindowSeconds,
 } from "./network-windows.ts";
+import { requireReferenceParameters } from "@zswap-da/validator";
 import {
   MIP6_NAMESPACE_ID_SUFFIX_HEX,
   parseSponsorPolicy,
@@ -73,21 +75,19 @@ export const CELESTIA_GAS = _gas ? parseInt(_gas) : undefined;
 export const CELESTIA_MAX_GAS_PRICE = _maxGasPrice ? parseFloat(_maxGasPrice) : undefined;
 export const CELESTIA_TX_PRIORITY = _txPriority ? parseInt(_txPriority) : undefined;
 
-// Root-recency window and offer TTL — per-network defaults live in
-// network-windows.ts (1 h on all current networks; STAGENET placeholder at
-// 2 weeks, not publicly available yet). Env vars override both.
+// Root-recency window — the default lives in network-windows.ts: 3600 s, the
+// window the ledger-8 zswap crate hardcodes. Env overrides.
 //
-// OFFER_TTL_SECONDS defaults to the root window: a shielded offer is fillable
-// only while the Merkle root its `Input`/`Transient` proves against is still
-// inside the chain's window; once it ages out the input fails with
-// `UnknownMerkleRoot` at apply time — silently, with no event the indexer can
-// observe. Keeping offers indexed past that only serves unfillable offers.
+// A shielded (zswap) offer has NO TTL: it is fillable only while the Merkle
+// root its `Input`/`Transient` proves against is still in the chain's
+// `past_roots`; once it ages out the input fails with `UnknownMerkleRoot` at
+// apply time — silently, with no event the indexer can observe. known_roots
+// mirrors that retention, and a shielded offer's expiry is its root's
+// last-seen time + this window.
 //
 // Caveats:
 //   - The window bounds *proof freshness*, not coin age: a maker proves an
 //     old coin against a recent root, so old coins are unaffected.
-//   - Unshielded-only offers have no root window (a UTXO is valid until
-//     spent); if you need them to live longer, override OFFER_TTL_SECONDS.
 //   - Makers should publish promptly after proving — the fill window starts
 //     at the referenced root, not at publication.
 export const ROOT_WINDOW_SECONDS = resolveRootWindowSeconds(
@@ -95,15 +95,37 @@ export const ROOT_WINDOW_SECONDS = resolveRootWindowSeconds(
   getEnv("ROOT_WINDOW_SECONDS"),
 );
 
+// OFFER_TTL_SECONDS is only the fallback lifetime of an offer with no shielded
+// root, no intent and no DUST spend (none exists for a well-formed two-sided
+// offer). It no longer caps offers (00056): an unshielded offer lives until
+// its intent TTL (up to 14 days), a shielded one until its root leaves the
+// window. Setting it logs a startup warning saying so. See network-windows.ts.
 export const OFFER_TTL_SECONDS = resolveOfferTtlSeconds(
   ROOT_WINDOW_SECONDS,
   getEnv("OFFER_TTL_SECONDS"),
 );
+{
+  const notice = offerTtlSecondsNotice(getEnv("OFFER_TTL_SECONDS"));
+  if (notice) console.warn(`[config] ${notice}`);
+}
 
 // Midnight network id the offers are created against. Used as the `wellFormed`
 // reference-state network (offer validation) — must match the network whose
 // proofs the offers carry.
 export const MIDNIGHT_NETWORK_ID = midnightNetworkConfig.id;
+
+// The offer validator's reference ledger parameters for this network (00056
+// FR-001): pinned per network in packages/validator/reference-parameters.ts.
+// Resolved HERE, at import, so a network id without a snapshot fails at
+// startup instead of on the first offer — never validating against blank
+// defaults, whose 3600 s `global_ttl` would refuse valid intent TTLs.
+export const REFERENCE_LEDGER_PARAMETERS = requireReferenceParameters(MIDNIGHT_NETWORK_ID);
+
+// The DUST grace period of those parameters (10,800 s on every supported
+// network): a DUST spend is valid only while `tblock <= ctime + grace`.
+export const DUST_GRACE_PERIOD_SECONDS = Number(
+  REFERENCE_LEDGER_PARAMETERS.dust.dustGracePeriodSeconds,
+);
 
 // Upper bound on a decoded offer transaction, in bytes. A DoS guard for the
 // validator (the Celestia adapter separately caps the on-wire blob at 1.5 MB);

@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { Transaction } from "@midnight-ntwrk/ledger-v8";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
-import { getBlankRefState, validateZswapOfferBytes } from "@zswap-da/validator";
+import { getReferenceState, validateZswapOfferBytes } from "@zswap-da/validator";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { blobStorePath } from "./actors/wallets.ts";
 import { OUT_DIR } from "./config.ts";
@@ -83,7 +83,7 @@ console.log(`\n  two-sided: ${twoSided}   layers present: ${[...layers].join(" +
 // steps run without a DB, so the verdict here is exactly what the STM's
 // structural phase would produce.
 const v = validateZswapOfferBytes(merged.serialize(), {
-  refState: getBlankRefState(net.id),
+  refState: getReferenceState(net.id),
   tblock: new Date(ss.indexedAt ?? Date.now()),
   maxBytes: 1024 * 1024,
   crypto: "verify", // proofs AND signatures — merge preserves both

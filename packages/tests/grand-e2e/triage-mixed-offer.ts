@@ -19,7 +19,7 @@ import { writeFileSync } from "node:fs";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { getBlankRefState, validateZswapOffer } from "@zswap-da/validator";
+import { getReferenceState, validateZswapOffer } from "@zswap-da/validator";
 
 import { buildWallet, shieldedKeys, unshieldedAddressObj, waitForSync } from "../lib/wallet.ts";
 import { TX_TTL_MS } from "./config.ts";
@@ -71,7 +71,7 @@ writeFileSync("/tmp/mixed-offer.bech32", blob);
 console.log(`blob written to /tmp/mixed-offer.bech32 (${blob.length} chars)`);
 
 const v = validateZswapOffer(blob, {
-  refState: getBlankRefState(net.id),
+  refState: getReferenceState(net.id),
   tblock: new Date(),
   maxBytes: 1024 * 1024,
   crypto: "defer",

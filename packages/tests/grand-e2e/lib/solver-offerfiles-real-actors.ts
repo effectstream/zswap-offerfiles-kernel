@@ -44,7 +44,7 @@ import {
 import {
   collectNullifiers,
   collectOutputCommitments,
-  getBlankRefState,
+  getReferenceState,
   validateZswapOffer,
   type OfferLeg,
   type OfferValidation,
@@ -447,7 +447,7 @@ export interface RealPreSpentOfferDependencies {
 const REAL_PRE_SPENT_OFFER_DEPENDENCIES: RealPreSpentOfferDependencies = {
   encodeOffer: (bytes) => OfferFiles.encode(bytes),
   decodeOffer: (blob) => OfferFiles.decode(blob),
-  blankReferenceState: (networkId) => getBlankRefState(networkId),
+  blankReferenceState: (networkId) => getReferenceState(networkId),
   validateOffer: (blob, options) => validateZswapOffer(blob, options),
   now: () => new Date(),
 };
@@ -1659,7 +1659,7 @@ export async function provisionRealActors(
     const finalized = await user.wallet.finalizeTransaction(recipe.transaction);
     const offerBlob = OfferFiles.encode(finalized.serialize());
     const validation = validateZswapOffer(offerBlob, {
-      refState: getBlankRefState(net.id),
+      refState: getReferenceState(net.id),
       tblock: new Date(),
       maxBytes: MAX_OFFER_BYTES,
       crypto: "verify",

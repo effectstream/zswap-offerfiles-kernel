@@ -9,8 +9,13 @@ import { describe, expect, test } from "bun:test";
 // (ROOT_UNKNOWN). The opposite mistake (14 days on a 1 h chain) is why the
 // value is pinned here rather than made a tunable per network.
 import {
+  OFFER_TTL_BOUND_TEXT,
+  OFFER_TTL_DEFAULT_MINUTES,
+  OFFER_TTL_MAX_MINUTES,
+  OFFER_TTL_MAX_S,
   ROOT_WINDOW_DEFAULT_S,
   ROOT_WINDOW_STAGENET_S,
+  TTL_SAFETY_MARGIN_S,
   resolveOfferTtlSeconds,
   resolveRootWindowSeconds,
   rootWindowDefaultSeconds,
@@ -81,5 +86,34 @@ describe("offer TTL tracks the root window", () => {
   test("env override wins (e.g. unshielded-heavy books)", () => {
     expect(resolveOfferTtlSeconds(ROOT_WINDOW_DEFAULT_S, "86400")).toBe(86400);
     expect(resolveOfferTtlSeconds(ROOT_WINDOW_DEFAULT_S, "0")).toBe(ROOT_WINDOW_DEFAULT_S);
+  });
+});
+
+// 00055: the poster's and the maker one-shot's offer TTL default and bound are
+// derived here, from the root window minus one shared safety margin, so no
+// second literal exists. The ledger-level check of the bound is in
+// offer-ttl-boundary.test.ts.
+describe("client offer TTL = root window minus a 1 h safety margin (00055)", () => {
+  test("the margin is 1 hour", () => {
+    expect(TTL_SAFETY_MARGIN_S).toBe(3_600);
+  });
+
+  test("the bound is derived from the root window: 1,206,000 s = 20,100 min", () => {
+    expect(OFFER_TTL_MAX_S).toBe(ROOT_WINDOW_DEFAULT_S - TTL_SAFETY_MARGIN_S);
+    expect(OFFER_TTL_MAX_S).toBe(1_206_000);
+    expect(OFFER_TTL_MAX_MINUTES).toBe(20_100);
+    expect(Number.isInteger(OFFER_TTL_MAX_MINUTES)).toBe(true);
+    expect(OFFER_TTL_MAX_MINUTES * 60).toBe(OFFER_TTL_MAX_S);
+  });
+
+  test("the default is the bound, strictly below global_ttl", () => {
+    expect(OFFER_TTL_DEFAULT_MINUTES).toBe(OFFER_TTL_MAX_MINUTES);
+    expect(OFFER_TTL_DEFAULT_MINUTES * 60).toBeLessThan(ROOT_WINDOW_DEFAULT_S);
+  });
+
+  test("refusals state the bound, the global_ttl and the margin", () => {
+    expect(OFFER_TTL_BOUND_TEXT).toContain("20100 minutes");
+    expect(OFFER_TTL_BOUND_TEXT).toContain("1209600 s");
+    expect(OFFER_TTL_BOUND_TEXT).toContain("3600 s");
   });
 });

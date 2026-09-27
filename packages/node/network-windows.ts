@@ -61,6 +61,35 @@ export function resolveRootWindowSeconds(
   return rootWindowDefaultSeconds(networkId);
 }
 
+// ── Client-chosen offer TTLs (00055) ─────────────────────────────────────────
+// The kernel's own posting tools (the offer poster and the maker one-shot in
+// deploy/scripts) pick the `ttl` their wallet passes to `initSwap`. Ledger 9
+// rejects an intent whose `ttl > tblock + global_ttl`: at well-formedness
+// (midnight-ledger `ledger-9.1.0.0-rc.3`, ledger/src/verify.rs:1721-1742,
+// `ttl_check_weak`) and again at apply (ledger/src/semantics.rs:1968,
+// `IntentTtlTooFarInFuture`). `tblock` is the CHAIN's block time, while the
+// tool computes `now + TTL` from its own wall clock, so a TTL of exactly
+// `global_ttl` is refused whenever the block clock lags. The defaults therefore
+// stay one safety margin below `global_ttl`, and a TTL above that bound is
+// refused at startup, by variable name.
+
+/** Kept below `global_ttl` for every client-chosen offer TTL: 1 hour. */
+export const TTL_SAFETY_MARGIN_S = 3_600;
+
+/** Longest offer TTL the kernel's tools accept: `global_ttl` − margin (1,206,000 s). */
+export const OFFER_TTL_MAX_S = ROOT_WINDOW_DEFAULT_S - TTL_SAFETY_MARGIN_S;
+
+/** {@link OFFER_TTL_MAX_S} in minutes (20,100), the unit the tools' env vars use. */
+export const OFFER_TTL_MAX_MINUTES = OFFER_TTL_MAX_S / 60;
+
+/** Default offer TTL of the poster and the maker one-shot: the bound itself (20,100 min). */
+export const OFFER_TTL_DEFAULT_MINUTES = OFFER_TTL_MAX_MINUTES;
+
+/** How the bound is stated in refusals, so every tool names it the same way. */
+export const OFFER_TTL_BOUND_TEXT =
+  `${OFFER_TTL_MAX_MINUTES} minutes (the ledger global_ttl of ${ROOT_WINDOW_DEFAULT_S} s ` +
+  `minus the ${TTL_SAFETY_MARGIN_S} s safety margin)`;
+
 /**
  * Offer TTL default: tracks the root window. A shielded offer is fillable
  * only while its proof root stays inside the window, so keeping indexed

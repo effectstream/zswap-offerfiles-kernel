@@ -8,6 +8,9 @@ import {
   MAX_MODELLED_TAKER_INPUTS,
   MIN_MODELLED_TAKER_INPUTS,
 } from "@zswap-da/solver-core/fee-sizing";
+// Relative, pure (no imports): the kernel's root window, which is also the
+// kernel's default OFFER_TTL_SECONDS. Importing it keeps one literal (00055).
+import { ROOT_WINDOW_DEFAULT_S } from "../node/network-windows.ts";
 
 // Dev seed. Must avoid every other wallet on the dev stack — genesis, the
 // batcher's (…0003/…0004), and the ring-maker range (…0005+) — because two
@@ -394,12 +397,18 @@ export function loadSolverRuntimeEnv(read: EnvReader = getEnv): SolverRuntimeEnv
       1,
       604_800,
     ),
+    // The KERNEL's offer lifetime, read under the kernel's own variable name so
+    // one env file serves both. Its only use here is the cross-check below
+    // (SOLVER_EXPIRY_MARGIN_SECONDS < OFFER_TTL_SECONDS). Default and cap are
+    // the kernel's default: the root window, the ledger-9 global_ttl
+    // (1,209,600 s, 14 days). The old 7-day cap made the solver refuse an env
+    // file that set OFFER_TTL_SECONDS to the kernel's default.
     offerTtlSeconds: parseBoundedIntegerEnv(
       "OFFER_TTL_SECONDS",
       read("OFFER_TTL_SECONDS"),
-      3_600,
+      ROOT_WINDOW_DEFAULT_S,
       2,
-      604_800,
+      ROOT_WINDOW_DEFAULT_S,
     ),
     settleTtlMinutes: parseBoundedIntegerEnv(
       "SOLVER_SETTLE_TTL_MINUTES",

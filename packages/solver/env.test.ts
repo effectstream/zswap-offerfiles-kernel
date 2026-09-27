@@ -18,6 +18,7 @@ import {
   parseBoundedIntegerEnv,
   parseSolverRelayHttpUrl,
 } from "./env.ts";
+import { ROOT_WINDOW_DEFAULT_S } from "../node/network-windows.ts";
 
 // `string | undefined` values, matching a real environment: the negative
 // tables below set one variable per row and leave the rest unset.
@@ -205,9 +206,26 @@ test("runtime config accepts the bounded defaults", () => {
     backendHealthCheckIntervalMs: 5_000,
     backendHealthMaxAgeMs: 15_000,
     expiryMarginSeconds: 120,
+    offerTtlSeconds: 1_209_600,
     settleTtlMinutes: 30,
     statusPollMs: 5_000,
   });
+});
+
+// 00055 FR-003 / T3: OFFER_TTL_SECONDS is the KERNEL's offer lifetime, read
+// under the kernel's name. Its default and cap are the kernel's default, the
+// root window (the ledger-9 global_ttl), so one env file serves both.
+test("OFFER_TTL_SECONDS defaults to and is capped at the kernel's root window", () => {
+  expect(loadSolverRuntimeEnv(reader({})).offerTtlSeconds).toBe(ROOT_WINDOW_DEFAULT_S);
+  // The kernel's own default value, and the old 7-day cap + 1, both start.
+  expect(loadSolverRuntimeEnv(reader({ OFFER_TTL_SECONDS: "1209600" })).offerTtlSeconds).toBe(
+    1_209_600,
+  );
+  expect(loadSolverRuntimeEnv(reader({ OFFER_TTL_SECONDS: "604801" })).offerTtlSeconds).toBe(604_801);
+  expect(loadSolverRuntimeEnv(reader({ OFFER_TTL_SECONDS: "3600" })).offerTtlSeconds).toBe(3_600);
+  expect(() => loadSolverRuntimeEnv(reader({ OFFER_TTL_SECONDS: "1209601" }))).toThrow(
+    /^OFFER_TTL_SECONDS: expected a base-10 integer in \[2, 1209600\], got "1209601"$/,
+  );
 });
 
 test("every bounded runtime variable rejects malformed startup input by name", () => {

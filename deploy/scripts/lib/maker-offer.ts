@@ -100,6 +100,9 @@ export async function postMakerOffer(opts: PostMakerOfferOptions): Promise<Poste
     wantToken,
     giveAmount,
     wantAmount,
+    // initSwap `ttl`: an INTENT TTL only. This shielded-only payFees:false
+    // offer carries no intent, so it is inert here (00056); a shielded offer
+    // expires when its proof root leaves the root window.
     ttlMs = 120 * 60_000,
     liveTries = 40,
     liveIntervalMs = 5_000,

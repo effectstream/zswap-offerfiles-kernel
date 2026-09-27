@@ -54,7 +54,8 @@ disabled, the service exits successfully without creating a pricing artifact.
 For the maker one-shot set `MAKER_OFFER_ENABLED=true`,
 `MAKER_OFFER_GIVE_TOKEN`, and `MAKER_OFFER_WANT_TOKEN`. The maker wallet must
 already hold a spendable give-token coin of at least `MAKER_OFFER_GIVE_AMOUNT`
-and enough fee currency.
+and enough fee currency. `MAKER_OFFER_TTL_MINUTES` (default 120) is an
+**intent** TTL: see "Offer TTL knobs" below.
 
 ## Offer poster
 
@@ -95,6 +96,24 @@ inspect configuration and wallet inventory without posting:
 ```bash
 docker compose --profile poster run --rm -e DRY_RUN=true offer-poster
 ```
+
+### Offer TTL knobs apply to intents only
+
+`OFFER_POSTER_TTL_MINUTES` (the poster's `OFFER_TTL_MINUTES`, default 60) and
+`MAKER_OFFER_TTL_MINUTES` (the maker's `TTL_MINUTES`, default 120) are the `ttl`
+the tools pass to the wallet's `initSwap`. On the ledger that value exists only
+in an **intent**: an unshielded leg's intent, or a DUST fee intent when
+`payFees: true`. It must lie within `tblock ≤ ttl ≤ tblock + global_ttl`
+(14 days), which the kernel checks with the network's reference ledger
+parameters (`INTENT_TTL_EXPIRED` / `INTENT_TTL_TOO_FAR`).
+
+Both tools build **shielded-only** offers with `payFees: false`. For those,
+wallet-sdk-facade 5.0.0-beta.2 writes no intent, so the knob changes neither the
+offer bytes nor its expiry: a shielded (zswap) offer has **no TTL**. The kernel
+lists it until its proof root leaves the chain's `past_roots`, root last-seen
++ `ROOT_WINDOW_SECONDS` (14 days on ledger 9). The poster also records the value
+in its journal (`ttlSec`); re-offers follow the kernel's reported status, not
+this value.
 
 ## E2E profile
 

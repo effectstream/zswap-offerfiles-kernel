@@ -34,6 +34,7 @@ const { give, want } = resolveExplicitTokens({
 });
 const giveAmount = BigInt(process.env["GIVE_AMOUNT"] ?? "500000");
 const wantAmount = BigInt(process.env["WANT_AMOUNT"] ?? "750000");
+// Intent TTL only (inert for this shielded-only payFees:false offer; 00056).
 const ttlMs = Number(process.env["TTL_MINUTES"] ?? "120") * 60_000;
 
 log(`kernel   : ${api.base}`);

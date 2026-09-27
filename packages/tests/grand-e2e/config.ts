@@ -12,7 +12,10 @@ export const ORCHESTRATOR_URL = "http://127.0.0.1:4747";
 
 // The stack MUST be launched with these windows (see HANDOFF §2):
 //   ROOT_WINDOW_SECONDS=600 OFFER_TTL_SECONDS=600 bun run dev
-// Phase 0 verifies the running node actually has them.
+// Phase 0 verifies the running node actually has them. Since 00056
+// OFFER_TTL_SECONDS no longer caps offers: it is only the kernel's fallback for
+// an offer with no root and no intent (none here). Each offer's expiry is its
+// own ledger limit — see MAX_OFFER_LIFETIME_MS below.
 export const ROOT_WINDOW_SECONDS = 600;
 export const OFFER_TTL_SECONDS = 600;
 
@@ -100,6 +103,12 @@ export const DIRECT_CELESTIA_EVERY = 20;
 
 // Offer/settle transaction TTLs (Midnight tx validity — NOT the indexer TTL).
 export const TX_TTL_MS = 30 * 60_000;
+
+// The longest an indexed offer of this suite can stay live (00056): a shielded
+// offer until its proof root is ROOT_WINDOW_SECONDS past its last-seen time
+// (it carries no TTL), an unshielded one until its intent TTL, which the
+// suite sets TX_TTL_MS after building it. Sweep deadlines wait for the longer.
+export const MAX_OFFER_LIFETIME_MS = Math.max(ROOT_WINDOW_SECONDS * 1000, TX_TTL_MS);
 
 // ── Timing / polling ─────────────────────────────────────────────────────────
 export const INDEX_WAIT_TRIES = 36;     // × 5 s — publish → offer_file row

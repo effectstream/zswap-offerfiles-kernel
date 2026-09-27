@@ -18,7 +18,6 @@ import {
 import {
   DEEP_AUDIT,
   DEEP_AUDIT_SAMPLE,
-  OFFER_TTL_SECONDS,
   ROOT_WINDOW_SECONDS,
 } from "../config.ts";
 import { ledger, type OfferRecord } from "../ledger.ts";
@@ -64,8 +63,9 @@ function expectedStatus(rec: OfferRecord, now: number): string[] {
     case "expired":
       return ["expired"];
     case "live": {
-      // Live only inside the TTL window; a slow audit sees them expired.
-      const fresh = rec.indexedAt !== undefined && now < rec.indexedAt + OFFER_TTL_SECONDS * 1000;
+      // Live only inside the root window (the shortest lifetime an offer of
+      // this suite can have, 00056); a slow audit sees them expired.
+      const fresh = rec.indexedAt !== undefined && now < rec.indexedAt + ROOT_WINDOW_SECONDS * 1000;
       return fresh ? ["live"] : ["live", "expired"];
     }
   }

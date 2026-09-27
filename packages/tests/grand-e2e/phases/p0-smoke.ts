@@ -102,7 +102,7 @@ export async function p0Smoke(db: Client): Promise<void> {
   );
 
   // ROOT_WINDOW_SECONDS=600 cannot be read from the node directly; it is
-  // verified by effect twice: ttl_seconds=600 on the first indexed offer (p1)
-  // and the known_roots window span (p7 audit).
-  note("window check", "deferred to p1 (ttl_seconds) and p7 audit (known_roots span)");
+  // verified by effect twice: the first indexed (shielded) offer's per-offer
+  // ttl_seconds is at most 600 (p1) and the known_roots window span (p7 audit).
+  note("window check", "deferred to p1 (ttl_seconds ≤ window) and p7 audit (known_roots span)");
 }

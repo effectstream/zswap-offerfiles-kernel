@@ -8,7 +8,7 @@
 
 import type { Client } from "pg";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { OFFER_TTL_SECONDS, ARCHIVE_WAIT_TRIES } from "../config.ts";
+import { ROOT_WINDOW_SECONDS, ARCHIVE_WAIT_TRIES } from "../config.ts";
 import { ledger, type OfferRecord } from "../ledger.ts";
 import type { Actors } from "../actors/wallets.ts";
 import {
@@ -56,9 +56,22 @@ export async function p1Happy(db: Client, actors: Actors, sse: SseRecorder): Pro
   await check("API-path offer accepted + indexed", () => publishAndIndex(db, recA, builtA));
   if (recA.state !== "indexed") return null;
 
-  await check("indexed offer has ttl_seconds=600 (proves OFFER_TTL_SECONDS)", async () => {
-    const r = await db.query(`SELECT ttl_seconds FROM offer_file WHERE offer_hash = $1`, [builtA.hash]);
-    return Number(r.rows[0]?.ttl_seconds) === OFFER_TTL_SECONDS;
+  // 00056: ttl_seconds is the offer's own derived lifetime (expiry − creation,
+  // whole seconds), not a constant. For this shielded offer the expiry is its
+  // root's last-seen time + ROOT_WINDOW_SECONDS, so the lifetime is positive
+  // and at most the window (which proves the node runs the 600 s window).
+  await check("indexed offer's ttl_seconds is its derived lifetime (≤ ROOT_WINDOW_SECONDS)", async () => {
+    const r = await db.query(
+      `SELECT ttl_seconds, metadata_created_at, metadata_expires_at FROM offer_file WHERE offer_hash = $1`,
+      [builtA.hash],
+    );
+    const row = r.rows[0];
+    if (!row) return false;
+    const ttl = Number(row.ttl_seconds);
+    const lifetime = Math.floor(
+      (new Date(row.metadata_expires_at).getTime() - new Date(row.metadata_created_at).getTime()) / 1000,
+    );
+    return ttl === lifetime && ttl > 0 && ttl <= ROOT_WINDOW_SECONDS;
   });
 
   await check("offer_indexed SSE event carries the content hash", async () =>

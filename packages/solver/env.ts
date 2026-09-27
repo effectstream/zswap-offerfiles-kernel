@@ -358,7 +358,6 @@ export interface SolverRuntimeEnv {
   backendHealthCheckIntervalMs: number;
   backendHealthMaxAgeMs: number;
   expiryMarginSeconds: number;
-  offerTtlSeconds: number;
   settleTtlMinutes: number;
   statusPollMs: number;
 }
@@ -394,13 +393,6 @@ export function loadSolverRuntimeEnv(read: EnvReader = getEnv): SolverRuntimeEnv
       1,
       604_800,
     ),
-    offerTtlSeconds: parseBoundedIntegerEnv(
-      "OFFER_TTL_SECONDS",
-      read("OFFER_TTL_SECONDS"),
-      3_600,
-      2,
-      604_800,
-    ),
     settleTtlMinutes: parseBoundedIntegerEnv(
       "SOLVER_SETTLE_TTL_MINUTES",
       read("SOLVER_SETTLE_TTL_MINUTES"),
@@ -417,12 +409,6 @@ export function loadSolverRuntimeEnv(read: EnvReader = getEnv): SolverRuntimeEnv
     ),
   };
 
-  if (env.expiryMarginSeconds >= env.offerTtlSeconds) {
-    throw new Error(
-      `SOLVER_EXPIRY_MARGIN_SECONDS (${env.expiryMarginSeconds}) must be less than ` +
-        `OFFER_TTL_SECONDS (${env.offerTtlSeconds})`,
-    );
-  }
   if (env.backendHealthCheckIntervalMs >= env.backendHealthMaxAgeMs) {
     throw new Error(
       `SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS (${env.backendHealthCheckIntervalMs}) must be less than ` +
@@ -499,7 +485,6 @@ export const SOLVER_RESYNC_INTERVAL_MS = runtime.resyncIntervalMs;
 export const SOLVER_BACKEND_HEALTH_CHECK_INTERVAL_MS = runtime.backendHealthCheckIntervalMs;
 export const SOLVER_BACKEND_HEALTH_MAX_AGE_MS = runtime.backendHealthMaxAgeMs;
 export const SOLVER_EXPIRY_MARGIN_SECONDS = runtime.expiryMarginSeconds;
-export const SOLVER_OFFER_TTL_SECONDS = runtime.offerTtlSeconds;
 export const SOLVER_SETTLE_TTL_MINUTES = runtime.settleTtlMinutes;
 export const SOLVER_STATUS_POLL_MS = runtime.statusPollMs;
 

@@ -37,6 +37,7 @@ import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 // only the first-party imports need the relative form.
 import { shieldedKeys, waitForSync } from "../../../packages/solver-core/wallet.ts";
 import { KernelApi } from "./kernel-api.ts";
+import { OFFER_TTL_DEFAULT_MS, assertOfferTtlMs } from "./offer-ttl.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -85,6 +86,8 @@ export interface PostMakerOfferOptions {
   wantToken: string;
   giveAmount: bigint;
   wantAmount: bigint;
+  /** The `ttl` handed to `initSwap`, from now. Default and upper bound: the
+   *  root window minus the safety margin, 20,100 minutes (offer-ttl.ts). */
   ttlMs?: number;
   log?: (msg: string) => void;
   /** Poll budget for the offer to reach `live` in the kernel book. */
@@ -100,11 +103,13 @@ export async function postMakerOffer(opts: PostMakerOfferOptions): Promise<Poste
     wantToken,
     giveAmount,
     wantAmount,
-    ttlMs = 120 * 60_000,
+    ttlMs = OFFER_TTL_DEFAULT_MS,
     liveTries = 40,
     liveIntervalMs = 5_000,
   } = opts;
   const log = opts.log ?? ((msg: string) => console.log(`[maker-offer] ${msg}`));
+  // Refuse a TTL above the bound before any wallet or proving work.
+  assertOfferTtlMs("ttlMs", ttlMs);
 
   const state = await maker.wallet.shielded.waitForSyncedState();
   const balances = (state.balances ?? {}) as Record<string, bigint>;

@@ -9,7 +9,10 @@
 //   ZSWAP_API / NODE_URL   kernel API base       (default http://kernel:9999)
 //   MAKER_SEED             externally prefunded maker wallet seed
 //   GIVE_TOKEN, WANT_TOKEN required 64-hex token IDs
-//   GIVE_AMOUNT, WANT_AMOUNT, TTL_MINUTES
+//   GIVE_AMOUNT, WANT_AMOUNT
+//   TTL_MINUTES            offer ttl in whole minutes; blank = the root window
+//                          minus the 1 h safety margin (20,100), which is also
+//                          the upper bound (lib/offer-ttl.ts)
 
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -17,6 +20,7 @@ import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/m
 import { buildWallet } from "../../packages/solver-core/wallet.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
 import { postMakerOfferWithWallet, resolveExplicitTokens } from "./lib/maker-offer.ts";
+import { resolveOfferTtlMinutes } from "./lib/offer-ttl.ts";
 
 globalThis.WebSocket = WebSocket;
 setNetworkId(net.id as never);
@@ -34,11 +38,14 @@ const { give, want } = resolveExplicitTokens({
 });
 const giveAmount = BigInt(process.env["GIVE_AMOUNT"] ?? "500000");
 const wantAmount = BigInt(process.env["WANT_AMOUNT"] ?? "750000");
-const ttlMs = Number(process.env["TTL_MINUTES"] ?? "120") * 60_000;
+// Blank or unset = the derived default; above the bound = refused by name.
+const ttlMinutes = resolveOfferTtlMinutes("TTL_MINUTES", process.env["TTL_MINUTES"]);
+const ttlMs = ttlMinutes * 60_000;
 
 log(`kernel   : ${api.base}`);
 log(`give     : ${giveAmount} of ${give.slice(0, 16)}…`);
 log(`want     : ${wantAmount} of ${want.slice(0, 16)}…`);
+log(`ttl      : ${ttlMinutes} min`);
 log(`=> the solver quotes this as tokenIn=${want.slice(0, 8)}… tokenOut=${give.slice(0, 8)}…`);
 
 await postMakerOfferWithWallet(buildWallet, MAKER_SEED, {

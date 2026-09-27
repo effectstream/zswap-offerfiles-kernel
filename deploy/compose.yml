@@ -384,7 +384,9 @@ services:
       WANT_TOKEN: ${MAKER_OFFER_WANT_TOKEN:-}
       GIVE_AMOUNT: ${MAKER_OFFER_GIVE_AMOUNT:-500000}
       WANT_AMOUNT: ${MAKER_OFFER_WANT_AMOUNT:-750000}
-      TTL_MINUTES: ${MAKER_OFFER_TTL_MINUTES:-120}
+      # Blank = the script's derived default: the root window minus the 1 h
+      # safety margin, 20,100 min, which is also the upper bound.
+      TTL_MINUTES: ${MAKER_OFFER_TTL_MINUTES:-}
       MAKER_OFFER_MARKER_DIR: /var/lib/maker-offer
     volumes:
       - maker-offer-state:/var/lib/maker-offer

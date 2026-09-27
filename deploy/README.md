@@ -54,7 +54,9 @@ disabled, the service exits successfully without creating a pricing artifact.
 For the maker one-shot set `MAKER_OFFER_ENABLED=true`,
 `MAKER_OFFER_GIVE_TOKEN`, and `MAKER_OFFER_WANT_TOKEN`. The maker wallet must
 already hold a spendable give-token coin of at least `MAKER_OFFER_GIVE_AMOUNT`
-and enough fee currency.
+and enough fee currency. `MAKER_OFFER_TTL_MINUTES` follows the same rule as the
+poster's offer TTL (see [Offer TTL](#offer-ttl)): blank means 20,100 minutes,
+and a larger value is refused.
 
 ## Offer poster
 
@@ -95,6 +97,35 @@ inspect configuration and wallet inventory without posting:
 ```bash
 docker compose --profile poster run --rm -e DRY_RUN=true offer-poster
 ```
+
+### Offer TTL
+
+The poster (`OFFER_POSTER_TTL_MINUTES`) and the maker one-shot
+(`MAKER_OFFER_TTL_MINUTES`) choose the `ttl` their wallet passes to `initSwap`.
+Both default to **20,100 minutes**: the kernel's root window, which is the
+ledger's `global_ttl` of 1,209,600 s (14 days), minus a **1-hour safety
+margin**. Ledger 9 rejects an intent whose `ttl` is later than block time plus
+`global_ttl`, and the chain's block clock can lag the wall clock the tool
+computes `now + ttl` from. With the margin, a block clock up to one hour behind
+is still accepted. 20,100 minutes is also the **upper bound**: a larger value
+stops the tool at startup with an error that names the variable and the bound.
+Leave both knobs blank to follow the default. `.env.example` leaves them blank,
+and compose passes a blank value through.
+
+A long TTL keeps the offered coin locked for as long as the offer lives. The
+poster re-offers a coin only after the kernel reports its offer `expired`,
+`cancelled` or `rejected`. With about 14-day offers, the inventory the poster
+can offer runs out sooner, so fund the wallet with enough coins of the
+configured size.
+
+The kernel's own listed expiry of a **shielded** offer does not come from this
+value. It is the proof root's anchor plus `ROOT_WINDOW_SECONDS`, capped by
+`OFFER_TTL_SECONDS`, both 14 days by default. With the pinned wallet SDK
+(`wallet-sdk-facade` 5.0.0-beta.2), a shielded-only swap built with
+`payFees: false` carries no intent, so the TTL does not appear in the offer's
+bytes. The poster records it in its journal. The bound starts to matter once
+the TTL lands in an intent, for example with an unshielded leg, fee payment,
+or a newer SDK.
 
 ## E2E profile
 

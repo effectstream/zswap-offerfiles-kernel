@@ -56,6 +56,8 @@ Three configurations ship out of the box. All endpoints and env-var names are id
 ¹ Mocha-4 block equivalent to Midnight Preview genesis (2026-03-25T01:05:42 UTC).  
 ² The root window is the ledger's `global_ttl`: 1,209,600 s (14 days) on every network. Ledger 9 keeps past zswap Merkle roots for exactly `global_ttl`, which is static (changing it is a hard fork). Offers proving against an expired root cannot settle; matching `OFFER_TTL_SECONDS` to the root window prevents the indexer from serving un-fillable offers. Celestia mocha prunes blobs after about 7 days, so a kernel that syncs from scratch cannot re-read offers older than that, although they stay fillable on chain for 14 days (see README, "Celestia data retention").
 
+The kernel's own posting tools in `deploy/` (the offer poster's `OFFER_TTL_MINUTES` and the maker one-shot's `TTL_MINUTES`) default to **20,100 minutes**, the root window minus a 1-hour safety margin. That is also their maximum: ledger 9 rejects an intent whose `ttl` is later than block time + `global_ttl`, and the chain's block clock can lag the wall clock. A long TTL keeps each offered coin locked for as long as the offer lives, so a poster's inventory runs out sooner. See `deploy/README.md`, "Offer TTL".
+
 ### Environment variables (complete reference)
 
 ```bash
@@ -121,6 +123,9 @@ SOLVER_ENABLED=true                      # "false" exits 0 without requiring the
 SOLVER_RELAY_MAX_PARALLEL_SWAPS=8        # advertised and enforced proof-build capacity
 SOLVER_STATUS_POLL_MS=5000               # missed-signal backend-consumption backstop
 SOLVER_SETTLE_TTL_MINUTES=30             # wallet rollback window when no terminal signal arrives
+OFFER_TTL_SECONDS=                       # the kernel's offer lifetime, read under its name for the
+                                        # startup check SOLVER_EXPIRY_MARGIN_SECONDS < OFFER_TTL_SECONDS;
+                                        # default and max 1209600 (the root window, as in the kernel)
 SOLVER_SUPPORTED_PAIRS=                  # JSON ["<64hex>-><64hex>"]; bounds publication AND admission
 SOLVER_MIN_JOB_OUTPUT=                   # JSON {"<64hex out-token>":"<min>"}; same two boundaries
 SOLVER_DUST_MAX_PER_JOB=                 # DUST admission budget; all three DUST values set together

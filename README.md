@@ -468,6 +468,7 @@ bun check-env.ts                # static checks plus a live Celestia probe
 | NTP block time | `600000` ms, preview's | `packages/node/env.ts` |
 | Celestia | **mocha**, on the MIP-0006 shared namespace `6d6e2d737761702d7631` (`mn-swap-v1`), **not overridden** | owner decision (00050 Q1) |
 | Root window / offer TTL | `1209600` s (14 days) | ledger 9 prunes zswap roots by the `global_ttl` ledger parameter; stagenet's is 1209600 (midnight-node `d9729c13` `res/stagenet/ledger-parameters-config.json`, and the live parameters) |
+| Poster offer TTL (`OFFER_TTL_MINUTES`) | `20100` min by default, also the maximum | the root window minus a 1-hour safety margin: ledger 9 rejects an intent `ttl` later than block time + `global_ttl`, and the block clock can lag. Offered coins stay locked while their offer lives, so inventory runs out sooner (`packages/node/network-windows.ts`, `deploy/README.md` "Offer TTL") |
 | Token registry | `mint-test-tokens` `metadata.stagenet.json`, revision `59041d2f…`: shielded TWBTC (8), TWETH (18), TWUSDC (6), TWUSDM (6); unshielded UTWUSDC (6), UTWBTC (8) | vendored fixture `packages/database/fixtures/mint-test-tokens.stagenet.json` |
 
 Several networks share the MIP-0006 namespace. A stagenet kernel ingests
@@ -615,6 +616,7 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `SOLVER_RELAY_MAX_PARALLEL_SWAPS` | optional | Advertised and enforced concurrent proof-build bound; default 8. |
 | `SOLVER_RELAY_PUSH_INTERVAL_MS` / `SOLVER_RELAY_RECONNECT_DELAY_MS` | optional | Complete ladder replacement cadence (default 1 000 ms) and reconnect delay (default 2 000 ms). |
 | `SOLVER_STATUS_POLL_MS` / `SOLVER_SETTLE_TTL_MINUTES` | optional | Backend-consumption backstop cadence and chain-TTL wallet rollback window. |
+| `OFFER_TTL_SECONDS` (solver) | optional | The kernel's offer lifetime, read under the kernel's name so one env file serves both. The solver uses it only for the startup check `SOLVER_EXPIRY_MARGIN_SECONDS < OFFER_TTL_SECONDS`. Default and maximum: the root window, 1 209 600 s (14 days), the kernel's own default. |
 | `SOLVER_SUPPORTED_PAIRS` | optional (UNSET is OPEN + warning) | Strict JSON array of unique directed lowercase `64hex->64hex` taker endpoint pairs. SET is enforced in publication (including after a reconnect) and admission; internal maker legs may use other pairs. |
 | `SOLVER_MIN_JOB_OUTPUT` | optional (UNSET is OPEN + warning) | Strict JSON object from lowercase output-token `64hex` to positive canonical integer strings. A SET map omits tokens without a minimum and sub-minimum rungs/jobs. |
 | `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` / `SOLVER_DUST_WINDOW_MS` | optional as one group (UNSET is OPEN + warning) | All three must be SET together. Amounts are positive canonical decimal bigints; window is a positive safe integer in ms. Reservations are journal-durable and rolling-window bounded. |

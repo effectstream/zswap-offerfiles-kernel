@@ -37,6 +37,14 @@ import { defaultMidnightNetworkConfig } from "@effectstream/midnight-contracts/m
 // Relative, like offer-poster.ts's first-party imports: `deploy/` is not a
 // workspace member, so `@zswap-da/*` specifiers do not resolve from here.
 import { isPublicDevSeed } from "../../../packages/offer-guard/public-dev-seeds.ts";
+// The offer-TTL default and bound derive from the kernel's root window (the
+// ledger-9 `global_ttl`) minus one shared safety margin. One module holds all
+// three numbers, so no second literal can drift (00055 FR-001).
+import {
+  OFFER_TTL_BOUND_TEXT,
+  OFFER_TTL_DEFAULT_MINUTES,
+  OFFER_TTL_MAX_MINUTES,
+} from "../../../packages/node/network-windows.ts";
 
 export interface GiveRange {
   minBase: bigint;
@@ -85,6 +93,8 @@ export interface PosterConfig {
 
   // ── loop ─────────────────────────────────────────────────────────────────
   readonly postIntervalMs: number;
+  /** `OFFER_TTL_MINUTES`, the ttl handed to `initSwap`. Default and upper bound:
+   *  the root window minus the safety margin, 20,100 (network-windows.ts). */
   readonly offerTtlMinutes: number;
   readonly reconcileIntervalMs: number;
   readonly maxReoffersPerTick: number;
@@ -148,7 +158,12 @@ function readString(env: EnvMap, key: string, fallback: string): string {
   return readEnv(env, key) ?? fallback;
 }
 
-function readInt(env: EnvMap, key: string, fallback: number, opts: { min?: number } = {}): number {
+function readInt(
+  env: EnvMap,
+  key: string,
+  fallback: number,
+  opts: { min?: number; max?: number; maxText?: string } = {},
+): number {
   const raw = readEnv(env, key);
   if (raw === undefined) return fallback;
   if (!/^-?\d+$/.test(raw)) {
@@ -158,6 +173,13 @@ function readInt(env: EnvMap, key: string, fallback: number, opts: { min?: numbe
   const min = opts.min ?? 0;
   if (!Number.isSafeInteger(value) || value < min) {
     throw new ConfigError("MALFORMED", `${key} must be an integer >= ${min}, got ${raw}`, key);
+  }
+  if (opts.max !== undefined && value > opts.max) {
+    throw new ConfigError(
+      "MALFORMED",
+      `${key} must be <= ${opts.maxText ?? String(opts.max)}, got ${raw}`,
+      key,
+    );
   }
   return value;
 }
@@ -488,7 +510,14 @@ export async function parsePosterConfig(env: EnvMap): Promise<PosterConfig> {
     forcedWantAmount,
 
     postIntervalMs: readInt(env, "POST_INTERVAL_MS", 60_000, { min: 1 }),
-    offerTtlMinutes: readInt(env, "OFFER_TTL_MINUTES", 60, { min: 1 }),
+    // Default and bound: the root window minus the safety margin (20,100 min);
+    // see network-windows.ts. A larger TTL can be refused by the ledger when
+    // the chain's block clock lags the wall clock, so it is refused here first.
+    offerTtlMinutes: readInt(env, "OFFER_TTL_MINUTES", OFFER_TTL_DEFAULT_MINUTES, {
+      min: 1,
+      max: OFFER_TTL_MAX_MINUTES,
+      maxText: OFFER_TTL_BOUND_TEXT,
+    }),
     reconcileIntervalMs: readInt(env, "RECONCILE_INTERVAL_MS", 60_000, { min: 1 }),
     maxReoffersPerTick: readInt(env, "POSTER_MAX_REOFFERS_PER_TICK", 1, { min: 1 }),
     shutdownGraceMs: readInt(env, "SHUTDOWN_GRACE_MS", 15_000, { min: 0 }),

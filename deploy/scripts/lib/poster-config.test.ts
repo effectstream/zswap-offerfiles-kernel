@@ -8,6 +8,12 @@ import {
   readEnv,
   resolveSeed,
 } from "./poster-config.ts";
+import {
+  OFFER_TTL_DEFAULT_MINUTES,
+  OFFER_TTL_MAX_MINUTES,
+  ROOT_WINDOW_DEFAULT_S,
+  TTL_SAFETY_MARGIN_S,
+} from "../../../packages/node/network-windows.ts";
 
 const SEED = "ab".repeat(32);
 const GIVE = "12".repeat(32);
@@ -157,7 +163,7 @@ describe("wallet and logging", () => {
       networkId: "undeployed",
       giveAmount: 1n,
       postIntervalMs: 60_000,
-      offerTtlMinutes: 60,
+      offerTtlMinutes: 20_100,
       reconcileIntervalMs: 60_000,
       maxReoffersPerTick: 1,
       shutdownGraceMs: 15_000,
@@ -292,5 +298,49 @@ describe("public dev seeds on stagenet (00050 US1)", () => {
     await expect(
       parsePosterConfig({ MIDNIGHT_NETWORK_ID: "stagenet", GIVE_TOKEN: GIVE, WANT_TOKEN: WANT }),
     ).rejects.toMatchObject({ code: "MISSING" });
+  });
+});
+
+describe("OFFER_TTL_MINUTES follows the root window (00055 FR-001, T1)", () => {
+  test("the default is the root window minus the 1 h margin, from the shared constant", async () => {
+    const cfg = await parse();
+    expect(cfg.offerTtlMinutes).toBe(OFFER_TTL_DEFAULT_MINUTES);
+    expect(cfg.offerTtlMinutes).toBe((ROOT_WINDOW_DEFAULT_S - TTL_SAFETY_MARGIN_S) / 60);
+    expect(cfg.offerTtlMinutes).toBe(20_100);
+  });
+
+  test("blank means the default (compose renders an unset knob as \"\")", async () => {
+    expect((await parse({ OFFER_TTL_MINUTES: "" })).offerTtlMinutes).toBe(20_100);
+    expect((await parse({ OFFER_TTL_MINUTES: "  " })).offerTtlMinutes).toBe(20_100);
+  });
+
+  test("an explicit value wins, up to and including the bound", async () => {
+    expect((await parse({ OFFER_TTL_MINUTES: "60" })).offerTtlMinutes).toBe(60);
+    expect((await parse({ OFFER_TTL_MINUTES: "1" })).offerTtlMinutes).toBe(1);
+    expect((await parse({ OFFER_TTL_MINUTES: String(OFFER_TTL_MAX_MINUTES) })).offerTtlMinutes).toBe(
+      20_100,
+    );
+  });
+
+  test("a value above the bound is refused by name, stating the bound", async () => {
+    const refused = parse({ OFFER_TTL_MINUTES: "20101" });
+    await expect(refused).rejects.toBeInstanceOf(ConfigError);
+    await expect(refused).rejects.toMatchObject({ code: "MALFORMED", variable: "OFFER_TTL_MINUTES" });
+    await expect(refused).rejects.toThrow(
+      /OFFER_TTL_MINUTES must be <= 20100 minutes \(the ledger global_ttl of 1209600 s minus the 3600 s safety margin\), got 20101/,
+    );
+    // 14 days exactly is refused too: that is the ledger's own limit, not ours.
+    await expect(parse({ OFFER_TTL_MINUTES: String(ROOT_WINDOW_DEFAULT_S / 60) })).rejects.toMatchObject({
+      variable: "OFFER_TTL_MINUTES",
+    });
+  });
+
+  test("zero, negative and non-integer values are still refused by name", async () => {
+    for (const bad of ["0", "-5", "1.5", "two weeks"]) {
+      await expect(parse({ OFFER_TTL_MINUTES: bad })).rejects.toMatchObject({
+        code: "MALFORMED",
+        variable: "OFFER_TTL_MINUTES",
+      });
+    }
   });
 });

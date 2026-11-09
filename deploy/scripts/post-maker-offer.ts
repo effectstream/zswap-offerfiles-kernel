@@ -11,12 +11,17 @@
 //   GIVE_TOKEN, WANT_TOKEN required 64-hex token IDs
 //   GIVE_AMOUNT, WANT_AMOUNT, TTL_MINUTES
 
+import { redactBlockfrostProjectId } from "@effectstream/midnight-contracts/midnight-env";
 
+import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 import { buildWallet } from "../../packages/solver-core/wallet.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
 import { postMakerOfferWithWallet, resolveExplicitTokens } from "./lib/maker-offer.ts";
 
 globalThis.WebSocket = WebSocket;
+// The wallet SDK's RPC client logs the node URL it loses, query string
+// included; on a public network that URL carries the Blockfrost project token.
+installLogRedaction(redactBlockfrostProjectId);
 
 const log = (msg: string) => console.log(`[maker-offer] ${msg}`);
 

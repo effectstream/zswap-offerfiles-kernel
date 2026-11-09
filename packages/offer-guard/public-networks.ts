@@ -262,6 +262,16 @@ const PROJECT_ID_BYTES = Buffer.from("project_id=");
  * carries the project token in its query string. Installing twice is a no-op.
  * The public-network entries call it once all modules are loaded and before
  * any connection is opened.
+ *
+ * Bun prints an uncaught exception or an unhandled rejection natively,
+ * bypassing both the console and the stream writes, and a failed request's
+ * error carries its URL (Bun's fetch error holds it in `path`). While no other
+ * listener is registered for the event, the guard reports it through the
+ * redacting console instead, with Bun's own outcome: an uncaught exception
+ * ends the process with exit code 1; an unhandled rejection is reported, the
+ * process keeps running and its exit code becomes 1. A listener registered by
+ * other code (one that ignores some rejections, for example) keeps its own
+ * behaviour, and its output goes through the redacting console.
  */
 export function installLogRedaction(redact: (text: string) => string): void {
   const marker = Symbol.for("zswap-da.log-redaction");
@@ -283,4 +293,27 @@ export function installLogRedaction(redact: (text: string) => string): void {
       return write(chunk, ...rest);
     }) as typeof stream.write;
   }
+  process.on("uncaughtException", (error) => {
+    if (process.listenerCount("uncaughtException") > 1) return;
+    reportThroughConsole(error);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    if (process.listenerCount("unhandledRejection") > 1) return;
+    reportThroughConsole(reason);
+    process.exitCode = 1;
+  });
+}
+
+/**
+ * Prints an uncaught value through the (redacting) console. Bun sometimes
+ * builds an error's `stack` without the message line ("Error\n    at …"),
+ * and formatting an error prints its stack, so the message line is printed
+ * first whenever the stack lacks it.
+ */
+function reportThroughConsole(value: unknown): void {
+  if (value instanceof Error && value.message && !String(value.stack ?? "").includes(value.message)) {
+    console.error(`${value.name}: ${value.message}`);
+  }
+  console.error(value);
 }

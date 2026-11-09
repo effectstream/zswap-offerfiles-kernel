@@ -50,7 +50,11 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { Database } from "bun:sqlite";
 
 import { registerNightForDust } from "@effectstream/midnight-contracts";
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
+import {
+  midnightNetworkConfig as net,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
+import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 
 // RELATIVE first-party imports: `deploy/` is not a bun workspace member, so
 // `@zswap-da/*` does not resolve from here (bun links workspace packages into
@@ -73,6 +77,9 @@ import { KernelApi, type LiveOffer } from "./lib/kernel-api.ts";
 import { postMakerOffer, resolveExplicitTokens, type PostedOffer } from "./lib/maker-offer.ts";
 
 globalThis.WebSocket = WebSocket;
+// The wallet SDK's RPC client logs the node URL it loses, query string
+// included; on a public network that URL carries the Blockfrost project token.
+installLogRedaction(redactBlockfrostProjectId);
 
 // ── configuration ────────────────────────────────────────────────────────────
 

@@ -1,7 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
 
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
+import {
+  midnightNetworkConfig as net,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
+import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 
 import {
   buildWallet,
@@ -17,6 +21,9 @@ import { KernelApi } from "./lib/kernel-api.ts";
 import { postMakerOffer, type PostedOffer } from "./lib/maker-offer.ts";
 
 globalThis.WebSocket = WebSocket;
+// The wallet SDK's RPC client logs the node URL it loses, query string
+// included; on a public network that URL carries the Blockfrost project token.
+installLogRedaction(redactBlockfrostProjectId);
 
 type AmountMap = Record<string, string>;
 type OfferSpec = {

@@ -6,12 +6,20 @@
  * per-IP budget applies here (no allowlist off-host), so the book mirror leans
  * on the SSE stream rather than polling.
  */
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
+import {
+  midnightNetworkConfig as net,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
+import { installLogRedaction } from "../offer-guard/public-networks.ts";
 
 import { isSolverEnabled } from "./env.ts";
 import { assertNoRetiredSolverPricingEnv } from "./src/launch.ts";
 import { runSolver } from "./src/run.ts";
 import { startWithSignalOwnership } from "./src/startup-signals.ts";
+
+// The wallet SDK's RPC client logs the node URL it loses, query string
+// included; on a public network that URL carries the Blockfrost project token.
+installLogRedaction(redactBlockfrostProjectId);
 
 if (net.id !== "preview") {
   throw new Error(`solver.preview.ts requires MIDNIGHT_NETWORK_ID=preview, got "${net.id}"`);

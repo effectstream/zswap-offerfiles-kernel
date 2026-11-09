@@ -27,8 +27,12 @@
  * (00007 FR-001; unset port = no listener and no behaviour change at all, and a
  * set port makes the bearer MANDATORY so `/status/*` can never come up open).
  */
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
+import {
+  midnightNetworkConfig as net,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
 
+import { installLogRedaction } from "./packages/offer-guard/public-networks.ts";
 import { isSolverEnabled } from "./packages/solver/env.ts";
 import {
   describeSolverLaunchConfig,
@@ -38,6 +42,10 @@ import {
 } from "./packages/solver/src/launch.ts";
 import { runSolver } from "./packages/solver/src/run.ts";
 import { startWithSignalOwnership } from "./packages/solver/src/startup-signals.ts";
+
+// The wallet SDK's RPC client logs the node URL it loses, query string
+// included; on a public network that URL carries the Blockfrost project token.
+installLogRedaction(redactBlockfrostProjectId);
 
 // An intentionally disabled service must not have to satisfy the full trading
 // configuration to report that it is disabled. Note the value grammar is still

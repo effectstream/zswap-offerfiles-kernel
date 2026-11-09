@@ -25,6 +25,13 @@ import {
   redactBlockfrostProjectId,
 } from "@effectstream/midnight-contracts/midnight-env";
 
+import { installLogRedaction } from "../../offer-guard/public-networks.ts";
+
+// The lines below already redact the endpoints they print; this also covers
+// anything a dependency prints about a failed request (its URL carries the
+// Blockfrost project token in the query string).
+installLogRedaction(redactBlockfrostProjectId);
+
 const net = process.argv[2] ?? "preview";
 const needsDefaults = !process.env["MIDNIGHT_INDEXER_HTTP"] || !process.env["MIDNIGHT_NODE_HTTP"];
 const defaults = needsDefaults

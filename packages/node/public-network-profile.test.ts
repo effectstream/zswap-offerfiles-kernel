@@ -428,4 +428,89 @@ describe("installLogRedaction — every printed line goes through redactBlockfro
     expect(err).toContain("a=1&project_id=<redacted>&b=2");
     expect(out).toContain("untouched line");
   });
+
+  /** Runs `body` in a child process after installing the guard; the token is `T`. */
+  const runGuarded = (body: string[], before: string[] = []) => {
+    const script = [
+      ...before,
+      'const { installLogRedaction } = await import("@zswap-da/offer-guard/public-networks");',
+      'const { redactBlockfrostProjectId } = await import("@effectstream/midnight-contracts/midnight-env");',
+      "installLogRedaction(redactBlockfrostProjectId);",
+      `const T = ${JSON.stringify(TOKEN)};`,
+      ...body,
+    ].join("\n");
+    const result = Bun.spawnSync([process.execPath, "-e", script], {
+      cwd: HERE,
+      env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return { exitCode: result.exitCode, out: result.stdout.toString(), err: result.stderr.toString() };
+  };
+
+  test("an uncaught exception naming a token URL is reported redacted and ends the process with exit code 1", () => {
+    const run = runGuarded([
+      'setTimeout(() => { throw new Error("lost wss://rpc.midnight-preprod.blockfrost.io/?project_id=" + T); }, 0);',
+      'await new Promise((resolve) => setTimeout(resolve, 200));',
+      'console.log("still running");',
+    ]);
+    expect(run.exitCode, run.err).toBe(1);
+    expect(run.out + run.err).not.toContain(TOKEN);
+    expect(run.err).toContain("lost wss://rpc.midnight-preprod.blockfrost.io/?project_id=<redacted>");
+    expect(run.out).not.toContain("still running");
+  });
+
+  test("an uncaught error whose stack lacks its message line is reported with the message, redacted", () => {
+    // Bun sometimes builds `stack` as "Error\n    at …"; the report must still name the error.
+    const run = runGuarded([
+      'const error = new Error("lost wss://rpc.midnight-preprod.blockfrost.io/?project_id=" + T);',
+      'error.stack = "Error\\n    at somewhere (file.ts:1:1)";',
+      "throw error;",
+    ]);
+    expect(run.exitCode, run.err).toBe(1);
+    expect(run.out + run.err).not.toContain(TOKEN);
+    expect(run.err).toContain("Error: lost wss://rpc.midnight-preprod.blockfrost.io/?project_id=<redacted>");
+  });
+
+  test("a refused request at top level (Bun's fetch error holds the URL in `path`) is reported redacted, exit code 1", () => {
+    // Port 1 is closed in every test environment: the request is refused at once.
+    const run = runGuarded(['await fetch("http://127.0.0.1:1/api/v0?project_id=" + T);']);
+    expect(run.exitCode, run.err).toBe(1);
+    expect(run.out + run.err).not.toContain(TOKEN);
+    expect(run.err).toContain("http://127.0.0.1:1/api/v0?project_id=<redacted>");
+  });
+
+  test("an unhandled rejection is reported redacted; the process keeps running and its exit code becomes 1", () => {
+    const run = runGuarded([
+      'Promise.reject(new Error("rejected https://midnight-preprod.blockfrost.io/api/v0?project_id=" + T));',
+      'await new Promise((resolve) => setTimeout(resolve, 100));',
+      'console.log("still running");',
+    ]);
+    expect(run.exitCode, run.err).toBe(1);
+    expect(run.out + run.err).not.toContain(TOKEN);
+    expect(run.err).toContain("rejected https://midnight-preprod.blockfrost.io/api/v0?project_id=<redacted>");
+    expect(run.out).toContain("still running");
+  });
+
+  test("a listener other code registered keeps its own behaviour, and what it prints is redacted", () => {
+    // Registered before the guard, the way a dependency does at import time:
+    // this one ignores rejections and lets uncaught exceptions pass.
+    const run = runGuarded(
+      [
+        'Promise.reject(new Error("closed wss://rpc.midnight-preprod.blockfrost.io/?project_id=" + T));',
+        'setTimeout(() => { throw new Error("thrown https://midnight-preprod.blockfrost.io/api/v0?project_id=" + T); }, 0);',
+        'await new Promise((resolve) => setTimeout(resolve, 200));',
+        'console.log("still running");',
+      ],
+      [
+        'process.on("unhandledRejection", (reason) => console.log("ignored:", String(reason)));',
+        'process.on("uncaughtException", (error) => console.log("passed:", String(error)));',
+      ],
+    );
+    expect(run.exitCode, run.err).toBe(0);
+    expect(run.out + run.err).not.toContain(TOKEN);
+    expect(run.out).toContain("ignored: Error: closed wss://rpc.midnight-preprod.blockfrost.io/?project_id=<redacted>");
+    expect(run.out).toContain("passed: Error: thrown https://midnight-preprod.blockfrost.io/api/v0?project_id=<redacted>");
+    expect(run.out).toContain("still running");
+  });
 });

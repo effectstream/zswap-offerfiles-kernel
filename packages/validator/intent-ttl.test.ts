@@ -32,7 +32,7 @@ const CASES = [
   ["expired (−1 s)", -1, "INTENT_TTL_EXPIRED"],
 ] as const;
 
-const NETWORKS = ["undeployed", "stagenet"] as const;
+const NETWORKS = ["undeployed", "preview", "preprod"] as const;
 /** Offers per network id: the reference state checks the tx's network id too. */
 const offers = new Map<string, SignedOffer>();
 const key = (network: string, label: string) => `${network}|${label}`;

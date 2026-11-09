@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { LedgerParameters, LedgerState } from "@midnightntwrk/ledger-v9";
 
 import { REFERENCE_PARAMETERS } from "./reference-parameters.ts";
@@ -13,14 +11,17 @@ import {
   UnknownNetworkParametersError,
 } from "./refstate.ts";
 
-// 00056 FR-001 / T4: the validator's reference state carries each network's
-// PINNED ledger parameters. These tests pin what the bytes are (provenance
-// hash), what they say (global_ttl, DUST grace) and what happens for a network
-// without a snapshot.
+// The validator's reference state carries each network's PINNED ledger
+// parameters. These tests pin what the bytes are (sha256, ledger-9 header),
+// what they say (global_ttl, DUST grace period) and what happens for a
+// network without a snapshot.
 
-const GLOBAL_TTL_S = 1_209_600; // 14 days, every network (static; hard fork to change)
+const GLOBAL_TTL_S = 1_209_600; // 14 days, every network
 const DUST_GRACE_S = 10_800; // 3 h
 const HEADER = "midnight:ledger-parameters[v8]:"; // ledger 9's LedgerParameters tag
+
+/** The pinned networks, in declaration order (the order the error lists). */
+const PINNED = ["undeployed", "preview", "preprod"];
 
 /** `LedgerParameters` exposes no `global_ttl` getter; its debug dump does. */
 function globalTtlSeconds(p: LedgerParameters): number {
@@ -29,47 +30,84 @@ function globalTtlSeconds(p: LedgerParameters): number {
   return Number(m[1]);
 }
 
+/** The debug dump without its `fee_prices` block: the parameters that do not
+ *  move from block to block. */
+function staticDump(p: LedgerParameters): string {
+  const dump = p.toString();
+  const without = dump.replace(/\n\s*fee_prices: FeePrices \{[^}]*\},/, "");
+  if (without === dump) throw new Error("fee_prices block not found in the LedgerParameters dump");
+  return without;
+}
+
+/** Lines of `a` that are not in `b`, trimmed. */
+function linesOnlyIn(a: string, b: string): string[] {
+  const other = new Set(b.split("\n").map((l) => l.trim()));
+  return a.split("\n").map((l) => l.trim()).filter((l) => !other.has(l));
+}
+
+const decoded = (networkId: string) =>
+  LedgerParameters.deserialize(Buffer.from(REFERENCE_PARAMETERS[networkId]!.hex, "hex"));
+
 describe("pinned reference parameters", () => {
-  test("exactly the ledger-9 networks this line serves have a snapshot", () => {
-    expect(Object.keys(REFERENCE_PARAMETERS).sort()).toEqual(["stagenet", "undeployed"]);
+  test("exactly the ledger-9 networks with a pinned snapshot, in declaration order", () => {
+    expect(Object.keys(REFERENCE_PARAMETERS)).toEqual(PINNED);
   });
 
-  for (const snapshot of Object.values(REFERENCE_PARAMETERS)) {
-    describe(snapshot.networkId, () => {
+  for (const [key, snapshot] of Object.entries(REFERENCE_PARAMETERS)) {
+    describe(key, () => {
       const bytes = Buffer.from(snapshot.hex, "hex");
 
       test("the bytes match their recorded sha256 and carry the ledger-9 header", () => {
+        expect(snapshot.networkId).toBe(key);
         expect(snapshot.hex).toMatch(/^[0-9a-f]+$/);
         expect(createHash("sha256").update(bytes).digest("hex")).toBe(snapshot.sha256);
         expect(bytes.subarray(0, HEADER.length).toString("latin1")).toBe(HEADER);
-        expect(snapshot.source.length).toBeGreaterThan(20);
+      });
+
+      test("the provenance names a date and carries no endpoint token", () => {
+        expect(snapshot.source).toMatch(/\b2026-\d\d-\d\d\b/);
+        expect(snapshot.source).not.toContain("project_id");
+        expect(snapshot.source).not.toMatch(/[?&]\w+=/);
       });
 
       test("they decode to global_ttl = 14 days and a 3 h DUST grace period", () => {
         const parameters = LedgerParameters.deserialize(bytes);
         expect(globalTtlSeconds(parameters)).toBe(GLOBAL_TTL_S);
         expect(Number(parameters.dust.dustGracePeriodSeconds)).toBe(DUST_GRACE_S);
-        expect(referenceDustGracePeriodSeconds(snapshot.networkId)).toBe(DUST_GRACE_S);
+        expect(referenceDustGracePeriodSeconds(key)).toBe(DUST_GRACE_S);
+        // Decoding is lossless: the pinned bytes are what the ledger re-serializes.
+        expect(Buffer.from(parameters.serialize()).toString("hex")).toBe(snapshot.hex);
       });
 
       test("getReferenceState carries them (and is cached)", () => {
-        const state = getReferenceState(snapshot.networkId);
+        const state = getReferenceState(key);
         expect(state).toBeInstanceOf(LedgerState);
-        expect(state).toBe(getReferenceState(snapshot.networkId));
+        expect(state).toBe(getReferenceState(key));
         expect(Buffer.from(state.parameters.serialize()).toString("hex")).toBe(snapshot.hex);
         expect(globalTtlSeconds(state.parameters)).toBe(GLOBAL_TTL_S);
         // The deprecated alias returns the same reference state, not a blank one.
-        expect(getBlankRefState(snapshot.networkId)).toBe(state);
+        expect(getBlankRefState(key)).toBe(state);
       });
     });
   }
 
-  test("stagenet's snapshot is the 00055 live fixture (indexer block 637,700)", () => {
-    const fixture = readFileSync(
-      join(import.meta.dir, "..", "node", "test-support", "stagenet-ledger-parameters.hex"),
-      "utf8",
-    ).trim();
-    expect(REFERENCE_PARAMETERS["stagenet"]!.hex).toBe(fixture);
+  test("each network has its own snapshot: no two entries share bytes", () => {
+    const hashes = Object.values(REFERENCE_PARAMETERS).map((s) => s.sha256);
+    expect(new Set(hashes).size).toBe(hashes.length);
+  });
+
+  test("preview and preprod differ only in the per-block fee prices", () => {
+    const preview = decoded("preview");
+    const preprod = decoded("preprod");
+    expect(REFERENCE_PARAMETERS["preview"]!.sha256).not.toBe(REFERENCE_PARAMETERS["preprod"]!.sha256);
+    expect(staticDump(preview)).toBe(staticDump(preprod));
+  });
+
+  test("undeployed differs from the public networks in max_contract_metadata_size (besides fee prices)", () => {
+    const local = staticDump(decoded("undeployed"));
+    const preview = staticDump(decoded("preview"));
+    expect(linesOnlyIn(local, preview)).toEqual(["max_contract_metadata_size: 10485760,"]);
+    expect(linesOnlyIn(preview, local)).toEqual(["max_contract_metadata_size: 50000,"]);
   });
 
   test("the pitfall they replace: a BLANK state's global_ttl is only 3600 s", () => {
@@ -79,7 +117,7 @@ describe("pinned reference parameters", () => {
 });
 
 describe("a network without a snapshot fails loudly", () => {
-  for (const networkId of ["preview", "preprod", "mainnet", "devnet", "", "undeployed "]) {
+  for (const networkId of ["stagenet", "mainnet", "devnet", "", "undeployed ", "Preview", "PREPROD"]) {
     test(`requireReferenceParameters(${JSON.stringify(networkId)}) throws, naming the supported ids`, () => {
       let error: unknown;
       try {
@@ -88,9 +126,11 @@ describe("a network without a snapshot fails loudly", () => {
         error = e;
       }
       expect(error).toBeInstanceOf(UnknownNetworkParametersError);
+      expect((error as UnknownNetworkParametersError).networkId).toBe(networkId);
       expect((error as Error).message).toContain(`MIDNIGHT_NETWORK_ID='${networkId}'`);
-      expect((error as Error).message).toContain("supported: stagenet, undeployed");
+      expect((error as Error).message).toContain("(supported: undeployed, preview, preprod)");
       expect(() => getReferenceState(networkId)).toThrow(UnknownNetworkParametersError);
+      expect(() => referenceDustGracePeriodSeconds(networkId)).toThrow(UnknownNetworkParametersError);
     });
   }
 

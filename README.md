@@ -452,8 +452,8 @@ the network; the supported ids are `undeployed`, `preview`, `preprod` and
 > pinned in `packages/validator/reference-parameters.ts` (they exist only on
 > the live chain; the node runtime API `MidnightRuntimeApi_get_ledger_parameters`
 > returns them at a block hash). Until a snapshot with its block hash, height,
-> date and sha256 is added, the node, the batcher and `check-env.ts` refuse
-> `MIDNIGHT_NETWORK_ID=mainnet` with exit 78:
+> date and sha256 is added, the node and the batcher refuse
+> `MIDNIGHT_NETWORK_ID=mainnet` with exit 78 (and `check-env.ts` fails on it):
 > `MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ledger-9 reference parameters are not pinned yet …`.
 > The mainnet profile below (endpoints, Celestia, seeds) is complete and
 > checked; only the parameters are missing.

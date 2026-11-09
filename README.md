@@ -19,6 +19,10 @@ bun install
 bun run dev   # PGLite + Midnight + Celestia + sync + batcher
 ```
 
+Use Bun 1.3.11, the version CI and the kernel image run. The effectstream
+0.300.x runtime uses standard decorators, and Bun 1.3.3 fails to load it
+(`context.addInitializer is not a function`).
+
 **Supported domain: Midnight 2.x / ledger 9** on `mainnet`, `preview`,
 `preprod` and the local `undeployed` devnet, on the stable stack
 (`@effectstream/*` 0.300.x, `@midnightntwrk/ledger-v9` 1.0.0, midnight-js 5,

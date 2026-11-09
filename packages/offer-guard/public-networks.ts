@@ -23,7 +23,11 @@ import { formatWithOptions } from "node:util";
 
 import { isPublicDevSeed } from "./public-dev-seeds.ts";
 
-/** Every network id this kernel has a profile and pinned parameters for. */
+/**
+ * Every network id this kernel supports: `undeployed` runs the dev entries,
+ * the other three the public-network profile. Each also needs its reference
+ * ledger parameters pinned in @zswap-da/validator to start.
+ */
 export const SUPPORTED_MIDNIGHT_NETWORKS = ["undeployed", "preview", "preprod", "mainnet"] as const;
 export type SupportedMidnightNetwork = (typeof SUPPORTED_MIDNIGHT_NETWORKS)[number];
 

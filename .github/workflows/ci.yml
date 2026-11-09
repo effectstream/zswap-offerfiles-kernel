@@ -48,6 +48,7 @@ jobs:
           packages/solver-frontend
           packages/tests/grand-e2e
           scripts/check-compact-runtime.test.ts
+          scripts/check-midnight-stack.test.ts
           deploy/scripts/lib
 
   kernel-image-amd64:

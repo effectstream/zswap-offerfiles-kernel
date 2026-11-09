@@ -268,7 +268,10 @@ describe("GET /v1/quote — unknown-token demo fallback", () => {
 // ── Reference prices (00005) ───────────────────────────────────────────────
 //
 // The same real router over the same real migrations, so the seeds under test
-// are literally the ones a fresh deployment gets.
+// are literally the ones a fresh deployment gets. A fresh database lists NIGHT
+// only; a network's canonical tokens arrive through its registry import, so
+// the TW* rows below are registered the way that import writes them (colour,
+// name, kind, published decimals, asset id).
 
 const WBTC = `e7${"5".repeat(62)}`;
 const WETH = `fd${"a".repeat(62)}`;
@@ -277,10 +280,17 @@ const TESTA = `d1${"3".repeat(62)}`;
 const OVERRIDDEN = `c0${"f".repeat(62)}`;
 
 const COLOR_NIGHT = "0".repeat(64);
-const COLOR_TWBTC = "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc";
-const COLOR_TWETH = "087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f";
-const COLOR_TWUSDC = "a5c902be8fff1a0c3f10a926b24c3eaa8a93215535915b5af47d2c6a59febab5";
-const COLOR_TWUSDM = "931ceb35c81dc57978fea79de042a4a31f7694d012d0d79b351789502fc7b6ee";
+const COLOR_TWBTC = `b1${"1".repeat(62)}`;
+const COLOR_TWETH = `e7${"2".repeat(62)}`;
+const COLOR_TWUSDC = `a5${"3".repeat(62)}`;
+const COLOR_TWUSDM = `93${"4".repeat(62)}`;
+/** What a ledger-9 registry import writes for these four (8/18/6/6 decimals). */
+const IMPORTED_TOKENS = [
+  [COLOR_TWBTC, "TWBTC", 8, "bitcoin"],
+  [COLOR_TWETH, "TWETH", 18, "ethereum"],
+  [COLOR_TWUSDC, "TWUSDC", 6, "usd-coin"],
+  [COLOR_TWUSDM, "TWUSDM", 6, "usdm-2"],
+] as const;
 
 /** `GET /v1/prices` for a set of colours — `tokens` is required (Q-11). */
 const pricesFor = (...colors: string[]) => getJson(`/v1/prices?tokens=${colors.join(",")}`);
@@ -300,7 +310,13 @@ const registerToken = (
   );
 
 describe("GET /v1/prices", () => {
-  test("a fresh database already serves the seeded reference prices", async () => {
+  beforeAll(async () => {
+    for (const [color, name, decimals, assetId] of IMPORTED_TOKENS) {
+      await registerToken(color, name, "shielded", decimals, assetId);
+    }
+  });
+
+  test("seeded reference prices serve NIGHT and registry-imported tokens", async () => {
     const { status, body } = await pricesFor(
       COLOR_NIGHT,
       COLOR_TWBTC,
@@ -338,7 +354,7 @@ describe("GET /v1/prices", () => {
     });
     expect(assets.get("midnight-3").provider_updated_at).toBe("2026-09-02T20:26:20.000Z");
 
-    // Canonical seeded tokens are priced PER BASE UNIT at their published
+    // Registry-imported tokens are priced PER BASE UNIT at their published
     // 8/18/6 decimal scales.
     const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
     expect([...tokens.keys()].sort()).toEqual(["NIGHT", "TWBTC", "TWETH", "TWUSDC", "TWUSDM"]);
@@ -389,7 +405,7 @@ describe("GET /v1/prices", () => {
     const unknown = `ab${"9".repeat(62)}`;
     const { status, body } = await pricesFor(COLOR_TWUSDC, unknown);
     expect(status).toBe(200);
-    // Other defaults are seeded and priced, but were not asked for.
+    // Other known tokens are priced too, but were not asked for.
     expect(body.tokens.map((t: any) => t.name)).toEqual(["TWUSDC"]);
     // An unknown colour is an answer ("no reference price"), not a client
     // error: the batcher asks about whatever colours an offer's legs carry.
@@ -601,43 +617,37 @@ describe("GET /v1/quote — reference prices (SC-001)", () => {
   });
 });
 
-// ── sNight, a seeded default token (00021) ─────────────────────────────────
+// ── sNight (00021) ─────────────────────────────────────────────────────────
 //
-// Nothing is registered here: the SNIGHT row comes out of 000-init.sql like
-// NIGHT and the six canonical Preprod rows, so what these read back over HTTP
-// is exactly what a fresh
-// deployment serves. The seeded colour is *preprod*; another network patches
-// the row deliberately — see the SNIGHT note in 000-init.sql.
+// sNight's colour derives from the shielded-night contract address, so it
+// differs per network and is not seeded: a fresh database lists NIGHT only.
+// A registered sNight prices exactly as NIGHT through the name map.
 
-describe("sNight is a seeded known token", () => {
-  const COLOR_SNIGHT = "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
-  const COLOR_SNIGHT_PREVIEW =
-    "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c";
+describe("sNight is not seeded; a registered one prices as NIGHT", () => {
+  // The preprod and preview colours of the ledger-8 shielded-night wrapper.
+  const V8_ERA_SNIGHT_COLORS = [
+    "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819",
+    "793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c",
+  ];
+  const COLOR_SNIGHT = `5e${"6".repeat(62)}`;
 
-  test("GET /v1/known-tokens lists it with NIGHT's shape", async () => {
+  test("GET /v1/known-tokens has no sNight row on a fresh database", async () => {
     const { status, body } = await getJson("/v1/known-tokens");
     expect(status).toBe(200);
-    const byName = new Map<string, any>(body.map((t: any) => [t.name, t]));
-    expect(byName.get("SNIGHT")).toMatchObject({
-      token_color: COLOR_SNIGHT,
-      kind: "shielded",
-      // Q3: NIGHT's decimals, so equal base units are at par under the gate.
-      decimals: byName.get("NIGHT").decimals,
-      asset_id: "midnight-3",
-    });
-    // Exactly one sNight row — `name` is UNIQUE, and the colour of a network
-    // this database was not built for must not be here.
-    expect(body.filter((t: any) => t.name === "SNIGHT")).toHaveLength(1);
-    expect(body.some((t: any) => t.token_color === COLOR_SNIGHT_PREVIEW)).toBe(false);
+    expect(body.filter((t: any) => t.name === "SNIGHT")).toEqual([]);
+    expect(body.some((t: any) => V8_ERA_SNIGHT_COLORS.includes(t.token_color))).toBe(false);
+    expect(body.find((t: any) => t.name === "NIGHT")).toMatchObject({ token_color: COLOR_NIGHT, decimals: 6 });
   });
 
-  test("GET /v1/prices prices it exactly as NIGHT, per base unit", async () => {
+  test("GET /v1/prices prices a registered sNight (no asset_id) exactly as NIGHT, per base unit", async () => {
+    await registerToken(COLOR_SNIGHT, "SNIGHT", "shielded", 6, null);
     const { status, body } = await pricesFor(COLOR_SNIGHT, COLOR_NIGHT);
     expect(status).toBe(200);
     const tokens = new Map<string, any>(body.tokens.map((t: any) => [t.name, t]));
     const night = tokens.get("NIGHT");
+    // The row keeps its own NULL asset_id; the price comes through the name map.
     expect(tokens.get("SNIGHT")).toMatchObject({
-      asset_id: "midnight-3",
+      asset_id: null,
       decimals: night.decimals,
       price_usd: night.price_usd,
       source: "seed",

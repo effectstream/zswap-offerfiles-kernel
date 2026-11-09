@@ -9,9 +9,9 @@ import {
 export interface MidnightBalancingOptions {
   /**
    * Where the DUST wallet state is cached between restarts. Unset keeps the
-   * SDK default, a cwd-relative `dust-state/` folder (what the dev and preview
-   * entries have always used); the stagenet entry passes a directory under
-   * BATCHER_STORAGE_DIR so the cache lives on the batcher's volume (00050).
+   * SDK default, a cwd-relative `dust-state/` folder (what the dev entry
+   * uses); the public-network entry passes a directory under
+   * BATCHER_STORAGE_DIR so the cache lives on the batcher's volume.
    */
   dustStateDir?: string;
 }

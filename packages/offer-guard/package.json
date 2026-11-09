@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./mod.ts"
+    ".": "./mod.ts",
+    "./public-networks": "./public-networks.ts"
   },
   "dependencies": {
     "@effectstream/mip-zswap-offer": "0.4.0",

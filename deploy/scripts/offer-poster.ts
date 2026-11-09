@@ -37,7 +37,11 @@ import { createHash } from "node:crypto";
 
 import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
+import {
+  midnightNetworkConfig as net,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
+import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 
 import { collectNullifiers } from "../../packages/validator/derive.ts";
 import { shieldedKeys } from "../../packages/solver-core/wallet.ts";
@@ -686,6 +690,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
 }
 
 if (import.meta.main) {
+  // Every line the process prints — its own and its dependencies' (the wallet
+  // SDK's RPC client logs the node URL it loses, query string included) —
+  // goes through redactBlockfrostProjectId: a Blockfrost URL carries the
+  // project token. Installed here, not in main(), so importing the module
+  // (tests) leaves the console alone.
+  installLogRedaction(redactBlockfrostProjectId);
   const code = await main();
   process.exit(code);
 }

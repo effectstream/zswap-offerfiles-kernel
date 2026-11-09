@@ -1,6 +1,6 @@
-# compact-toolchain — the preserved ledger-v9 compactc compiler pin in a
-# container. The kernel no longer ships a local Compact contract, but this
-# target branch retains its authenticated compiler route for downstream work.
+# compact-toolchain — the ledger-v9 compactc compiler pin in a container. The
+# kernel ships no Compact contract of its own; this authenticated compiler
+# route is kept for downstream work against the same ledger.
 #
 # The LFDT-Minokawa release archive is selected for the build architecture and
 # authenticated against compact-checksums.sha256 before extraction.
@@ -8,16 +8,13 @@
 # ENTRYPOINT is compactc itself (the version manager is not installed), so the
 # invocation is `compactc <flags> <src> <outdir>`.
 #
-# NOTE ON ZKIR: we deliberately do NOT pass `--feature-zkir-v3`. compactc 0.34
-# still defaults to ZKIR version 2, which emits `verifier-key[v6]` keys; the ledger
-# maps those to ProofVersioned::V2, which the PLAIN `proof-server:9.0.0-rc.5`
-# image proves. Passing `--feature-zkir-v3` would emit `verifier-key[v7]` keys
-# and require the `9.0.0-rc.5_experimental` proof-server build instead. This
-# The v2 lane remains the preserved default for this target toolchain.
+# ZKIR: compactc 0.36 bundles only the ZKIR v3 backend (`zkir-v3`), which emits
+# `verifier-key[v7]` keys; the stable ledger-9 proof server (9.0.1) proves them.
+# There is no ZKIR v2 backend or selection flag in this release.
 
 FROM debian:stable-slim
 
-# e.g. 0.34.0 -> release tag compactc-v0.34.0
+# e.g. 0.36.0 -> release tag compactc-v0.36.0
 ARG COMPACT_VERSION
 ARG TARGETARCH
 
@@ -53,11 +50,13 @@ RUN set -eux; \
     printf '#!/bin/sh\nexec /opt/compactc/compactc "$@"\n' > /usr/local/bin/compactc; \
     chmod +x /usr/local/bin/compactc
 
-# Fail the build if the preserved default (v2) zkir backend is missing.
-RUN test -x /opt/compactc/zkir || { echo "image lacks the default zkir backend" >&2; exit 1; } \
- && test "$(compactc --version)" = "$COMPACT_VERSION" \
- && test "$(compactc --language-version)" = "0.26.0" \
- && test "$(compactc --runtime-version)" = "0.19.0"
+# Fail the build if the ZKIR v3 backend is missing or the release is not the
+# pinned one. `--version` prints "<version> (<commit> <date>)"; the first word
+# is the version.
+RUN test -x /opt/compactc/zkir-v3 || { echo "image lacks the zkir-v3 backend" >&2; exit 1; } \
+ && test "$(compactc --version | awk '{print $1}')" = "$COMPACT_VERSION" \
+ && test "$(compactc --language-version)" = "0.28.0" \
+ && test "$(compactc --runtime-version)" = "0.21.0"
 
 WORKDIR /work
 ENTRYPOINT ["compactc"]

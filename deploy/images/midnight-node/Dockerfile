@@ -1,11 +1,14 @@
-# deploy/images/midnight-node/Dockerfile — Midnight substrate node 2.0.0-rc.4 (dev preset).
+# deploy/images/midnight-node/Dockerfile — Midnight substrate node 2.1.0-806ff70-ledger9final (dev preset).
 #
-# Version provenance: this is NOT a version we chose. `@effectstream/npm-midnight-node@0.200.2`
+# Version provenance: this is NOT a version we chose. `@effectstream/npm-midnight-node@0.300.2`
 # — a pinned dependency of this repo, and what `bun run dev` actually launches —
-# hard-codes `CURRENT_BINARY_VERSION = "2.0.0-rc.4"` and the release URL
+# hard-codes `CURRENT_BINARY_VERSION = "2.1.0-806ff70-ledger9final"` and the release URL
 # `https://github.com/effectstream/binaries/releases/download/0.3.120/…`. Running
 # anything else here would mean the Compose stack and the dev stack are different
-# chains. Same for the proof server (9.0.0-rc.5) and the indexer (v4.4.0 line).
+# chains. Same for the proof server (9.0.1) and the indexer (v4.4.0-rc.6-ledger9final).
+# The `-ledger9final` builds carry the stable ledger-9 crates: a node built with
+# the release-candidate ledger crates rejects the stable client's state-writing
+# calls (Custom error 104).
 #
 # The binary is fetched at BUILD time and verified against the sha256 the GitHub
 # release reports, so a rolling re-tag of `0.3.120` (it is a mirror release, not
@@ -14,10 +17,10 @@ FROM debian:trixie-slim
 
 ARG TARGETARCH
 ARG BINARIES_RELEASE=0.3.120
-ARG MIDNIGHT_NODE_VERSION=2.0.0-rc.4
+ARG MIDNIGHT_NODE_VERSION=2.1.0-806ff70-ledger9final
 # sha256 of the release assets (gh release view 0.3.120 --repo effectstream/binaries).
-ARG SHA256_ARM64=490ef12ddf58a2a188f70edbfce974fd8d6cfa392e131232aa04e28557dbc55c
-ARG SHA256_AMD64=8f53e9dfb2c70ec2fb98fd6958466ef107685774ca4d93660bc63e7686948879
+ARG SHA256_ARM64=b33d6f7ae5feb9a535540bcc5a24d05503e38095f9e004b988201a86ebe49353
+ARG SHA256_AMD64=355c5095ab291cde048b41100ee76e5834a1440f2e8b5522b295c46e775670a1
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl unzip jq \
@@ -67,9 +70,8 @@ RUN set -eux; \
 # The resource tree the node resolves from its cwd. Asserted at BUILD time
 # because its absence is a startup panic, not a build error: D1's image kept
 # only the binary and every `--version` gate still passed.
-# The 2.0.0-rc.4 zip ships no `*_undeployed.mn` genesis files (the 1.0.0 one
-# did): under `--dev` / `CFG_PRESET=dev` the node derives the undeployed
-# genesis itself, so only the cfg tree and the genesis directory are asserted.
+# Under `--dev` / `CFG_PRESET=dev` the node derives the undeployed genesis
+# itself, so only the cfg tree and the genesis directory are asserted.
 WORKDIR /opt/midnight-node
 RUN set -eux; \
     test -f res/cfg/default.toml; \

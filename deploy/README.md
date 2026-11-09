@@ -5,6 +5,30 @@ the kernel, batcher, reference relay, solver, and optional offer tools. It does
 not deploy an asset issuer, mint tokens, or register deployment-generated token
 IDs. Asset inventory must already exist on the selected network.
 
+## Chain images
+
+The Midnight services run the same binaries as the `@effectstream/npm-midnight-*`
+0.300.2 wrappers that `bun run dev` launches, fetched at build time from the
+[effectstream/binaries 0.3.120](https://github.com/effectstream/binaries/releases/tag/0.3.120)
+release and checked against these sha256 sums (a mismatch fails the build).
+
+| Image | Binary | linux/amd64 sha256 | linux/arm64 sha256 | Checked at build |
+|---|---|---|---|---|
+| `images/midnight-node` | midnight-node `2.1.0-806ff70-ledger9final` | `355c5095ab291cde048b41100ee76e5834a1440f2e8b5522b295c46e775670a1` | `b33d6f7ae5feb9a535540bcc5a24d05503e38095f9e004b988201a86ebe49353` | links, `--version` = `midnight-node 2.1.0`, `res/` tree |
+| `images/indexer` | indexer-standalone `v4.4.0-rc.6-ledger9final` | `fa83a5397d42d2c9bd43de1e8fdc8011af3920abff3429bba109490d11a1b01b` | `0667eee4bc85dadc58e03f5a0de5487296a349b5b89ed69512b4d6c300d4a9ba` | links; `config.yaml` is `npm-midnight-indexer@0.300.2`'s (`cache_max_nodes`, `contract_state_cache`) |
+| `images/proof-server` | midnight-proof-server `9.0.1` | `1f8e75ff08c5535da7242768c7aafc3f2e64f57add50ce54c8e1701db46cdbc2` | `66e52887dea95912b434a123d9520abcbc164e4201f10aaeb8a51a05773628ec` | links, starts (`--help`); `GET /version` answers `9.0.1` |
+
+Only these `-ledger9final` builds work with the stable ledger-9 client stack:
+node and indexer builds that carry the release-candidate ledger crates reject
+state-writing calls (Custom error 104) and then fail DUST spends (error 170).
+On first start the proof server downloads its ZK parameters from
+`srs.midnight.network`, which takes minutes and needs network access.
+
+The Compact compiler pin (not used by the kernel image, which ships no
+contract) is `infra/compact-version.txt` = 0.36.0, built by
+`infra/compact-toolchain.Dockerfile` from the LFDT-Minokawa release archives
+checked against `infra/compact-checksums.sha256`.
+
 ## Start the core stack
 
 ```bash

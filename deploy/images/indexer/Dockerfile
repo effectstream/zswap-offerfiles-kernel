@@ -1,22 +1,20 @@
-# deploy/images/indexer/Dockerfile — midnight indexer-standalone v4.4.0-rc.3.
+# deploy/images/indexer/Dockerfile — midnight indexer-standalone v4.4.0-rc.6-ledger9final.
 #
 # THE INDEXER PIN IS NOT A GUESS. This repo's own pinned dependency,
-# `@effectstream/npm-midnight-indexer@0.200.2/binary.js`, has
-# `CURRENT_BINARY_VERSION = "v4.4.0-rc.1"` — the 4.4.0 line is what `bun run dev`
-# runs against midnight-node 2.0.0-rc.4. Release 0.3.120 publishes rc.1 for
-# linux-amd64 only, though, while rc.3 is published for BOTH linux/amd64 and
-# linux/arm64; rc.3 also fixes rc.1's single-connection SQLite starvation
-# (chain writes vs active-wallet queries) and is what the sibling
-# `midnight-2-offers` stack runs the same kernel against. So the image takes
-# rc.3: same 4.4.0 API (explicit `/api/v4`), same node pairing, no emulation on
-# Apple Silicon.
+# `@effectstream/npm-midnight-indexer@0.300.2/binary.js`, has
+# `CURRENT_BINARY_VERSION = "v4.4.0-rc.6-ledger9final"` — the build `bun run dev`
+# runs against midnight-node 2.1.0-806ff70-ledger9final. Release 0.3.120
+# publishes it for both linux/amd64 and linux/arm64. The `-ledger9final` build
+# carries the stable ledger-9 crates: an indexer built with the
+# release-candidate crates misreads the DUST state the stable node writes
+# (Custom error 170 on the next DUST spend).
 FROM debian:trixie-slim
 
 ARG TARGETARCH
 ARG BINARIES_RELEASE=0.3.120
-ARG INDEXER_VERSION=v4.4.0-rc.3
-ARG SHA256_ARM64=eb44e8493df141d552334399dc25277e76cd500e937bedd5c6ff42a068fb15d0
-ARG SHA256_AMD64=4b5df2ae3ed01f378adfb64d1c0d20d306470f8fba23a36638f937a4486a9434
+ARG INDEXER_VERSION=v4.4.0-rc.6-ledger9final
+ARG SHA256_ARM64=0667eee4bc85dadc58e03f5a0de5487296a349b5b89ed69512b4d6c300d4a9ba
+ARG SHA256_AMD64=fa83a5397d42d2c9bd43de1e8fdc8011af3920abff3429bba109490d11a1b01b
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl unzip \
@@ -38,7 +36,7 @@ RUN set -eux; \
     rm -rf /tmp/ix.zip /tmp/ix
 
 # Link check — the reason this image is on trixie and not bookworm.
-# `indexer-standalone v4.4.0-rc.3` is built against GLIBC 2.38; bookworm ships 2.36,
+# `indexer-standalone` 4.4.x is built against GLIBC 2.38; bookworm ships 2.36,
 # and the only symptom is the binary refusing to start LONG after the image
 # "built fine". Failing the build on an unresolved library or symbol version
 # puts the error next to the base image that caused it.
@@ -52,15 +50,14 @@ RUN set -eux; \
     rm -f /tmp/ldd.txt
 
 # config.yaml is copied VERBATIM from
-# `@effectstream/npm-midnight-indexer@0.200.2/indexer-standalone/config.yaml`
+# `@effectstream/npm-midnight-indexer@0.300.2/indexer-standalone/config.yaml`
 # (the file that package ships and runs the binary against, MIT/Apache-2.0).
-# It is not the generic template the wrapper writes when none exists: the
-# shipped one carries the 4.4.0-shaped `application:` (gc_bound,
-# ledger_state_retention) / `spo:` / `ledger_db:` / `progress_cache` sections
-# and the `blockfrost_id` placeholder, and reproducing that by hand would be a
-# divergence waiting to happen. Every value that has to differ in a
+# It is on the schema this binary requires: `infra.ledger_db` takes
+# `cache_max_nodes` (a config with only the older `cache_size` key is refused
+# with "missing field cache_max_nodes") and `infra.api.contract_state_cache`
+# sizes the contract state cache. Every value that has to differ in a
 # container is overridden through the binary's own `APP__*` environment
-# hierarchy (see entrypoint.sh) rather than by editing this file.
+# hierarchy (see entrypoint.sh and compose.yml) rather than by editing this file.
 WORKDIR /var/lib/indexer
 COPY deploy/images/indexer/config.yaml /var/lib/indexer/config.yaml
 COPY deploy/images/indexer/entrypoint.sh /usr/local/bin/entrypoint.sh

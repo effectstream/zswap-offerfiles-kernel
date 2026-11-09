@@ -23,7 +23,8 @@ COMPACT_VERSION="$(tr -d ' \t\n' < "$INFRA_DIR/compact-version.txt")"
 IMAGE="${COMPACT_IMAGE:-compact-toolchain:${COMPACT_VERSION}}"
 
 if [[ -n "${COMPACTC:-}" ]]; then
-  actual_version="$("$COMPACTC" --version)" || {
+  # `--version` prints "<version> (<commit> <date>)"; compare the version word.
+  actual_version="$("$COMPACTC" --version | awk '{print $1}')" || {
     echo "ERROR: COMPACTC=$COMPACTC does not run." >&2
     exit 1
   }
@@ -43,7 +44,7 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     "$INFRA_DIR" >&2
 fi
 
-actual_version="$(docker run --rm "$IMAGE" --version)" || {
+actual_version="$(docker run --rm "$IMAGE" --version | awk '{print $1}')" || {
   echo "ERROR: COMPACT_IMAGE=$IMAGE could not be probed." >&2
   exit 1
 }

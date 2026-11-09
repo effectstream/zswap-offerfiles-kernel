@@ -180,7 +180,7 @@ export function hasTransactionIntents(tx: unknown): boolean {
  * The earliest DUST deadline of a transaction: `ctime + graceSeconds` over
  * every intent whose DUST actions carry at least one spend (the ledger refuses
  * a DUST spend once `tblock > ctime + dust_grace_period`, midnight-ledger
- * `ledger-9.1.0.0-rc.3` ledger/src/dust.rs:815-824). `null` when no intent
+ * `ledger-9.1.0.0` ledger/src/dust.rs:823-831). `null` when no intent
  * spends DUST. Registrations alone impose no deadline on the offer here.
  */
 export function earliestDustSpendDeadline(tx: unknown, graceSeconds: number): Date | null {

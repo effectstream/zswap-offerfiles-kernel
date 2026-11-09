@@ -63,7 +63,7 @@ function errMsg(e: unknown): string {
  * The reject code for a `wellFormed` failure message. The ledger's intent TTL
  * check (`ttl_check_weak`, run first in `wellFormed`) reports "Intent TTL has
  * expired" / "Intent TTL is too far in the future" (midnight-ledger
- * `ledger-9.1.0.0-rc.3` ledger/src/error.rs:1172-1181); those get their own
+ * `ledger-9.1.0.0` ledger/src/error.rs:1173-1182); those get their own
  * codes instead of PROOF_INVALID (00056 FR-004). Exported for tests.
  */
 export function wellFormedFailureCode(message: string): OfferRejectCode {

@@ -16,10 +16,9 @@
 //   bun packages/tests/two-wallet-swap-e2e.ts
 
 import { Transaction } from "@midnightntwrk/ledger-v9";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
-import { registerNightForDust } from "@effectstream/midnight-contracts";
+import { adoptInWallet, registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import { requireDistinctTokenColors } from "./lib/prefunded.ts";
@@ -33,7 +32,6 @@ import {
 } from "./lib/wallet.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 const API = "http://127.0.0.1:9999";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -126,7 +124,6 @@ try {
   const recipe = await maker.wallet.initSwap(
     { shielded: { [Z]: GIVE_Z } },
     [{ type: "shielded", outputs: [{ type: X, amount: WANT_X, receiverAddress: makerShieldedAddr }] } as any],
-    shieldedKeys(maker),
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   const offerFinalized = await maker.wallet.finalizeTransaction(recipe.transaction);
@@ -148,7 +145,7 @@ try {
   // ── 7. TAKER (genesis: holds X + dust) balances + settles on Midnight ──
   console.log("[2wallet] genesis (taker) balancing + settling the offer…");
   const offerTx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(blob));
-  const balRecipe = await (genesis.wallet as any).balanceFinalizedTransaction(offerTx, shieldedKeys(genesis), {
+  const balRecipe = await (genesis.wallet as any).balanceFinalizedTransaction(await adoptInWallet(genesis.wallet, "Finalized", offerTx), {
     ttl: new Date(Date.now() + 30 * 60_000),
   });
   const settleTx = await genesis.wallet.finalizeRecipe(balRecipe);

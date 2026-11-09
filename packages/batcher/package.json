@@ -13,15 +13,15 @@
     "start:stagenet": "bun run batcher.stagenet.ts"
   },
   "dependencies": {
-    "@effectstream/batcher-sdk": "0.200.6",
-    "@effectstream/midnight-contracts": "0.200.6",
-    "@effectstream/utils": "0.200.6",
+    "@effectstream/batcher-sdk": "0.300.2",
+    "@effectstream/midnight-contracts": "0.300.2",
+    "@effectstream/utils": "0.300.2",
     "@zswap-da/validator": "workspace:*",
     "effection": "^3.5.0",
     "@zswap-da/offer-guard": "workspace:*"
   },
   "devDependencies": {
     "@scure/base": "^2.0.0",
-    "@effectstream/mip-zswap-offer": "0.4.0-v9.0"
+    "@effectstream/mip-zswap-offer": "0.4.0"
   }
 }

@@ -51,7 +51,6 @@ import { Database } from "bun:sqlite";
 
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 
 // RELATIVE first-party imports: `deploy/` is not a bun workspace member, so
 // `@zswap-da/*` does not resolve from here (bun links workspace packages into
@@ -74,7 +73,6 @@ import { KernelApi, type LiveOffer } from "./lib/kernel-api.ts";
 import { postMakerOffer, resolveExplicitTokens, type PostedOffer } from "./lib/maker-offer.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as never);
 
 // ── configuration ────────────────────────────────────────────────────────────
 
@@ -648,7 +646,6 @@ async function fundTakerNight(): Promise<void> {
     try {
       const recipe = await genesis.wallet.transferTransaction(
         [{ type: "unshielded", outputs } as any],
-        shieldedKeys(genesis),
         { ttl: new Date(Date.now() + 30 * 60_000), payFees: true },
       );
       const signed = await genesis.wallet.signRecipe(recipe, (p: Uint8Array) =>
@@ -706,7 +703,6 @@ async function fundTakerTokenIn(tokenIn: string): Promise<void> {
             ],
           } as any,
         ],
-        shieldedKeys(genesis),
         { ttl: new Date(Date.now() + 30 * 60_000), payFees: true },
       );
       const finalized = await genesis.wallet.finalizeRecipe(recipe);
@@ -882,7 +878,6 @@ async function runCase(
         outputs: [{ type: tokenOut, amount: demanded, receiverAddress: takerShielded }],
       } as never,
     ],
-    shieldedKeys(taker),
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   const finalized = await taker.wallet.finalizeTransaction(recipe.transaction);

@@ -133,7 +133,6 @@ export async function postMakerOffer(opts: PostMakerOfferOptions): Promise<Poste
         outputs: [{ type: wantToken, amount: wantAmount, receiverAddress: makerShieldedAddr }],
       } as never,
     ],
-    shieldedKeys(maker),
     // payFees:false — an Offer File is settled by whoever takes it.
     { ttl: new Date(Date.now() + ttlMs), payFees: false },
   );

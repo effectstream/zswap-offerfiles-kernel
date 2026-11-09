@@ -235,7 +235,6 @@ async function runPartialOverlap(db: Client, actors: Actors): Promise<void> {
           ],
         } as any,
       ],
-      shieldedKeys(actors.partialOverlap.wr),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     ),
   );

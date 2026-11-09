@@ -27,7 +27,6 @@
 // restart the batcher so the SDK snapshots the new UTXO count:
 //   bun run packages/tests/grand-e2e/provision-batcher-dust.ts [count]
 
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { HDWallet, Roles } from "@midnightntwrk/wallet-sdk-hd";
 import { createKeystore } from "@midnightntwrk/wallet-sdk-unshielded-wallet";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -68,7 +67,6 @@ function keystoreForSeed(seed: string, networkId: string) {
 }
 
 async function main(): Promise<void> {
-  setNetworkId(net.id as any);
   const keystore = keystoreForSeed(BATCHER_SEED, net.id);
   const targetBech32 = keystore.getBech32Address();
   console.log(`batcher unshielded address : ${targetBech32.asString()}`);
@@ -103,7 +101,6 @@ async function main(): Promise<void> {
         try {
           const recipe = await genesis.wallet.transferTransaction(
             [{ type: "unshielded", outputs } as any],
-            shieldedKeys(genesis),
             { ttl: new Date(Date.now() + 30 * 60_000), payFees: true },
           );
           const signed = await (genesis.wallet as any).signRecipe(recipe, (p: Uint8Array) =>

@@ -16,7 +16,6 @@ import {
   offersGone,
   waitFor,
 } from "../lib/db.ts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -45,7 +44,6 @@ const P0_SEED = "000000000000000000000000000000000000000000000000000000000000003
 const P1_SEED = "0000000000000000000000000000000000000000000000000000000000000031";
 
 export async function apiTest(db: Client): Promise<void> {
-  setNetworkId(net.id as any);
 
   async function submitAndWaitRoot(blob: string, label: string): Promise<{ status: number; body: any }> {
     let sub = await submitOffer(blob);
@@ -98,7 +96,6 @@ export async function apiTest(db: Client): Promise<void> {
           outputs: [{ type: T1, amount: AMT, receiverAddress: p0Addr }],
         } as any,
       ],
-      shieldedKeys(p0),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const blob0 = OfferFiles.encode(
@@ -112,7 +109,6 @@ export async function apiTest(db: Client): Promise<void> {
           outputs: [{ type: T0, amount: AMT, receiverAddress: p1Addr }],
         } as any,
       ],
-      shieldedKeys(p1),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const blob1 = OfferFiles.encode(

@@ -16,7 +16,6 @@
 //   bun run packages/tests/grand-e2e/triage-mixed-offer.ts
 
 import { writeFileSync } from "node:fs";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { getReferenceState, validateZswapOffer } from "@zswap-da/validator";
@@ -24,7 +23,6 @@ import { getReferenceState, validateZswapOffer } from "@zswap-da/validator";
 import { buildWallet, shieldedKeys, unshieldedAddressObj, waitForSync } from "../lib/wallet.ts";
 import { TX_TTL_MS } from "./config.ts";
 
-setNetworkId(net.id as any);
 (globalThis as any).WebSocket = WebSocket;
 
 // Genesis holds both the externally issued shielded token and NIGHT, so one wallet can build the
@@ -48,7 +46,6 @@ const recipe = await w.wallet.initSwap(
       outputs: [{ type: NIGHT, amount: 500n, receiverAddress: unshieldedAddressObj(w) }],
     } as any,
   ],
-  shieldedKeys(w),
   { ttl: new Date(Date.now() + TX_TTL_MS), payFees: false },
 );
 

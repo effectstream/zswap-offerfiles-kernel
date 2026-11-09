@@ -24,11 +24,10 @@ import { createHash } from "node:crypto";
 import { link, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-import { registerNightForDust } from "@effectstream/midnight-contracts";
+import { registerNightForDust, unwrapInWallet } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { waitForDustFunds } from "@effectstream/midnight-contracts/wallet-info";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
 
 import {
@@ -481,7 +480,6 @@ export async function buildRealPreSpentOfferCandidate(
         receiverAddress: genesisShieldedAddress,
       }],
     } as never],
-    shieldedKeys(genesis),
     { ttl: options.expiresAt, payFees: false },
   );
 
@@ -1037,7 +1035,6 @@ async function submitTransferOnce(
   void attempt;
   const recipe = await from.wallet.transferTransaction(
     [{ type: layer, outputs } as never],
-    shieldedKeys(from),
     { ttl: new Date(Date.now() + ttlMs), payFees: true },
   );
   let finalized: unknown;
@@ -1053,10 +1050,13 @@ async function submitTransferOnce(
     await (from.wallet as any).revert(finalized ?? recipe).catch(() => undefined);
     throw error;
   }
+  // The facade returns a sealed wallet handle; hashes, identifiers and
+  // nullifiers are read off the ledger transaction it carries.
+  const ledgerFinalized = await unwrapInWallet(from.wallet, finalized as never);
   return {
-    hash: txHash(finalized),
-    identifiers: txIdentifiers(finalized),
-    inputNullifiers: txInputNullifiers(finalized),
+    hash: txHash(ledgerFinalized),
+    identifiers: txIdentifiers(ledgerFinalized),
+    inputNullifiers: txInputNullifiers(ledgerFinalized),
   };
 }
 
@@ -1332,7 +1332,6 @@ export async function openRealSettlementActors(
   onPhase: (phase: string) => void | Promise<void> = () => undefined,
   signal?: AbortSignal,
 ): Promise<RealSettlementActorFixture> {
-  setNetworkId(net.id as any);
   globalThis.WebSocket = WebSocket;
   const owned: Array<{ label: string; result: WalletResult }> = [];
   const cleanupWallets = createIdempotentRealActorCleanup(() =>
@@ -1432,7 +1431,6 @@ export async function provisionRealActors(
   onPhase: (phase: string) => void | Promise<void> = () => undefined,
   signal?: AbortSignal,
 ): Promise<RealActorFixture> {
-  setNetworkId(net.id as any);
   globalThis.WebSocket = WebSocket;
 
   const wallets: WalletResult[] = [];
@@ -1653,7 +1651,6 @@ export async function provisionRealActors(
           }],
         } as never,
       ],
-      shieldedKeys(user),
       { ttl: expiresAt, payFees: false },
     );
     const finalized = await user.wallet.finalizeTransaction(recipe.transaction);
@@ -1998,7 +1995,6 @@ async function runBuildIntentCli(): Promise<void> {
   ) {
     throw new Error("intent builder actor manifest is not the exact funded A/B oracle");
   }
-  setNetworkId(net.id as any);
   globalThis.WebSocket = WebSocket;
   const solver = await buildWallet(solverSeed);
   let recipe: unknown;
@@ -2020,10 +2016,9 @@ async function runBuildIntentCli(): Promise<void> {
         type: "shielded",
         outputs: [{ type: gives.token, amount: amountOut, receiverAddress }],
       } as never],
-      shieldedKeys(solver),
       { ttl: expiresAt, payFees: false },
     );
-    const finalized = await (solver.wallet as any).finalizeRecipe(recipe);
+    const finalized: any = await unwrapInWallet(solver.wallet, await (solver.wallet as any).finalizeRecipe(recipe));
     const serialized = Uint8Array.from(finalized.serialize());
     if (serialized.length === 0 || serialized.length > MAX_OFFER_BYTES) {
       throw new Error("proved taker intent bytes are empty or oversized");

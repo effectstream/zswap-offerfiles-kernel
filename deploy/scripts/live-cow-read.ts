@@ -1,12 +1,10 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 
 import { buildWallet, shieldedBalances, waitForSync } from "../../packages/solver-core/wallet.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as never);
 
 type AmountMap = Record<string, string>;
 type Scenario = {

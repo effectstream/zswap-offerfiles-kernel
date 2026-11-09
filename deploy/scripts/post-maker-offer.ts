@@ -11,15 +11,12 @@
 //   GIVE_TOKEN, WANT_TOKEN required 64-hex token IDs
 //   GIVE_AMOUNT, WANT_AMOUNT, TTL_MINUTES
 
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import { buildWallet } from "../../packages/solver-core/wallet.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
 import { postMakerOfferWithWallet, resolveExplicitTokens } from "./lib/maker-offer.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as never);
 
 const log = (msg: string) => console.log(`[maker-offer] ${msg}`);
 

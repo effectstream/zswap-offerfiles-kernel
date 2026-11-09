@@ -69,7 +69,6 @@ try {
   const recipe = await result.wallet.initSwap(
     { shielded: { [give]: 1_000_000n } },
     [{ type: "shielded", outputs: [{ type: "ff".repeat(32), amount: 5_000_000n, receiverAddress: addr }] } as any],
-    { shieldedSecretKeys: result.zswapSecretKeys, dustSecretKey: result.dustSecretKey },
     { ttl: new Date(Date.now() + 1800_000), payFees: false },
   );
   blob = OfferFiles.encode((await result.wallet.finalizeTransaction(recipe.transaction)).serialize());

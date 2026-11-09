@@ -24,7 +24,6 @@ import { dirname, isAbsolute } from "node:path";
 
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 
 import { tokenImbalances } from "@zswap-da/solver-core/batcher";
 import {
@@ -910,7 +909,6 @@ export async function startInstrumentedRealSolver(
   config: RealSolverServiceConfig,
   signal?: AbortSignal,
 ): Promise<InstrumentedRealSolverHandle> {
-  setNetworkId(net.id as any);
   globalThis.WebSocket = WebSocket;
   const telemetry = await SerializedTelemetry.create(config.telemetryPath, config.runId);
   const failures = new RealSolverEvidenceFailures();

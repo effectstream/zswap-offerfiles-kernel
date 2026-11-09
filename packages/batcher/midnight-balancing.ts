@@ -1,5 +1,5 @@
 import { MidnightBalancingAdapter } from "@effectstream/batcher-sdk";
-import { waitForDustFundsWithRetry } from "@effectstream/midnight-contracts";
+import { unwrapInWallet, waitForDustFundsWithRetry } from "@effectstream/midnight-contracts";
 import type { BatcherConfig } from "./config.ts";
 import {
   BATCHER_NIGHT_UTXO_TARGET,
@@ -151,7 +151,10 @@ export function installContractTxValidationLane(
       strictness.verifySignatures = options?.flags?.verifySignatures ?? true;
       strictness.enforceLimits = options?.flags?.enforceLimits ?? true;
       strictness.verifyContractProofs = false;
-      tx.wellFormed(state, strictness, new Date());
+      // wallet-sdk 2.x passes a sealed wallet handle; well-formedness is a
+      // method of the ledger transaction it carries.
+      const ledgerTx = typeof tx?.wellFormed === "function" ? tx : await unwrapInWallet(wallet, tx);
+      ledgerTx.wellFormed(state, strictness, new Date());
       console.log(
         "[zswap-da-batcher] contract-tx lane: wellFormed passed with " +
           "verifyContractProofs=false (missing-contract retry; node verifies " +

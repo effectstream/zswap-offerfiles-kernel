@@ -188,13 +188,21 @@ describe("stagenet batcher profile (00050 FR-002)", () => {
   });
 });
 
+// `@effectstream/midnight-contracts/midnight-env` has no hosted default for
+// stagenet, so a process that loads it on stagenet needs all three URLs.
+const STAGENET_ENDPOINT_ENV: Record<string, string> = {
+  MIDNIGHT_INDEXER_HTTP: "https://indexer.stagenet.shielded.tools/api/v4/graphql",
+  MIDNIGHT_INDEXER_WS: "wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws",
+  MIDNIGHT_NODE_HTTP: "https://rpc.stagenet.shielded.tools",
+};
+
 describe("batcher.stagenet.ts — the real entry, in a child process", () => {
   // A fresh process per case: the entry reads the environment at load time
   // (midnight-env, loadBatcherConfig). `--check` stops before any network call.
   const run = (vars: Record<string, string>, args: string[] = ["--check"]) =>
     Bun.spawnSync([process.execPath, "run", join(HERE, "batcher.stagenet.ts"), ...args], {
       cwd: HERE,
-      env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", ...vars },
+      env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", ...STAGENET_ENDPOINT_ENV, ...vars },
       stdout: "pipe",
       stderr: "pipe",
     });

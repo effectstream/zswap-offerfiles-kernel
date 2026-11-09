@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
 
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 
 import {
   buildWallet,
@@ -18,7 +17,6 @@ import { KernelApi } from "./lib/kernel-api.ts";
 import { postMakerOffer, type PostedOffer } from "./lib/maker-offer.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as never);
 
 type AmountMap = Record<string, string>;
 type OfferSpec = {
@@ -270,7 +268,6 @@ async function buildHalf(taker: any, tokenIn: string, tokenOut: string, amountIn
   const recipe = await taker.wallet.initSwap(
     { shielded: { [tokenIn]: amountIn } },
     [{ type: "shielded", outputs: [{ type: tokenOut, amount: demandOut, receiverAddress }] } as never],
-    shieldedKeys(taker),
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   const finalized = await taker.wallet.finalizeTransaction(recipe.transaction);

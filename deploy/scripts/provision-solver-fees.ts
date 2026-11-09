@@ -6,7 +6,6 @@ import { writeFileSync } from "node:fs";
 
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 
 import {
   buildWallet,
@@ -17,7 +16,6 @@ import {
 import { ensureSolverDustReady } from "./lib/solver-provision.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as never);
 
 const log = (message: string): void => console.log(`[provision-external] ${message}`);
 const HEX_TOKEN = /^[0-9a-f]{64}$/;

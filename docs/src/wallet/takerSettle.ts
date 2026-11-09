@@ -11,7 +11,6 @@
 
 import type { ConnectedAPI } from '@midnight-ntwrk/dapp-connector-api'
 import { Transaction as LedgerV9Transaction } from '@midnightntwrk/ledger-v9'
-import { type NetworkId, setNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
 import { OfferFiles } from '@effectstream/mip-zswap-offer/mip5'
 import { fromHex, toHex } from '../hex'
 
@@ -86,10 +85,8 @@ async function balanceViaMirrorMerge(
  */
 export async function buildSettlementTxHex(
   connectedApi: ConnectedAPI,
-  networkId: string,
   offerBech32m: string,
 ): Promise<string> {
-  setNetworkId(networkId as NetworkId)
   const rawBytes = OfferFiles.decode(offerBech32m.trim())
   const makerTx = LedgerV9Transaction.deserialize('signature', 'proof', 'binding', rawBytes)
 

@@ -11,7 +11,6 @@
 //
 //   bun packages/tests/api-roundtrip-swap-e2e.ts
 
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
@@ -23,7 +22,6 @@ import { describeImbalances, mergeFinalized, nonDustImbalances, settleViaBatcher
 import { getZswaps, getZswapByHash, reconstructOffer, submitOffer } from "./lib/api.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 const TAG = "[api-roundtrip]";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -93,14 +91,12 @@ try {
   const r0 = await p0.wallet.initSwap(
     { shielded: { [T0]: AMT } },
     [{ type: "shielded", outputs: [{ type: T1, amount: AMT, receiverAddress: p0Addr }] } as any],
-    shieldedKeys(p0),
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   const blob0 = OfferFiles.encode((await p0.wallet.finalizeTransaction(r0.transaction)).serialize());
   const r1 = await p1.wallet.initSwap(
     { shielded: { [T1]: AMT } },
     [{ type: "shielded", outputs: [{ type: T0, amount: AMT, receiverAddress: p1Addr }] } as any],
-    shieldedKeys(p1),
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   const blob1 = OfferFiles.encode((await p1.wallet.finalizeTransaction(r1.transaction)).serialize());

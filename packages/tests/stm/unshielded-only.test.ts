@@ -5,10 +5,8 @@
 import type { Client } from "pg";
 import { assert } from "../helpers.ts";
 import { count, offerArchivedConsumed, waitFor } from "../lib/db.ts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
   buildWallet,
@@ -24,6 +22,7 @@ import {
   settleViaBatcher,
 } from "../lib/batcher.ts";
 import { submitOffer } from "../lib/api.ts";
+import { adoptInWallet, unwrapInWallet } from "@effectstream/midnight-contracts";
 
 globalThis.WebSocket = WebSocket;
 
@@ -52,7 +51,6 @@ async function fundingUtxosGone(db: Client, refs: FundingUtxo[]): Promise<boolea
 }
 
 export async function unshieldedOnlyTest(db: Client): Promise<void> {
-  setNetworkId(net.id as any);
 
   const before = {
     created_unshielded: await count(db, "created_unshielded"),
@@ -103,13 +101,12 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
     const recipe = await m0.wallet.initSwap(
       { unshielded: { [U0]: AMT } } as any,
       [{ type: "unshielded", outputs: [{ type: U1, amount: AMT, receiverAddress: m0Unshielded }] } as any],
-      shieldedKeys(m0),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const signedRecipe = await (m0.wallet as any).signRecipe(recipe, (p: Uint8Array) =>
       m0.unshieldedKeystore.signDataAsync(p),
     );
-    const offer0 = await m0.wallet.finalizeRecipe(signedRecipe);
+    const offer0 = await unwrapInWallet(m0.wallet, await m0.wallet.finalizeRecipe(signedRecipe));
     console.log(`${TAG} offer imbalances: ${describeImbalances(offer0 as any)}`);
 
     const blob = OfferFiles.encode(offer0.serialize());
@@ -146,8 +143,7 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
     // wallet replay it before the second prove+submit.
     await waitForWalletSettlement(m1, { label: `${TAG} pre-settle` });
     const balRecipe = await (m1.wallet as any).balanceFinalizedTransaction(
-      offer0,
-      shieldedKeys(m1),
+      await adoptInWallet(m1.wallet, "Finalized", offer0),
       {
         ttl: new Date(Date.now() + 30 * 60_000),
         tokenKindsToBalance: ["unshielded"],
@@ -156,7 +152,7 @@ export async function unshieldedOnlyTest(db: Client): Promise<void> {
     const balSigned = await (m1.wallet as any).signRecipe(balRecipe, (p: Uint8Array) =>
       m1.unshieldedKeystore.signDataAsync(p),
     );
-    const balancedTx = await m1.wallet.finalizeRecipe(balSigned);
+    const balancedTx = await unwrapInWallet(m1.wallet, await m1.wallet.finalizeRecipe(balSigned));
     await assert(
       "taker produced token-balanced tx",
       async () => nonDustImbalances(balancedTx as any).length === 0,

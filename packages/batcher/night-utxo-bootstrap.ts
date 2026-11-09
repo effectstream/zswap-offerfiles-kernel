@@ -102,10 +102,6 @@ async function defaultSubmitSelfSplit(
         })),
       } as any,
     ],
-    {
-      shieldedSecretKeys: walletResult.zswapSecretKeys,
-      dustSecretKey: walletResult.dustSecretKey,
-    },
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: true },
   );
 

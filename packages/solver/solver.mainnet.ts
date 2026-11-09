@@ -7,7 +7,6 @@
  * inventory while starting no relay jobs. A controlled staging rehearsal is
  * still required before any live acknowledgement.
  */
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import {
@@ -47,7 +46,6 @@ if (!isSolverEnabled()) {
 assertNoRetiredSolverPricingEnv();
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 await startWithSignalOwnership((signal) => runSolver({ dryRun, signal }), {
   onSecondSignal: (signal) => {

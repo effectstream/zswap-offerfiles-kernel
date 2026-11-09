@@ -19,7 +19,6 @@
 
 import { writeFileSync } from "node:fs";
 import { config, get, post, header } from "./config.ts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
@@ -31,7 +30,6 @@ header("Submit Offer");
 
 // ── 1. Midnight config from node ──────────────────────────────────────────────
 const midnightCfg = await get<any>("/v1/midnight/config");
-setNetworkId(midnightCfg.networkId as any);
 
 const networkUrls = {
   id:          midnightCfg.networkId as any,
@@ -95,7 +93,6 @@ const address = state.address.coinPublicKeyString();
 const recipe = await wallet.initSwap(
   { shielded: { [GIVE_TOKEN]: GIVE_AMOUNT } },
   [{ type: "shielded", outputs: [{ type: WANT_TOKEN, amount: WANT_AMOUNT, receiverAddress: address }] } as any],
-  keys,
   { ttl, payFees: false },
 );
 const offerFinalized = await wallet.finalizeTransaction(recipe.transaction);

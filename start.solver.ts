@@ -27,7 +27,6 @@
  * (00007 FR-001; unset port = no listener and no behaviour change at all, and a
  * set port makes the bearer MANDATORY so `/status/*` can never come up open).
  */
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import { isSolverEnabled } from "./packages/solver/env.ts";
@@ -63,7 +62,6 @@ try {
 console.log(describeSolverLaunchConfig(config));
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 try {
   await startWithSignalOwnership(

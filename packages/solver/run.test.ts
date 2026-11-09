@@ -394,6 +394,8 @@ test("relay publishes empty and rejects jobs until journal reconciliation finish
       // "post-reconciliation ladder" wait below would have hung.
       shieldedBalances: async () => ({ [B]: 1_000n }),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
+      // The double already speaks the executor's wallet contract.
+      swapJobWallet: (built: unknown) => built as never,
     } as any,
     jobDependencies: {
       mergeFinalized: merge as any,
@@ -478,6 +480,8 @@ test("runSolver starts relay beside the mirror, executes a job, and shuts down i
       // removed the tokenIn bound that used to require `A` here.
       shieldedBalances: async () => ({}),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
+      // The double already speaks the executor's wallet contract.
+      swapJobWallet: (built: unknown) => built as never,
     } as any,
     jobDependencies: {
       readExactOfferFiles: async (offerIds) => ({
@@ -608,6 +612,8 @@ test("an empty wallet publishes the full staircase and refuses output above the 
       waitForSync: async () => {},
       shieldedBalances: async () => ({}),
       shieldedKeys: () => ({ dustSecretKey: "dust-key" }),
+      // The double already speaks the executor's wallet contract.
+      swapJobWallet: (built: unknown) => built as never,
     } as any,
     log: () => {},
   });

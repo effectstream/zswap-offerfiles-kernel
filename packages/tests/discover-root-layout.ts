@@ -49,7 +49,6 @@ async function main(): Promise<void> {
     const recipe = await wallet.initSwap(
       { shielded: { [give]: 1_000_000n } },
       [{ type: "shielded", outputs: [{ type: "ff".repeat(32), amount: 5_000_000n, receiverAddress: address }] } as any],
-      { shieldedSecretKeys: zswapSecretKeys, dustSecretKey },
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const finalized = await wallet.finalizeTransaction(recipe.transaction);

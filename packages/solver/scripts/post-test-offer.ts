@@ -8,14 +8,11 @@
 // imbalance is the trade, and whoever fills it supplies the other side.
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 
 import { getOfferStatus, submitOffer } from "@zswap-da/solver-core/api-client";
 import { buildWallet, shieldedBalances, shieldedKeys, waitForSync } from "@zswap-da/solver-core/wallet";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 const arg = (name: string): string | undefined => {
   const i = process.argv.indexOf(`--${name}`);
@@ -46,7 +43,6 @@ const makerAddress = await maker.wallet.shielded.getAddress();
 const recipe = await maker.wallet.initSwap(
   { shielded: { [give]: giveAmount } },
   [{ type: "shielded", outputs: [{ type: want, amount: wantAmount, receiverAddress: makerAddress }] } as any],
-  shieldedKeys(maker),
   { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
 );
 const finalized = await maker.wallet.finalizeTransaction(recipe.transaction);

@@ -382,13 +382,16 @@ describe("real fixture lifecycle seams", () => {
         dustSecretKey: { exact: "dust-key" },
         wallet: {
           shielded: { async getAddress() { return { exact: "genesis-address" }; } },
-          async initSwap(inputs, outputs, keys, options) {
+          // wallet-sdk-facade 5.x: the facade holds its own keys, so initSwap
+          // takes (inputs, outputs, options) and a fourth argument is a bug.
+          async initSwap(inputs, outputs, options, ...extra) {
+            if (extra.length !== 0) throw new Error("initSwap called with extra arguments");
             if (inputs.shielded[tokenA] !== 1000000n) throw new Error("wrong full-coin input");
             if (outputs[0].outputs[0].type !== tokenB || outputs[0].outputs[0].amount !== 900n) {
               throw new Error("wrong wanted output");
             }
-            if (keys.shieldedSecretKeys !== genesis.zswapSecretKeys || options.payFees !== false) {
-              throw new Error("wrong keys or fee policy");
+            if (options.payFees !== false) {
+              throw new Error("wrong fee policy");
             }
             if (options.ttl.toISOString() !== expiresAt.toISOString()) throw new Error("wrong ttl");
             return recipe;

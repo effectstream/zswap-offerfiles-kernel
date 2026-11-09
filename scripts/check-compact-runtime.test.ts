@@ -26,7 +26,7 @@ function stateWith(lock: BunLock): CompactRuntimeState {
 }
 
 describe("compact runtime invariant", () => {
-  test("accepts exactly one 0.19.0 resolution and exact first-party pins", () => {
+  test(`accepts exactly one ${EXPECTED_COMPACT_RUNTIME_VERSION} resolution and exact first-party pins`, () => {
     expect(() =>
       assertCompactRuntimeInvariant(
         stateWith({

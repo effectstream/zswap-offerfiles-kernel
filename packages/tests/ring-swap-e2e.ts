@@ -14,11 +14,10 @@
 //
 //   bun packages/tests/ring-swap-e2e.ts [N]   # default N=2
 
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import pg from "pg";
-import { registerNightForDust } from "@effectstream/midnight-contracts";
+import { registerNightForDust, unwrapInWallet } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import { requireDistinctTokenColors } from "./lib/prefunded.ts";
@@ -33,7 +32,6 @@ import {
 import { describeImbalances, mergeFinalized, settleViaBatcher } from "./lib/batcher.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 const N = Math.max(2, Number(process.argv[2] ?? "2") | 0);
 const TAG = `[ring-${N}]`;
@@ -133,10 +131,11 @@ try {
     const recipe = await makers[i].wallet.initSwap(
       { shielded: { [tokens[i]]: SWAP_AMOUNT } },
       [{ type: "shielded", outputs: [{ type: wantColor, amount: SWAP_AMOUNT, receiverAddress: makerAddrs[i] }] } as any],
-      shieldedKeys(makers[i]),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
-    finalizedOffers.push(await makers[i].wallet.finalizeTransaction(recipe.transaction));
+    finalizedOffers.push(
+      await unwrapInWallet<FinalizedTransaction>(makers[i].wallet, await makers[i].wallet.finalizeTransaction(recipe.transaction)),
+    );
   }
 
   // ── 5. Submit each offer → Celestia → indexed ──

@@ -4,40 +4,39 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Transaction } from "@midnightntwrk/ledger-v9";
-import {
-  PendingTransactions,
-  PendingTransactionsServiceImpl,
-} from "@midnightntwrk/wallet-sdk-capabilities";
-import { firstValueFrom } from "rxjs";
+import { TransactionLifecycleServiceImpl } from "@midnightntwrk/wallet-sdk-capabilities";
 
-import { finalizedTransactionPersistenceTrait } from "./sdk-artifact-test-trait.ts";
+import {
+  finalizedCodec,
+  finalizedFixture,
+  lifecycleTraits,
+  OFFLINE_INDEXER,
+  submittedFacts,
+} from "./sdk-artifact-test-trait.ts";
 
 const CHILD = new URL("./sdk-artifact-child.ts", import.meta.url).pathname;
 
 test("pinned SDK artifacts round-trip and remain actionable in a fresh process", async () => {
   const directory = await mkdtemp(join(tmpdir(), "cow-rf1a-sdk-"));
   const inputPath = join(directory, "artifacts.json");
-  const mirror = Transaction.fromParts("undeployed");
-  const finalized = mirror.mockProve();
-  const pending = await PendingTransactionsServiceImpl.init({
-    txTrait: finalizedTransactionPersistenceTrait,
-    configuration: { indexerClientConnection: { indexerHttpUrl: "http://127.0.0.1:1" } },
+  const { finalized, mirror } = finalizedFixture();
+  expect(finalized.identifiers().length).toBeGreaterThan(0);
+  const service = await TransactionLifecycleServiceImpl.init({
+    txTraits: lifecycleTraits,
+    configuration: OFFLINE_INDEXER,
   });
 
   try {
-    await pending.addPendingTransaction(finalized);
-    const pendingState = PendingTransactions.serialize(
-      await firstValueFrom(pending.state()),
-      finalizedTransactionPersistenceTrait,
-    );
-    expect(JSON.parse(pendingState)).toMatchObject({ version: "v1" });
+    await service.submitted(submittedFacts(finalized));
+    const lifecycleState = await service.serializeState();
+    expect(JSON.parse(lifecycleState)).toMatchObject({ version: "v2" });
 
     await writeFile(inputPath, JSON.stringify({
-      finalizedHex: finalizedTransactionPersistenceTrait.serialize(finalized).toHex(),
+      finalizedHex: finalizedCodec.serialize(finalized).toHex(),
       mirrorHex: mirror.serialize().toHex(),
-      pendingState,
+      lifecycleState,
     }));
-    await pending.stop();
+    await service.stop();
 
     const child = Bun.spawn([process.execPath, CHILD, inputPath], {
       stdout: "pipe",
@@ -54,24 +53,27 @@ test("pinned SDK artifacts round-trip and remain actionable in a fresh process",
       finalizedHex: finalized.serialize().toHex(),
       mirrorHex: mirror.serialize().toHex(),
       revertedStateBytes: expect.any(Number),
-      restoredPending: 1,
-      pendingCleared: 0,
+      restoredLive: 1,
+      restoredState: "Submitted",
+      restoredTxHex: finalized.serialize().toHex(),
+      liveAfterRevert: 0,
+      stateAfterRevert: "Reverted",
     });
   } finally {
-    await pending.stop().catch(() => undefined);
+    await service.stop().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("pinned SDK restore rejects malformed pending-state and transaction bytes", async () => {
+test("pinned SDK restore rejects malformed lifecycle-state and transaction bytes", async () => {
   await expect(
-    PendingTransactionsServiceImpl.restore(
-      '{"version":"v2","transactions":[]}',
-      finalizedTransactionPersistenceTrait,
-      { indexerClientConnection: { indexerHttpUrl: "http://127.0.0.1:1" } },
+    TransactionLifecycleServiceImpl.restore(
+      '{"version":"v9","records":[]}',
+      lifecycleTraits,
+      OFFLINE_INDEXER,
     ),
   ).rejects.toThrow();
-  expect(() => finalizedTransactionPersistenceTrait.deserialize(new Uint8Array([1, 2, 3]))).toThrow();
+  expect(() => finalizedCodec.deserialize(new Uint8Array([1, 2, 3]))).toThrow();
   expect(() =>
     Transaction.deserialize("signature", "pre-proof", "pre-binding", new Uint8Array([1, 2, 3])),
   ).toThrow();

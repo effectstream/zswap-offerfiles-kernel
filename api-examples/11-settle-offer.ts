@@ -12,9 +12,8 @@
 //   OFFER_BLOB=swapoffer1… specific offer to settle; defaults to first open offer
 
 import { config, get, post, header } from "./config.ts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
-import { Transaction } from "@midnightntwrk/ledger-v9";
+import { adoptInWallet, buildWalletAndWaitForFunds, unwrapInWallet } from "@effectstream/midnight-contracts";
+import { type FinalizedTransaction, Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
 globalThis.WebSocket = WebSocket;
@@ -25,7 +24,6 @@ header("Settle Offer");
 
 // ── 1. Midnight config ────────────────────────────────────────────────────────
 const midnightCfg = await get<any>("/v1/midnight/config");
-setNetworkId(midnightCfg.networkId as any);
 
 const networkUrls = {
   id:          midnightCfg.networkId as any,
@@ -64,7 +62,7 @@ const keys = { shieldedSecretKeys: zswapSecretKeys, dustSecretKey };
 console.log("Balancing settlement transaction (proving…)");
 const offerTx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(blob));
 
-const balRecipe = await (wallet as any).balanceFinalizedTransaction(offerTx, keys, {
+const balRecipe = await (wallet as any).balanceFinalizedTransaction(await adoptInWallet(wallet, "Finalized", offerTx), {
   ttl: new Date(Date.now() + 30 * 60_000),
 });
 const settleTx = await wallet.finalizeRecipe(balRecipe);
@@ -73,7 +71,7 @@ const settleTx = await wallet.finalizeRecipe(balRecipe);
 console.log("Submitting settlement transaction to Midnight…");
 await (wallet as any).submitTransaction(settleTx);
 
-const txHash = settleTx.transactionHash?.().toString?.().slice(0, 24) ?? "(tx)";
+const txHash = (await unwrapInWallet<FinalizedTransaction>(wallet, settleTx)).transactionHash().toString().slice(0, 24);
 console.log(`\n✅  Settlement submitted: ${txHash}…`);
 
 // ── 6. Wait for offer to be archived ─────────────────────────────────────────

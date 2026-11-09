@@ -188,7 +188,6 @@ export async function transferShielded(
 ): Promise<void> {
   const recipe = await from.wallet.transferTransaction(
     [{ type: "shielded", outputs: [{ type: color, amount, receiverAddress: toShieldedAddress as any }] }],
-    shieldedKeys(from),
     { ttl: new Date(Date.now() + ttlMs), payFees: true },
   );
   const finalized = await from.wallet.finalizeRecipe(recipe);

@@ -1,7 +1,7 @@
 import path from "node:path";
 
 export const COMPACT_RUNTIME_PACKAGE = "@midnight-ntwrk/compact-runtime";
-export const EXPECTED_COMPACT_RUNTIME_VERSION = "0.19.0";
+export const EXPECTED_COMPACT_RUNTIME_VERSION = "0.21.0";
 export const EXPECTED_COMPACT_RUNTIME_LOCATOR =
   `${COMPACT_RUNTIME_PACKAGE}@${EXPECTED_COMPACT_RUNTIME_VERSION}`;
 

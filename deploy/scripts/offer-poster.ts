@@ -35,7 +35,6 @@
 
 import { createHash } from "node:crypto";
 
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -73,6 +72,8 @@ import {
   type TickDeps,
   type TickWallet,
 } from "./lib/poster-tick.ts";
+import { unwrapInWallet } from "@effectstream/midnight-contracts";
+import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 
 // ---------------------------------------------------------------------------
 // Small shared helpers
@@ -284,13 +285,17 @@ function makeBuilder(walletResult: PinnedWalletResult): TickBuilder {
               ],
             } as never,
           ],
-          shieldedKeys(walletResult),
           // payFees:false — an Offer File is settled by whoever takes it, and
           // the batcher sponsors the Celestia fee.
           { ttl: new Date(Date.now() + args.ttlMs), payFees: false },
         ),
       );
-      const finalized = await walletResult.wallet.finalizeTransaction(recipe.transaction);
+      // The facade returns a sealed wallet handle; nullifier and input
+      // inspection need the ledger transaction it carries.
+      const finalized = await unwrapInWallet<FinalizedTransaction>(
+        walletResult.wallet,
+        await walletResult.wallet.finalizeTransaction(recipe.transaction),
+      );
       const raw = finalized.serialize();
       const blob = OfferFiles.encode(raw);
       return {
@@ -499,7 +504,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     }
     throw err;
   }
-  setNetworkId(cfg.networkId as never);
   if (net.id !== cfg.networkId) {
     warn(
       `MIDNIGHT_NETWORK_ID=${cfg.networkId} but @effectstream/midnight-contracts resolved ` +

@@ -6,7 +6,6 @@
  * per-IP budget applies here (no allowlist off-host), so the book mirror leans
  * on the SSE stream rather than polling.
  */
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import { isSolverEnabled } from "./env.ts";
@@ -27,7 +26,6 @@ if (!isSolverEnabled()) {
 assertNoRetiredSolverPricingEnv();
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 await startWithSignalOwnership((signal) => runSolver({ signal }), {
   onSecondSignal: (signal) => {

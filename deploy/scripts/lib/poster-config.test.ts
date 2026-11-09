@@ -16,6 +16,16 @@ const WANT = "34".repeat(32);
 const parse = (extra: Record<string, string | undefined> = {}) =>
   parsePosterConfig({ POSTER_SEED: SEED, GIVE_TOKEN: GIVE, WANT_TOKEN: WANT, ...extra });
 
+// A placeholder Blockfrost project token: the hosted networks' defaults need one.
+const PROJECT_ID = "preprodTestProjectId0000000000000";
+// A network with no hosted defaults runs only on explicit endpoints.
+const STAGENET_ENDPOINTS = {
+  MIDNIGHT_NETWORK_ID: "stagenet",
+  MIDNIGHT_NODE_HTTP: "https://rpc.stagenet.shielded.tools",
+  MIDNIGHT_INDEXER_HTTP: "https://indexer.stagenet.shielded.tools/api/v4/graphql",
+  MIDNIGHT_INDEXER_WS: "wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws",
+};
+
 describe("explicit externally issued token inventory", () => {
   test("requires both 64-hex token IDs and normalises case/prefix", async () => {
     await expect(parsePosterConfig({ POSTER_SEED: SEED })).rejects.toMatchObject({
@@ -41,9 +51,9 @@ describe("explicit externally issued token inventory", () => {
   });
 
   test("accepts arbitrary valid token IDs without a deployment file", async () => {
-    const cfg = await parse({ MIDNIGHT_NETWORK_ID: "preprod" });
+    const cfg = await parse({ MIDNIGHT_NETWORK_ID: "preprod", MIDNIGHT_BLOCKFROST_PROJECT_ID: PROJECT_ID });
     expect(cfg.networkId).toBe("preprod");
-    expect(cfg.networkUrls.node).toBe("https://rpc.preprod.midnight.network");
+    expect(cfg.networkUrls.node).toBe(`https://rpc.midnight-preprod.blockfrost.io?project_id=${PROJECT_ID}`);
   });
 });
 
@@ -78,15 +88,16 @@ describe("prefunded coin-size filters", () => {
     expect(undeployed.networkUrls.indexer).toContain("127.0.0.1:8088");
     expect(undeployed.networkUrls.node).toBe("http://127.0.0.1:9944");
 
-    const preprod = await parse({ MIDNIGHT_NETWORK_ID: "preprod" });
+    const preprod = await parse({ MIDNIGHT_NETWORK_ID: "preprod", MIDNIGHT_BLOCKFROST_PROJECT_ID: PROJECT_ID });
     expect(preprod.networkUrls.indexer).toBe(
-      "https://indexer.preprod.midnight.network/api/v4/graphql",
+      `https://midnight-preprod.blockfrost.io/api/v0?project_id=${PROJECT_ID}`,
     );
-    expect(preprod.networkUrls.node).toBe("https://rpc.preprod.midnight.network");
+    expect(preprod.networkUrls.node).toBe(`https://rpc.midnight-preprod.blockfrost.io?project_id=${PROJECT_ID}`);
     expect(preprod.networkUrls.proofServer).toBe("http://127.0.0.1:6300");
 
     const explicit = await parse({
       MIDNIGHT_NETWORK_ID: "preprod",
+      MIDNIGHT_BLOCKFROST_PROJECT_ID: PROJECT_ID,
       MIDNIGHT_INDEXER_HTTP: "https://preprod.api-zswap.zkdojo.com/graphql",
       MIDNIGHT_PROOF_SERVER: "http://proof:6300",
     });
@@ -208,26 +219,27 @@ describe("endpoint defaults per network (00050 FR-003)", () => {
     });
   });
 
-  test.each(["preview", "preprod"])("%s keeps the *.<id>.midnight.network defaults", async (id) => {
-    expect((await parse({ MIDNIGHT_NETWORK_ID: id })).networkUrls).toEqual({
+  test.each(["preview", "preprod", "mainnet"])("%s defaults to the Blockfrost hosts with the project token", async (id) => {
+    expect((await parse({ MIDNIGHT_NETWORK_ID: id, MIDNIGHT_BLOCKFROST_PROJECT_ID: PROJECT_ID })).networkUrls).toEqual({
       id,
-      indexer: `https://indexer.${id}.midnight.network/api/v4/graphql`,
-      indexerWS: `wss://indexer.${id}.midnight.network/api/v4/graphql/ws`,
-      node: `https://rpc.${id}.midnight.network`,
+      indexer: `https://midnight-${id}.blockfrost.io/api/v0?project_id=${PROJECT_ID}`,
+      indexerWS: `wss://midnight-${id}.blockfrost.io/api/v0/ws?project_id=${PROJECT_ID}`,
+      node: `https://rpc.midnight-${id}.blockfrost.io?project_id=${PROJECT_ID}`,
       proofServer: "http://127.0.0.1:6300",
     });
   });
 
-  test("stagenet defaults to the Shielded Tools hosts, not *.stagenet.midnight.network", async () => {
-    const cfg = await parse({ MIDNIGHT_NETWORK_ID: "stagenet" });
-    expect(cfg.networkUrls).toEqual({
-      id: "stagenet",
-      indexer: "https://indexer.stagenet.shielded.tools/api/v4/graphql",
-      indexerWS: "wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws",
-      node: "wss://rpc.stagenet.shielded.tools",
-      proofServer: "http://127.0.0.1:6300",
-    });
-    expect(JSON.stringify(cfg.networkUrls)).not.toContain("midnight.network");
+  test.each(["preview", "preprod", "mainnet"])("%s without MIDNIGHT_BLOCKFROST_PROJECT_ID is refused, naming it", async (id) => {
+    const error = await parse({ MIDNIGHT_NETWORK_ID: id }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ConfigError);
+    expect(error).toMatchObject({ code: "MISSING" });
+    expect((error as Error).message).toContain("MIDNIGHT_BLOCKFROST_PROJECT_ID");
+  });
+
+  test("a network with no hosted defaults (stagenet) is refused without explicit endpoints", async () => {
+    const error = await parse({ MIDNIGHT_NETWORK_ID: "stagenet" }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "MISSING" });
+    expect((error as Error).message).toContain("MIDNIGHT_INDEXER_HTTP");
   });
 
   test("explicit endpoint env wins on stagenet too", async () => {
@@ -252,18 +264,18 @@ describe("public dev seeds on stagenet (00050 US1)", () => {
   const DEV = "0".repeat(63) + "1";
 
   test("POSTER_SEED set to a repository dev seed is refused by name on stagenet", async () => {
-    await expect(parse({ MIDNIGHT_NETWORK_ID: "stagenet", POSTER_SEED: DEV })).rejects.toMatchObject({
+    await expect(parse({ ...STAGENET_ENDPOINTS, POSTER_SEED: DEV })).rejects.toMatchObject({
       code: "PUBLIC_DEV_SEED",
       variable: "POSTER_SEED",
     });
     await expect(
-      parse({ MIDNIGHT_NETWORK_ID: "stagenet", POSTER_SEED: `0x${"0".repeat(62)}05` }),
+      parse({ ...STAGENET_ENDPOINTS, POSTER_SEED: `0x${"0".repeat(62)}05` }),
     ).rejects.toMatchObject({ code: "PUBLIC_DEV_SEED" });
   });
 
   test("the refusal message never contains the seed", async () => {
     try {
-      await parse({ MIDNIGHT_NETWORK_ID: "stagenet", POSTER_SEED: DEV });
+      await parse({ ...STAGENET_ENDPOINTS, POSTER_SEED: DEV });
       throw new Error("expected a refusal");
     } catch (error) {
       expect((error as Error).message).toContain("POSTER_SEED is a public dev seed");
@@ -273,14 +285,16 @@ describe("public dev seeds on stagenet (00050 US1)", () => {
 
   test("unchanged elsewhere: the same seed is still accepted on undeployed and preview", async () => {
     expect((await parse({ POSTER_SEED: DEV })).seed).toBe(DEV);
-    expect((await parse({ MIDNIGHT_NETWORK_ID: "preview", POSTER_SEED: DEV })).seed).toBe(DEV);
+    expect(
+      (await parse({ MIDNIGHT_NETWORK_ID: "preview", MIDNIGHT_BLOCKFROST_PROJECT_ID: PROJECT_ID, POSTER_SEED: DEV })).seed,
+    ).toBe(DEV);
   });
 
   test("a real seed and a mnemonic are accepted on stagenet", async () => {
-    expect((await parse({ MIDNIGHT_NETWORK_ID: "stagenet" })).seed).toBe(SEED);
+    expect((await parse(STAGENET_ENDPOINTS)).seed).toBe(SEED);
     const phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     const cfg = await parsePosterConfig({
-      MIDNIGHT_NETWORK_ID: "stagenet",
+      ...STAGENET_ENDPOINTS,
       POSTER_MNEMONIC: phrase,
       GIVE_TOKEN: GIVE,
       WANT_TOKEN: WANT,

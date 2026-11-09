@@ -54,7 +54,7 @@ export function AcceptPanel({
         )
         return
       }
-      const hex = await buildSettlementTxHex(wallet.connected.connectedApi, cfg.networkId, b)
+      const hex = await buildSettlementTxHex(wallet.connected.connectedApi, b)
       setSettleHex(hex)
       setBuildOk(`Built settlement tx (${hex.length / 2} bytes). Review below, then settle via batcher.`)
     } catch (e: any) {

@@ -182,7 +182,6 @@ export function UploadPanel({
       }
       const blobOut = await buildMakerOfferBlob(
         wallet.connected.connectedApi,
-        cfg.networkId,
         [{ kind: giveTok.kind, color: giveColor, amount: gAmt }],
         [{ kind: wantTok.kind, color: wantColor, amount: wAmt }],
       )

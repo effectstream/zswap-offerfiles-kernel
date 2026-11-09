@@ -3,7 +3,6 @@
  * whole-offer combination ladders. Requires MIDNIGHT_NETWORK_ID=undeployed and a running `bun run dev`
  * (node API on ZSWAP_API, Intents socket on SOLVER_RELAY_WS_URL).
  */
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import { isSolverEnabled } from "./env.ts";
@@ -24,7 +23,6 @@ if (!isSolverEnabled()) {
 assertNoRetiredSolverPricingEnv();
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 await startWithSignalOwnership((signal) => runSolver({ signal }), {
   onSecondSignal: (signal) => {

@@ -16,12 +16,11 @@
 //
 //   bun packages/tests/unshielded-swap-e2e.ts
 
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import { MidnightBech32m, UnshieldedAddress } from "@midnightntwrk/wallet-sdk-address-format";
 import pg from "pg";
-import { registerNightForDust } from "@effectstream/midnight-contracts";
+import { registerNightForDust, unwrapInWallet } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 import { requireDistinctTokenColors } from "./lib/prefunded.ts";
@@ -29,7 +28,6 @@ import { buildWallet, shieldedKeys, transferShielded, waitForShielded, waitForSy
 import { describeImbalances, mergeFinalized, nonDustImbalances, settleViaBatcher } from "./lib/batcher.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 const TAG = "[unshielded]";
 const API = "http://127.0.0.1:9999";
@@ -133,10 +131,9 @@ try {
   const r0 = await p0.wallet.initSwap(
     { shielded: { [T0]: AMT } },
     [{ type: "unshielded", outputs: [{ type: U, amount: AMT, receiverAddress: p0UnshieldedAddr }] } as any],
-    shieldedKeys(p0),
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
-  const offer0 = await p0.wallet.finalizeTransaction(r0.transaction);
+  const offer0 = await unwrapInWallet<FinalizedTransaction>(p0.wallet, await p0.wallet.finalizeTransaction(r0.transaction));
 
   // P1 offer: give unshielded U, want shielded T0 — SIGN the unshielded intent.
   console.log(`${TAG} P1 building unshielded-give / shielded-want offer (with explicit unshielded signing)…`);
@@ -145,14 +142,13 @@ try {
     const r1 = await p1.wallet.initSwap(
       { unshielded: { [U]: AMT } } as any,
       [{ type: "shielded", outputs: [{ type: T0, amount: AMT, receiverAddress: p1ShieldedAddr }] } as any],
-      shieldedKeys(p1),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const signed = await (p1.wallet as any).signUnprovenTransaction(
       r1.transaction,
       (data: Uint8Array) => p1.unshieldedKeystore.signDataAsync(data),
     );
-    offer1 = await p1.wallet.finalizeTransaction(signed);
+    offer1 = await unwrapInWallet<FinalizedTransaction>(p1.wallet, await p1.wallet.finalizeTransaction(signed));
     check("P1 unshielded-give offer built + signed", true);
   } catch (e) {
     skip("unshielded-give offer (build/sign)", `${String(e).slice(0, 180)}`);

@@ -20,6 +20,14 @@ import {
 // lives under a path with a space in it.
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+// `@effectstream/midnight-contracts/midnight-env` has no hosted default for
+// stagenet, so a process that loads it on stagenet needs all three URLs.
+const STAGENET_ENDPOINT_ENV: Record<string, string> = {
+  MIDNIGHT_INDEXER_HTTP: "https://indexer.stagenet.shielded.tools/api/v4/graphql",
+  MIDNIGHT_INDEXER_WS: "wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws",
+  MIDNIGHT_NODE_HTTP: "https://rpc.stagenet.shielded.tools",
+};
+
 const complete = (): Record<string, string | undefined> => ({
   MIDNIGHT_NETWORK_ID: "stagenet",
   CELESTIA_START_HEIGHT: "9000000",
@@ -225,7 +233,7 @@ describe("stagenet node profile — load order", () => {
     }
     const result = Bun.spawnSync([process.execPath, "-e", script], {
       cwd: HERE,
-      env: { ...childEnv, ...(complete() as Record<string, string>), CELESTIA_NAMESPACE: "" },
+      env: { ...childEnv, ...(complete() as Record<string, string>), ...STAGENET_ENDPOINT_ENV, CELESTIA_NAMESPACE: "" },
       stdout: "pipe",
       stderr: "pipe",
     });

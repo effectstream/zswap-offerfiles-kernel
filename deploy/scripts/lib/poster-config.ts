@@ -31,9 +31,12 @@
 import { Buffer } from "node:buffer";
 import { mnemonicToSeed } from "@scure/bip39";
 // Endpoint defaults are the SAME function the wallet facade's config comes
-// from, so the poster can never log one endpoint and dial another (00050
-// FR-003). It is pure: it maps a network id to its default URLs.
+// from, so the poster can never log one endpoint and dial another. It is pure:
+// it maps a network id (and a Blockfrost project token) to its default URLs.
 import { defaultMidnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
+// The proof server is always local; `defaultMidnightNetworkConfig` returns this
+// for every network, and it is the fallback when no default was consulted.
+const LOCAL_PROOF_SERVER = "http://127.0.0.1:6300";
 // Relative, like offer-poster.ts's first-party imports: `deploy/` is not a
 // workspace member, so `@zswap-da/*` specifiers do not resolve from here.
 import { isPublicDevSeed } from "../../../packages/offer-guard/public-dev-seeds.ts";
@@ -408,20 +411,46 @@ export async function parsePosterConfig(env: EnvMap): Promise<PosterConfig> {
   // Endpoint defaults come from `@effectstream/midnight-contracts`'
   // `defaultMidnightNetworkConfig`, the function behind the
   // `midnightNetworkConfig` the wallet facade reads: loopback for `undeployed`,
-  // the Shielded Tools hosts for `stagenet`, `*.<id>.midnight.network` for
-  // every other id. Explicit env always wins. The poster resolves them itself
+  // the Blockfrost-hosted indexer and node (with the project token from
+  // MIDNIGHT_BLOCKFROST_PROJECT_ID) for `preview`, `preprod` and `mainnet`,
+  // and none for any other id. Explicit env always wins, and, as in
+  // `midnightNetworkConfig`, the defaults are consulted only while at least
+  // one of the three URLs is left to them, so a network with all three set
+  // needs neither a token nor a known id. The poster resolves the URLs itself
   // as well so the startup log can show them and a mismatch is visible.
   const networkId = readString(env, "MIDNIGHT_NETWORK_ID", "undeployed");
-  const defaults = defaultMidnightNetworkConfig(networkId as never);
+  const explicit = {
+    indexer: readEnv(env, "MIDNIGHT_INDEXER_HTTP"),
+    indexerWS: readEnv(env, "MIDNIGHT_INDEXER_WS"),
+    node: readEnv(env, "MIDNIGHT_NODE_HTTP"),
+  };
+  const needsDefaults =
+    networkId === "undeployed" ||
+    explicit.indexer === undefined ||
+    explicit.indexerWS === undefined ||
+    explicit.node === undefined;
+  let defaults: { indexer: string; indexerWS: string; node: string; proofServer: string } | undefined;
+  if (needsDefaults) {
+    try {
+      defaults = defaultMidnightNetworkConfig(
+        networkId as never,
+        readEnv(env, "MIDNIGHT_BLOCKFROST_PROJECT_ID") ?? "",
+      );
+    } catch (error) {
+      // The upstream message names the variables to set and carries no secret.
+      throw new ConfigError("MISSING", (error as Error).message);
+    }
+  }
   const networkUrls: PosterNetworkUrls = {
     id: networkId,
-    indexer: readString(env, "MIDNIGHT_INDEXER_HTTP", defaults.indexer),
-    indexerWS: readString(env, "MIDNIGHT_INDEXER_WS", defaults.indexerWS),
-    node: readString(env, "MIDNIGHT_NODE_HTTP", defaults.node),
+    indexer: explicit.indexer ?? defaults!.indexer,
+    indexerWS: explicit.indexerWS ?? defaults!.indexerWS,
+    node: explicit.node ?? defaults!.node,
     proofServer:
       readEnv(env, "MIDNIGHT_PROOF_SERVER_URL") ??
       readEnv(env, "MIDNIGHT_PROOF_SERVER") ??
-      defaults.proofServer,
+      defaults?.proofServer ??
+      LOCAL_PROOF_SERVER,
   };
 
   // A repository dev seed is anyone's wallet. On stagenet (a network with

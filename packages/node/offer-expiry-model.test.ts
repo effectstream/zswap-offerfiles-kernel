@@ -511,7 +511,16 @@ describe("T4 — startup: the node's env resolves reference parameters or fails"
 
   test("undeployed and stagenet start (14-day window, 3 h DUST grace)", () => {
     for (const network of ["undeployed", "stagenet"]) {
-      const run = child({ MIDNIGHT_NETWORK_ID: network, OFFER_TTL_SECONDS: "", ROOT_WINDOW_SECONDS: "" });
+      // midnight-env has no hosted default for stagenet: all three URLs are explicit there.
+      const endpoints: Record<string, string> =
+        network === "stagenet"
+          ? {
+              MIDNIGHT_INDEXER_HTTP: "https://indexer.stagenet.shielded.tools/api/v4/graphql",
+              MIDNIGHT_INDEXER_WS: "wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws",
+              MIDNIGHT_NODE_HTTP: "https://rpc.stagenet.shielded.tools",
+            }
+          : {};
+      const run = child({ MIDNIGHT_NETWORK_ID: network, OFFER_TTL_SECONDS: "", ROOT_WINDOW_SECONDS: "", ...endpoints });
       expect({ network, exitCode: run.exitCode, stderr: run.stderr }).toMatchObject({ network, exitCode: 0 });
       const out = JSON.parse(run.stdout.trim().split("\n").pop()!);
       expect(out).toMatchObject({
@@ -525,7 +534,9 @@ describe("T4 — startup: the node's env resolves reference parameters or fails"
   });
 
   test("a network without reference parameters (preview) fails at startup, naming the supported ids", () => {
-    const run = child({ MIDNIGHT_NETWORK_ID: "preview" });
+    // A placeholder Blockfrost token lets midnight-env resolve preview's hosted
+    // defaults, so the failure is the missing reference parameters.
+    const run = child({ MIDNIGHT_NETWORK_ID: "preview", MIDNIGHT_BLOCKFROST_PROJECT_ID: "placeholder-project-id" });
     expect(run.exitCode).not.toBe(0);
     expect(run.stderr).toContain("no reference ledger parameters for MIDNIGHT_NETWORK_ID='preview'");
     expect(run.stderr).toContain("supported: stagenet, undeployed");

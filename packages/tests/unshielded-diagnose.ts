@@ -11,7 +11,6 @@
 //
 //   bun packages/tests/unshielded-diagnose.ts
 
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { UnshieldedAddress } from "@midnightntwrk/wallet-sdk-address-format";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -21,7 +20,6 @@ import { requireDistinctTokenColors } from "./lib/prefunded.ts";
 import { buildWallet, shieldedKeys, transferShielded, waitForShielded, waitForSync } from "./lib/wallet.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as any);
 
 const TAG = "[diag]";
 const FUND = 5_000_000n;
@@ -118,7 +116,6 @@ try {
   const a = await pA.wallet.initSwap(
     { shielded: { [T0]: AMT } },
     [{ type: "shielded", outputs: [{ type: T1, amount: AMT, receiverAddress: pAaddr }] } as any],
-    shieldedKeys(pA),
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   introspect("A) all-shielded  give T0 / want T1   (WORKS baseline)", a.transaction);
@@ -128,7 +125,6 @@ try {
     const b = await pB.wallet.initSwap(
       { shielded: { [T0]: AMT } },
       [{ type: "unshielded", outputs: [{ type: U, amount: AMT, receiverAddress: pBunshielded }] } as any],
-      shieldedKeys(pB),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     introspect("B) cross-kind    give shielded T0 / want UNSHIELDED U", b.transaction);
@@ -141,7 +137,6 @@ try {
     const c0 = await pC.wallet.initSwap(
       { unshielded: { [U]: AMT } } as any,
       [{ type: "shielded", outputs: [{ type: T0, amount: AMT, receiverAddress: pCaddr }] } as any],
-      shieldedKeys(pC),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const cSigned = await (pC.wallet as any).signUnprovenTransaction(

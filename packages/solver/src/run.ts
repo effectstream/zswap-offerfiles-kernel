@@ -46,6 +46,7 @@ import {
   type SyncHandle,
 } from "./book-sync.ts";
 import { Stock } from "./stock.ts";
+import { type SwapFacade, swapJobWalletFromFacade } from "./facade-swap-wallet.ts";
 import {
   SolverOperationJournal,
   type SolverOperationJournalOptions,
@@ -61,6 +62,7 @@ import {
   type SwapJobDependencies,
   type SwapJobExecutorHandle,
   type SwapJobTimers,
+  type SwapJobWallet,
 } from "./swap-job-executor.ts";
 
 export interface SolverWalletDependencies {
@@ -68,13 +70,21 @@ export interface SolverWalletDependencies {
   waitForSync: typeof waitForSync;
   shieldedBalances: typeof shieldedBalances;
   shieldedKeys: typeof shieldedKeys;
+  /** The swap-job executor's view of the built wallet. Defaults to the
+   *  wallet-sdk facade adapter; a wallet double that already speaks the
+   *  executor's contract passes itself through. */
+  swapJobWallet?: (wallet: unknown) => SwapJobWallet;
 }
+
+const facadeSwapJobWallet = (wallet: unknown): SwapJobWallet =>
+  swapJobWalletFromFacade(wallet as SwapFacade);
 
 const DEFAULT_WALLET_DEPENDENCIES: SolverWalletDependencies = {
   buildWallet,
   waitForSync,
   shieldedBalances,
   shieldedKeys,
+  swapJobWallet: facadeSwapJobWallet,
 };
 
 export interface SolverOptions {
@@ -919,7 +929,10 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
     jobExecutor = startSwapJobExecutor({
       cache: activeSync,
       stock,
-      wallet: ownedWallet.wallet as any,
+      // The facade takes and returns sealed wallet handles and holds its own
+      // keys; the adapter gives the executor ledger transactions, as its
+      // journal, merges and imbalance checks expect.
+      wallet: (walletDependencies.swapJobWallet ?? facadeSwapJobWallet)(ownedWallet.wallet),
       journal: operationJournal,
       keys: walletDependencies.shieldedKeys(ownedWallet) as any,
       // FR-001: the same network id `buildWallet` handed the facade, so the

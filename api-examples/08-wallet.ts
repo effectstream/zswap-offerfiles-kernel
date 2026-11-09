@@ -8,7 +8,6 @@
 //   bun run api-examples/08-wallet.ts
 
 import { config, header } from "./config.ts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { get } from "./config.ts";
 
@@ -23,8 +22,6 @@ const midnightCfg = await get<{
   proofServerUri: string;
   networkId: string;
 }>("/v1/midnight/config");
-
-setNetworkId(midnightCfg.networkId as any);
 
 const networkUrls = {
   id:          midnightCfg.networkId as any,

@@ -37,7 +37,10 @@ import {
   OFFER_MAX_BYTES,
   ROOT_WINDOW_SECONDS,
 } from "./env.ts";
-import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
+import {
+  midnightNetworkConfig,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
 import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/solver-core/amount";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getReferenceState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
@@ -742,13 +745,16 @@ export const apiRouter: StartConfigApiRouter = async function (
     },
   );
 
-  // GET /v1/midnight/config — expose public network endpoints for browser
-  // wallets. Offer Files has no application contract address.
+  // GET /v1/midnight/config — expose the network endpoints for browser
+  // wallets. Offer Files has no application contract address. The URLs pass
+  // through redactBlockfrostProjectId: a Blockfrost endpoint carries the
+  // operator's project token in its query string, and this route is public,
+  // so a client sees `project_id=<redacted>` and brings its own token.
   server.get("/v1/midnight/config", async () => {
     return {
-      indexerUri: midnightNetworkConfig.indexer,
-      indexerWsUri: midnightNetworkConfig.indexerWS,
-      proofServerUri: midnightNetworkConfig.proofServer,
+      indexerUri: redactBlockfrostProjectId(midnightNetworkConfig.indexer),
+      indexerWsUri: redactBlockfrostProjectId(midnightNetworkConfig.indexerWS),
+      proofServerUri: redactBlockfrostProjectId(midnightNetworkConfig.proofServer),
       networkId: midnightNetworkConfig.id,
     };
   });
@@ -958,13 +964,13 @@ export const apiRouter: StartConfigApiRouter = async function (
             hint:
               "Lace proved against a Merkle root this node has never synced. " +
               "Usually Lace's indexer URI differs from this node even when networkId matches " +
-              `(node networkId=${MIDNIGHT_NETWORK_ID}, indexer=${midnightNetworkConfig.indexer}). ` +
+              `(node networkId=${MIDNIGHT_NETWORK_ID}, indexer=${redactBlockfrostProjectId(midnightNetworkConfig.indexer)}). ` +
               "Configure Lace for this node's indexer, obtain same-chain inventory, then rebuild the offer. " +
               "Retrying the same blob will not help if the root is foreign.",
             diagnostics: {
               offerRoot: root,
               nodeNetworkId: MIDNIGHT_NETWORK_ID,
-              nodeIndexerUri: midnightNetworkConfig.indexer,
+              nodeIndexerUri: redactBlockfrostProjectId(midnightNetworkConfig.indexer),
               knownRootsTotal: rootsMeta?.total ?? null,
               knownRootsLatestHeight: rootsMeta?.latest_height ?? null,
               midnightTip: tip?.midnight?.tip ?? null,

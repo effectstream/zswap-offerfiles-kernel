@@ -4,16 +4,16 @@
 // The scripts are executed for real with bash, in a scratch copy where
 // `/usr/local/bin/` points at a temp directory and `bun` on PATH is a stub
 // that records every invocation: `bun -e …` (the wait-for.sh readiness probes)
-// succeeds at once, the stagenet preflights exit with $FAKE_PREFLIGHT_EXIT,
+// succeeds at once, the public-network preflights exit with $FAKE_PREFLIGHT_EXIT,
 // the registry import with $FAKE_IMPORT_EXIT, and the final `exec bun run
 // <entry>` is recorded as EXEC. So each case proves, without a chain:
 //   * which entry MIDNIGHT_NETWORK_ID selects, and the exact argv it execs;
 //   * that `undeployed` still runs main.dev.ts / batcher.dev.ts after the same
 //     readiness waits and prints nothing new (T3);
-//   * that the stagenet preflight runs BEFORE the waits and its refusal stops
-//     the script (T1/T2);
-//   * that an unsupported network, a missing variable, or a missing preview
-//     batcher seed exits 78 naming it.
+//   * that the public-network preflight runs BEFORE the waits and its refusal
+//     stops the script, and that no hosted Midnight or Celestia URL is waited
+//     on (or logged) there;
+//   * that an unsupported network or a missing variable exits 78 naming it.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -34,7 +34,7 @@ if [ "$1" = "-e" ]; then echo "BUN -e <probe> \${@: -1}" >> "$FAKE_BUN_LOG"; exi
 echo "BUN $*" >> "$FAKE_BUN_LOG"
 if [ "$1" = "run" ]; then
   case "$2" in
-    packages/node/stagenet-profile.ts) exit "\${FAKE_PREFLIGHT_EXIT:-0}" ;;
+    packages/node/public-network-profile.ts) exit "\${FAKE_PREFLIGHT_EXIT:-0}" ;;
     packages/database/import-token-registry.ts) exit "\${FAKE_IMPORT_EXIT:-0}" ;;
   esac
   for arg in "$@"; do
@@ -122,41 +122,58 @@ describe("entrypoint-kernel.sh selects the node entry from MIDNIGHT_NETWORK_ID",
     expect(run.stderr).toContain("starting kernel on :9999 (network undeployed)");
   });
 
-  test("preview: main.preview.ts", () => {
-    const run = runEntrypoint("entrypoint-kernel.sh", kernelEnv("preview"));
-    expect(run.code, run.stderr).toBe(0);
-    expect(execs(run)).toEqual(["EXEC run packages/node/main.preview.ts"]);
-    expect(run.stderr).toContain("selected packages/node/main.preview.ts for network preview");
+  // What an operator sets on a public network: no Midnight URL (the Blockfrost
+  // defaults apply), a token- or credential-bearing Celestia URL.
+  const publicKernelEnv = (network: string): Record<string, string> => ({
+    MIDNIGHT_NETWORK_ID: network,
+    MIDNIGHT_BLOCKFROST_PROJECT_ID: "entrypointTestToken000000000000",
+    CELESTIA_RPC_URL: "https://user:secret@celestia.example.invalid/path-credential",
+    DB_HOST: "postgres",
+    DB_PORT: "5432",
   });
 
-  test("stagenet: the config preflight runs BEFORE the waits, then main.stagenet.ts (T1)", () => {
-    const run = runEntrypoint("entrypoint-kernel.sh", kernelEnv("stagenet"));
-    expect(run.code, run.stderr).toBe(0);
-    expect(run.calls[0]).toBe("BUN run packages/node/stagenet-profile.ts");
-    expect(probes(run)).toBe(5);
-    expect(execs(run)).toEqual(["EXEC run packages/node/main.stagenet.ts"]);
-    expect(run.stderr).toContain("selected packages/node/main.stagenet.ts for network stagenet");
-  });
+  test.each(["preview", "preprod", "mainnet"])(
+    "%s: the config preflight runs BEFORE the waits, then main.public.ts; only the database is waited on",
+    (network) => {
+      const run = runEntrypoint("entrypoint-kernel.sh", publicKernelEnv(network));
+      expect(run.code, run.stderr).toBe(0);
+      expect(run.calls[0]).toBe("BUN run packages/node/public-network-profile.ts");
+      expect(probes(run)).toBe(1);
+      expect(execs(run)).toEqual(["EXEC run packages/node/main.public.ts"]);
+      expect(run.stderr).toContain(`selected packages/node/main.public.ts for network ${network}`);
+      expect(run.stderr).not.toContain("entrypointTestToken");
+      expect(run.stderr).not.toContain("secret@");
+    },
+  );
 
-  test("stagenet: a preflight refusal (exit 78) stops before any wait or exec (T2)", () => {
-    const run = runEntrypoint("entrypoint-kernel.sh", { ...kernelEnv("stagenet"), FAKE_PREFLIGHT_EXIT: "78" });
+  test("a preflight refusal (exit 78) stops before any wait or exec", () => {
+    const run = runEntrypoint("entrypoint-kernel.sh", { ...publicKernelEnv("preprod"), FAKE_PREFLIGHT_EXIT: "78" });
     expect(run.code).toBe(78);
     expect(probes(run)).toBe(0);
     expect(execs(run)).toEqual([]);
   });
 
-  test.each(["mainnet", "preprod", "devnet"])("%s is refused with exit 78, naming the supported set", (network) => {
+  test.each(["stagenet", "devnet", "qanet"])("%s is refused with exit 78, naming the supported set", (network) => {
     const run = runEntrypoint("entrypoint-kernel.sh", kernelEnv(network));
     expect(run.code).toBe(78);
-    expect(run.stderr).toContain(`no kernel entry for MIDNIGHT_NETWORK_ID='${network}' (supported: undeployed, preview, stagenet)`);
+    expect(run.stderr).toContain(
+      `no kernel entry for MIDNIGHT_NETWORK_ID='${network}' (supported: undeployed, preview, preprod, mainnet)`,
+    );
     expect(run.calls).toEqual([]);
   });
 
   test("a missing required variable exits 78 naming it (unchanged)", () => {
-    const { DB_HOST: _omit, ...vars } = kernelEnv("stagenet");
+    const { DB_HOST: _omit, ...vars } = publicKernelEnv("preprod");
     const run = runEntrypoint("entrypoint-kernel.sh", vars);
     expect(run.code).toBe(78);
     expect(run.stderr).toContain("missing required environment: DB_HOST");
+  });
+
+  test("undeployed still requires its explicit local endpoints", () => {
+    const { MIDNIGHT_NODE_HTTP: _omit, ...vars } = kernelEnv("undeployed");
+    const run = runEntrypoint("entrypoint-kernel.sh", vars);
+    expect(run.code).toBe(78);
+    expect(run.stderr).toContain("missing required environment: MIDNIGHT_NODE_HTTP");
   });
 });
 
@@ -169,35 +186,41 @@ describe("entrypoint-batcher.sh selects the batcher entry from MIDNIGHT_NETWORK_
     expect(run.stderr).not.toContain("selected");
   });
 
-  test("preview requires BATCHER_WALLET_SEED at the shell (no public-seed fallback), then batcher.preview.ts", () => {
-    const refused = runEntrypoint("entrypoint-batcher.sh", batcherEnv("preview"));
-    expect(refused.code).toBe(78);
-    expect(refused.stderr).toContain("missing required environment: BATCHER_WALLET_SEED");
-    expect(refused.calls).toEqual([]);
-    const run = runEntrypoint("entrypoint-batcher.sh", { ...batcherEnv("preview"), BATCHER_WALLET_SEED: "7f".repeat(32) });
-    expect(run.code, run.stderr).toBe(0);
-    expect(execs(run)).toEqual(["EXEC run packages/batcher/batcher.preview.ts"]);
+  const publicBatcherEnv = (network: string): Record<string, string> => ({
+    MIDNIGHT_NETWORK_ID: network,
+    MIDNIGHT_BLOCKFROST_PROJECT_ID: "entrypointTestToken000000000000",
+    MIDNIGHT_PROOF_SERVER_URL: "http://proof-server:6300",
+    CELESTIA_RPC_URL: "https://user:secret@celestia.example.invalid/path-credential",
+    BATCHER_STORAGE_DIR: join(scratch, `batcher-${network}`),
   });
 
-  test("stagenet: `batcher.stagenet.ts --check` BEFORE the waits, then batcher.stagenet.ts (T1)", () => {
-    const run = runEntrypoint("entrypoint-batcher.sh", batcherEnv("stagenet"));
-    expect(run.code, run.stderr).toBe(0);
-    expect(run.calls[0]).toBe("BUN run packages/batcher/batcher.stagenet.ts --check");
-    expect(probes(run)).toBe(4);
-    expect(execs(run)).toEqual(["EXEC run packages/batcher/batcher.stagenet.ts"]);
-  });
+  test.each(["preview", "preprod", "mainnet"])(
+    "%s: `batcher.public.ts --check` BEFORE the waits, then batcher.public.ts; only the proof server is waited on",
+    (network) => {
+      const run = runEntrypoint("entrypoint-batcher.sh", publicBatcherEnv(network));
+      expect(run.code, run.stderr).toBe(0);
+      expect(run.calls[0]).toBe("BUN run packages/batcher/batcher.public.ts --check");
+      expect(probes(run)).toBe(1);
+      expect(run.calls.filter((c) => c.startsWith("BUN -e ")).at(0)).toEndWith("http://proof-server:6300");
+      expect(execs(run)).toEqual(["EXEC run packages/batcher/batcher.public.ts"]);
+      expect(run.stderr).not.toContain("entrypointTestToken");
+      expect(run.stderr).not.toContain("secret@");
+    },
+  );
 
-  test("stagenet: a --check refusal (exit 78) stops before any wait or exec (T2)", () => {
-    const run = runEntrypoint("entrypoint-batcher.sh", { ...batcherEnv("stagenet"), FAKE_PREFLIGHT_EXIT: "78" });
+  test("a --check refusal (exit 78: e.g. no seed, or a dev seed) stops before any wait or exec", () => {
+    const run = runEntrypoint("entrypoint-batcher.sh", { ...publicBatcherEnv("mainnet"), FAKE_PREFLIGHT_EXIT: "78" });
     expect(run.code).toBe(78);
     expect(probes(run)).toBe(0);
     expect(execs(run)).toEqual([]);
   });
 
   test("an unsupported network exits 78", () => {
-    const run = runEntrypoint("entrypoint-batcher.sh", batcherEnv("mainnet"));
+    const run = runEntrypoint("entrypoint-batcher.sh", batcherEnv("stagenet"));
     expect(run.code).toBe(78);
-    expect(run.stderr).toContain("no batcher entry for MIDNIGHT_NETWORK_ID='mainnet'");
+    expect(run.stderr).toContain(
+      "no batcher entry for MIDNIGHT_NETWORK_ID='stagenet' (supported: undeployed, preview, preprod, mainnet)",
+    );
   });
 });
 
@@ -273,12 +296,10 @@ describe("the image ships every entrypoint and every selected entry exists", () 
 
   test.each([
     "packages/node/main.dev.ts",
-    "packages/node/main.preview.ts",
-    "packages/node/main.stagenet.ts",
-    "packages/node/stagenet-profile.ts",
+    "packages/node/main.public.ts",
+    "packages/node/public-network-profile.ts",
     "packages/batcher/batcher.dev.ts",
-    "packages/batcher/batcher.preview.ts",
-    "packages/batcher/batcher.stagenet.ts",
+    "packages/batcher/batcher.public.ts",
     "packages/database/import-token-registry.ts",
   ])("%s exists", (entry) => {
     expect(() => readFileSync(join(REPO_ROOT, entry))).not.toThrow();

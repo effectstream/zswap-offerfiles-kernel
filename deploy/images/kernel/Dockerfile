@@ -13,10 +13,10 @@
 # the container's PID 1 is the real workload and Compose signals reach it.
 #
 #   entrypoint-pglite.sh    the Postgres-wire server the kernel talks to
-#   entrypoint-kernel.sh    exec bun run packages/node/main.<network>.ts (:9999)
-#   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.<network>.ts (:3334)
-#                           (<network> from MIDNIGHT_NETWORK_ID: undeployed → .dev.ts,
-#                           preview, stagenet; anything else exits 78)
+#   entrypoint-kernel.sh    exec bun run packages/node/main.<dev|public>.ts (:9999)
+#   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.<dev|public>.ts (:3334)
+#                           (from MIDNIGHT_NETWORK_ID: undeployed → .dev.ts; preview,
+#                           preprod, mainnet → .public.ts; anything else exits 78)
 #   entrypoint-solver.sh    exec bun run start.solver.ts
 #   entrypoint-solver-frontend.sh  exec bun run start.solver-frontend.ts (:8080)
 #   entrypoint-price-feed.sh  daily CoinGecko refresh of asset_prices

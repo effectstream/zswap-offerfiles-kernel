@@ -47,6 +47,7 @@ import {
   ConfigError,
   configDump,
   parsePosterConfig,
+  redactNetworkUrls,
   type PosterConfig,
 } from "./lib/poster-config.ts";
 import { type Journal, openJournal, JournalError } from "./lib/poster-journal.ts";
@@ -363,7 +364,8 @@ async function startup(cfg: PosterConfig): Promise<Started> {
   const api = new KernelApi(cfg.kernelBase);
 
   info(`kernel      : ${api.base}`);
-  info(`network     : ${cfg.networkId} (indexer ${cfg.networkUrls.indexer})`);
+  // Blockfrost URLs carry the project token: log them redacted.
+  info(`network     : ${cfg.networkId} (indexer ${redactNetworkUrls(cfg.networkUrls).indexer})`);
   if (cfg.giveRange === undefined) {
     info(`give        : ${cfg.giveToken}, exact prefunded coin size ${cfg.giveAmount} base units`);
   } else {

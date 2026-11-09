@@ -393,13 +393,13 @@ batcher_env() { # <network>
                -e BATCHER_STORAGE_DIR=/var/lib/batcher -e MIDNIGHT_PROOF_SERVER_URL=http://proof-server:6300)
 }
 
-# G8a/b — every public network: the node preflight and the batcher --check
-# print the network's constants and the REDACTED Blockfrost endpoints.
-for NET in preview preprod mainnet; do
+# G8a/b — every public network with pinned reference parameters: the node
+# preflight and the batcher --check print the network's constants and the
+# REDACTED Blockfrost endpoints.
+for NET in preview preprod; do
   case "${NET}" in
     preview) ANCHOR=1784214468491; CEL=mocha ;;
     preprod) ANCHOR=1774031004000; CEL=mocha ;;
-    mainnet) ANCHOR=1773843582000; CEL=mainnet ;;
   esac
   node_env "${NET}"; batcher_env "${NET}"
   run_expect_gate "${NET}-node-preflight" 0 \
@@ -416,6 +416,23 @@ for NET in preview preprod mainnet; do
     "${KRUN[@]}" "${BATCHER_ENV[@]}" --entrypoint sh "${KERNEL_IMG}" -c \
       "export BATCHER_WALLET_SEED=${RANDOM_SEED}; exec bun run packages/batcher/batcher.public.ts --check"
 done
+
+# G8a/b mainnet — supported, but its ledger-9 reference parameters are not
+# pinned yet: the node preflight, the node entry, the batcher --check and the
+# batcher entry each exit 78 saying so (not "not supported"), before any
+# network call, with an otherwise complete configuration.
+MAINNET_NOT_PINNED='MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ledger-9 reference parameters are not pinned yet'
+node_env mainnet; batcher_env mainnet
+run_expect_gate mainnet-node-preflight-not-pinned 78 "${MAINNET_NOT_PINNED}" "(1 problem)" "!${GATE_BF_TOKEN}" -- \
+  "${KRUN[@]}" "${NODE_ENV[@]}" --entrypoint bun "${KERNEL_IMG}" run packages/node/public-network-profile.ts
+run_expect_gate mainnet-node-entry-not-pinned 78 "${MAINNET_NOT_PINNED}" "!${GATE_BF_TOKEN}" "!Starting ZSwap DA Node" -- \
+  "${KRUN[@]}" "${NODE_ENV[@]}" --entrypoint bun "${KERNEL_IMG}" run packages/node/main.public.ts
+run_expect_gate mainnet-batcher-check-not-pinned 78 "${MAINNET_NOT_PINNED}" "(1 problem)" "!${GATE_BF_TOKEN}" -- \
+  "${KRUN[@]}" "${BATCHER_ENV[@]}" --entrypoint sh "${KERNEL_IMG}" -c \
+    "export BATCHER_WALLET_SEED=${RANDOM_SEED}; exec bun run packages/batcher/batcher.public.ts --check"
+run_expect_gate mainnet-batcher-entry-not-pinned 78 "${MAINNET_NOT_PINNED}" "!${GATE_BF_TOKEN}" "!starting on" -- \
+  "${KRUN[@]}" "${BATCHER_ENV[@]}" --entrypoint sh "${KERNEL_IMG}" -c \
+    "export BATCHER_WALLET_SEED=${RANDOM_SEED}; exec bun run packages/batcher/batcher.public.ts"
 
 # G8c–f — node refusals by name (exit 78): an unsupported network, a missing
 # start height, no Blockfrost token, a retired Midnight-hosted endpoint.
@@ -501,8 +518,9 @@ run_expect_gate public-poster-boot-offline nonzero \
     -e POSTER_JOURNAL_FILE=/tmp/offer-poster/journal.json -e POSTER_SYNC_TIMEOUT_MS=20000 --entrypoint sh "${KERNEL_IMG}" -c \
     "export POSTER_SEED=${RANDOM_SEED}; exec bun run deploy/scripts/offer-poster.ts"
 
-# G8q/r — token-registry one-shot: undeployed refused; an import that cannot
-# apply fails LOUDLY after its bounded retries (the registry is unreachable).
+# G8q/r/t — token-registry one-shot: undeployed refused; an import that cannot
+# apply fails LOUDLY after its bounded retries (the registry is unreachable);
+# mainnet has no source yet, so it imports nothing and exits 0 without retry.
 run_expect_gate public-token-registry-undeployed 78 "TOKEN_REGISTRY_NETWORK must be" -- \
   "${KRUN[@]}" -e TOKEN_REGISTRY_NETWORK=undeployed -e DB_HOST=127.0.0.1 -e DB_PORT=5432 \
     --entrypoint /usr/local/bin/entrypoint-token-registry.sh "${KERNEL_IMG}"
@@ -510,6 +528,11 @@ run_expect_gate public-token-registry-loud-failure 1 \
   "FAILED (required import did not apply)" "token registry import FAILED after 2 attempt(s)" -- \
   "${KRUN[@]}" -e TOKEN_REGISTRY_NETWORK=preprod -e DB_HOST=127.0.0.1 -e DB_PORT=5432 \
     -e TOKEN_REGISTRY_ATTEMPTS=2 -e TOKEN_REGISTRY_RETRY_DELAY_S=0 -e TOKEN_REGISTRY_TIMEOUT_MS=1000 \
+    --entrypoint sh "${KERNEL_IMG}" -c "${DB_PROBE} sleep 1; exec /usr/local/bin/entrypoint-token-registry.sh"
+run_expect_gate public-token-registry-mainnet-nothing-to-import 0 \
+  "token registry import skipped: nothing to import for mainnet" "!FAILED" -- \
+  "${KRUN[@]}" -e TOKEN_REGISTRY_NETWORK=mainnet -e DB_HOST=127.0.0.1 -e DB_PORT=5432 \
+    -e TOKEN_REGISTRY_ATTEMPTS=2 -e TOKEN_REGISTRY_RETRY_DELAY_S=0 \
     --entrypoint sh "${KERNEL_IMG}" -c "${DB_PROBE} sleep 1; exec /usr/local/bin/entrypoint-token-registry.sh"
 
 # G8s — the entrypoint selection harness passes with the image's own bash/bun

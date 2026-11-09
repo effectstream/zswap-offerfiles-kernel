@@ -30,3 +30,9 @@ so the reference state matches.
 `valid-offer.bech32` is committed — it is a public, intentionally-unbalanced
 open offer for a throwaway devnet coin and contains no secrets. The string
 uses the MIP-0005 HRP `swapoffer` (via `@effectstream/mip-zswap-offer/mip5`).
+
+`valid-offer.ledger8.bech32` is a real proven **ledger-8** (Midnight 1.x)
+offer from a local devnet, the kind ledger-8 kernels posted to the shared
+MIP-0006 namespace. This ledger-9 kernel cannot deserialize it; the node tests
+use it to show such a blob is rejected without stalling the sync. It is public
+and contains no secrets.

@@ -363,6 +363,47 @@ describe("T1 — batcher pre-fee gate and offer-guard (wall-clock tblock)", () =
   });
 });
 
+// ── the shared namespace ──────────────────────────────────────────────────
+//
+// Preview and preprod kernels (and kernels of other networks or of the ledger-8
+// era) post to the same MIP-0006 namespace, so every kernel ingests blobs it
+// can never accept. Each must be rejected and counted, and the next blob of the
+// kernel's own network must still be indexed.
+
+describe("shared namespace: another network's offers and ledger-8 blobs are rejected, the sync goes on", () => {
+  const LEDGER8_OFFER = OfferFiles.decode(
+    readFileSync(join(import.meta.dir, "..", "validator", "fixtures", "valid-offer.ledger8.bech32"), "utf8").trim(),
+  );
+
+  const rejectionCount = async (code: string) =>
+    Number((await client!.query(`SELECT count FROM offer_rejections WHERE code = $1`, [code])).rows[0]?.count ?? 0);
+
+  for (const [label, foreign] of [
+    ["an offer signed for preprod", async () => (await signedUnshieldedOffer(atBlock(2 * HOUR_S), "preprod")).bytes],
+    ["an offer signed for mainnet", async () => (await signedUnshieldedOffer(atBlock(2 * HOUR_S), "mainnet")).bytes],
+    ["a ledger-8 (Midnight 1.x) offer", async () => LEDGER8_OFFER],
+  ] as const) {
+    test(`${label}: rejected, counted, not indexed; the next own-network offer is indexed`, async () => {
+      const bytes = await foreign();
+      const own = await signedUnshieldedOffer(atBlock(2 * HOUR_S));
+      await inRolledBackTransaction(async () => {
+        await seedLiveUtxo(own.spend);
+        const rejected = await ingest(bytes);
+        const code = rejectionCode(rejected);
+        expect(code).not.toBeNull();
+        expect(rejected.events.some((e) => e.type === "offer_indexed")).toBe(false);
+        expect(await offerRow(bytes)).toBeUndefined();
+        expect(await rejectionCount(code!)).toBe(1);
+
+        const accepted = await ingest(own.bytes);
+        expect(rejectionCode(accepted)).toBeNull();
+        expect(accepted.events.some((e) => e.type === "offer_indexed")).toBe(true);
+        expect(await offerRow(own.bytes)).toBeDefined();
+      });
+    });
+  }
+});
+
 // ── T2 / T3 ───────────────────────────────────────────────────────────────
 
 describe("T2/T3 — STM expiry is the earliest real limit; ttl_seconds is per offer", () => {

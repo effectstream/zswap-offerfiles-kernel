@@ -1,9 +1,17 @@
-// Simple, dependency-free confirmation of the on-chain data the liveness checks
-// rely on, run against a public Midnight indexer. No wallet/secrets needed — it
-// only reads public block data + schema introspection.
+// Simple confirmation of the on-chain data the liveness checks rely on, run
+// against a public Midnight indexer and node. No wallet needed — it only reads
+// public block data + schema introspection.
 //
-//   bun packages/validator/scripts/check-preview-indexer.ts            # preview
-//   bun packages/validator/scripts/check-preview-indexer.ts testnet    # other net
+//   bun packages/validator/scripts/check-preview-indexer.ts           # preview
+//   bun packages/validator/scripts/check-preview-indexer.ts preprod   # other net
+//
+// with MIDNIGHT_BLOCKFROST_PROJECT_ID in the environment (never on the
+// command line).
+//
+// The endpoints are effectstream's defaults for the network
+// (`defaultMidnightNetworkConfig`: Blockfrost-hosted, the token in
+// `?project_id=`), each replaced by MIDNIGHT_INDEXER_HTTP / MIDNIGHT_NODE_HTTP
+// when set; every printed URL goes through `redactBlockfrostProjectId`.
 //
 // It confirms: RegularTransaction.raw (full tx) and zswapMerkleTreeRoot exist
 // and are populated; Block.timestamp exists; the spent-set sources
@@ -12,8 +20,18 @@
 // MerkleTreeCollapsedUpdate) — i.e. a validation-capable global ZswapChainState
 // would have to be reconstructed.
 
+import {
+  defaultMidnightNetworkConfig,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
+
 const net = process.argv[2] ?? "preview";
-const URL = `https://indexer.${net}.midnight.network/api/v4/graphql`;
+const needsDefaults = !process.env["MIDNIGHT_INDEXER_HTTP"] || !process.env["MIDNIGHT_NODE_HTTP"];
+const defaults = needsDefaults
+  ? defaultMidnightNetworkConfig(net as never, process.env["MIDNIGHT_BLOCKFROST_PROJECT_ID"] ?? "")
+  : undefined;
+const URL = process.env["MIDNIGHT_INDEXER_HTTP"] || defaults!.indexer;
+const RPC_URL = process.env["MIDNIGHT_NODE_HTTP"] || defaults!.node;
 
 async function gql(query: string, variables?: unknown) {
   const res = await fetch(URL, {
@@ -25,7 +43,7 @@ async function gql(query: string, variables?: unknown) {
 }
 const ok = (b: boolean) => (b ? "✅" : "❌");
 
-console.log(`Indexer: ${URL}\n`);
+console.log(`Indexer: ${redactBlockfrostProjectId(URL)}\n`);
 
 // 1) RegularTransaction schema — the fields we read.
 const rt = await gql(`{ __type(name:"RegularTransaction"){ fields(includeDeprecated:true){ name isDeprecated deprecationReason } } }`);
@@ -63,18 +81,18 @@ console.log(`${ok(utxoFields.includes("createdAtTransaction") && utxoFields.incl
 
 // 5) Node RPC: only root digests, no full-state method.
 try {
-  const rpcUrl = `https://rpc.${net}.midnight.network`;
+  const rpcUrl = RPC_URL;
   const rpc = async (method: string) =>
     (await (await fetch(rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [] }) })).json()) as any;
   const midnightMethods: string[] = ((await rpc("rpc_methods"))?.result?.methods ?? []).filter((m: string) => /midnight/i.test(m));
-  console.log(`\nRPC ${rpcUrl}`);
+  console.log(`\nRPC ${redactBlockfrostProjectId(rpcUrl)}`);
   console.log(`   midnight_* methods: ${midnightMethods.join(", ") || "(none listed)"}`);
   const fullState = midnightMethods.filter((m) => /state/i.test(m) && !/root/i.test(m) && !/contract/i.test(m));
   console.log(`${ok(fullState.length === 0)} no full-state RPC (only root digests + per-contract state)`);
   const root = await rpc("midnight_zswapStateRoot");
   console.log(`${ok(Array.isArray(root?.result))} midnight_zswapStateRoot returns a bare digest (${Array.isArray(root?.result) ? root.result.length + " bytes" : JSON.stringify(root?.error ?? root).slice(0, 60)})`);
 } catch (e) {
-  console.log(`RPC check skipped (${String(e).slice(0, 80)})`);
+  console.log(`RPC check skipped (${redactBlockfrostProjectId(String(e)).slice(0, 80)})`);
 }
 
 // 6) Root-check blocker, demonstrated at runtime: the installed ledger (v8-era note)

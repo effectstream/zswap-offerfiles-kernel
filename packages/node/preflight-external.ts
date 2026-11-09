@@ -14,7 +14,10 @@
 //   MIDNIGHT_NODE_HTTP / MIDNIGHT_INDEXER_HTTP / MIDNIGHT_PROOF_SERVER_URL
 //   CELESTIA_RPC_URL + CELESTIA_AUTH_TOKEN
 
-import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
+import {
+  midnightNetworkConfig,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
 
 const TIMEOUT_MS = 5_000;
 
@@ -24,10 +27,10 @@ async function probe(
 ): Promise<boolean> {
   try {
     const detail = await fn();
-    console.log(`[preflight] OK   ${name}${detail ? ` — ${detail}` : ""}`);
+    console.log(`[preflight] OK   ${name}${detail ? ` — ${redactBlockfrostProjectId(detail)}` : ""}`);
     return true;
   } catch (e) {
-    console.error(`[preflight] FAIL ${name} — ${(e as Error).message}`);
+    console.error(`[preflight] FAIL ${name} — ${redactBlockfrostProjectId(String((e as Error)?.message ?? e))}`);
     return false;
   }
 }
@@ -38,8 +41,11 @@ const withTimeout = (init?: RequestInit): RequestInit => ({
 });
 
 const net = midnightNetworkConfig;
+// Every printed endpoint goes through redactBlockfrostProjectId: a Blockfrost
+// URL carries the project token in its query string.
 console.log(
-  `[preflight] external stack: node=${net.node} indexer=${net.indexer} proofServer=${net.proofServer}`,
+  `[preflight] external stack: node=${redactBlockfrostProjectId(net.node)} ` +
+    `indexer=${redactBlockfrostProjectId(net.indexer)} proofServer=${redactBlockfrostProjectId(net.proofServer)}`,
 );
 
 const results = await Promise.all([

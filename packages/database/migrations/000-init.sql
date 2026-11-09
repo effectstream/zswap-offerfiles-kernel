@@ -120,91 +120,33 @@ CREATE TABLE known_tokens (
 -- registry importer. A name by itself is not provenance: the local demo API
 -- can register any uppercase name, including TWBTC. The importer records the
 -- exact color it last committed and refuses to overwrite a same-name row that
--- neither matches this marker nor the incoming canonical record.
+-- neither matches this marker nor the incoming canonical record. `network` is
+-- one of the public ledger-9 networks (RegistryNetwork in
+-- packages/database/token-registry.ts); a fresh database has no rows here.
 CREATE TABLE canonical_token_registry_state (
     name              TEXT PRIMARY KEY,
     token_color       TEXT UNIQUE NOT NULL,
-    network           TEXT NOT NULL CHECK (network IN ('preview', 'preprod', 'stagenet')),
+    network           TEXT NOT NULL CHECK (network IN ('preview', 'preprod', 'mainnet')),
     registry_revision TEXT NOT NULL,
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Legacy local colours (WBTC, WETH, TESTTOKEN*) are NOT seeded. The six
--- external faucet tokens below ARE seeded from the pinned ready Preprod
--- registry, so a fresh database has canonical defaults even while the faucet
--- service is offline. Source evidence and immutable snapshots live in
--- packages/database/fixtures/.
+-- The only default token is NIGHT, the native token: colour 0x00…00 on every
+-- network, so it is correct on preview, preprod, mainnet and undeployed alike.
+-- **6 decimals**: 1 NIGHT = 10^6 Stars (its base unit) — STARS_PER_NIGHT in
+-- midnight-ledger/ledger/src/structure.rs. `decimals` here means "base units
+-- per PRICED coin", so 0 would price one Star at NIGHT's whole-coin price and
+-- put every quote and sponsorship threshold touching NIGHT off by 10^6.
 --
--- The other two defaults are:
---   NIGHT — the native token, colour 0x00…00 on every network. **6 decimals**:
---           1 NIGHT = 10^6 Stars (its base unit) — STARS_PER_NIGHT in
---           midnight-ledger/ledger/src/structure.rs, confirmed in
---           NIGHT-shielded-vs-unshielded-FINDINGS.md ("1 NIGHT = 10⁶ atomic
---           units (Stars)"). This row was seeded at 0 before PR #54's own
---           follow-up fix: since `decimals` here means "base units per PRICED
---           coin" (not the display decimals of the colour itself), a 0 priced
---           one Star at NIGHT's whole-coin price of ~$0.019 — every quote and
---           sponsorship threshold touching NIGHT (and anything registered to
---           mirror it, e.g. sNight) was off by 10^6.
---   SNIGHT — the shielded-night wrapper (effectstream/shielded-night): NIGHT
---           held as a shielded (Zswap) token, locked 1:1, so one sNight base
---           unit is one Star. It therefore prices off NIGHT's asset
---           (`midnight-3`) with **NIGHT's 6 decimals** — the two rows must
---           carry the same value or a NIGHT <-> sNight offer of equal base
---           units stops being at par under the sponsorship gate.
---
---           Preprod is the canonical default. Patch this row only when an
---           operator deliberately selects another network for this database.
---
---           Unlike native NIGHT, sNight's colour is
---             tokenType(pad(32, "shielded-night:wrapper"), self())
---           i.e. rawTokenType(pad32("shielded-night:wrapper"), <contract
---           address>) with @midnightntwrk/ledger-v9 — so it derives from the
---           contract ADDRESS and differs per network:
---             preview  address 80b89b9a4213c61da84f54b2ea02e2809f9c4dedbdafacd04b38d4667bee1396
---                      colour  793c29c94f72972bfbd861e8e84e55480ccc8e57a7b74067f35a5672c816f99c
---             preprod  address e354e6725893397e6a2dfa44522a017fabb5d9c92efed50288711f5f865c8950
---                      colour  8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819
---             mainnet  not deployed — MAINNET_ADDRESS is empty in the
---                      shielded-night repo's frontend/.env, so there is no
---                      colour to seed yet.
---           This file runs against an EMPTY database exactly once, so an
---           ALREADY-LIVE database is not reached by editing it: patch that one
---           by hand, with
---             UPDATE known_tokens SET token_color = '<colour>' WHERE name = 'SNIGHT';
---           or POST /v1/known-tokens.
---           asset-prices.test.ts re-derives the seeded colour AND the preprod
---           one from the addresses above, so neither the row nor this comment
---           can rot after a contract redeploy.
---
--- Local test helpers must use externally issued same-chain values; none of
--- WBTC/WETH/TESTTOKEN* is a canonical default or added here.
+-- Every other token colour names a contract on one network only, so no other
+-- token is seeded. A network's canonical tokens come from its registry source
+-- (packages/database/import-token-registry.ts, run once per database after the
+-- kernel has started): preview and preprod import a published registry file
+-- only when it is labelled for ledger 9 (`midnight-2.x`); mainnet has no
+-- source yet and lists NIGHT alone. Local test helpers register their own
+-- same-chain colours; none of WBTC/WETH/TESTTOKEN* is a default.
 INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES
-('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 6, 'midnight-3'),
--- preprod sNight — see the SNIGHT note above before selecting another network.
-('8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819', 'SNIGHT','shielded',   6, 'midnight-3'),
--- mint-test-tokens Preprod registry revision
--- ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc
-('b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc', 'TWBTC',   'shielded',   8, 'bitcoin'),
-('087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f', 'TWETH',   'shielded',  18, 'ethereum'),
-('a5c902be8fff1a0c3f10a926b24c3eaa8a93215535915b5af47d2c6a59febab5', 'TWUSDC',  'shielded',   6, 'usd-coin'),
-('931ceb35c81dc57978fea79de042a4a31f7694d012d0d79b351789502fc7b6ee', 'TWUSDM',  'shielded',   6, 'usdm-2'),
-('4ecbf451771bebdc0e9ad7aed27405b7f5dee20121bcf0be5746a4ef22748e9f', 'UTWUSDC', 'unshielded', 6, 'usd-coin'),
-('be3354fbcec9efa8c2d75eb64ab49a7fd2bda9cfa76b3cf6ede47fef63b6878e', 'UTWBTC',  'unshielded', 8, 'bitcoin');
--- ('0000000000000000000000000000000000000000000000000000000000000001', 'SILK', 'shielded'),
--- ('0000000000000000000000000000000000000000000000000000000000000002', 'DUSK', 'shielded')
-
--- Seed importer ownership with the same six rows. This lets an explicit
--- Preview/Stagenet import replace Preprod atomically while refusing unrelated
--- same-name or same-colour records.
-INSERT INTO canonical_token_registry_state
-    (name, token_color, network, registry_revision) VALUES
-('TWBTC',   'b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
-('TWETH',   '087d1d5d35316e7e25a1b069ac302742547d784f46410deb4d20266fd3ea9f1f', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
-('TWUSDC',  'a5c902be8fff1a0c3f10a926b24c3eaa8a93215535915b5af47d2c6a59febab5', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
-('TWUSDM',  '931ceb35c81dc57978fea79de042a4a31f7694d012d0d79b351789502fc7b6ee', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
-('UTWUSDC', '4ecbf451771bebdc0e9ad7aed27405b7f5dee20121bcf0be5746a4ef22748e9f', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc'),
-('UTWBTC',  'be3354fbcec9efa8c2d75eb64ab49a7fd2bda9cfa76b3cf6ede47fef63b6878e', 'preprod', 'ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc');
+('0000000000000000000000000000000000000000000000000000000000000000', 'NIGHT', 'unshielded', 6, 'midnight-3');
 
 -- ── Live offers ───────────────────────────────────────────────────────────
 --

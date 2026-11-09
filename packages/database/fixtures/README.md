@@ -1,19 +1,23 @@
-# Canonical mint-test-tokens registry snapshots
+# Canonical token-registry fixtures
 
-These fixtures pin the public registry documents used to verify database seeds
-and selected-network replacement without requiring network access during tests.
-They were downloaded from `https://mint-test-tokens.pages.dev/metadata.<network>.json`
-on 2026-09-07/08 and are consumed by `token-registry.test.ts`.
+`registry-v2.preprod.synthetic.json` is a **synthetic** registry document in the
+mint-test-tokens registry format (`schemaVersion` 1.0.0), labelled for the
+ledger-9 line: `network.protocolFamily` `midnight-2.x` and
+`compatibility.profile` `v2`, with the stable Midnight 2.x versions (compactc
+0.36.0, compact-runtime 0.21.0, ledger-v9 1.0.0, midnight-js 5.0.0, wallet-sdk
+2.0.0).
 
-| Network | Registry revision | SHA-256 |
+Its contract addresses, token ids, transactions and block hashes are not real:
+each is `sha256("registry-fixture-v2:preprod:<symbol>:<field>")`, so no colour in
+it can be mistaken for a deployed token. On 2026-11-09 no public network had a
+published ledger-9 registry (`metadata.preview.json` and
+`metadata.preprod.json` at `https://mint-test-tokens.pages.dev/` are labelled
+`midnight-1.x` / `v1`, and `metadata.mainnet.json` does not exist), so the
+importer's accept path is tested against this document. The 1.x skip path is
+tested by relabelling it in memory the way the published files are labelled.
+
+| File | Registry revision | SHA-256 |
 |---|---|---|
-| Preprod | `ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc` | `9e0087b1ffd83b5ebf2a11b8690a3b48bd84728dc67d5ddd488b72dbbd544350` |
-| Preview | `c15d38f3a00a319c15ff10e39a2d4926763a4438e7fbb3bfc202bd15aa5a7d28` | `0edf2aaab3c9a7e770d2097809213e5c84304deb4f47710d5f7620ac451c4fc6` |
-| Stagenet | `59041d2fd2acfdad53e437e5a4d2ba88a6f24e4f9e55869b66f465f3da11a0d1` | `973977bc0dbf7eae6afd4b1d92f365326b2b69d257f3597cdaffa9dac34839d0` |
+| `registry-v2.preprod.synthetic.json` | `09cfd670d5670755d49e9162ba268166f78713f75bb518539dcf9165aecd4ce0` | `710a6fce5c8ca13864df4b6d9c4182a209deb6d4a9e9697c485374d0c4af4497` |
 
-The published Preprod document semantically matches
-`metadata/metadata.preprod.json` in
-`effectstream/mint-test-tokens` commit
-`4a6aee1ed50dea17875f28b2d2cf398bfee315fb`. Preprod is the authoritative
-source for `000-init.sql`; Preview and Stagenet are replacement-test inputs and
-must never be substituted for Preprod defaults.
+Consumed by `token-registry.test.ts`.

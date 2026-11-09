@@ -5,6 +5,17 @@ the kernel, batcher, reference relay, solver, and optional offer tools. It does
 not deploy an asset issuer, mint tokens, or register deployment-generated token
 IDs. Asset inventory must already exist on the selected network.
 
+The stack is the local `undeployed` devnet on Midnight 2.x / ledger 9
+(`MIDNIGHT_NETWORK_ID=undeployed`). The kernel image it builds also runs the
+public networks (`preview`, `preprod`, `mainnet`) as separate processes with
+their own env contract (`.env.<network>.example` at the repository root;
+Blockfrost endpoints through `MIDNIGHT_BLOCKFROST_PROJECT_ID`, Celestia mocha or
+mainnet on the MIP-0006 namespace `mn-swap-v1`); this directory deploys none of
+them. A mainnet kernel does not start yet: its ledger-9 reference parameters
+are not pinned. Real funds stay NO-GO. See the repository README, "Running on
+preview, preprod and mainnet". `GATES_ONLY=public ./gates.sh` runs the offline
+public-network gates (G8) against the kernel image.
+
 ## Chain images
 
 The Midnight services run the same binaries as the `@effectstream/npm-midnight-*`
@@ -132,7 +143,7 @@ in an **intent**: an unshielded leg's intent, or a DUST fee intent when
 parameters (`INTENT_TTL_EXPIRED` / `INTENT_TTL_TOO_FAR`).
 
 Both tools build **shielded-only** offers with `payFees: false`. For those,
-wallet-sdk-facade 5.0.0-beta.2 writes no intent, so the knob changes neither the
+wallet-sdk-facade 5.0.0 writes no intent, so the knob changes neither the
 offer bytes nor its expiry: a shielded (zswap) offer has **no TTL**. The kernel
 lists it until its proof root leaves the chain's `past_roots`, root last-seen
 + `ROOT_WINDOW_SECONDS` (14 days on ledger 9). The poster also records the value

@@ -19,34 +19,34 @@ bun install
 bun run dev   # PGLite + Midnight + Celestia + sync + batcher
 ```
 
-Use the compatible branch pairs: `effectstream:v-next` with this kernel's
-`ledger-v9`, and `effectstream:midnight-1` with kernel `main`. Do not mix the
-frontend and kernel protocol branches.
+**Supported domain: Midnight 2.x / ledger 9** on `mainnet`, `preview`,
+`preprod` and the local `undeployed` devnet, on the stable stack
+(`@effectstream/*` 0.300.x, `@midnightntwrk/ledger-v9` 1.0.0, midnight-js 5,
+the ledger9final node / indexer / proof-server builds). Ledger-8 (Midnight 1.x)
+networks, transactions and databases are not supported; the last ledger-8
+state of this repository is `main` @ `3b76604`. The matching example frontend is effectstream's `v-next` branch. **Mainnet does
+not start yet**: its ledger-9 reference parameters are not pinned (see
+[Running on preview, preprod and mainnet](#running-on-preview-preprod-and-mainnet)).
 
 After the database initializes, `start.dev.ts` runs the optional
-`canonical-token-registry` one-shot. It fetches the selected network's six
-canonical token records and applies them in one database transaction. Preprod
-is the default; an explicit `TOKEN_REGISTRY_NETWORK` or `MIDNIGHT_NETWORK_ID`
-selects Preview, Stagenet or local `undeployed` (which skips the public import). A timeout,
-HTTP/metadata error or database rejection logs a skip and the rest of the stack
-continues with the database's existing rows.
+`canonical-token-registry` one-shot. The network is `TOKEN_REGISTRY_NETWORK`,
+else `MIDNIGHT_NETWORK_ID`, else `undeployed`, which has no registry source
+and skips. Preview and preprod import their published `mint-test-tokens` file
+only when it is labelled for ledger 9 (`network.protocolFamily` =
+`midnight-2.x`); a 1.x-labelled or missing file is skipped with one warning
+naming the network and the file, and imports nothing. Mainnet has no token
+source yet: nothing is imported and NIGHT is its only token. A timeout,
+HTTP/metadata error or database rejection logs a skip and the rest of the
+stack continues with the database's existing rows.
 
-A fresh database already contains the six canonical Preprod rows, together
-with NIGHT and Preprod SNIGHT, so this optional request is not required for an
-offline Preprod start. The seed is pinned to public registry revision
-`ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc`
-from `effectstream/mint-test-tokens` source commit
-`4a6aee1ed50dea17875f28b2d2cf398bfee315fb`. The complete source document and
-checksum are recorded in `packages/database/fixtures/`.
+A fresh database lists **NIGHT only**. Every other token comes from the
+network's registry import or from `POST /v1/known-tokens`.
 
 The one-shot runs only in orchestration, after migrations. It does not add a
 server import endpoint or refresh job. A successful run upserts only the six
 canonical names; unrelated tokens, offer history and manual prices retain their
-existing colors. Editing `000-init.sql` affects only a fresh database, while the
-one-shot updates an existing operator-selected database to Preview, Preprod or
-Stagenet without resetting it. If that request fails, the existing database is
-left exactly as it was; it is not reset to the SQL defaults. This repository
-contains no faucet contract or local mint fallback.
+existing colors. If the import fails, the existing database is left exactly as
+it was. This repository contains no faucet contract or local mint fallback.
 
 - API: http://localhost:9999
 - API playground: `bun run docs:dev` → http://localhost:10601/docs/ (or build + http://localhost:9999/docs)
@@ -91,23 +91,22 @@ Fresh local chains require a separately provisioned same-chain fixture.
 
 ## Environments
 
-| Layer | Dev (`bun run dev`) | Mainnet (`bun run start:mainnet`) |
+| Layer | Dev (`bun run dev`, `MIDNIGHT_NETWORK_ID=undeployed`) | Public networks (`MIDNIGHT_NETWORK_ID=preview` \| `preprod` \| `mainnet`) |
 |-------|---------------------|------------------------------------|
-| DA | Local Celestia devnet (`packages/contracts-celestia`) | Celestia mainnet beta via local light node |
-| Privacy chain | Local Midnight devnet (`packages/midnight-infra`) | Midnight (the `@effectstream/midnight-contracts` resolved networkId) |
-| Database | PGLite (in-memory) | PGLite (in-memory) |
-| Node entry | `packages/node/main.dev.ts` | `packages/node/main.mainnet.ts` |
-| Batcher entry | `packages/batcher/batcher.dev.ts` | `packages/batcher/batcher.mainnet.ts` |
-| Orchestrator | `start.dev.ts` | `start.mainnet.ts` |
-| COW solver | **separate process** — `bun run start:solver` (or `packages/solver/solver.dev.ts`) | **separate process** — `bun run start:solver` (or `packages/solver/solver.mainnet.ts`) |
+| DA | Local Celestia devnet (`packages/contracts-celestia`) | Celestia **mocha** (preview, preprod) or Celestia **mainnet** (mainnet), on the MIP-0006 shared namespace `mn-swap-v1` (`6d6e2d737761702d7631`) |
+| Privacy chain | Local Midnight devnet (`packages/midnight-infra`, ledger9final binaries) | Midnight preview / preprod / mainnet through the Blockfrost-hosted indexer and node (`MIDNIGHT_BLOCKFROST_PROJECT_ID`) |
+| Database | PGLite (in-memory) | Your Postgres (`PGLITE=false`), empty on first start |
+| Node entry | `packages/node/main.dev.ts` | `packages/node/main.public.ts` (`bun run start:public`) |
+| Batcher entry | `packages/batcher/batcher.dev.ts` | `packages/batcher/batcher.public.ts` (`bun run start:batcher:public`) |
+| Orchestrator | `start.dev.ts` | none: one process per service (the kernel image, or systemd units) |
+| COW solver | **separate process** — `bun run start:solver` (or `packages/solver/solver.dev.ts`) | **separate process** — `bun run start:solver` (or `packages/solver/solver.{preview,mainnet}.ts`) |
 | Price feed | **separate process, optional** — `bun run --filter @zswap-da/price-feed start` (or `… once` for a single refresh) | same, plus the `price-feed` compose service (`--profile prices`) |
 
-**Stagenet** runs from the kernel image rather than an orchestrator — see
-[Running against stagenet](#running-against-stagenet).
+The public networks are described in
+[Running on preview, preprod and mainnet](#running-on-preview-preprod-and-mainnet).
 
-**Neither orchestrator launches the solver.** `start.dev.ts` and `start.mainnet.ts`
-bring up chain, database, node and batcher only; see
-[Running the COW solver](#running-the-cow-solver).
+**`start.dev.ts` does not launch the solver.** It brings up chain, database,
+node and batcher only; see [Running the COW solver](#running-the-cow-solver).
 
 **The price feed is optional.** `start.dev.ts` registers it only when
 `COINGECKO_API_KEY` is set, and never as a system-dependency, because
@@ -136,18 +135,15 @@ Tokens without an explicit asset ID map to assets **by normalized name** —
 Token colors are opaque, network-specific external IDs, so the name map is only
 a fallback for manually registered rows. `known_tokens.asset_id` overrides it;
 canonical `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and `UTWBTC` records
-carry explicit asset IDs and are seeded from the pinned Preprod registry on a
-fresh database. `PRICE_FEED_MAP`
+carry explicit asset IDs when the network's registry import writes them. `PRICE_FEED_MAP`
 (`NAME_OR_COLOR=<asset_id>[:decimals],…`) overrides the defaults.
 
 `SNIGHT` is the [shielded-night](https://github.com/effectstream/shielded-night)
 wrapper — NIGHT held as a shielded (Zswap) token, locked 1:1, so it prices off
-`midnight-3` like NIGHT and is seeded with NIGHT's `decimals`. It is the one seeded
-token whose colour depends on the network, because it derives from the contract
-address: `000-init.sql` seeds **Preprod** (`8fac382b…6819`) as the default and
-documents Preview beside it. Deploying to another network means patching that
-row before the database is created — or updating an already-live database
-deliberately, since `000-init.sql` only ever runs against an empty database.
+`midnight-3` like NIGHT. It is **not seeded**: its colour derives from the
+wrapper contract's address and differs per network. Register it with NIGHT's
+`decimals` (6) where a deployment exists; the name maps it to `midnight-3`
+without an asset id.
 
 `decimals` here always means **base units per priced coin** — a token's asset
 price is divided by `10^decimals` to get the per-base-unit price this API
@@ -194,7 +190,7 @@ opt-in compose service in `deploy/`.
 | `SPONSOR_DISCOUNT_BPS` | `250` | How far below reference an offer must be priced to earn fee sponsorship. Published in `/v1/prices.sponsor_discount` |
 | `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PW` / `DB_NAME` | `127.0.0.1` / `5432` / `postgres` / `postgres` / `postgres` | Database used by the feed and optional token-registry import |
 | `TOKEN_REGISTRY_BASE_URL` | `https://mint-test-tokens.pages.dev/` | Base URL for the optional orchestrator-owned metadata import |
-| `TOKEN_REGISTRY_NETWORK` | explicit `MIDNIGHT_NETWORK_ID`, otherwise `preprod` | Registry selected after initialization: `preprod`, `preview`, `stagenet`, or local `undeployed` (skip) |
+| `TOKEN_REGISTRY_NETWORK` | explicit `MIDNIGHT_NETWORK_ID`, otherwise `undeployed` (skip) | Registry selected after initialization: `preview`, `preprod` (each imports only a `midnight-2.x`-labelled file), `mainnet` (no source yet: NIGHT only), or local `undeployed` (skip) |
 | `TOKEN_REGISTRY_TIMEOUT_MS` | `5000` | Fetch, DB connection and DB statement bound; maximum 30000 ms |
 
 ### Fee sponsorship
@@ -237,7 +233,8 @@ settles relay-dispatched swap jobs from its own wallet.
 bun run start:solver          # the one documented deployment entrypoint
 ```
 
-`bun run start:mainnet` deliberately does **not** start it. Trading must be an
+No backend entry (`start.dev.ts`, `main.public.ts`, the kernel image's
+kernel and batcher) starts it. Trading must be an
 explicit act: folding the solver into the backend command would let an operator
 who only wanted an indexer end up with a wallet-spending process attached to a
 relay. The per-network entrypoints (`packages/solver/solver.{dev,preview,mainnet}.ts`)
@@ -251,7 +248,7 @@ is missing or malformed values exits non-zero listing **every** problem at once
 
 | Variable | Why it is mandatory |
 |---|---|
-| `MIDNIGHT_NETWORK_ID` | The SDK silently defaults to `undeployed`; a deployment must declare its network. An unknown value is refused rather than turned into generated `https://rpc.<typo>.midnight.network` URLs. |
+| `MIDNIGHT_NETWORK_ID` | The SDK silently defaults to `undeployed`; a deployment must declare its network. An unknown value is refused. |
 | `ZSWAP_API` | Kernel Offer Files REST/SSE base. Otherwise defaults to `http://127.0.0.1:9999`, a developer default. |
 | `SOLVER_RELAY_WS_URL` | Outbound Midnight Intents solver socket (`ws://`/`wss://`, no embedded credentials). |
 | `SOLVER_RELAY_HTTP_URL` | The relay's public HTTP base for durable `GET /jobs/:jobId` recovery. Never derived from the websocket URL — deployed prefixes differ (for example `/api/v1`). |
@@ -438,79 +435,127 @@ transaction, the relay reports `submit-failed`, and the solver's contribution is
 reverted), not a loss of funds. The startup banner prints the effective model and
 its coverage.
 
-## Running against stagenet
+## Running on preview, preprod and mainnet
 
-The `ledger-v9` line runs the kernel image's API node, batcher and offer
-poster on Midnight **stagenet**, plus a one-shot that imports the stagenet
-token registry into the kernel database. This repository does not deploy
-it: there is no compose file and no database service for stagenet. You run
-the containers, the proof server and the Postgres.
+The public networks run the kernel's API node, batcher and offer poster as
+separate processes (the kernel image's entrypoints, or one systemd unit per
+program), plus a one-shot that imports the network's token registry into the
+kernel database. This repository does not deploy them: there is no compose
+file and no database service for a public network. You run the processes, a
+proof server (9.0.1) and the Postgres.
 
-The env contract is [`.env.stagenet.example`](.env.stagenet.example), one
-file for all four services; every variable is tagged with the services that
-read it, and secrets are left empty. A test
-(`deploy/scripts/lib/stagenet-env-contract.test.ts`) fails if a stagenet
-service starts reading a variable that the file does not list. Check a
-filled-in copy with:
+Every network runs **Midnight 2.x / ledger 9**. `MIDNIGHT_NETWORK_ID` selects
+the network; the supported ids are `undeployed`, `preview`, `preprod` and
+`mainnet`. Any other id is refused at startup naming those four.
+
+> **Mainnet does not start yet.** Its ledger-9 reference parameters are not
+> pinned in `packages/validator/reference-parameters.ts` (they exist only on
+> the live chain; the node runtime API `MidnightRuntimeApi_get_ledger_parameters`
+> returns them at a block hash). Until a snapshot with its block hash, height,
+> date and sha256 is added, the node, the batcher and `check-env.ts` refuse
+> `MIDNIGHT_NETWORK_ID=mainnet` with exit 78:
+> `MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ledger-9 reference parameters are not pinned yet …`.
+> The mainnet profile below (endpoints, Celestia, seeds) is complete and
+> checked; only the parameters are missing.
+
+The env contract is one file per network, for all four services:
+[`.env.preview.example`](.env.preview.example),
+[`.env.preprod.example`](.env.preprod.example) and
+[`.env.mainnet.example`](.env.mainnet.example). Every variable is tagged with
+the services that read it, and secrets are left empty. Check a filled-in copy
+with:
 
 ```bash
-cp .env.stagenet.example .env   # fill in the secrets, never commit it
+cp .env.preprod.example .env   # fill in the secrets, never commit it
 bun check-env.ts                # static checks plus a live Celestia probe
 ```
 
-### Stagenet constants
+### Per-network contract
 
-| What | Value | Source |
-|------|-------|--------|
-| Midnight node | `2.0.0-d9729c13` (ledger 9.1 rc.3, `dust/9` keys) | `system_version` |
-| RPC / indexer | `https://rpc.stagenet.shielded.tools`, `https://indexer.stagenet.shielded.tools/api/v4/graphql` (`wss://…/api/v4/graphql/ws`) | `@effectstream/midnight-contracts` stagenet profile |
-| NTP anchor | `1786638294000` = stagenet block 1, 2026-08-13T16:24:54Z | chain |
-| NTP block time | `600000` ms, preview's | `packages/node/env.ts` |
-| Celestia | **mocha**, on the MIP-0006 shared namespace `6d6e2d737761702d7631` (`mn-swap-v1`), **not overridden** | owner decision (00050 Q1) |
-| Root window | `1209600` s (14 days) | ledger 9 prunes zswap roots by the `global_ttl` ledger parameter; stagenet's is 1209600 (midnight-node `d9729c13` `res/stagenet/ledger-parameters-config.json`, and the live parameters). Shielded offers carry no TTL: they expire when their root leaves this window |
-| Offer validator parameters | stagenet `LedgerParameters` at indexer block 637,700 (`global_ttl` 1209600 s, so intent TTLs up to 14 days are accepted) | pinned in `packages/validator/reference-parameters.ts` (00056); an unknown `MIDNIGHT_NETWORK_ID` fails at startup |
-| Token registry | `mint-test-tokens` `metadata.stagenet.json`, revision `59041d2f…`: shielded TWBTC (8), TWETH (18), TWUSDC (6), TWUSDM (6); unshielded UTWUSDC (6), UTWBTC (8) | vendored fixture `packages/database/fixtures/mint-test-tokens.stagenet.json` |
+| What | preview | preprod | mainnet |
+|------|---------|---------|---------|
+| Midnight endpoints (defaults) | `https://midnight-preview.blockfrost.io/api/v0` (WS `…/api/v0/ws`), `https://rpc.midnight-preview.blockfrost.io` | `https://midnight-preprod.blockfrost.io/api/v0` (WS `…/api/v0/ws`), `https://rpc.midnight-preprod.blockfrost.io` | `https://midnight-mainnet.blockfrost.io/api/v0` (WS `…/api/v0/ws`), `https://rpc.midnight-mainnet.blockfrost.io` |
+| Token | `MIDNIGHT_BLOCKFROST_PROJECT_ID` (the network's own Blockfrost project) | same | same |
+| NTP anchor (default) | `1784214468491` = block 1, 2026-07-16T15:07:48.491Z | `1774031004000` = block 1, 2026-03-20T18:23:24Z | `1773843582000` = block 1, 2026-03-18T14:19:42Z |
+| Celestia | **mocha** | **mocha** | **Celestia mainnet** |
+| Celestia namespace | MIP-0006 shared namespace `mn-swap-v1` = `6d6e2d737761702d7631` (leave `CELESTIA_NAMESPACE` unset) | same | same |
+| Root window | `1209600` s (14 days) = the ledger-9 `global_ttl` | same | same |
+| Offer validator parameters | pinned: indexer block 40,171 (2026-11-09), sha256 `a6e7a319…` | pinned: indexer block 3,352,707 (2026-11-09), sha256 `2d96bd99…` | **not pinned yet**: the kernel does not start |
+| Token registry | `mint-test-tokens` `metadata.preview.json`, imported only when labelled `midnight-2.x` | `metadata.preprod.json`, same rule | no source yet: NIGHT only |
 
-Several networks share the MIP-0006 namespace. A stagenet kernel ingests
-their blobs too and drops them in validation: the offer's proof root is
-unknown to its own chain, or its proofs fail against the stagenet network
-id. Rejected blobs are scrubbed and counted in `offer_rejections`.
+- **Endpoints.** The defaults are effectstream's `defaultMidnightNetworkConfig`
+  (`@effectstream/midnight-contracts` 0.300.2): the Blockfrost-hosted indexer
+  and node, each with `?project_id=<MIDNIGHT_BLOCKFROST_PROJECT_ID>`. Without
+  the token every service refuses to start, naming the variable.
+  `MIDNIGHT_INDEXER_HTTP`, `MIDNIGHT_INDEXER_WS` and `MIDNIGHT_NODE_HTTP` stay
+  available as full overrides (all three set means no token is needed). The
+  Midnight-hosted preprod and mainnet hosts (`indexer.<net>.midnight.network`,
+  `rpc.<net>.midnight.network`) were retired on 2026-10-09: an override that
+  names one is refused at startup, naming `MIDNIGHT_BLOCKFROST_PROJECT_ID`.
+- **Wrong-network token.** Blockfrost project tokens are per network. A token
+  of another network gets HTTP 403 `Network token mismatch`; the node and the
+  batcher probe the indexer once at startup and stop (exit 78) naming
+  `MIDNIGHT_BLOCKFROST_PROJECT_ID` instead of retrying forever.
+- **Redaction.** Every endpoint the kernel logs or serves (startup lines, the
+  configuration preflights, `/v1/health`, `GET /v1/midnight/config`, error
+  messages) goes through effectstream's `redactBlockfrostProjectId` and shows
+  `project_id=<redacted>`. Browser clients that read `GET /v1/midnight/config`
+  bring their own Blockfrost token.
+- **The shared namespace.** Preview and preprod kernels share
+  `mn-swap-v1` on mocha. Each kernel ingests the other networks' blobs (and
+  any ledger-8 era blob) and drops them in validation: the offer's proof root
+  is unknown to its own chain, or its proofs fail against its network id.
+  Rejected blobs are scrubbed and counted in `offer_rejections`; the sync does
+  not stall.
+- **Validator parameters.** The offer validator checks offers with
+  `Transaction.wellFormed` against a reference state that carries the
+  network's real ledger-9 `LedgerParameters`, pinned per network with sha256
+  and provenance in `packages/validator/reference-parameters.ts` (`undeployed`,
+  `preview`, `preprod`). Each has `global_ttl` 1,209,600 s, so intent TTLs up
+  to 14 days are accepted, and a DUST grace period of 10,800 s. A network
+  without a pinned snapshot fails at startup; it never validates against
+  blank one-hour defaults.
 
 ### Services
 
-Every service below is selected by `MIDNIGHT_NETWORK_ID=stagenet`. The image
-entrypoints pick the entry from that variable: `undeployed` → the `*.dev.ts`
-entries (unchanged), `preview`, `stagenet`; any other value exits 78. The
-kernel and batcher run a network-free configuration preflight before their
+The image entrypoints pick the entry from `MIDNIGHT_NETWORK_ID`:
+`undeployed` → the `*.dev.ts` entries (unchanged), `preview` / `preprod` /
+`mainnet` → the public-network entries; any other value exits 78. The kernel
+and the batcher run a network-free configuration preflight before their
 readiness waits. Every service refuses a missing required variable, or a
-repository dev seed, with exit 78 and names it.
+repository dev seed, with exit 78 and names it, listing every problem at once.
 
 | Service | Image entrypoint → entry | Required | Secrets |
 |---------|--------------------------|----------|---------|
-| Kernel (sync node + API, `:9999`) | `entrypoint-kernel.sh` → `packages/node/main.stagenet.ts` | `MIDNIGHT_NODE_HTTP`, `MIDNIGHT_INDEXER_HTTP`, `MIDNIGHT_INDEXER_WS`, `MIDNIGHT_PROOF_SERVER_URL`, `CELESTIA_RPC_URL`, `CELESTIA_START_HEIGHT`, Celestia auth, `DB_HOST`, `DB_PORT` (+ `DB_USER`, `DB_NAME`, `PGLITE=false`), `BATCHER_SUBMIT_URL` | `CELESTIA_AUTH_TOKEN`, `DB_PW` |
-| Batcher (`:3334`) | `entrypoint-batcher.sh` → `packages/batcher/batcher.stagenet.ts` | the four `MIDNIGHT_*` endpoints, `CELESTIA_RPC_URL`, Celestia auth, `BATCHER_WALLET_SEED`, `BATCHER_STORAGE_DIR` (+ `BATCHER_NODE_API_URL`) | `BATCHER_WALLET_SEED`, `CELESTIA_AUTH_TOKEN` |
-| Offer poster | `entrypoint-offer-poster.sh` → `deploy/scripts/offer-poster.ts` | `ZSWAP_API`, `GIVE_TOKEN`, `WANT_TOKEN`, `POSTER_SEED` or `POSTER_MNEMONIC`, `MIDNIGHT_PROOF_SERVER_URL` (endpoints default to stagenet's) | `POSTER_SEED` / `POSTER_MNEMONIC` |
-| Token registry (one-shot) | `entrypoint-token-registry.sh` → `import-token-registry.ts --required` | `TOKEN_REGISTRY_NETWORK=stagenet`, `DB_HOST`, `DB_PORT` (+ `ZSWAP_API` to wait for the kernel) | `DB_PW` |
+| Kernel (sync node + API, `:9999`) | `entrypoint-kernel.sh` → `packages/node/main.public.ts` (preflight `packages/node/public-network-profile.ts`) | `MIDNIGHT_BLOCKFROST_PROJECT_ID` (or the three endpoint overrides), `CELESTIA_RPC_URL`, `CELESTIA_START_HEIGHT`, Celestia auth, `DB_HOST`, `DB_PORT` (+ `DB_USER`, `DB_NAME`, `PGLITE=false`), `BATCHER_SUBMIT_URL` | `MIDNIGHT_BLOCKFROST_PROJECT_ID`, `CELESTIA_AUTH_TOKEN`, `DB_PW` |
+| Batcher (`:3334`) | `entrypoint-batcher.sh` → `packages/batcher/batcher.public.ts` (preflight `--check`) | `MIDNIGHT_BLOCKFROST_PROJECT_ID` (or the overrides), `MIDNIGHT_PROOF_SERVER_URL`, `CELESTIA_RPC_URL`, Celestia auth, `BATCHER_WALLET_SEED`, `BATCHER_STORAGE_DIR` (absolute, on a volume) (+ `BATCHER_NODE_API_URL`) | `MIDNIGHT_BLOCKFROST_PROJECT_ID`, `BATCHER_WALLET_SEED`, `CELESTIA_AUTH_TOKEN` |
+| Offer poster | `entrypoint-offer-poster.sh` → `deploy/scripts/offer-poster.ts` | `ZSWAP_API`, `GIVE_TOKEN`, `WANT_TOKEN`, `POSTER_SEED` or `POSTER_MNEMONIC`, `MIDNIGHT_PROOF_SERVER_URL`, `MIDNIGHT_BLOCKFROST_PROJECT_ID` (endpoints default as above) | `POSTER_SEED` / `POSTER_MNEMONIC`, `MIDNIGHT_BLOCKFROST_PROJECT_ID` |
+| Token registry (one-shot) | `entrypoint-token-registry.sh` → `import-token-registry.ts --required` | `TOKEN_REGISTRY_NETWORK` (`preview`, `preprod` or `mainnet`), `DB_HOST`, `DB_PORT` (+ `ZSWAP_API` to wait for the kernel) | `DB_PW` |
 
 - **Celestia auth** means `CELESTIA_AUTH_TOKEN`, the RPC bearer token. If the
-  RPC URL embeds its own credential, as preview's QuickNode URL does, set
+  RPC URL embeds its own credential (the QuickNode pattern), set
   `CELESTIA_AUTH_IN_URL=true` instead. The logs show only the URL's origin.
-- **Without the image**, from a checkout: `bun run start:stagenet` (node),
-  `bun run --filter @zswap-da/batcher start:stagenet`, and the preflights
-  `bun run packages/node/stagenet-profile.ts` and
-  `bun run packages/batcher/batcher.stagenet.ts --check`.
+- **Dev seeds.** The wallet seeds committed in this repository (`…01`,
+  `…02`, `…03`, `…21`, `…31`, `…32`, and any 32-byte seed whose first 31 bytes
+  are zero) are accepted only on `undeployed`. On every public network the
+  poster, the batcher and `check-env.ts` refuse them by name, and the batcher
+  has no fallback seed: an unset `BATCHER_WALLET_SEED` is a startup error.
+- **Without the image**, from a checkout: `bun run start:public` (node),
+  `bun run start:batcher:public` (batcher), and the preflights
+  `bun run packages/node/public-network-profile.ts` and
+  `bun run packages/batcher/batcher.public.ts --check`.
 - **The batcher's DUST-state cache** lives in
   `${BATCHER_STORAGE_DIR}/dust-state`. Put `BATCHER_STORAGE_DIR` on a volume,
   so a restart resumes the DUST sync instead of rescanning.
 
 ### Start heights: pin them
 
-- `CELESTIA_START_HEIGHT` is **required**; there is no fallback to 1. Use
-  the mocha height at, or a little before, the first stagenet offer you
-  care about. For a fresh deployment with no history, that is the current
-  head (`header.NetworkHead` on your mocha RPC).
+- `CELESTIA_START_HEIGHT` is **required**; there is no fallback to 1. Use the
+  Celestia height (mocha, or Celestia mainnet for mainnet) at, or a little
+  before, the first offer you care about. For a fresh deployment with no
+  history, that is the current head (`header.NetworkHead` on your RPC).
 - `MIDNIGHT_START_BLOCK` defaults to 1, which matches the NTP anchor, so the
-  node indexes stagenet from genesis on its first start.
+  node indexes the network from genesis on its first start.
 - The runtime snapshots these start values and the NTP anchor on the first
   boot. A later change is refused unless `USE_DB_STARTHEIGHT` is set, and
   then the database's snapshot wins. Choose the start heights once.
@@ -520,41 +565,46 @@ repository dev seed, with exit 78 and names it.
 The kernel talks to Postgres through `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PW`
 and `DB_NAME`. **Set `PGLITE=false`.** The runtime defaults `PGLITE` to
 true, which means single-connection PGlite mode and never sending `DB_PW`;
-the stagenet node logs a warning while it is unset. The kernel applies its
-own migrations when it processes its first block, and a fresh database
-comes up with the **Preprod** token rows and Preprod SNIGHT. The next step
-replaces them. This repository's tests and CI run on PGlite; no gate here
-exercises a real Postgres.
+the public node logs a warning while it is unset. **Start on an empty
+database**: data written by a ledger-8 kernel does not deserialize under
+ledger 9, and no migration is offered. The kernel applies its own migrations
+when it processes its first block, and a fresh database lists NIGHT only.
+This repository's tests and CI run on PGlite; no gate here exercises a real
+Postgres.
 
 ### Token registry
 
-Run the `entrypoint-token-registry.sh` one-shot once, after the kernel's
-first start, with `TOKEN_REGISTRY_NETWORK=stagenet`. It replaces the six
-seeded Preprod rows with the stagenet tokens listed above, and it removes
-the Preprod SNIGHT (stagenet has no shielded-night deployment), all in one
-transaction. It retries while a fresh database has no schema yet. It then
-**fails loudly** (exit 1) rather than skipping. Re-running it is idempotent.
+Run the `entrypoint-token-registry.sh` one-shot once per database, after the
+kernel's first start, with `TOKEN_REGISTRY_NETWORK=<network>`:
 
-Extra tokens, such as project 00053's stk tokens, are registered with
-`POST /v1/known-tokens`, which works on stagenet exactly as on a devnet.
-The route is off unless `ENABLE_TOKEN_REGISTRY=true`, and it has **no
-authentication**. Enable it only if you accept that, or insert the rows in
-your Postgres instead.
+- `preview` / `preprod`: it imports the network's published `mint-test-tokens`
+  file when the file is labelled for ledger 9 (`midnight-2.x`, profile `v2`),
+  in one transaction. A 1.x-labelled or missing file is skipped with one
+  warning naming the network and the file, and nothing is imported.
+- `mainnet`: there is no source yet (a token API is planned); nothing is
+  imported and NIGHT stays the only token.
+
+The one-shot exits 0 when the import applied or when there is nothing to
+import, and 1 (loudly) after its retries when a source exists but cannot be
+read or applied. It retries while a fresh database has no schema yet.
+Re-running it is idempotent.
+
+Extra tokens are registered with `POST /v1/known-tokens`. The route is off
+unless `ENABLE_TOKEN_REGISTRY=true`, and it has **no authentication**. Enable
+it only if you accept that, or insert the rows in your Postgres instead.
 
 ### Funding runbook
 
-The stagenet faucet has a CAPTCHA, so every step below is done by hand.
+Every step below is done by hand; none of it is automated here.
 
 1. **Batcher DUST.** Send NIGHT to the unshielded address of
    `BATCHER_WALLET_SEED`, then register it for DUST **with the batcher
    stopped**, because only one wallet facade may run per seed. The existing
-   provision script does it, reading the seed from `SOLVER_SEED`:
+   provision script does it, reading the seed from `SOLVER_SEED` (the
+   Blockfrost token comes from the environment, never the command line):
 
    ```bash
-   MIDNIGHT_NETWORK_ID=stagenet \
-   MIDNIGHT_NODE_HTTP=https://rpc.stagenet.shielded.tools \
-   MIDNIGHT_INDEXER_HTTP=https://indexer.stagenet.shielded.tools/api/v4/graphql \
-   MIDNIGHT_INDEXER_WS=wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws \
+   MIDNIGHT_NETWORK_ID=preprod \
    MIDNIGHT_PROOF_SERVER_URL=http://127.0.0.1:6300 \
    SOLVER_SEED="$BATCHER_WALLET_SEED" SOLVER_PROVISION_RECEIPT=/tmp/batcher-dust.json \
    bun run deploy/scripts/provision-solver-fees.ts
@@ -564,26 +614,41 @@ The stagenet faucet has a CAPTCHA, so every step below is done by hand.
    usable. Each registered NIGHT UTXO is one concurrent fee slot. The default
    off `undeployed` is `BATCHER_MAX_SLOTS_PER_WALLET=1`; split the NIGHT into
    several UTXOs before raising it.
-2. **Celestia signer.** Fund the mocha account behind `CELESTIA_RPC_URL` /
-   `CELESTIA_AUTH_TOKEN` with testnet TIA from the mocha faucet. On a light
-   node, `state.AccountAddress` prints the address. The batcher pays one blob
-   fee per sponsored offer.
+2. **Celestia signer.** Fund the account behind `CELESTIA_RPC_URL` /
+   `CELESTIA_AUTH_TOKEN` with TIA (testnet TIA from the mocha faucet for
+   preview and preprod). On a light node, `state.AccountAddress` prints the
+   address. The batcher pays one blob fee per sponsored offer.
 3. **Poster coins.** Send the poster's shielded address coins of `GIVE_TOKEN`
-   in the configured size (`GIVE_AMOUNT`, or `GIVE_MIN`..`GIVE_MAX`), minted on
-   the stagenet faucet. The address is printed at startup, and `DRY_RUN=true`
-   prints it without posting. The poster pays no fees: the batcher sponsors
-   them.
+   in the configured size (`GIVE_AMOUNT`, or `GIVE_MIN`..`GIVE_MAX`). The
+   address is printed at startup, and `DRY_RUN=true` prints it without
+   posting. The poster pays no fees: the batcher sponsors them.
+
+### Real funds: NO-GO
+
+The mainnet profile ships, but **real funds stay NO-GO** on this line. The
+owner's 2026-08-21 conditional GO covered only the audited solver sha
+`381022d`; the solver has changed since (the ledger-9 port included), so real
+funds stay NO-GO until a re-audit and a new owner decision. The mainnet
+profile is proven read-only only (offline profile tests and refusals; a
+mainnet kernel does not start until its reference parameters are pinned). The
+solver's own guard stays: on mainnet it runs dry-run by default, and live
+settlement additionally requires `SOLVER_MAINNET_LIVE_TRADING_ACK=true`.
 
 ### Not covered here
 
-- No live stagenet test runs in this repository's gates. The profile is
-  proven offline (configuration preflights and refusals) and end to end on
+- No live public-network test runs in this repository's gates. The profiles
+  are proven offline (configuration preflights and refusals) and end to end on
   `undeployed`.
-- The COW solver does not support stagenet.
 
 ## Mainnet environment
 
-Mainnet uses a locally-running Celestia light node — start it yourself before launching the template:
+The mainnet profile is the public-network contract above with Celestia
+mainnet; [`.env.mainnet.example`](.env.mainnet.example) is the complete
+template. **A mainnet kernel does not start yet** (its ledger-9 reference
+parameters are not pinned), and **real funds stay NO-GO** (see
+[Real funds: NO-GO](#real-funds-no-go)).
+
+The Celestia RPC can be a light node you run yourself:
 
 ```bash
 celestia light init --p2p.network celestia
@@ -595,15 +660,17 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 
 | Env var | Required | Purpose |
 |---------|----------|---------|
-| `CELESTIA_NETWORK` | yes | Must be `mainnet`. |
-| `CELESTIA_RPC_URL` | yes | Light node JSON-RPC, default `http://127.0.0.1:26658`. |
-| `CELESTIA_AUTH_TOKEN` | yes | Admin JWT from `celestia light auth admin`. |
-| `CELESTIA_NAMESPACE` | recommended | 10-byte hex (padded to 28). Default `000000000000deadbeef`. |
-| `CELESTIA_START_HEIGHT` | optional | Pin Celestia sync start. Defaults to current chain head. |
+| `MIDNIGHT_NETWORK_ID` | yes | `mainnet`. |
+| `MIDNIGHT_BLOCKFROST_PROJECT_ID` | yes (secret) | The mainnet Blockfrost project token; the default endpoints are `https://midnight-mainnet.blockfrost.io/api/v0` and `https://rpc.midnight-mainnet.blockfrost.io`. Not needed only when `MIDNIGHT_INDEXER_HTTP`, `MIDNIGHT_INDEXER_WS` and `MIDNIGHT_NODE_HTTP` are all set; an override on the retired `*.mainnet.midnight.network` hosts is refused. |
+| `CELESTIA_NETWORK` | default | `mainnet` (the default on mainnet; any other value is refused). |
+| `CELESTIA_RPC_URL` | yes | Celestia mainnet JSON-RPC (no loopback default). |
+| `CELESTIA_AUTH_TOKEN` | yes (secret) | RPC bearer, e.g. the admin JWT from `celestia light auth admin`; or `CELESTIA_AUTH_IN_URL=true` when the URL carries the credential. |
+| `CELESTIA_NAMESPACE` | leave unset | The MIP-0006 shared namespace `mn-swap-v1` (`6d6e2d737761702d7631`) is the default; an override is warned about because kernels on the shared namespace will not see those offers. |
+| `CELESTIA_START_HEIGHT` | yes | The Celestia mainnet height to start reading offers at; no fallback, frozen after the first boot. |
 | `CELESTIA_GAS_PRICE`, `CELESTIA_MAX_GAS_PRICE`, `CELESTIA_TX_PRIORITY`, `CELESTIA_GAS` | optional | Tx-config knobs that skip on-chain estimator calls (avoid rate-limit 429s). |
 | `CELESTIA_POLLING_INTERVAL_MS` | optional | Sync cadence. Defaults: devnet 6 000 ms, mainnet 30 000 ms. |
-| `MIDNIGHT_START_BLOCK` | yes | Numeric block height to start Midnight sync from. |
-| `NTP_START_TIME` | optional | NTP reference timestamp; resumed from DB when unset. |
+| `MIDNIGHT_START_BLOCK` | default | `1`, which matches the NTP anchor; the nullifier set must be complete. |
+| `NTP_START_TIME` | default | `1773843582000`, mainnet block 1 (2026-03-18T14:19:42Z); an override is warned about. |
 | `API_RATE_LIMIT_MAX`, `API_RATE_LIMIT_ALLOWLIST` | optional | Per-client-IP budget for `/v1/*` per minute (default 600; `/v1/health*` exempt) and comma-separated IPs exempt from it. Size it for a solver plus its console on one address (~450/min worst case); `deploy/` sets 6000. |
 | `BATCHER_SUBMIT_TIMEOUT_MS` | optional | Absolute batcher fetch + receipt-body deadline; default 310 000 ms, bounded to 1 000–600 000 ms. |
 | `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
@@ -622,7 +689,7 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `SOLVER_ADMISSION_WARNING_INTERVAL_MS` | optional | Startup/periodic warning cadence for every UNSET admission group; positive safe integer, default 900000. |
 | `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | Mainnet defaults to dry-run, which now requires and syncs the real funded wallet and loads read-only Stock while starting no relay jobs. Live settlement additionally requires the exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
 
-A complete dev → mainnet env template lives at `.env.mainnet.example`.
+A complete mainnet env template lives at `.env.mainnet.example`.
 
 > **BREAKING DEPLOYMENT REQUIREMENT (RF1/RF2):** relay job execution now requires
 > both a durable `SOLVER_JOURNAL_PATH` and an explicit
@@ -724,7 +791,7 @@ inventory and set the token-color variables used by each case:
 `E2E_UNSHIELDED_TOKEN_0/1`, and `E2E_ROOT_GIVE_TOKEN/E2E_ROOT_ADVANCE_TOKEN`.
 A freshly reset local chain has no such issuer, so this live gate cannot pass
 until an external same-chain fixture has funded it. The public faucet supports
-Preview, Preprod and Stagenet; it does not fund the local `undeployed` chain.
+Preview and Preprod; it does not fund the local `undeployed` chain.
 
 The runner boots the undeployed stack (PGLite `:5432`, Midnight
 node/indexer/proof-server, Celestia, sync `:9999`, batcher `:3334`) via
@@ -774,7 +841,6 @@ and skipping safely when the offer comes out give-only.
 ```
 zswap-offerfile-kernel/
 ├── start.dev.ts                              # Local orchestrator config (no solver)
-├── start.mainnet.ts                          # Mainnet orchestrator (+ light-node pre-flight; no solver)
 ├── start.solver.ts                           # COW solver component (bun run start:solver)
 ├── packages/
 │   ├── node/                                 # @zswap-da/node
@@ -798,15 +864,15 @@ monorepo at
 
 | Package | Files |
 |---------|-------|
-| `node/` | `main.{dev,mainnet}.ts`, `config.{dev,mainnet}.ts`, `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `prices.ts` (price resolution + `GET /v1/prices`), `docs.ts` (`GET /docs` serves Vite playground dist), `batcher-client.ts`, `event-bus.ts` |
+| `node/` | `main.{dev,public}.ts`, `config.{dev,preview}.ts` (the public entry's env-driven config), `public-network-profile.ts` (public-network checks + preflight), `env.ts` (env-derived constants), `grammar.ts`, `state-machine.ts`, `api.ts`, `prices.ts` (price resolution + `GET /v1/prices`), `docs.ts` (`GET /docs` serves Vite playground dist), `batcher-client.ts`, `event-bus.ts` |
 | `database/` | `mod.ts` (re-exports), `migration-order.ts`, `migrations/000-init.sql` (THE schema — one file applied from zero; there is no numbered chain, and the 001/002 files this table used to list are gone), `migrations/local-migration.sql` (local-only additions), `price-map.ts` (token NAME → reference asset, per-base-unit conversion), `sql/queries.sql` (+ generated `queries.queries.ts`), `sql/queries.app.ts` |
-| `validator/` | `validate.ts` (pipeline), `derive.ts`, `refstate.ts`, `types.ts`, `README.md`, `scripts/check-preview-indexer.ts` |
-| `batcher/` | `batcher.{dev,mainnet}.ts`, `config.ts`, `midnight-balancing.ts`, `celestia.ts` (`ZswapCelestiaAdapter.validateInput` — pre-fee offer gate) |
+| `validator/` | `validate.ts` (pipeline), `derive.ts`, `refstate.ts`, `reference-parameters.ts` (pinned ledger-9 parameters per network), `types.ts`, `README.md`, `scripts/check-preview-indexer.ts` |
+| `batcher/` | `batcher.{dev,public}.ts`, `public-network.ts` (public-network checks), `config.ts`, `midnight-balancing.ts`, `celestia.ts` (`ZswapCelestiaAdapter.validateInput` — pre-fee offer gate) |
 | `midnight-infra/` | `package.json` (Midnight node, indexer and proof-server process scripts) |
 | `contracts-celestia/` | `package.json` (`celestia-{node,bridge,fund}:*` scripts), `fund-bridge.ts` |
 | `solver/` | `solver.{dev,preview,mainnet}.ts` (per-network entrypoints), `env.ts`, `src/launch.ts` (the `start:solver` configuration contract), `src/run.ts` (`runSolver`), `src/book-sync.ts`, `src/ladder-source.ts`, `src/relay-client.ts`, `src/swap-job-executor.ts`, `src/stock.ts`, `src/operation-journal.ts` |
 | `solver-core/` | `api-client.ts` (kernel REST/SSE + exact files), `ladder-derivation.ts`, `admission-policy.ts` (one typed policy for publication and admission), `relay-ws-contract.ts`, `receipt-client.ts`, `batcher.ts`, `wallet.ts` |
-| `offer-guard/` | `mod.ts` (offer hash, guard ladder, dedup store), `sponsorship.ts` (`evaluateSponsorship()` — the ONE fee-sponsorship rule, shared by the quote, the node pre-check and the batcher) |
+| `offer-guard/` | `mod.ts` (offer hash, guard ladder, dedup store), `public-networks.ts` (supported networks, endpoint / dev-seed / reference-parameter rules, log redaction), `sponsorship.ts` (`evaluateSponsorship()` — the ONE fee-sponsorship rule, shared by the quote, the node pre-check and the batcher) |
 | `price-feed/` | `price-feed.{dev,preview,mainnet}.ts`, `src/config.ts`, `src/coingecko.ts` (one asset per request, key as a header), `src/cycle.ts` (spacing, 429 stop, status row), `src/run.ts` (`--once` vs loop, retry ladder, exit codes) |
 | `tests/` | `run-tests.ts`, `start.test.ts` (test orchestrator), `helpers.ts`, `lib/db.ts`, `infra/{celestia,midnight}-ready.test.ts`, `stm/{zswap-flow,api,multi-token,unshielded-only,root-unknown}.test.ts` |
 

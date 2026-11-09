@@ -1,5 +1,19 @@
 # ledger-v9 migration — audit, and where it is blocked
 
+> **Current state (2026-11-09).** This repository supports **Midnight 2.x /
+> ledger 9 only**, on `mainnet`, `preview`, `preprod` and the local
+> `undeployed` devnet, on the stable stack: `@effectstream/*` 0.300.2,
+> `@midnightntwrk/ledger-v9` 1.0.0, `onchain-runtime-v4` 4.0.0, midnight-js
+> 5.0.0, wallet-sdk 2.0.0, compact-runtime 0.21.0 / compactc 0.36.0, and the
+> ledger9final chain images (node `2.1.0-806ff70-ledger9final`, indexer
+> `v4.4.0-rc.6-ledger9final`, proof-server 9.0.1). Ledger-8 networks,
+> transactions and databases are not supported; the last ledger-8 state of
+> `main` is `3b76604`. A mainnet kernel does not start yet (its ledger-9
+> reference parameters are not pinned), and real funds stay NO-GO. The
+> current env contract and runbook are in README.md ("Running on preview,
+> preprod and mainnet"); the last section below records the move to that
+> state. Everything above it is history.
+
 > **Historical migration record.** The ledger-v9 SDK and runtime pins remain,
 > but this repository no longer ships, compiles or deploys the OfferFiles demo
 > faucet contract. Contract sources, generated artifacts and mint APIs described
@@ -293,7 +307,8 @@ solver port stacked on it, PR #50) are folded into one branch, `ledger-v9`,
 with `main` merged in. Everything `main` gained after the branches forked at
 `feat/cow-solver` @ `381022d` — the token price service (#54–#56), the offer
 poster and its deployment (#57, #60), the solver status listener and console
-(#58, #59), sNight seeding (#61) — was written against the ledger-v8 line and
+(#58, #59), sNight seeding (#61; no longer seeded since 2026-11-09: a fresh
+database lists NIGHT only) — was written against the ledger-v8 line and
 is ported here rather than merged as-is:
 
 * **Root manifest.** The wallet-sdk set `main` added for the offer poster
@@ -337,3 +352,50 @@ Not re-verified here: the Midnight Intents reference relay (`deploy/relay`,
 built from the reference checkout at `061f4d3`) was never run against a 2.x
 chain from this stack; the ledger-v9 demo stack (`acedward/midnight-2-offers`)
 runs the solver in OBSERVATION mode without it.
+
+---
+
+## Stable stack and network profiles (2026-11-09)
+
+This supersedes the release-candidate pins above (ledger-v9 1.0.0-rc.3,
+midnight-js 5.0.0-beta.6, the wallet-sdk betas, node `2.0.0-rc.4`, indexer
+`v4.4.0-rc.3`, proof-server `9.0.0-rc.5`, compactc 0.33/0.34).
+
+* **`main` merged in** at `3b76604` (content-neutral: the conflicting files
+  were ledger-8 twins of changes this line already had).
+* **Stable stack.** `@effectstream/*` 0.300.2, `@effectstream/mip-zswap-offer`
+  0.4.0, `@midnightntwrk/ledger-v9` 1.0.0 and `onchain-runtime-v4` 4.0.0 (both
+  pinned in root `overrides`: a second ledger-v9 copy means two WASM instances
+  and `expected instance of LedgerParameters`), midnight-js 5.0.0, wallet-sdk
+  2.0.0, compact-runtime 0.21.0, compactc 0.36.0. `scripts/check-midnight-stack.ts`
+  fails CI on a second ledger-v9 / onchain-runtime copy, on any `ledger-v8` a
+  workspace manifest lists directly, on `@effectstream/*` 0.10x / 0.200.x and
+  on any Midnight rc or beta. The SDK itself still carries one
+  `ledger-v8@8.1.3` for its ledger-8 handlers; the guard allows exactly that
+  transitive copy.
+* **Network id.** `midnight-js-network-id` and every `setNetworkId` call are
+  gone: `@effectstream/midnight-contracts` 0.300.2 carries the network id in
+  the wallet and provider configuration.
+* **Chain images.** node `2.1.0-806ff70-ledger9final`, indexer
+  `v4.4.0-rc.6-ledger9final` (config on the rc.6 schema, `cache_max_nodes`)
+  and proof-server 9.0.1 from effectstream/binaries 0.3.120, sha256-pinned for
+  both linux arches (`deploy/README.md`). Builds that carry the
+  release-candidate ledger crates reject the stable client's state-writing
+  calls (Custom error 104).
+* **Networks.** One public-network entry pair (`main.public.ts`,
+  `batcher.public.ts`) serves `preview`, `preprod` and `mainnet`, selected by
+  `MIDNIGHT_NETWORK_ID`; the stagenet profile, the per-network preview entries
+  and the Celestia-mainnet orchestrator mode (`start:mainnet`) were removed.
+  Endpoints default to Blockfrost (`MIDNIGHT_BLOCKFROST_PROJECT_ID`), the
+  retired `indexer./rpc.<preprod|mainnet>.midnight.network` hosts are refused,
+  every logged or served endpoint is redacted, repository dev seeds are refused
+  off `undeployed`, and Celestia defaults to mocha (preview, preprod) or
+  Celestia mainnet on the MIP-0006 namespace `mn-swap-v1`.
+* **Reference parameters.** Pinned ledger-9 `LedgerParameters` for
+  `undeployed` (the ledger9final genesis; same bytes as the rc.4 pin),
+  `preview` and `preprod`; `global_ttl` 1,209,600 s and DUST grace 10,800 s on
+  each. Mainnet's are not pinned yet, so a mainnet kernel stops at startup
+  saying so.
+* **Token registry.** Registry networks `preview`, `preprod`, `mainnet`;
+  imports accept only `midnight-2.x` documents; mainnet has no source; the
+  schema seeds NIGHT only.

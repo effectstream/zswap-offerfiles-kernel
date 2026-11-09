@@ -13,6 +13,13 @@ settle via the batcher's `midnight-balancer` target, and connect a wallet to
 inspect balances or open the external faucet (`VITE_FAUCET_URL`, default
 `https://mint-test-tokens.pages.dev/`; default network `preprod`).
 
+**Supported domain: Midnight 2.x / ledger 9** on `mainnet`, `preview`,
+`preprod` and the local `undeployed` devnet. Any other `MIDNIGHT_NETWORK_ID` is
+refused at startup naming those four. **A mainnet kernel does not start yet**:
+its ledger-9 reference parameters are not pinned (README, "Running on preview,
+preprod and mainnet"). Real funds stay NO-GO on this line (README, "Real
+funds: NO-GO").
+
 **Repository validation scope.** There are two strict, no-emit TypeScript gates,
 and `bun run typecheck` runs both.
 
@@ -38,23 +45,26 @@ not transitive assumptions.
 
 ## Environments
 
-Three configurations ship out of the box. All endpoints and env-var names are identical across environments; only the values differ.
+Four networks are supported. All endpoints and env-var names are identical across environments; only the values differ. Preview, preprod and mainnet share one entry pair (`main.public.ts`, `batcher.public.ts`) and one env-driven config (`config.preview.ts`); the per-network values below are their defaults.
 
-| | **Undeployed (local dev)** | **Preview** | **Mainnet** |
-|---|---|---|---|
-| `MIDNIGHT_NETWORK_ID` | `undeployed` | `preview` | `mainnet` |
-| `CELESTIA_NETWORK` | `devnet` | `mocha` | `mainnet` |
-| `CELESTIA_RPC_URL` | `http://127.0.0.1:26658` | QuickNode Mocha-4 URL | QuickNode / self-hosted |
-| `CELESTIA_POLLING_INTERVAL_MS` | `6000` | `3000` | `30000` |
-| `CELESTIA_START_HEIGHT` | `1` | `10620000` ¹ | set to your deployment block |
-| `MIDNIGHT_START_BLOCK` | `1` | `1` | set to your deployment block |
-| `OFFER_TTL_SECONDS` | fallback only; default = root window (14 days) ² | fallback only; default = root window (14 days) ² | fallback only; default = root window (14 days) ² |
-| Node API port | `9999` | `9999` | `9999` |
-| Batcher port | `3334` | `3334` | `3334` |
-| Config file | `config.dev.ts` | `config.preview.ts` | `config.mainnet.ts` |
+| | **Undeployed (local dev)** | **Preview** | **Preprod** | **Mainnet** |
+|---|---|---|---|---|
+| `MIDNIGHT_NETWORK_ID` | `undeployed` | `preview` | `preprod` | `mainnet` |
+| Midnight endpoints | local node / indexer | Blockfrost `midnight-preview` (`MIDNIGHT_BLOCKFROST_PROJECT_ID`) | Blockfrost `midnight-preprod` (`MIDNIGHT_BLOCKFROST_PROJECT_ID`) | Blockfrost `midnight-mainnet` (`MIDNIGHT_BLOCKFROST_PROJECT_ID`) |
+| `CELESTIA_NETWORK` | `devnet` | `mocha` | `mocha` | `mainnet` |
+| `CELESTIA_NAMESPACE` | MIP-0006 `mn-swap-v1` (`6d6e2d737761702d7631`) | same | same | same |
+| `CELESTIA_RPC_URL` | `http://127.0.0.1:26658` | required (mocha) | required (mocha) | required (Celestia mainnet) |
+| `CELESTIA_POLLING_INTERVAL_MS` | `6000` | `3000` | `3000` | `30000` |
+| `CELESTIA_START_HEIGHT` | `1` | required, pinned | required, pinned | required, pinned |
+| `NTP_START_TIME` (default) | `1774400742000` | `1784214468491` (block 1) | `1774031004000` (block 1) | `1773843582000` (block 1) |
+| `MIDNIGHT_START_BLOCK` | `1` | `1` | `1` | `1` |
+| Reference ledger parameters | pinned | pinned | pinned | **not pinned yet: does not start** |
+| `OFFER_TTL_SECONDS` | fallback only; default = root window (14 days) ¹ | same ¹ | same ¹ | same ¹ |
+| Node API port | `9999` | `9999` | `9999` | `9999` |
+| Batcher port | `3334` | `3334` | `3334` | `3334` |
+| Node entry | `main.dev.ts` | `main.public.ts` | `main.public.ts` | `main.public.ts` |
 
-¹ Mocha-4 block equivalent to Midnight Preview genesis (2026-03-25T01:05:42 UTC).  
-² The root window is the ledger's `global_ttl`: 1,209,600 s (14 days) on every network. Ledger 9 keeps past zswap Merkle roots for exactly `global_ttl`, which is static (changing it is a hard fork). **Offer expiry follows the ledger** (see "Offer expiry" under `GET /v1/offers`): shielded (zswap) inputs carry **no TTL** and expire when their proof root leaves the window; intents (unshielded legs, fee intents) carry a **mandatory TTL**, which the ledger accepts while `tblock ≤ ttl ≤ tblock + global_ttl`. `OFFER_TTL_SECONDS` no longer caps offers: it is only the fallback for an offer with no root and no intent (no well-formed two-sided offer is in that case), and setting it logs a startup warning. Celestia mocha prunes blobs after about 7 days, so a kernel that syncs from scratch cannot re-read offers older than that, although they stay fillable on chain for 14 days (see README, "Celestia data retention").
+¹ The root window is the ledger's `global_ttl`: 1,209,600 s (14 days) on every network. Ledger 9 keeps past zswap Merkle roots for exactly `global_ttl`, which changes only through a governance parameter update. **Offer expiry follows the ledger** (see "Offer expiry" under `GET /v1/offers`): shielded (zswap) inputs carry **no TTL** and expire when their proof root leaves the window; intents (unshielded legs, fee intents) carry a **mandatory TTL**, which the ledger accepts while `tblock ≤ ttl ≤ tblock + global_ttl`. `OFFER_TTL_SECONDS` no longer caps offers: it is only the fallback for an offer with no root and no intent (no well-formed two-sided offer is in that case), and setting it logs a startup warning. Celestia mocha prunes blobs after about 7 days, so a kernel that syncs from scratch cannot re-read offers older than that, although they stay fillable on chain for 14 days (see README, "Celestia data retention").
 
 ### Environment variables (complete reference)
 
@@ -66,19 +76,26 @@ CELESTIA_NAMESPACE=6d6e2d737761702d7631   # 10-byte namespace id suffix (hex, no
                                         # Default = the MIP-0006 SHARED namespace
                                         # ("mn-swap-v1"): one namespace = one liquidity
                                         # pool. Override only for isolated dev/e2e.
-CELESTIA_AUTH_TOKEN=                    # bearer token; leave empty for QuickNode (auth is in the URL)
-CELESTIA_START_HEIGHT=1                 # skip blocks before your deployment
+CELESTIA_AUTH_TOKEN=                    # bearer token; on a public network either this or
+CELESTIA_AUTH_IN_URL=false              # true when CELESTIA_RPC_URL carries the credential (QuickNode)
+CELESTIA_START_HEIGHT=1                 # skip blocks before your deployment; REQUIRED on public networks
 CELESTIA_POLLING_INTERVAL_MS=6000       # how often to poll for new blocks
 CELESTIA_STEP_SIZE=200                  # blocks per fetch window
 CELESTIA_FETCH_CONCURRENCY=12           # parallel RPC calls per window
 
 # ── Midnight ─────────────────────────────────────────────────────────────────
-MIDNIGHT_NETWORK_ID=undeployed|preview|mainnet
+MIDNIGHT_NETWORK_ID=undeployed|preview|preprod|mainnet
+MIDNIGHT_BLOCKFROST_PROJECT_ID=          # SECRET; required on preview/preprod/mainnet: the default
+                                        # endpoints are Blockfrost-hosted with ?project_id=<token>
+MIDNIGHT_INDEXER_HTTP=                   # optional full overrides (all three set = no token needed);
+MIDNIGHT_INDEXER_WS=                     # the retired indexer./rpc.<preprod|mainnet>.midnight.network
+MIDNIGHT_NODE_HTTP=                      # hosts are refused at startup
 MIDNIGHT_START_BLOCK=1
 MIDNIGHT_DELAY_MS=30000                 # indexer poll delay
 
 # ── NTP timing ────────────────────────────────────────────────────────────────
-NTP_START_TIME=1774400742000            # epoch anchor (ms); default = Preview block 1
+NTP_START_TIME=                         # epoch anchor (ms); default = the network's block 1
+                                        # (undeployed: 1774400742000)
 BLOCK_TIME_MS=600000                    # 10 min/block keeps catch-up short
 NTP_STEP_SIZE=1000
 
@@ -97,7 +114,8 @@ OFFER_FILES_READ_TIMEOUT_MS=15000        # exact-files read decision budget; max
 ROOT_WINDOW_SECONDS=                    # known-roots retention window. Default 1209600
                                         # (14 days) on every network: the ledger-9
                                         # global_ttl, which is also the zswap past_roots
-                                        # retention (static; changing it is a hard fork).
+                                        # retention (it changes only through a governance
+                                        # parameter update).
                                         # Override only for tests. Too wide ⇒ phantom
                                         # unfillable offers on the book; too narrow ⇒
                                         # valid offers rejected ROOT_UNKNOWN.
@@ -602,7 +620,7 @@ a basket does not appear as a market at all.
 #### `GET /v1/known-tokens`
 
 > **⚠️ Mixed registry endpoint — do not treat the endpoint itself as a source of truth.**
-> Fresh databases contain six records pinned from the external canonical test-token registry, while local operators may also add manually curated rows. Use the published registry revision when provenance matters.
+> A fresh database lists NIGHT only. Other rows come from the network's registry import or from operators adding curated rows. Use the published registry revision when provenance matters.
 
 All registered token colors.
 
@@ -610,32 +628,27 @@ All registered token colors.
 curl http://host:9999/v1/known-tokens
 ```
 
+A fresh database:
+
 ```json
 [
-  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded", "decimals": 6, "asset_id": "midnight-3" },
-  { "id": 2, "token_color": "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819", "name": "SNIGHT", "kind": "shielded", "decimals": 6, "asset_id": "midnight-3" },
-  { "id": 3, "token_color": "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc", "name": "TWBTC", "kind": "shielded", "decimals": 8, "asset_id": "bitcoin" }
+  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded", "decimals": 6, "asset_id": "midnight-3" }
 ]
 ```
 
-`NIGHT`, `SNIGHT`, `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and
-`UTWBTC` are seeded by the schema. The six `TW*`/`UTW*` records exactly match
-the pinned ready Preprod registry revision
-`ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc`;
-their complete source fixture and checksum are in
-`packages/database/fixtures/`. The optional `start.dev.ts` import can replace
-those six rows in an existing database for an explicitly selected network. A
-failed import preserves all current values, and editing `000-init.sql` alone
-never changes an already initialized database.
+`NIGHT` is the only row the schema seeds. On preview and preprod the
+token-registry one-shot (`entrypoint-token-registry.sh`, or the optional
+`start.dev.ts` step) adds the network's six canonical `TW*`/`UTW*` records,
+but only from a registry file labelled for ledger 9 (`midnight-2.x`); a
+1.x-labelled or missing file is skipped with a warning and imports nothing.
+Mainnet has no token source yet, so it lists NIGHT only. A failed import
+preserves all current values.
 
 `SNIGHT` — the
 [shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
-held as a shielded token — is the one seed whose colour depends on the network,
-because it derives from the contract address. The schema seeds **Preprod**
-(`8fac382b…6819`, shown above); Preview is `793c29c9…f99c`, and `mainnet` has
-no deployment yet. An operator selecting another network patches that separate
-row before a fresh database is created, or updates it deliberately in an
-existing database. It carries NIGHT's `decimals` and prices off the same asset,
+held as a shielded token — is not seeded: its colour derives from the wrapper
+contract's address and differs per network. Register it deliberately where a
+deployment exists; it carries NIGHT's `decimals` and prices off the same asset,
 so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
@@ -1164,7 +1177,11 @@ correct consumer of this stream already implements it.
 
 #### `GET /v1/midnight/config`
 
-Public Midnight network configuration the browser wallet needs. Never includes secrets.
+Public Midnight network configuration the browser wallet needs. Never includes
+secrets: every URL passes through effectstream's `redactBlockfrostProjectId`,
+so a Blockfrost endpoint shows `project_id=<redacted>` instead of the
+operator's project token. A client that dials these URLs brings its own
+Blockfrost token for the network.
 
 ```bash
 curl http://host:9999/v1/midnight/config
@@ -1172,10 +1189,10 @@ curl http://host:9999/v1/midnight/config
 
 ```json
 {
-  "indexerUri":      "https://indexer.midnight.network:8088/graphql",
-  "indexerWsUri":    "wss://indexer.midnight.network:8088/graphql",
-  "proofServerUri":  "https://proof.midnight.network",
-  "networkId":       "preview"
+  "indexerUri":      "https://midnight-preprod.blockfrost.io/api/v0?project_id=<redacted>",
+  "indexerWsUri":    "wss://midnight-preprod.blockfrost.io/api/v0/ws?project_id=<redacted>",
+  "proofServerUri":  "http://proof-server:6300",
+  "networkId":       "preprod"
 }
 ```
 
@@ -1190,8 +1207,8 @@ separate process (`bun run start:solver`; see README → "Running the COW solver
 that consumes this backend as a client — `GET /v1/offers`, `GET /v1/offers/updates`,
 `POST /v1/offers/files`, `GET /v1/health/sync` — and connects **outbound** to a
 Midnight Intents relay, where it publishes price ladders and settles the swap
-jobs the relay dispatches to it. Neither `bun run dev` nor `bun run start:mainnet`
-launches it.
+jobs the relay dispatches to it. Neither `bun run dev` nor the public-network
+entries (`main.public.ts`, `batcher.public.ts`) launch it.
 
 **Topology.** Kernel (node), batcher and solver are three independent processes.
 The kernel indexes and serves offers; the batcher publishes blobs to Celestia;

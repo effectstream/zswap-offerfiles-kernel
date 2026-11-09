@@ -10,6 +10,14 @@ Base URL: `http://<host>:9999`. All offer-related endpoints moved from `/api/*` 
 `/v1/*`. Rate limit: **600 requests/min per IP** (`API_RATE_LIMIT_MAX`) across all routes → HTTP 429
 `{ "error": "RATE_LIMITED", "reason": "..." }`. On 429, back off; do not retry-loop.
 
+**Networks.** The backend runs **Midnight 2.x / ledger 9** only, on `mainnet`,
+`preview`, `preprod` and the local `undeployed` devnet; a Midnight 1.x /
+ledger-8 wallet or offer does not work against it. A mainnet backend does not
+start yet (its ledger-9 reference parameters are not pinned), and real funds
+stay NO-GO. Preview, preprod and mainnet endpoints are Blockfrost-hosted:
+`GET /v1/midnight/config` returns them with `project_id=<redacted>`, so the
+frontend supplies its own Blockfrost project token for the network.
+
 ---
 
 ## 1. The two breaking ideas (read this first)
@@ -22,7 +30,7 @@ lowercase-hex SHA-256 of the offer's **raw transaction bytes** (not of the
 offer, so it is safe to use in URLs, dedup keys, and React keys.
 If you have a blob and need its id client-side:
 `sha256(bech32m-decode(blob))` — or `OfferFiles.offerId(bytes)` from
-`@effectstream/mip-zswap-offer` **v0.3.0** (on npm). The same package's
+`@effectstream/mip-zswap-offer` **0.4.0** (on npm; ledger-v9 1.0.0). The same package's
 `OffchainOfferPayload` type matches these response shapes exactly.
 
 ### 1.2 The list is blob-free; the payload is MIP-0006 shaped
@@ -297,7 +305,7 @@ their shapes as-is; don't "fix" the casing client-side beyond your own mapping:
   Unregistered colors do NOT error: they quote at a $1 demo fallback (two unknowns ⇒ 1:1). Don't render fallback quotes as real market prices — check the token against `/v1/known-tokens` if the UI needs to distinguish.
 - `GET /v1/chart/stats?base=…&quote=…` → `{ "base", "quote", "last", "change24", "high", "low", "volume_base", "volume_quote" }` (numbers; `change24` in %).
 - `GET /v1/chart/history?base=…&quote=…` → newest-first `[{ "price": n, "amt": n, "up": bool, "at": ms }]`. Derived **only from genuine fills** (consumed, not cancelled) — expect it to be sparser than the old data if the old one counted cancels.
-- `GET /v1/midnight/config` → `{ "contractAddress", "indexerUri", "indexerWsUri", "proofServerUri", "networkId" }` (already camelCase).
+- `GET /v1/midnight/config` → `{ "indexerUri", "indexerWsUri", "proofServerUri", "networkId" }` (already camelCase; no contract address). Blockfrost URLs come back as `…?project_id=<redacted>`: replace the placeholder with the frontend's own token for that network before dialling.
 - `GET /v1/health` → `{ "status": "ok|syncing|error", "synced": bool }`, aggregate
   protocol readiness across NTP, Midnight, and Celestia. `GET /v1/health/sync`
   returns the same overall status plus per-chain positions/lag and set diagnostics.

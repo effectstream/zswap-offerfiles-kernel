@@ -5,8 +5,8 @@
  * This is a single process. It launches no orchestrator, no kernel, no batcher
  * and no chain service: the solver is a separate component that attaches to an
  * already-running kernel API and Midnight Intents relay. That is also why the
- * solver is deliberately ABSENT from `start.mainnet.ts` (`bun run start:mainnet`
- * brings up pglite/midnight/sync/batcher only): adding it there would turn a
+ * solver is deliberately ABSENT from the backend entries (`start.dev.ts`,
+ * `main.public.ts`, `batcher.public.ts`): adding it there would turn a
  * backend command into a trading command with no explicit acknowledgement.
  *
  * Every mandatory boundary is resolved and validated before any resource is

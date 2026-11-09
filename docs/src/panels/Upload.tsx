@@ -43,8 +43,8 @@ export function UploadPanel({
     setGiveAmt(String(half > 0n ? half : bal))
   }, [giveId, giveBal])
 
-  // A fresh database may have only NIGHT/SNIGHT until the optional canonical
-  // registry import succeeds. Keep both selectors on rows the API actually
+  // A fresh database lists only NIGHT until the network's registry import (or
+  // an operator) adds tokens. Keep both selectors on rows the API actually
   // returned instead of inventing a local faucet preset/color.
   useEffect(() => {
     const tokens = wallet.registeredTokens

@@ -18,7 +18,7 @@
  *   (`@effectstream/midnight-contracts/midnight-env`), `ZSWAP_API` unset means
  *   `http://127.0.0.1:9999`, and `SOLVER_SEED` unset means the repository's
  *   public dev seed. A deployment must state all three.
- * - The solver must NOT be reachable from `start:mainnet` (adding it there
+ * - The solver must NOT be reachable from a backend entry (adding it there
  *   would turn a backend command into a trading command — 00003 `P5-D02`), so
  *   the launch contract has to live in its own entrypoint.
  *

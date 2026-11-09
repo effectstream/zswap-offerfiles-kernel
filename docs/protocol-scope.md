@@ -24,6 +24,15 @@
 > live trading is off unless explicitly acknowledged, unsupported offer shapes
 > fail closed, and solver ladders never replace the `/v1/quote` contract).
 > Do not cite it as a specification, and do not implement from it.
+>
+> **Current domain and real-funds position.** The kernel and the solver run on
+> Midnight 2.x / ledger 9 only, on `mainnet`, `preview`, `preprod` and the local
+> `undeployed` devnet (a mainnet kernel does not start until its ledger-9
+> reference parameters are pinned). Real funds are NO-GO: the owner's
+> 2026-08-21 conditional GO covered only the audited solver sha `381022d`; the
+> solver has changed since (the ledger-9 port included), so real funds stay
+> NO-GO until a re-audit and a new owner decision. The mainnet profile is
+> proven read-only only.
 
 ## Status
 

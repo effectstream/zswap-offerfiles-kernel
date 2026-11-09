@@ -2,8 +2,8 @@
 # entrypoint-solver.sh — the COW solver as its OWN component (FR-005 / P4-F05).
 #
 # `exec bun run start.solver.ts`. That root script is the one documented way to
-# run the solver; it is deliberately absent from `start:mainnet`, and it is not
-# the orchestrator.
+# run the solver; it is deliberately absent from the backend entries, and it is
+# not the orchestrator.
 #
 # THIS SCRIPT MUST NOT VALIDATE THE SOLVER'S OWN CONFIGURATION.
 # `packages/solver/src/launch.ts` resolves all seven mandatory boundaries

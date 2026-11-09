@@ -3,7 +3,7 @@ import { LedgerParameters, LedgerState, WellFormedStrictness } from "@midnightnt
 
 import { REFERENCE_PARAMETERS } from "./reference-parameters.ts";
 
-// Reference state for `Transaction.wellFormed` (00056 FR-001).
+// Reference state for `Transaction.wellFormed`.
 //
 // The security-critical `stateless_check` (ZK proof + signature verification)
 // is STATE-INDEPENDENT — it uses bundled verifier keys and never reads state
@@ -11,15 +11,16 @@ import { REFERENCE_PARAMETERS } from "./reference-parameters.ts";
 // the parts of the reference state `wellFormed` does consult are the network
 // id and the network's LEDGER PARAMETERS — above all `global_ttl`, which
 // bounds every intent TTL: `tblock <= ttl <= tblock + global_ttl`
-// (midnight-ledger `ledger-9.1.0.0-rc.3` ledger/src/verify.rs:632-635,
-// :1721-1742).
+// (midnight-ledger `ledger-9.1.0.0` ledger/src/verify.rs:641-645 and
+// :1731-1750).
 //
 // So the reference state is a blank state for the network with the network's
 // real parameters swapped in. A BLANK state is wrong here: it carries the
-// ledger's INITIAL_PARAMETERS, whose `global_ttl` is 3600 s, so an intent TTL
-// more than one hour ahead would be refused although the chain accepts up to
-// 14 days. The parameters are pinned per network (reference-parameters.ts),
-// never read live, so every kernel and every replay reaches the same verdict.
+// ledger's INITIAL_PARAMETERS, whose `global_ttl` is 3600 s
+// (ledger/src/structure.rs:1371), so an intent TTL more than one hour ahead
+// would be refused although the chain accepts up to 14 days. The parameters
+// are pinned per network (reference-parameters.ts), never read live, so every
+// kernel and every replay reaches the same verdict.
 //
 // Not covered by parameters alone: a DUST spend's proof is checked against the
 // DUST commitment/generation roots at its `ctime`, which only a synced state
@@ -28,12 +29,13 @@ import { REFERENCE_PARAMETERS } from "./reference-parameters.ts";
 
 /** No pinned ledger parameters exist for this network id. Thrown at startup
  *  (see requireReferenceParameters) so the kernel never validates against
- *  blank defaults. */
+ *  blank defaults. The message lists the pinned ids in their declaration
+ *  order (reference-parameters.ts). */
 export class UnknownNetworkParametersError extends Error {
   constructor(readonly networkId: string) {
     super(
       `no reference ledger parameters for MIDNIGHT_NETWORK_ID='${networkId}' ` +
-        `(supported: ${Object.keys(REFERENCE_PARAMETERS).sort().join(", ")}). ` +
+        `(supported: ${Object.keys(REFERENCE_PARAMETERS).join(", ")}). ` +
         "The offer validator needs the network's real ledger parameters " +
         "(global_ttl bounds intent TTLs); add a pinned snapshot to " +
         "packages/validator/reference-parameters.ts.",
@@ -85,9 +87,9 @@ export function getReferenceState(networkId: string): LedgerState {
 }
 
 /**
- * @deprecated Use getReferenceState. Kept for out-of-tree importers; since
- * 00056 it returns the same reference state (the network's pinned
- * parameters), not a blank one — a blank state would refuse valid intent TTLs.
+ * @deprecated Use getReferenceState. Kept for out-of-tree importers; it
+ * returns the same reference state (the network's pinned parameters), not a
+ * blank one — a blank state would refuse valid intent TTLs.
  */
 export function getBlankRefState(networkId: string): LedgerState {
   return getReferenceState(networkId);

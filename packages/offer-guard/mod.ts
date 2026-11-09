@@ -276,10 +276,32 @@ export {
   type UnpricedPolicy,
 } from "./sponsorship.ts";
 
-// Repository dev seeds, refused by every entry that runs on a network with real
-// users (00050). Re-exported for the same one-import reason as above.
+// Repository dev seeds, refused by every entry that runs on a network other
+// than `undeployed`. Re-exported for the same one-import reason as above.
 export {
   isPublicDevSeed,
   KNOWN_PUBLIC_DEV_SEEDS,
   normalizeSeedHex,
 } from "./public-dev-seeds.ts";
+
+// The supported networks and the configuration rules the public ones share.
+// Modules that must not load this package's ledger imports (the profiles that
+// run before midnight-env) import ./public-networks.ts directly instead.
+export {
+  BLOCKFROST_PROJECT_ID_VAR,
+  CELESTIA_NETWORK_FOR,
+  installLogRedaction,
+  isPublicMidnightNetwork,
+  isSupportedMidnightNetwork,
+  MIDNIGHT_ENDPOINT_VARS,
+  midnightEndpointProblems,
+  probeMidnightIndexerAuth,
+  PUBLIC_MIDNIGHT_NETWORKS,
+  publicDevSeedProblem,
+  retiredMidnightHost,
+  SUPPORTED_MIDNIGHT_NETWORKS,
+  unsupportedNetworkProblem,
+  type EndpointAuthProbe,
+  type PublicMidnightNetwork,
+  type SupportedMidnightNetwork,
+} from "./public-networks.ts";

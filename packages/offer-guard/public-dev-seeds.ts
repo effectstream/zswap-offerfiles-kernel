@@ -2,11 +2,11 @@
 // its sibling stacks) and are therefore drainable by anyone who reads it.
 //
 // They are fine on `undeployed`, where the chain is a throwaway devnet and the
-// genesis wallet is public by design. On any network with real users (stagenet
-// today) a service holding one of these is a service whose funds and fee
-// capacity belong to whoever notices first, and whose wallet facade fights
-// every other process that booted on the same seed. Entries that must never
-// run on one call `isPublicDevSeed` and refuse, naming the variable.
+// genesis wallet is public by design. On every other network a service holding
+// one of these is a service whose funds and fee capacity belong to whoever
+// notices first, and whose wallet facade fights every other process that
+// booted on the same seed. The batcher, the offer poster and `check-env.ts`
+// refuse one there by name (`publicDevSeedProblem` in ./public-networks.ts).
 //
 // The list mirrors the seed block in `deploy/.env.example` and the defaults in
 // the code (genesis …01, API-example taker …02, batcher fallback …03 in

@@ -2,10 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { LedgerParameters, LedgerState } from "@midnightntwrk/ledger-v9";
 
-import { REFERENCE_PARAMETERS } from "./reference-parameters.ts";
+import { REFERENCE_PARAMETERS, UNPINNED_REFERENCE_PARAMETERS } from "./reference-parameters.ts";
 import {
   getBlankRefState,
   getReferenceState,
+  ReferenceParametersNotPinnedError,
   referenceDustGracePeriodSeconds,
   requireReferenceParameters,
   UnknownNetworkParametersError,
@@ -117,7 +118,7 @@ describe("pinned reference parameters", () => {
 });
 
 describe("a network without a snapshot fails loudly", () => {
-  for (const networkId of ["stagenet", "mainnet", "devnet", "", "undeployed ", "Preview", "PREPROD"]) {
+  for (const networkId of ["stagenet", "devnet", "", "undeployed ", "Preview", "PREPROD", "Mainnet"]) {
     test(`requireReferenceParameters(${JSON.stringify(networkId)}) throws, naming the supported ids`, () => {
       let error: unknown;
       try {
@@ -126,13 +127,45 @@ describe("a network without a snapshot fails loudly", () => {
         error = e;
       }
       expect(error).toBeInstanceOf(UnknownNetworkParametersError);
+      expect(error).not.toBeInstanceOf(ReferenceParametersNotPinnedError);
       expect((error as UnknownNetworkParametersError).networkId).toBe(networkId);
-      expect((error as Error).message).toContain(`MIDNIGHT_NETWORK_ID='${networkId}'`);
+      expect((error as Error).message).toContain(`no reference ledger parameters for MIDNIGHT_NETWORK_ID='${networkId}'`);
       expect((error as Error).message).toContain("(supported: undeployed, preview, preprod)");
+      // The four-vs-three difference is spelled out, not left to the reader.
+      expect((error as Error).message).toContain("Supported but not pinned yet, so not startable either: mainnet");
       expect(() => getReferenceState(networkId)).toThrow(UnknownNetworkParametersError);
       expect(() => referenceDustGracePeriodSeconds(networkId)).toThrow(UnknownNetworkParametersError);
     });
   }
+
+  test("mainnet is supported but not pinned yet: the error says so instead of calling it unknown", () => {
+    let error: unknown;
+    try {
+      requireReferenceParameters("mainnet");
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ReferenceParametersNotPinnedError);
+    // Still an UnknownNetworkParametersError: every startup check that refuses
+    // an id without parameters refuses this one too.
+    expect(error).toBeInstanceOf(UnknownNetworkParametersError);
+    const message = (error as Error).message;
+    expect(message).toStartWith("reference ledger parameters for MIDNIGHT_NETWORK_ID='mainnet' are not pinned yet: ");
+    expect(message).toContain("MidnightRuntimeApi_get_ledger_parameters");
+    expect(message).toContain("mainnet is a supported network");
+    expect(message).toContain("(pinned today: undeployed, preview, preprod)");
+    expect(message).not.toContain("no reference ledger parameters");
+    expect((error as ReferenceParametersNotPinnedError).reason).toBe(UNPINNED_REFERENCE_PARAMETERS["mainnet"]!);
+    expect(() => getReferenceState("mainnet")).toThrow(ReferenceParametersNotPinnedError);
+    expect(() => referenceDustGracePeriodSeconds("mainnet")).toThrow(ReferenceParametersNotPinnedError);
+  });
+
+  test("the not-pinned list is exactly mainnet, and no id is both pinned and not pinned", () => {
+    expect(Object.keys(UNPINNED_REFERENCE_PARAMETERS)).toEqual(["mainnet"]);
+    for (const id of Object.keys(UNPINNED_REFERENCE_PARAMETERS)) {
+      expect(Object.hasOwn(REFERENCE_PARAMETERS, id)).toBe(false);
+    }
+  });
 
   test("inherited object keys are not snapshots", () => {
     expect(() => requireReferenceParameters("toString")).toThrow(UnknownNetworkParametersError);

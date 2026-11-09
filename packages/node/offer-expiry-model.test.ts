@@ -39,7 +39,7 @@ const { bytesToLatin1, guardOffer, offerHashFromBytes } = await import("@zswap-d
 const { gameStateTransitions } = await import("./state-machine.ts");
 const { canonicalValidatorCode, checkedVerdict } = await import("./offer-validation.ts");
 const { ZswapCelestiaAdapter } = await import("../batcher/celestia.ts");
-const { UnknownNetworkParametersError } = await import("@zswap-da/validator");
+const { ReferenceParametersNotPinnedError, UnknownNetworkParametersError } = await import("@zswap-da/validator");
 const { apiRouter } = await import("./api.ts");
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
@@ -350,9 +350,16 @@ describe("T1 — batcher pre-fee gate and offer-guard (wall-clock tblock)", () =
   });
 
   test("the batcher refuses to start for a network without reference parameters", () => {
-    expect(() => adapter("preview")).toThrow(UnknownNetworkParametersError);
-    expect(() => adapter("preview")).toThrow("supported: stagenet, undeployed");
-    expect(() => adapter("stagenet")).not.toThrow();
+    expect(() => adapter("stagenet")).toThrow(UnknownNetworkParametersError);
+    expect(() => adapter("stagenet")).toThrow("supported: undeployed, preview, preprod");
+    for (const network of ["undeployed", "preview", "preprod"]) expect(() => adapter(network)).not.toThrow();
+  });
+
+  test("the batcher refuses mainnet at startup: its reference parameters are not pinned yet", () => {
+    expect(() => adapter("mainnet")).toThrow(ReferenceParametersNotPinnedError);
+    expect(() => adapter("mainnet")).toThrow(
+      "reference ledger parameters for MIDNIGHT_NETWORK_ID='mainnet' are not pinned yet",
+    );
   });
 });
 
@@ -509,17 +516,12 @@ describe("T4 — startup: the node's env resolves reference parameters or fails"
     };
   };
 
-  test("undeployed and stagenet start (14-day window, 3 h DUST grace)", () => {
-    for (const network of ["undeployed", "stagenet"]) {
-      // midnight-env has no hosted default for stagenet: all three URLs are explicit there.
+  test("undeployed, preview and preprod start (14-day window, 3 h DUST grace)", () => {
+    for (const network of ["undeployed", "preview", "preprod"]) {
+      // A placeholder Blockfrost token lets midnight-env resolve the hosted
+      // networks' default endpoints; nothing is dialled here.
       const endpoints: Record<string, string> =
-        network === "stagenet"
-          ? {
-              MIDNIGHT_INDEXER_HTTP: "https://indexer.stagenet.shielded.tools/api/v4/graphql",
-              MIDNIGHT_INDEXER_WS: "wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws",
-              MIDNIGHT_NODE_HTTP: "https://rpc.stagenet.shielded.tools",
-            }
-          : {};
+        network === "undeployed" ? {} : { MIDNIGHT_BLOCKFROST_PROJECT_ID: "placeholder-project-id" };
       const run = child({ MIDNIGHT_NETWORK_ID: network, OFFER_TTL_SECONDS: "", ROOT_WINDOW_SECONDS: "", ...endpoints });
       expect({ network, exitCode: run.exitCode, stderr: run.stderr }).toMatchObject({ network, exitCode: 0 });
       const out = JSON.parse(run.stdout.trim().split("\n").pop()!);
@@ -533,13 +535,26 @@ describe("T4 — startup: the node's env resolves reference parameters or fails"
     }
   });
 
-  test("a network without reference parameters (preview) fails at startup, naming the supported ids", () => {
-    // A placeholder Blockfrost token lets midnight-env resolve preview's hosted
-    // defaults, so the failure is the missing reference parameters.
-    const run = child({ MIDNIGHT_NETWORK_ID: "preview", MIDNIGHT_BLOCKFROST_PROJECT_ID: "placeholder-project-id" });
+  test("a network without reference parameters (stagenet) fails at startup, naming the supported ids", () => {
+    // midnight-env has no hosted default for stagenet: explicit (unreachable,
+    // never dialled) URLs let it load, so the failure is the missing reference
+    // parameters.
+    const run = child({
+      MIDNIGHT_NETWORK_ID: "stagenet",
+      MIDNIGHT_INDEXER_HTTP: "https://indexer.example.invalid/api/v4/graphql",
+      MIDNIGHT_INDEXER_WS: "wss://indexer.example.invalid/api/v4/graphql/ws",
+      MIDNIGHT_NODE_HTTP: "https://rpc.example.invalid",
+    });
     expect(run.exitCode).not.toBe(0);
-    expect(run.stderr).toContain("no reference ledger parameters for MIDNIGHT_NETWORK_ID='preview'");
-    expect(run.stderr).toContain("supported: stagenet, undeployed");
+    expect(run.stderr).toContain("no reference ledger parameters for MIDNIGHT_NETWORK_ID='stagenet'");
+    expect(run.stderr).toContain("supported: undeployed, preview, preprod");
+  });
+
+  test("mainnet fails at startup because its reference parameters are not pinned yet", () => {
+    const run = child({ MIDNIGHT_NETWORK_ID: "mainnet", MIDNIGHT_BLOCKFROST_PROJECT_ID: "placeholder-project-id" });
+    expect(run.exitCode).not.toBe(0);
+    expect(run.stderr).toContain("reference ledger parameters for MIDNIGHT_NETWORK_ID='mainnet' are not pinned yet");
+    expect(run.stderr).not.toContain("no reference ledger parameters");
   });
 
   test("an explicit OFFER_TTL_SECONDS warns and no longer caps offers", () => {

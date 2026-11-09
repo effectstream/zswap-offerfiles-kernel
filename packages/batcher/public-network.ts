@@ -31,6 +31,7 @@ import {
   midnightEndpointProblems,
   PUBLIC_MIDNIGHT_NETWORKS,
   publicDevSeedProblem,
+  referenceParametersProblem,
   unsupportedNetworkProblem,
   type PublicMidnightNetwork,
 } from "@zswap-da/offer-guard/public-networks";
@@ -153,6 +154,12 @@ export function resolvePublicBatcherProblems(env: EnvMap): string[] {
 
   // ── Midnight endpoints: Blockfrost token, no retired host ──
   if (network) problems.push(...midnightEndpointProblems(network, env));
+
+  // ── reference ledger parameters: the pre-fee gate validates against them
+  // (celestia.ts resolves them at startup), so a network without a pinned
+  // snapshot is refused here, with the reason ──
+  const parameters = network ? referenceParametersProblem(network) : undefined;
+  if (parameters !== undefined) problems.push(parameters);
 
   return problems;
 }

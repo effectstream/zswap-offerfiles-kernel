@@ -28,6 +28,9 @@
 //       Celestia auth         CELESTIA_AUTH_TOKEN (bearer), or
 //                             CELESTIA_AUTH_IN_URL=true when the RPC URL itself
 //                             carries the credential
+//       reference parameters  the network's ledger-9 parameters, pinned in
+//                             @zswap-da/validator; a supported network that is
+//                             not pinned yet is refused with the reason
 //
 // ORDER MATTERS. env.ts, config.preview.ts and midnight-env read the
 // environment when they are first evaluated (midnight-env also throws at
@@ -47,6 +50,7 @@ import {
   isPublicMidnightNetwork,
   midnightEndpointProblems,
   PUBLIC_MIDNIGHT_NETWORKS,
+  referenceParametersProblem,
   unsupportedNetworkProblem,
   type PublicMidnightNetwork,
 } from "@zswap-da/offer-guard/public-networks";
@@ -240,6 +244,12 @@ export function resolvePublicNodeProfile(env: EnvMap): PublicNodeProfile {
 
   // ── Midnight endpoints: Blockfrost token, no retired host ──
   if (network) problems.push(...midnightEndpointProblems(network, env));
+
+  // ── reference ledger parameters: env.ts resolves them at import, so a
+  // network without a pinned snapshot is refused here, with the reason ──
+  const parameters = network ? referenceParametersProblem(network) : undefined;
+  if (parameters !== undefined) problems.push(parameters);
+
   const overrides = ["MIDNIGHT_INDEXER_HTTP", "MIDNIGHT_INDEXER_WS", "MIDNIGHT_NODE_HTTP"].filter(
     (name) => read(env, name) !== undefined,
   ).length;

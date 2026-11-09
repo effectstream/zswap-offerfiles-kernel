@@ -21,12 +21,18 @@
 import { Buffer } from "node:buffer";
 import { formatWithOptions } from "node:util";
 
+import {
+  REFERENCE_PARAMETERS,
+  UNPINNED_REFERENCE_PARAMETERS,
+} from "@zswap-da/validator/reference-parameters";
+
 import { isPublicDevSeed } from "./public-dev-seeds.ts";
 
 /**
  * Every network id this kernel supports: `undeployed` runs the dev entries,
  * the other three the public-network profile. Each also needs its reference
- * ledger parameters pinned in @zswap-da/validator to start.
+ * ledger parameters pinned in @zswap-da/validator to start
+ * ({@link referenceParametersProblem}).
  */
 export const SUPPORTED_MIDNIGHT_NETWORKS = ["undeployed", "preview", "preprod", "mainnet"] as const;
 export type SupportedMidnightNetwork = (typeof SUPPORTED_MIDNIGHT_NETWORKS)[number];
@@ -50,6 +56,26 @@ export function unsupportedNetworkProblem(id: string): string {
   return (
     `MIDNIGHT_NETWORK_ID="${id || "(unset)"}" is not supported ` +
     `(supported: ${SUPPORTED_MIDNIGHT_NETWORKS.join(", ")})`
+  );
+}
+
+/**
+ * The refusal for a supported network whose reference ledger parameters are
+ * not pinned in @zswap-da/validator yet, or undefined when they are. The node
+ * and the batcher validate offers against those parameters and resolve them
+ * at startup, so a network without them cannot start; this names it in the
+ * configuration check, next to every other problem, instead of letting the
+ * lookup fail later as an unknown network.
+ */
+export function referenceParametersProblem(networkId: SupportedMidnightNetwork): string | undefined {
+  if (Object.hasOwn(REFERENCE_PARAMETERS, networkId)) return undefined;
+  const reason = Object.hasOwn(UNPINNED_REFERENCE_PARAMETERS, networkId)
+    ? UNPINNED_REFERENCE_PARAMETERS[networkId]
+    : undefined;
+  return (
+    `MIDNIGHT_NETWORK_ID="${networkId}" is supported, but its ledger-9 reference parameters are not pinned ` +
+    `yet, so the kernel does not start on it (pinned: ${Object.keys(REFERENCE_PARAMETERS).join(", ")})` +
+    (reason === undefined ? "" : `: ${reason}`)
   );
 }
 

@@ -17,11 +17,16 @@ export {
   buildStrictness,
   getBlankRefState,
   getReferenceState,
+  ReferenceParametersNotPinnedError,
   referenceDustGracePeriodSeconds,
   requireReferenceParameters,
   UnknownNetworkParametersError,
 } from "./refstate.ts";
-export { REFERENCE_PARAMETERS, type ReferenceParametersSnapshot } from "./reference-parameters.ts";
+export {
+  REFERENCE_PARAMETERS,
+  type ReferenceParametersSnapshot,
+  UNPINNED_REFERENCE_PARAMETERS,
+} from "./reference-parameters.ts";
 export {
   bytesOrStringToHex,
   collectNullifiers,

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { redactBlockfrostProjectId } from "@effectstream/midnight-contracts/midnight-env";
 import { MIP6_NAMESPACE_ID_SUFFIX_HEX } from "@zswap-da/offer-guard";
+import { UNPINNED_REFERENCE_PARAMETERS } from "@zswap-da/validator/reference-parameters";
 
 import { ROOT_WINDOW_DEFAULT_S } from "./network-windows.ts";
 import {
@@ -23,6 +24,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 const TOKEN = "preprodTestProjectId0000000000000";
 const NETWORKS = ["preview", "preprod", "mainnet"] as const;
+
+/** The refusal every service gives a supported network whose reference
+ *  ledger parameters are not pinned yet (today: mainnet). */
+const NOT_PINNED = "ledger-9 reference parameters are not pinned yet";
+const unpinned = (network: string) => Object.hasOwn(UNPINNED_REFERENCE_PARAMETERS, network);
+/** The profile's problems apart from the not-pinned refusal: what the env itself gets wrong. */
+const envProblems = (problems: readonly string[]) => problems.filter((p) => !p.includes(NOT_PINNED));
 
 const complete = (network: string = "preprod"): Record<string, string | undefined> => ({
   MIDNIGHT_NETWORK_ID: network,
@@ -58,7 +66,9 @@ describe("public-network node profile — resolution", () => {
     ["mainnet", "mainnet"],
   ] as const)("%s resolves Celestia %s on the MIP-0006 namespace, anchored at its block 1", (network, celestia) => {
     const profile = resolvePublicNodeProfile(complete(network));
-    expect(profile.problems).toEqual([]);
+    // A network that is not pinned yet is refused for that alone; its profile
+    // still resolves completely.
+    expect(profile.problems).toEqual(unpinned(network) ? [expect.stringContaining(NOT_PINNED)] : []);
     expect(profile.warnings).toEqual([]);
     expect(profile.defaults).toEqual({
       NTP_START_TIME: String(NTP_ANCHOR_MS[network]),
@@ -98,16 +108,26 @@ describe("public-network node profile — resolution", () => {
       "CELESTIA_RPC_URL",
       "CELESTIA_AUTH_TOKEN",
       "MIDNIGHT_BLOCKFROST_PROJECT_ID",
+      'MIDNIGHT_NETWORK_ID="mainnet"',
     ]);
     expect(profile.problems[3]).toContain("MIDNIGHT_BLOCKFROST_PROJECT_ID is required on mainnet");
+    expect(profile.problems[4]).toContain(NOT_PINNED);
+  });
+
+  test("mainnet: a complete env is refused only because its reference parameters are not pinned yet", () => {
+    const profile = resolvePublicNodeProfile(complete("mainnet"));
+    expect(profile.problems).toHaveLength(1);
+    expect(profile.problems[0]).toStartWith(`MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ${NOT_PINNED}`);
+    expect(profile.problems[0]).toContain("(pinned: undeployed, preview, preprod)");
+    expect(() => applyPublicNodeProfile(complete("mainnet"))).toThrow(PublicNetworkConfigError);
   });
 
   test.each(NETWORKS)("%s without MIDNIGHT_BLOCKFROST_PROJECT_ID fails naming it", (network) => {
     const env = complete(network);
     delete env["MIDNIGHT_BLOCKFROST_PROJECT_ID"];
-    const profile = resolvePublicNodeProfile(env);
-    expect(profile.problems).toHaveLength(1);
-    expect(profile.problems[0]).toStartWith(`MIDNIGHT_BLOCKFROST_PROJECT_ID is required on ${network}`);
+    const problems = envProblems(resolvePublicNodeProfile(env).problems);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toStartWith(`MIDNIGHT_BLOCKFROST_PROJECT_ID is required on ${network}`);
   });
 
   test.each([
@@ -116,10 +136,10 @@ describe("public-network node profile — resolution", () => {
     ["mainnet", "MIDNIGHT_INDEXER_WS", "wss://indexer.mainnet.midnight.network/api/v4/graphql/ws"],
     ["mainnet", "MIDNIGHT_NODE_HTTP", "https://rpc.mainnet.midnight.network"],
   ] as const)("%s with %s on a retired host is refused naming MIDNIGHT_BLOCKFROST_PROJECT_ID", (network, name, url) => {
-    const profile = resolvePublicNodeProfile({ ...complete(network), [name]: url });
-    expect(profile.problems).toHaveLength(1);
-    expect(profile.problems[0]).toStartWith(`${name} points at `);
-    expect(profile.problems[0]).toContain("MIDNIGHT_BLOCKFROST_PROJECT_ID");
+    const problems = envProblems(resolvePublicNodeProfile({ ...complete(network), [name]: url }).problems);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toStartWith(`${name} points at `);
+    expect(problems[0]).toContain("MIDNIGHT_BLOCKFROST_PROJECT_ID");
   });
 
   test("Blockfrost URL overrides pass, with or without the token variable", () => {
@@ -163,7 +183,7 @@ describe("public-network node profile — resolution", () => {
       'CELESTIA_NETWORK must be "mainnet" on mainnet',
     );
     const explicit = resolvePublicNodeProfile({ ...complete("mainnet"), CELESTIA_NETWORK: "mainnet" });
-    expect(explicit.problems).toEqual([]);
+    expect(envProblems(explicit.problems)).toEqual([]);
     expect(explicit.defaults).not.toHaveProperty("CELESTIA_NETWORK");
   });
 
@@ -218,10 +238,10 @@ describe("public-network node profile — resolution", () => {
 
 describe("public-network node profile — application", () => {
   test("apply writes only the defaults and removes a blank namespace", () => {
-    const env = { ...complete("mainnet"), CELESTIA_NAMESPACE: "", BLOCK_TIME_MS: undefined };
+    const env = { ...complete("preview"), CELESTIA_NAMESPACE: "", BLOCK_TIME_MS: undefined };
     applyPublicNodeProfile(env);
-    expect(env["NTP_START_TIME"]).toBe("1773843582000");
-    expect(env["CELESTIA_NETWORK"]).toBe("mainnet");
+    expect(env["NTP_START_TIME"]).toBe("1784214468491");
+    expect(env["CELESTIA_NETWORK"]).toBe("mocha");
     expect("CELESTIA_NAMESPACE" in env).toBe(false);
     expect(env["BLOCK_TIME_MS"]).toBeUndefined();
   });
@@ -276,7 +296,7 @@ const run = (file: string, vars: Record<string, string | undefined>) =>
   });
 
 describe("public-network-profile.ts — the preflight, in a child process", () => {
-  test.each(NETWORKS)("%s: prints the resolved profile and the REDACTED Blockfrost endpoints, exits 0", (network) => {
+  test.each(NETWORKS.filter((n) => !unpinned(n)))("%s: prints the resolved profile and the REDACTED Blockfrost endpoints, exits 0", (network) => {
     const result = run("public-network-profile.ts", complete(network));
     const out = result.stdout.toString();
     const err = result.stderr.toString();
@@ -295,12 +315,22 @@ describe("public-network-profile.ts — the preflight, in a child process", () =
     expect(out + err).not.toContain(TOKEN);
   });
 
+  test("mainnet exits 78: supported, but its reference parameters are not pinned yet", () => {
+    const result = run("public-network-profile.ts", complete("mainnet"));
+    const err = result.stderr.toString();
+    expect(result.exitCode, err).toBe(78);
+    expect(err).toContain('node configuration for MIDNIGHT_NETWORK_ID="mainnet" is invalid (1 problem)');
+    expect(err).toContain(`MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ${NOT_PINNED}`);
+    expect(result.stdout.toString()).not.toContain("node configuration OK");
+    expect(result.stdout.toString() + err).not.toContain(TOKEN);
+  });
+
   test("explicit token-bearing overrides with other parameters are redacted too", () => {
     const result = run("public-network-profile.ts", {
-      ...complete("mainnet"),
-      MIDNIGHT_INDEXER_HTTP: `https://midnight-mainnet.blockfrost.io/api/v0?x=1&project_id=${TOKEN}`,
-      MIDNIGHT_INDEXER_WS: `wss://midnight-mainnet.blockfrost.io/api/v0/ws?project_id=${TOKEN}&y=2`,
-      MIDNIGHT_NODE_HTTP: `https://rpc.midnight-mainnet.blockfrost.io/?project_id=${TOKEN}`,
+      ...complete("preprod"),
+      MIDNIGHT_INDEXER_HTTP: `https://midnight-preprod.blockfrost.io/api/v0?x=1&project_id=${TOKEN}`,
+      MIDNIGHT_INDEXER_WS: `wss://midnight-preprod.blockfrost.io/api/v0/ws?project_id=${TOKEN}&y=2`,
+      MIDNIGHT_NODE_HTTP: `https://rpc.midnight-preprod.blockfrost.io/?project_id=${TOKEN}`,
     });
     const text = result.stdout.toString() + result.stderr.toString();
     expect(result.exitCode, text).toBe(0);
@@ -325,6 +355,16 @@ describe("main.public.ts — the profile runs before env.ts and midnight-env", (
     expect(result.exitCode, err).toBe(78);
     expect(err).toContain('MIDNIGHT_NETWORK_ID="stagenet" is not supported (supported: undeployed, preview, preprod, mainnet)');
     expect(result.stdout.toString()).not.toContain("Starting ZSwap DA Node");
+  });
+
+  test("mainnet exits 78 before anything else loads: its reference parameters are not pinned yet", () => {
+    const result = run("main.public.ts", complete("mainnet"));
+    const err = result.stderr.toString();
+    expect(result.exitCode, err).toBe(78);
+    expect(err).toContain(`MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ${NOT_PINNED}`);
+    expect(err).not.toContain("is not supported");
+    expect(result.stdout.toString()).not.toContain("Starting ZSwap DA Node");
+    expect(result.stdout.toString() + err).not.toContain(TOKEN);
   });
 
   test("a public network with no token and no Celestia config exits 78 listing every problem", () => {

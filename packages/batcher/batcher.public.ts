@@ -8,8 +8,10 @@
  * volume (it also holds the DUST-state cache), the network's Celestia chain
  * (mocha for preview and preprod, mainnet for mainnet) with an explicit RPC
  * URL and auth, and MIDNIGHT_BLOCKFROST_PROJECT_ID (or full endpoint
- * overrides, never a retired *.midnight.network host). Every refusal is
- * listed at once and exits 78 (EX_CONFIG), before any network call.
+ * overrides, never a retired *.midnight.network host), and the network's
+ * pinned reference ledger parameters (a supported network that is not pinned
+ * yet is refused with the reason). Every refusal is listed at once and exits
+ * 78 (EX_CONFIG), before any network call.
  *
  * `--check` validates, prints the resolved profile (endpoints redacted) and
  * exits 0 without touching the network — the image entrypoint's

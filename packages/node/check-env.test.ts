@@ -9,11 +9,18 @@ import { describe, expect, test } from "bun:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { UNPINNED_REFERENCE_PARAMETERS } from "@zswap-da/validator/reference-parameters";
+
 import { parseEnvFile, staticChecks } from "../../check-env.ts";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const NETWORKS = ["preview", "preprod", "mainnet"] as const;
 const TOKEN = "preprodTestProjectId0000000000000";
+/** A supported network whose reference ledger parameters are not pinned yet
+ *  (today: mainnet) fails check-env on MIDNIGHT_NETWORK_ID alone: its services
+ *  do not start. */
+const notPinned = (network: string): string[] =>
+  Object.hasOwn(UNPINNED_REFERENCE_PARAMETERS, network) ? ["MIDNIGHT_NETWORK_ID"] : [];
 
 const map = (vars: Record<string, string | undefined>) =>
   new Map(Object.entries(vars).filter((e): e is [string, string] => e[1] !== undefined));
@@ -33,14 +40,21 @@ const complete = (network: string): Record<string, string | undefined> => ({
 describe("check-env.ts — the public-network contract", () => {
   test.each(NETWORKS)("a complete %s .env passes, with MIP-0006 and the network's block-1 anchor as defaults", (network) => {
     const results = staticChecks(map(complete(network)));
-    expect(results.filter((r) => !r.ok)).toEqual([]);
+    expect(results.filter((r) => !r.ok).map((r) => r.label)).toEqual(notPinned(network));
     const labels = results.map((r) => r.label).join("\n");
-    expect(labels).toContain(`MIDNIGHT_NETWORK_ID = ${network}`);
+    expect(labels).toContain(notPinned(network).length > 0 ? "MIDNIGHT_NETWORK_ID" : `MIDNIGHT_NETWORK_ID = ${network}`);
     expect(labels).toContain(`(${network} block 1, default)`);
     expect(labels).toContain(`CELESTIA_NETWORK = ${network === "mainnet" ? "mainnet" : "mocha"} (default)`);
     expect(labels).toContain("CELESTIA_NAMESPACE — MIP-0006 shared namespace 6d6e2d737761702d7631 (mn-swap-v1)");
     expect(labels).not.toContain("7f7f");
     expect(labels).not.toContain(TOKEN);
+  });
+
+  test("mainnet: every other check passes; MIDNIGHT_NETWORK_ID fails because its parameters are not pinned yet", () => {
+    const failures = staticChecks(map(complete("mainnet"))).filter((r) => !r.ok);
+    expect(failures.map((r) => r.label)).toEqual(["MIDNIGHT_NETWORK_ID"]);
+    expect(failures[0]!.hint).toContain('MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ledger-9 reference parameters are not pinned yet');
+    expect(failures[0]!.hint).toContain("(pinned: undeployed, preview, preprod)");
   });
 
   test("the required variables are named when missing", () => {
@@ -78,13 +92,13 @@ describe("check-env.ts — the public-network contract", () => {
   });
 
   test("all three overrides stand in for the token", () => {
-    const { MIDNIGHT_BLOCKFROST_PROJECT_ID: _t, ...rest } = complete("mainnet");
+    const { MIDNIGHT_BLOCKFROST_PROJECT_ID: _t, ...rest } = complete("preprod");
     expect(
       failed({
         ...rest,
-        MIDNIGHT_INDEXER_HTTP: "https://midnight-mainnet.blockfrost.io/api/v0?project_id=x",
-        MIDNIGHT_INDEXER_WS: "wss://midnight-mainnet.blockfrost.io/api/v0/ws?project_id=x",
-        MIDNIGHT_NODE_HTTP: "https://rpc.midnight-mainnet.blockfrost.io?project_id=x",
+        MIDNIGHT_INDEXER_HTTP: "https://midnight-preprod.blockfrost.io/api/v0?project_id=x",
+        MIDNIGHT_INDEXER_WS: "wss://midnight-preprod.blockfrost.io/api/v0/ws?project_id=x",
+        MIDNIGHT_NODE_HTTP: "https://rpc.midnight-preprod.blockfrost.io?project_id=x",
       }),
     ).toEqual([]);
   });
@@ -95,7 +109,7 @@ describe("check-env.ts — the public-network contract", () => {
   });
 
   test("the wrong Celestia network is refused", () => {
-    expect(failed({ ...complete("mainnet"), CELESTIA_NETWORK: "mocha" })).toEqual(["CELESTIA_NETWORK"]);
+    expect(failed({ ...complete("mainnet"), CELESTIA_NETWORK: "mocha" })).toEqual([...notPinned("mainnet"), "CELESTIA_NETWORK"]);
     expect(failed({ ...complete("preprod"), CELESTIA_NETWORK: "mainnet" })).toEqual(["CELESTIA_NETWORK"]);
   });
 
@@ -105,9 +119,10 @@ describe("check-env.ts — the public-network contract", () => {
   });
 
   test.each(NETWORKS)("%s: a public dev batcher seed and a relative storage dir are refused", (network) => {
-    expect(failed({ ...complete(network), BATCHER_WALLET_SEED: "0".repeat(63) + "3" })).toEqual(["BATCHER_WALLET_SEED"]);
-    expect(failed({ ...complete(network), BATCHER_WALLET_SEED: "0".repeat(62) + "99" })).toEqual(["BATCHER_WALLET_SEED"]);
-    expect(failed({ ...complete(network), BATCHER_STORAGE_DIR: "batcher-data" })).toEqual(["BATCHER_STORAGE_DIR"]);
+    const np = notPinned(network);
+    expect(failed({ ...complete(network), BATCHER_WALLET_SEED: "0".repeat(63) + "3" })).toEqual([...np, "BATCHER_WALLET_SEED"]);
+    expect(failed({ ...complete(network), BATCHER_WALLET_SEED: "0".repeat(62) + "99" })).toEqual([...np, "BATCHER_WALLET_SEED"]);
+    expect(failed({ ...complete(network), BATCHER_STORAGE_DIR: "batcher-data" })).toEqual([...np, "BATCHER_STORAGE_DIR"]);
   });
 
   test("every other wallet seed in the file is refused when it is a dev seed", () => {
@@ -118,7 +133,7 @@ describe("check-env.ts — the public-network contract", () => {
         SOLVER_SEED: "0".repeat(62) + "21",
         MIDNIGHT_WALLET_SEED: "7e".repeat(32),
       }),
-    ).toEqual(["POSTER_SEED", "SOLVER_SEED"]);
+    ).toEqual([...notPinned("mainnet"), "POSTER_SEED", "SOLVER_SEED"]);
   });
 });
 
@@ -156,6 +171,7 @@ describe("the committed .env.<network>.example files", () => {
   test.each(NETWORKS)(".env.%s.example as committed fails check-env, naming what the operator must fill", (network) => {
     const labels = staticChecks(example(network)).filter((r) => !r.ok).map((r) => r.label);
     expect(labels).toEqual([
+      ...notPinned(network),
       "MIDNIGHT_BLOCKFROST_PROJECT_ID",
       "CELESTIA_RPC_URL",
       "CELESTIA_START_HEIGHT",
@@ -164,16 +180,16 @@ describe("the committed .env.<network>.example files", () => {
     ]);
   });
 
-  test.each(NETWORKS)(".env.%s.example filled with dummy non-dev values passes check-env", (network) => {
-    expect(staticChecks(filled(network)).filter((r) => !r.ok)).toEqual([]);
+  test.each(NETWORKS)(".env.%s.example filled with dummy non-dev values passes check-env (a network not pinned yet: fails on that alone)", (network) => {
+    expect(staticChecks(filled(network)).filter((r) => !r.ok).map((r) => r.label)).toEqual(notPinned(network));
   });
 
   test.each(NETWORKS)(".env.%s.example filled with a dev seed fails check-env, naming it", (network) => {
     const env = filled(network);
     env.set("BATCHER_WALLET_SEED", "0".repeat(63) + "3");
-    expect(staticChecks(env).filter((r) => !r.ok).map((r) => r.label)).toEqual(["BATCHER_WALLET_SEED"]);
+    expect(staticChecks(env).filter((r) => !r.ok).map((r) => r.label)).toEqual([...notPinned(network), "BATCHER_WALLET_SEED"]);
     const poster = filled(network);
     poster.set("POSTER_SEED", "0".repeat(63) + "1");
-    expect(staticChecks(poster).filter((r) => !r.ok).map((r) => r.label)).toEqual(["POSTER_SEED"]);
+    expect(staticChecks(poster).filter((r) => !r.ok).map((r) => r.label)).toEqual([...notPinned(network), "POSTER_SEED"]);
   });
 });

@@ -85,7 +85,7 @@ export function staticChecks(env: Map<string, string>): Result[] {
 
 function publicChecks(networkId: "preview" | "preprod" | "mainnet", env: Map<string, string>): Result[] {
   const get = (k: string) => (env.get(k) ?? "").trim();
-  const results: Result[] = [pass(`MIDNIGHT_NETWORK_ID = ${networkId}`)];
+  const results: Result[] = [];
   const profile = resolvePublicNodeProfile(Object.fromEntries(env));
   const problemsFor = (...names: string[]) =>
     profile.problems.filter((p) => names.some((name) => p.startsWith(name)));
@@ -93,6 +93,10 @@ function publicChecks(networkId: "preview" | "preprod" | "mainnet", env: Map<str
     const problems = problemsFor(name, ...also);
     results.push(problems.length > 0 ? fail(name, problems.join("\n       ↳ ")) : pass(okLabel));
   };
+
+  // The network itself: supported, and its reference ledger parameters pinned
+  // (a supported network that is not pinned yet does not start).
+  check("MIDNIGHT_NETWORK_ID", `MIDNIGHT_NETWORK_ID = ${networkId}`);
 
   // Midnight endpoints: the Blockfrost token, or overrides on live hosts.
   check(

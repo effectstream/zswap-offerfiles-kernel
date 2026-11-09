@@ -27,10 +27,12 @@
 // validator's verdicts (open offers are checked with balancing off).
 //
 // An id without an entry fails at startup (refstate.ts
-// `requireReferenceParameters`). Mainnet has no entry: the mainnet genesis in
-// midnight-node is a ledger-8 state (`ledger-state[v13]`, which this ledger-v9
-// build refuses), so its ledger-9 parameters exist only on the live chain, and
-// they are pinned here only once read from it.
+// `requireReferenceParameters`). A network the kernel supports but has not
+// pinned yet is listed in UNPINNED_REFERENCE_PARAMETERS below with the reason,
+// so its startup error says "not pinned yet" instead of "unknown network".
+//
+// This module has no imports on purpose: the startup profiles read it before
+// the ledger WASM or midnight-env is loaded.
 
 export interface ReferenceParametersSnapshot {
   /** Midnight network id (`MIDNIGHT_NETWORK_ID`). */
@@ -148,4 +150,25 @@ export const REFERENCE_PARAMETERS: Readonly<Record<string, ReferenceParametersSn
       "(a0e9d746493144e8c719804f37e5ae7165d5a3fd87c2d6f322f3b5f04b8ee508, 2026-11-09T20:01:30Z), " +
       "ledgerParameters, read 2026-11-09",
   }),
+  // TODO(mainnet): pin mainnet's ledger-9 parameters here. They are not
+  // pinned yet. The mainnet genesis in midnight-node is a ledger-8 state
+  // (`ledger-state[v13]`, which this ledger-v9 build refuses), so the ledger-9
+  // bytes exist only on the live chain: the node runtime API
+  // `MidnightRuntimeApi_get_ledger_parameters`, called with `state_call` at a
+  // block hash, returns them. Add a `mainnet` entry with the block hash,
+  // height and date of the read and the sha256 of the bytes, and remove
+  // `mainnet` from UNPINNED_REFERENCE_PARAMETERS. Until then
+  // MIDNIGHT_NETWORK_ID=mainnet stops at startup (node and batcher).
+});
+
+/**
+ * Networks the kernel supports whose parameters are not pinned yet, with the
+ * reason. Every service refuses to start on them, naming the reason, instead
+ * of reporting an unknown network. An id is never both here and in
+ * REFERENCE_PARAMETERS.
+ */
+export const UNPINNED_REFERENCE_PARAMETERS: Readonly<Record<string, string>> = Object.freeze({
+  mainnet:
+    "mainnet's ledger-9 parameters exist only on the live chain (the node runtime API " +
+    "MidnightRuntimeApi_get_ledger_parameters returns them at a block hash) and none has been pinned",
 });

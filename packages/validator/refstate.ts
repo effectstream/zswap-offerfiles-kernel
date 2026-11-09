@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { LedgerParameters, LedgerState, WellFormedStrictness } from "@midnightntwrk/ledger-v9";
 
-import { REFERENCE_PARAMETERS } from "./reference-parameters.ts";
+import { REFERENCE_PARAMETERS, UNPINNED_REFERENCE_PARAMETERS } from "./reference-parameters.ts";
 
 // Reference state for `Transaction.wellFormed`.
 //
@@ -27,20 +27,49 @@ import { REFERENCE_PARAMETERS } from "./reference-parameters.ts";
 // holds, so an offer carrying a DUST spend still fails here (as it did against
 // a blank state). Open offers do not pay fees; the taker's settlement does.
 
+const pinnedIds = (): string => Object.keys(REFERENCE_PARAMETERS).join(", ");
+const unpinnedIds = (): string[] => Object.keys(UNPINNED_REFERENCE_PARAMETERS);
+
 /** No pinned ledger parameters exist for this network id. Thrown at startup
  *  (see requireReferenceParameters) so the kernel never validates against
  *  blank defaults. The message lists the pinned ids in their declaration
- *  order (reference-parameters.ts). */
+ *  order (reference-parameters.ts), then the supported networks that are not
+ *  pinned yet. */
 export class UnknownNetworkParametersError extends Error {
-  constructor(readonly networkId: string) {
+  constructor(
+    readonly networkId: string,
+    message?: string,
+  ) {
+    const unpinned = unpinnedIds();
     super(
-      `no reference ledger parameters for MIDNIGHT_NETWORK_ID='${networkId}' ` +
-        `(supported: ${Object.keys(REFERENCE_PARAMETERS).join(", ")}). ` +
-        "The offer validator needs the network's real ledger parameters " +
-        "(global_ttl bounds intent TTLs); add a pinned snapshot to " +
-        "packages/validator/reference-parameters.ts.",
+      message ??
+        `no reference ledger parameters for MIDNIGHT_NETWORK_ID='${networkId}' ` +
+          `(supported: ${pinnedIds()}). ` +
+          (unpinned.length > 0
+            ? `Supported but not pinned yet, so not startable either: ${unpinned.join(", ")}. `
+            : "") +
+          "The offer validator needs the network's real ledger parameters " +
+          "(global_ttl bounds intent TTLs); add a pinned snapshot to " +
+          "packages/validator/reference-parameters.ts.",
     );
     this.name = "UnknownNetworkParametersError";
+  }
+}
+
+/** A network the kernel supports (UNPINNED_REFERENCE_PARAMETERS) whose
+ *  parameters are not pinned yet. A subclass of UnknownNetworkParametersError,
+ *  so every startup check that refuses an unknown id refuses this one too; the
+ *  message says why instead of calling the network unknown. */
+export class ReferenceParametersNotPinnedError extends UnknownNetworkParametersError {
+  constructor(networkId: string, readonly reason: string) {
+    super(
+      networkId,
+      `reference ledger parameters for MIDNIGHT_NETWORK_ID='${networkId}' are not pinned yet: ${reason}. ` +
+        `${networkId} is a supported network, but the offer validator needs its pinned ledger-9 ` +
+        "parameters (global_ttl bounds intent TTLs), so no service starts on it until a snapshot is " +
+        `added to packages/validator/reference-parameters.ts (pinned today: ${pinnedIds()}).`,
+    );
+    this.name = "ReferenceParametersNotPinnedError";
   }
 }
 
@@ -49,9 +78,10 @@ const stateCache = new Map<string, LedgerState>();
 
 /**
  * The pinned ledger parameters for `networkId`, deserialized once. Throws
- * UnknownNetworkParametersError for an id without a snapshot. Call it at
- * process startup (node env.ts, the batcher's adapter) so a wrong id fails
- * before the first offer.
+ * ReferenceParametersNotPinnedError for a supported network that is not pinned
+ * yet and UnknownNetworkParametersError for any other id without a snapshot.
+ * Call it at process startup (node env.ts, the batcher's adapter) so a wrong
+ * id fails before the first offer.
  */
 export function requireReferenceParameters(networkId: string): LedgerParameters {
   let parameters = parametersCache.get(networkId);
@@ -59,6 +89,9 @@ export function requireReferenceParameters(networkId: string): LedgerParameters 
     const snapshot = Object.hasOwn(REFERENCE_PARAMETERS, networkId)
       ? REFERENCE_PARAMETERS[networkId]
       : undefined;
+    if (!snapshot && Object.hasOwn(UNPINNED_REFERENCE_PARAMETERS, networkId)) {
+      throw new ReferenceParametersNotPinnedError(networkId, UNPINNED_REFERENCE_PARAMETERS[networkId]!);
+    }
     if (!snapshot) throw new UnknownNetworkParametersError(networkId);
     parameters = LedgerParameters.deserialize(Buffer.from(snapshot.hex, "hex"));
     parametersCache.set(networkId, parameters);

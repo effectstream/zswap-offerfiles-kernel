@@ -8,10 +8,12 @@ import {
   probeMidnightIndexerAuth,
   PUBLIC_MIDNIGHT_NETWORKS,
   publicDevSeedProblem,
+  referenceParametersProblem,
   retiredMidnightHost,
   SUPPORTED_MIDNIGHT_NETWORKS,
   unsupportedNetworkProblem,
 } from "./public-networks.ts";
+import { REFERENCE_PARAMETERS, UNPINNED_REFERENCE_PARAMETERS } from "@zswap-da/validator/reference-parameters";
 
 const TOKEN = "preprodTestProjectId0000000000000";
 // A test double standing in for midnight-env's redactBlockfrostProjectId (this
@@ -44,6 +46,30 @@ describe("supported networks", () => {
 
   test("Celestia: mocha for preview and preprod, mainnet for mainnet", () => {
     expect(CELESTIA_NETWORK_FOR).toEqual({ preview: "mocha", preprod: "mocha", mainnet: "mainnet" });
+  });
+});
+
+describe("reference parameters per supported network", () => {
+  test("every supported network is either pinned or listed as not pinned yet, with a reason", () => {
+    for (const id of SUPPORTED_MIDNIGHT_NETWORKS) {
+      const pinned = Object.hasOwn(REFERENCE_PARAMETERS, id);
+      const unpinned = Object.hasOwn(UNPINNED_REFERENCE_PARAMETERS, id);
+      expect({ id, pinnedXorUnpinned: pinned !== unpinned }).toEqual({ id, pinnedXorUnpinned: true });
+    }
+  });
+
+  test("undeployed, preview and preprod are pinned: no problem", () => {
+    for (const id of ["undeployed", "preview", "preprod"] as const) expect(referenceParametersProblem(id)).toBeUndefined();
+  });
+
+  test("mainnet is refused as not pinned yet, with the reason and the pinned list", () => {
+    const problem = referenceParametersProblem("mainnet");
+    expect(problem).toStartWith(
+      'MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ledger-9 reference parameters are not pinned yet, ' +
+        "so the kernel does not start on it (pinned: undeployed, preview, preprod): ",
+    );
+    expect(problem).toContain("MidnightRuntimeApi_get_ledger_parameters");
+    expect(problem).not.toContain("is not supported");
   });
 });
 

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { redactBlockfrostProjectId } from "@effectstream/midnight-contracts/midnight-env";
 import { MIP6_NAMESPACE_ID_SUFFIX_HEX } from "@zswap-da/offer-guard";
+import { UNPINNED_REFERENCE_PARAMETERS } from "@zswap-da/validator/reference-parameters";
 
 import type { BatcherConfig } from "./config.ts";
 import {
@@ -17,6 +18,12 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL_SEED = "7f".repeat(32);
 const TOKEN = "preprodTestProjectId0000000000000";
 const NETWORKS = ["preview", "preprod", "mainnet"] as const;
+/** The refusal for a supported network whose reference ledger parameters are
+ *  not pinned yet (today: mainnet). */
+const NOT_PINNED = "ledger-9 reference parameters are not pinned yet";
+const unpinned = (network: string) => Object.hasOwn(UNPINNED_REFERENCE_PARAMETERS, network);
+/** The problems apart from the not-pinned refusal: what the env itself gets wrong. */
+const envProblems = (problems: readonly string[]) => problems.filter((p) => !p.includes(NOT_PINNED));
 
 /** What loadBatcherConfig() builds for a public network — including the devnet
  *  defaults the profile must correct (Celestia devnet, loopback RPC). */
@@ -73,8 +80,18 @@ const env = (network: string = "preprod"): Record<string, string | undefined> =>
 });
 
 describe("public-network batcher — raw-environment problems", () => {
-  test.each(NETWORKS)("a complete %s env has no problem", (network) => {
-    expect(resolvePublicBatcherProblems(env(network))).toEqual([]);
+  test.each(NETWORKS)("a complete %s env has no problem (a network not pinned yet: only that one)", (network) => {
+    expect(resolvePublicBatcherProblems(env(network))).toEqual(
+      unpinned(network) ? [expect.stringContaining(NOT_PINNED)] : [],
+    );
+  });
+
+  test("mainnet: refused only because its reference parameters are not pinned yet", () => {
+    const problems = resolvePublicBatcherProblems(env("mainnet"));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toStartWith(`MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ${NOT_PINNED}`);
+    expect(problems[0]).toContain("(pinned: undeployed, preview, preprod)");
+    expect(problems[0]).not.toContain("is not supported");
   });
 
   test.each([
@@ -83,7 +100,7 @@ describe("public-network batcher — raw-environment problems", () => {
     ["whitespace", "  "],
   ])("BATCHER_WALLET_SEED %s is refused by name on every public network", (_label, value) => {
     for (const network of NETWORKS) {
-      const problems = resolvePublicBatcherProblems({ ...env(network), BATCHER_WALLET_SEED: value });
+      const problems = envProblems(resolvePublicBatcherProblems({ ...env(network), BATCHER_WALLET_SEED: value }));
       expect(problems).toHaveLength(1);
       expect(problems[0]).toStartWith(`BATCHER_WALLET_SEED is required on ${network}`);
     }
@@ -96,7 +113,7 @@ describe("public-network batcher — raw-environment problems", () => {
     "00000000000000000000000000000000000000000000000000000000000000ab", // 31 zero bytes
   ])("the public dev seed %s is refused by name on every public network", (seed) => {
     for (const network of NETWORKS) {
-      const problems = resolvePublicBatcherProblems({ ...env(network), BATCHER_WALLET_SEED: seed });
+      const problems = envProblems(resolvePublicBatcherProblems({ ...env(network), BATCHER_WALLET_SEED: seed }));
       expect(problems).toHaveLength(1);
       expect(problems[0]).toStartWith("BATCHER_WALLET_SEED is a public dev seed");
       expect(problems[0]).not.toContain(seed.replace(/^0x/, ""));
@@ -166,6 +183,7 @@ describe("public-network batcher — raw-environment problems", () => {
       "CELESTIA_RPC_URL",
       "CELESTIA_AUTH_TOKEN",
       "MIDNIGHT_BLOCKFROST_PROJECT_ID",
+      'MIDNIGHT_NETWORK_ID="mainnet"',
     ]);
   });
 });
@@ -230,11 +248,13 @@ describe("batcher.public.ts — the real entry, in a child process", () => {
     });
   };
 
-  test.each([
-    ["preview", "mocha"],
-    ["preprod", "mocha"],
-    ["mainnet", "mainnet"],
-  ] as const)("--check on %s prints the profile with REDACTED endpoints and exits 0", (network, celestia) => {
+  test.each(
+    ([
+      ["preview", "mocha"],
+      ["preprod", "mocha"],
+      ["mainnet", "mainnet"],
+    ] as const).filter(([network]) => !unpinned(network)),
+  )("--check on %s prints the profile with REDACTED endpoints and exits 0", (network, celestia) => {
     const result = run(env(network));
     const out = result.stdout.toString();
     const err = result.stderr.toString();
@@ -266,6 +286,22 @@ describe("batcher.public.ts — the real entry, in a child process", () => {
     const result = run({ ...env("mainnet"), MIDNIGHT_BLOCKFROST_PROJECT_ID: undefined }, []);
     expect(result.exitCode).toBe(78);
     expect(result.stderr.toString()).toContain("MIDNIGHT_BLOCKFROST_PROJECT_ID is required on mainnet");
+  });
+
+  test.each([
+    ["the --check preflight", ["--check"]],
+    ["the entry itself", []],
+  ] as const)("mainnet, %s: exits 78 because its reference parameters are not pinned yet", (_label, args) => {
+    const result = run(env("mainnet"), [...args]);
+    const out = result.stdout.toString();
+    const err = result.stderr.toString();
+    expect(result.exitCode, err).toBe(78);
+    expect(err).toContain('configuration for MIDNIGHT_NETWORK_ID="mainnet" is invalid (1 problem)');
+    expect(err).toContain(`MIDNIGHT_NETWORK_ID="mainnet" is supported, but its ${NOT_PINNED}`);
+    expect(out).not.toContain("batcher configuration OK");
+    expect(out).not.toContain("starting on");
+    expect(out + err).not.toContain(TOKEN);
+    expect(out + err).not.toContain(REAL_SEED);
   });
 
   test("stagenet exits 78 naming the supported networks", () => {

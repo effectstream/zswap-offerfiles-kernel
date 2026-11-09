@@ -1,4 +1,25 @@
-export type RegistryNetwork = "preview" | "preprod" | "stagenet";
+/**
+ * The public networks whose canonical token list the kernel can hold. Each is
+ * a ledger-9 (Midnight 2.x) network; `undeployed` (a local chain) has no
+ * public registry and never reaches the database code.
+ */
+export type RegistryNetwork = "preview" | "preprod" | "mainnet";
+
+export const REGISTRY_NETWORKS: readonly RegistryNetwork[] = ["preview", "preprod", "mainnet"];
+
+/**
+ * The registry label of the ledger-9 line: `network.protocolFamily` and
+ * `compatibility.profile` of a registry document. A document with another
+ * label (the `midnight-1.x` / `v1` files describe ledger-8 deployments) names
+ * token contracts this kernel cannot use and is never imported.
+ */
+export const LEDGER9_PROTOCOL_FAMILY = "midnight-2.x";
+export const LEDGER9_COMPATIBILITY_PROFILE = "v2";
+
+export type RegistryLabel = {
+  protocolFamily: string;
+  profile: string | null;
+};
 
 export type CanonicalToken = {
   symbol: CanonicalSymbol;
@@ -119,6 +140,31 @@ function dateTime(value: unknown, path: string): void {
   if (Number.isNaN(Date.parse(raw))) throw new Error(`${path} must be a date-time`);
 }
 
+/**
+ * Read only the label of a registry document, before anything else is
+ * validated, so a document of another protocol family can be skipped by
+ * policy instead of being reported as malformed. Null when the document has
+ * no readable `network.protocolFamily`.
+ */
+export function readRegistryLabel(value: unknown): RegistryLabel | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const document = value as Record<string, unknown>;
+  const network = document.network;
+  if (typeof network !== "object" || network === null || Array.isArray(network)) return null;
+  const protocolFamily = (network as Record<string, unknown>).protocolFamily;
+  if (typeof protocolFamily !== "string" || protocolFamily.length === 0) return null;
+  const compatibility = document.compatibility;
+  const profile =
+    typeof compatibility === "object" && compatibility !== null && !Array.isArray(compatibility)
+      ? (compatibility as Record<string, unknown>).profile
+      : undefined;
+  return { protocolFamily, profile: typeof profile === "string" ? profile : null };
+}
+
+export function isLedger9Label(label: RegistryLabel): boolean {
+  return label.protocolFamily === LEDGER9_PROTOCOL_FAMILY;
+}
+
 function validateNetwork(
   raw: unknown,
   expected: RegistryNetwork,
@@ -127,17 +173,16 @@ function validateNetwork(
   const network = object(raw, path);
   exactString(network.key, expected, `${path}.key`);
   exactString(network.networkId, expected, `${path}.networkId`);
-  const expectedProtocol = expected === "stagenet" ? "midnight-2.x" : "midnight-1.x";
-  exactString(network.protocolFamily, expectedProtocol, `${path}.protocolFamily`);
+  exactString(network.protocolFamily, LEDGER9_PROTOCOL_FAMILY, `${path}.protocolFamily`);
   nonEmptyString(network.displayName, `${path}.displayName`);
   nonEmptyString(network.chainId, `${path}.chainId`);
   nonEmptyString(network.stackIdentity, `${path}.stackIdentity`);
   return network;
 }
 
-function validateCompatibility(raw: unknown, network: RegistryNetwork, path: string): Record<string, unknown> {
+function validateCompatibility(raw: unknown, path: string): Record<string, unknown> {
   const compatibility = object(raw, path);
-  exactString(compatibility.profile, network === "stagenet" ? "v2" : "v1", `${path}.profile`);
+  exactString(compatibility.profile, LEDGER9_COMPATIBILITY_PROFILE, `${path}.profile`);
   for (const field of ["compiler", "compactRuntime", "ledger", "midnightJs", "walletSdk"]) {
     nonEmptyString(compatibility[field], `${path}.${field}`);
   }
@@ -162,7 +207,7 @@ function validateDeployment(
 
   const deploymentNetwork = object(deployment.network, `${path}.network`);
   const deploymentKey = nonEmptyString(deploymentNetwork.key, `${path}.network.key`);
-  if (!(["preview", "preprod", "stagenet", "undeployed"] as string[]).includes(deploymentKey)) {
+  if (!([...REGISTRY_NETWORKS, "undeployed"] as string[]).includes(deploymentKey)) {
     throw new Error(`${path}.network.key is invalid`);
   }
   for (const field of ["displayName", "networkId", "protocolFamily", "chainId", "stackIdentity"]) {
@@ -220,7 +265,7 @@ export function validateCanonicalRegistry(value: unknown, expectedNetwork: Regis
   const revision = nonEmptyString(registry.registryRevision, "registryRevision");
   dateTime(registry.generatedAt, "generatedAt");
   const network = validateNetwork(registry.network, expectedNetwork, "network");
-  const compatibility = validateCompatibility(registry.compatibility, expectedNetwork, "compatibility");
+  const compatibility = validateCompatibility(registry.compatibility, "compatibility");
   const rawTokens = array(registry.tokens, "tokens");
   if (rawTokens.length !== CANONICAL_SYMBOLS.length) {
     throw new Error("registry must contain exactly the six canonical tokens");
@@ -240,7 +285,13 @@ export function validateCanonicalRegistry(value: unknown, expectedNetwork: Regis
     const token = bySymbol.get(symbol);
     if (!token) throw new Error(`missing canonical token ${symbol}`);
     exactString(token.name, definition.registryName, `${symbol}.name`);
-    if (token.decimals !== definition.decimals || !Number.isInteger(token.decimals) || token.decimals < 0 || token.decimals > 38) {
+    if (
+      typeof token.decimals !== "number" ||
+      token.decimals !== definition.decimals ||
+      !Number.isInteger(token.decimals) ||
+      token.decimals < 0 ||
+      token.decimals > 38
+    ) {
       throw new Error(`${symbol}.decimals mismatch or outside database bounds`);
     }
     exactString(token.privacy, definition.kind, `${symbol}.privacy`);
@@ -294,22 +345,9 @@ export function validateCanonicalRegistry(value: unknown, expectedNetwork: Regis
 }
 
 /**
- * The PREPROD shielded-night (sNight) colour 000-init.sql seeds as `SNIGHT`.
- * Its colour is derived from the preprod contract address, so it names a token
- * that exists on preprod only. asset-prices.test.ts re-derives it.
- */
-export const PREPROD_SNIGHT_TOKEN_COLOR =
-  "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819";
-
-/**
  * Replace only the six canonical registry rows in one transaction.
- * Historical offers, unrelated known tokens and token_prices are never touched.
- *
- * One stagenet-only exception (00050 FR-005): stagenet has no shielded-night
- * deployment, so a stagenet import also removes the seeded SNIGHT row — but
- * only while it still carries the PREPROD colour. A known token that exists
- * on another network would otherwise be quoted and listed on stagenet; an
- * operator-set stagenet SNIGHT colour is left alone.
+ * Historical offers, unrelated known tokens (NIGHT included) and token_prices
+ * are never touched.
  */
 export async function applyCanonicalRegistry(
   client: RegistryDbClient,
@@ -325,7 +363,7 @@ export async function applyCanonicalRegistry(
       `CREATE TABLE IF NOT EXISTS canonical_token_registry_state (
          name TEXT PRIMARY KEY,
          token_color TEXT UNIQUE NOT NULL,
-         network TEXT NOT NULL CHECK (network IN ('preview', 'preprod', 'stagenet')),
+         network TEXT NOT NULL CHECK (network IN ('preview', 'preprod', 'mainnet')),
          registry_revision TEXT NOT NULL,
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
        )`,
@@ -409,12 +447,6 @@ export async function applyCanonicalRegistry(
            registry_revision = EXCLUDED.registry_revision,
            updated_at = NOW()`,
         [token.name, token.tokenColor, registry.network, registry.revision],
-      );
-    }
-    if (registry.network === "stagenet") {
-      await client.query(
-        "DELETE FROM known_tokens WHERE name = 'SNIGHT' AND token_color = $1",
-        [PREPROD_SNIGHT_TOKEN_COLOR],
       );
     }
     await client.query("COMMIT");

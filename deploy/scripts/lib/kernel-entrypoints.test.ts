@@ -209,16 +209,28 @@ describe("entrypoint-token-registry.sh — the one-shot import (FR-004)", () => 
     TOKEN_REGISTRY_RETRY_DELAY_S: "0",
   });
 
-  test("runs the import with --required and exits 0 when it applies", () => {
-    const run = runEntrypoint("entrypoint-token-registry.sh", registryEnv("stagenet"));
+  test.each(["preview", "preprod", "mainnet"])("%s: runs the import with --required and exits 0 when it applies", (network) => {
+    const run = runEntrypoint("entrypoint-token-registry.sh", registryEnv(network));
     expect(run.code, run.stderr).toBe(0);
     expect(run.calls).toContain("BUN run packages/database/import-token-registry.ts --required");
     expect(run.stderr).toContain("token registry import applied");
   });
 
+  test("exit 3 from the import (nothing to import for this network) succeeds at once, without a retry", () => {
+    const run = runEntrypoint("entrypoint-token-registry.sh", {
+      ...registryEnv("preview"),
+      FAKE_IMPORT_EXIT: "3",
+      TOKEN_REGISTRY_ATTEMPTS: "3",
+    });
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.calls.filter((c) => c.includes("import-token-registry.ts --required"))).toHaveLength(1);
+    expect(run.stderr).toContain("token registry import skipped: nothing to import for preview");
+    expect(run.stderr).not.toContain("token registry import applied");
+  });
+
   test("a failing import is retried, then fails LOUDLY (exit 1) — never a silent skip", () => {
     const run = runEntrypoint("entrypoint-token-registry.sh", {
-      ...registryEnv("stagenet"),
+      ...registryEnv("preprod"),
       FAKE_IMPORT_EXIT: "1",
       TOKEN_REGISTRY_ATTEMPTS: "3",
     });
@@ -235,10 +247,11 @@ describe("entrypoint-token-registry.sh — the one-shot import (FR-004)", () => 
 
   test.each([
     [{}, "missing required environment: TOKEN_REGISTRY_NETWORK"],
-    [{ TOKEN_REGISTRY_NETWORK: "undeployed" }, "TOKEN_REGISTRY_NETWORK must be preview, preprod or stagenet"],
+    [{ TOKEN_REGISTRY_NETWORK: "undeployed" }, "TOKEN_REGISTRY_NETWORK must be preview, preprod or mainnet"],
+    [{ TOKEN_REGISTRY_NETWORK: "stagenet" }, "TOKEN_REGISTRY_NETWORK must be preview, preprod or mainnet"],
     [{ TOKEN_REGISTRY_ATTEMPTS: "0" }, "TOKEN_REGISTRY_ATTEMPTS must be a positive integer"],
   ])("refuses %j with exit 78", (overrides, message) => {
-    const base = registryEnv("stagenet");
+    const base = registryEnv("preprod");
     if (!("TOKEN_REGISTRY_NETWORK" in overrides) && Object.keys(overrides).length === 0) {
       delete (base as Record<string, string | undefined>)["TOKEN_REGISTRY_NETWORK"];
     }

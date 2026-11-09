@@ -6,13 +6,17 @@ import { migrationTable } from "./migration-order.ts";
 import { tokenPriceFromAsset } from "./price-map.ts";
 import {
   applyCanonicalRegistry,
-  PREPROD_SNIGHT_TOKEN_COLOR,
+  readRegistryLabel,
+  REGISTRY_NETWORKS,
   validateCanonicalRegistry,
   type RegistryNetwork,
 } from "./token-registry.ts";
 import {
+  EXIT_NOTHING_TO_IMPORT,
+  loadRegistryImportConfig,
+  registrySourceFor,
   registryUrl,
-  runOptionalRegistryImport,
+  runRegistryImport,
   type RegistryImportConfig,
 } from "./import-token-registry.ts";
 
@@ -29,22 +33,30 @@ const TOKEN_DEFINITIONS = [
   ["utwBTC", "Unshielded-test-wrapped BTC", 8, "unshielded", "1", "100000000"],
 ] as const;
 
+const NIGHT_ROW = {
+  token_color: "0".repeat(64),
+  name: "NIGHT",
+  kind: "unshielded",
+  decimals: 6,
+  asset_id: "midnight-3",
+};
+
 const network = (key = "preprod") => ({
   key,
   displayName: key[0]!.toUpperCase() + key.slice(1),
-  protocolFamily: key === "stagenet" ? "midnight-2.x" : "midnight-1.x",
+  protocolFamily: "midnight-2.x",
   networkId: key,
   chainId: `Midnight ${key}`,
   stackIdentity: `${key}-stack`,
 });
 
-const compatibility = (key = "preprod") => ({
-  profile: key === "stagenet" ? "v2" : "v1",
-  compiler: "0.31.1",
-  compactRuntime: "0.16.0",
-  ledger: "8.1.0",
-  midnightJs: "4.1.1",
-  walletSdk: "1.2.0",
+const compatibility = () => ({
+  profile: "v2",
+  compiler: "0.36.0",
+  compactRuntime: "0.21.0",
+  ledger: "1.0.0",
+  midnightJs: "5.0.0",
+  walletSdk: "2.0.0",
 });
 
 function deployment(symbol: string, index: number, key = "preprod") {
@@ -54,16 +66,16 @@ function deployment(symbol: string, index: number, key = "preprod") {
     contractAddress: (100 + index).toString(16).padStart(64, "0"),
     tokenId: index.toString(16).padStart(64, "0"),
     deploymentTransaction: (200 + index).toString(16).padStart(64, "0"),
-    deployedAt: "2026-09-07T12:00:00.000Z",
-    verifiedAt: "2026-09-07T12:01:00.000Z",
+    deployedAt: "2026-11-09T12:00:00.000Z",
+    verifiedAt: "2026-11-09T12:01:00.000Z",
     network: network(key),
-    compatibility: compatibility(key),
-    deploymentToolchain: { runner: "test", runnerVersion: "1", walletSdk: "1.2.0" },
+    compatibility: compatibility(),
+    deploymentToolchain: { runner: "test", runnerVersion: "1", walletSdk: "2.0.0" },
     confirmation: { blockHeight: String(index), blockHash: `block-${index}` },
     maintenanceAuthority: { status: "retained", address: `authority-${index}` },
     artifact: {
       sourceRevision: "a".repeat(40),
-      compilerVersion: "0.31.1",
+      compilerVersion: "0.36.0",
       artifactSha256: "b".repeat(64),
       openZeppelinRelease: null,
     },
@@ -75,9 +87,9 @@ function readyRegistry(key = "preprod", offset = 0): any {
     schemaVersion: "1.0.0",
     registryRevision: `revision-${key}-${offset}`,
     status: "ready",
-    generatedAt: "2026-09-07T12:02:00.000Z",
+    generatedAt: "2026-11-09T12:02:00.000Z",
     network: network(key),
-    compatibility: compatibility(key),
+    compatibility: compatibility(),
     tokens: TOKEN_DEFINITIONS.map(([symbol, name, decimals, privacy, humanAmount, baseUnits], index) => ({
       symbol,
       name,
@@ -95,14 +107,37 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-const PINNED_FIXTURES: Record<RegistryNetwork, URL> = {
-  preprod: new URL("./fixtures/mint-test-tokens.preprod.json", import.meta.url),
-  preview: new URL("./fixtures/mint-test-tokens.preview.json", import.meta.url),
-  stagenet: new URL("./fixtures/mint-test-tokens.stagenet.json", import.meta.url),
-};
+const V2_FIXTURE = new URL("./fixtures/registry-v2.preprod.synthetic.json", import.meta.url);
+const V2_FIXTURE_REVISION = "09cfd670d5670755d49e9162ba268166f78713f75bb518539dcf9165aecd4ce0";
 
-async function pinnedRegistry(network: RegistryNetwork): Promise<unknown> {
-  return await Bun.file(PINNED_FIXTURES[network]).json();
+/** The synthetic ledger-9 registry document, labelled for `key`. */
+async function v2Registry(key: RegistryNetwork = "preprod"): Promise<any> {
+  const document = (await Bun.file(V2_FIXTURE).json()) as any;
+  const relabel = (target: any) => {
+    target.key = key;
+    target.networkId = key;
+    target.displayName = key[0]!.toUpperCase() + key.slice(1);
+    target.chainId = `Midnight ${target.displayName}`;
+  };
+  relabel(document.network);
+  for (const token of document.tokens) for (const d of token.deployments) relabel(d.network);
+  return document;
+}
+
+/**
+ * The same document labelled the way the published preview and preprod
+ * registries were on 2026-11-09: Midnight 1.x, profile v1, ledger 8.1.0.
+ */
+async function v1Registry(key: RegistryNetwork): Promise<any> {
+  const document = await v2Registry(key);
+  const relabel = (net: any, compat: any) => {
+    net.protocolFamily = "midnight-1.x";
+    compat.profile = "v1";
+    compat.ledger = "8.1.0";
+  };
+  relabel(document.network, document.compatibility);
+  for (const token of document.tokens) for (const d of token.deployments) relabel(d.network, d.compatibility);
+  return document;
 }
 
 async function freePort(): Promise<number> {
@@ -134,16 +169,51 @@ async function withFreshDatabase(
   }
 }
 
+/** A local registry host serving `documents` by network, 404 for anything else. */
+function serveRegistry(documents: Partial<Record<RegistryNetwork, unknown>>) {
+  const requested: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) => {
+      const path = new URL(request.url).pathname;
+      requested.push(path);
+      const match = /^\/metadata\.([a-z]+)\.json$/.exec(path);
+      const document = match ? documents[match[1] as RegistryNetwork] : undefined;
+      return document === undefined ? new Response("not found", { status: 404 }) : Response.json(document);
+    },
+  });
+  return { server, baseUrl: `http://127.0.0.1:${server.port}/`, requested };
+}
+
+const importConfig = (
+  baseUrl: string,
+  selected: RegistryImportConfig["network"],
+  databasePort = 5432,
+  timeoutMs = 2_000,
+): RegistryImportConfig => ({
+  baseUrl,
+  network: selected,
+  timeoutMs,
+  db: { host: "127.0.0.1", port: databasePort, user: "postgres", password: "postgres", database: "postgres" },
+});
+
+const knownTokens = async (client: InstanceType<typeof pg.Client>) =>
+  (await client.query("SELECT token_color, name, kind, decimals, asset_id FROM known_tokens ORDER BY name")).rows;
+const registryState = async (client: InstanceType<typeof pg.Client>) =>
+  (await client.query(
+    "SELECT name, token_color, network, registry_revision FROM canonical_token_registry_state ORDER BY name",
+  )).rows;
+
+const noDatabase = () => {
+  throw new Error("must not open a database connection");
+};
+
 describe("canonical registry validation", () => {
-  test("accepts the pinned published Preprod, Preview and Stagenet registries", async () => {
-    const expectedRevisions = {
-      preprod: "ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc",
-      preview: "c15d38f3a00a319c15ff10e39a2d4926763a4438e7fbb3bfc202bd15aa5a7d28",
-      stagenet: "59041d2fd2acfdad53e437e5a4d2ba88a6f24e4f9e55869b66f465f3da11a0d1",
-    } as const;
-    for (const network of ["preprod", "preview", "stagenet"] as const) {
-      const registry = validateCanonicalRegistry(await pinnedRegistry(network), network);
-      expect(registry).toMatchObject({ network, revision: expectedRevisions[network] });
+  test("accepts the synthetic ledger-9 registry for preview and preprod", async () => {
+    for (const key of ["preprod", "preview"] as const) {
+      const registry = validateCanonicalRegistry(await v2Registry(key), key);
+      expect(registry).toMatchObject({ network: key, revision: V2_FIXTURE_REVISION });
       expect(registry.tokens).toHaveLength(6);
     }
   });
@@ -160,16 +230,35 @@ describe("canonical registry validation", () => {
     ]);
   });
 
-  test("accepts superseded history from a prior stack identity", () => {
+  test("accepts superseded history from a prior stack identity, including a ledger-8 deployment", () => {
     const registry = readyRegistry();
     const superseded = clone(registry.tokens[0].deployments[0]);
     superseded.deploymentId = "twBTC:prior-stack";
     superseded.status = "superseded";
     superseded.network.stackIdentity = "prior-preprod-stack";
     superseded.network.chainId = "prior-preprod-chain";
+    superseded.network.protocolFamily = "midnight-1.x";
+    superseded.compatibility.profile = "v1";
     superseded.tokenId = "f".repeat(64);
     registry.tokens[0].deployments.unshift(superseded);
     expect(validateCanonicalRegistry(registry, "preprod").tokens).toHaveLength(6);
+  });
+
+  test("rejects a document that is not labelled for ledger 9, even when called directly", async () => {
+    expect(() => validateCanonicalRegistry(readyRegistry("preprod"), "preprod")).not.toThrow();
+    for (const key of ["preview", "preprod"] as const) {
+      const document = await v1Registry(key);
+      expect(() => validateCanonicalRegistry(document, key)).toThrow(/network.protocolFamily.*midnight-2\.x/);
+    }
+    const profileOnly = readyRegistry();
+    profileOnly.compatibility.profile = "v1";
+    expect(() => validateCanonicalRegistry(profileOnly, "preprod")).toThrow(/compatibility.profile.*v2/);
+  });
+
+  test("an active deployment from a removed network key is refused", () => {
+    const registry = readyRegistry();
+    registry.tokens[0].deployments[0].network.key = "stagenet";
+    expect(() => validateCanonicalRegistry(registry, "preprod")).toThrow(/network.key is invalid/);
   });
 
   test("rejects unavailable, wrong-network, malformed and ambiguous registries", () => {
@@ -178,6 +267,7 @@ describe("canonical registry validation", () => {
     expect(() => validateCanonicalRegistry(unavailable, "preprod")).toThrow(/status.*ready/);
 
     expect(() => validateCanonicalRegistry(readyRegistry("preview"), "preprod")).toThrow(/network.key.*preprod/);
+    expect(() => validateCanonicalRegistry(readyRegistry("preprod"), "mainnet")).toThrow(/network.key.*mainnet/);
 
     const malformed = readyRegistry();
     malformed.tokens[0].decimals = 6;
@@ -196,109 +286,280 @@ describe("canonical registry validation", () => {
     duplicateId.tokens[0].deployments.push(duplicate);
     expect(() => validateCanonicalRegistry(duplicateId, "preprod")).toThrow(/duplicate deploymentId/);
   });
+
+  test("reads a document's label without validating the rest", async () => {
+    expect(readRegistryLabel(await v1Registry("preview"))).toEqual({ protocolFamily: "midnight-1.x", profile: "v1" });
+    expect(readRegistryLabel(await v2Registry("preprod"))).toEqual({ protocolFamily: "midnight-2.x", profile: "v2" });
+    expect(readRegistryLabel({ network: { protocolFamily: "midnight-2.x" } })).toEqual({
+      protocolFamily: "midnight-2.x",
+      profile: null,
+    });
+    for (const unlabelled of [null, [], "x", {}, { network: {} }, { network: { protocolFamily: "" } }]) {
+      expect(readRegistryLabel(unlabelled)).toBeNull();
+    }
+  });
 });
 
-describe("pinned Preprod database defaults", () => {
-  test("fresh offline initialization matches the published registry and removes legacy placeholders", async () => {
+describe("fresh database defaults", () => {
+  test("a fresh database lists NIGHT only and holds no registry provenance", async () => {
     await withFreshDatabase(async (client) => {
-      const preprod = validateCanonicalRegistry(await pinnedRegistry("preprod"), "preprod");
-      const rows = (await client.query(
-        "SELECT token_color, name, kind, decimals, asset_id FROM known_tokens ORDER BY name",
-      )).rows;
-      expect(rows).toHaveLength(8);
-      expect(rows.some((row) => row.name === "USDC" || row.name === "USDM")).toBe(false);
-      const canonical = rows.filter((row) => preprod.tokens.some((token) => token.name === row.name));
-      expect(canonical).toEqual(preprod.tokens.map((token) => ({
-        token_color: token.tokenColor,
-        name: token.name,
-        kind: token.kind,
-        decimals: token.decimals,
-        asset_id: token.assetId,
-      })).sort((a, b) => a.name.localeCompare(b.name)));
-
-      const ownership = (await client.query(
-        "SELECT name, token_color, network, registry_revision FROM canonical_token_registry_state ORDER BY name",
-      )).rows;
-      expect(ownership).toHaveLength(6);
-      expect(ownership).toEqual(preprod.tokens.map((token) => ({
-        name: token.name,
-        token_color: token.tokenColor,
-        network: "preprod",
-        registry_revision: preprod.revision,
-      })).sort((a, b) => a.name.localeCompare(b.name)));
-
-      const prices = new Map((await client.query(
-        `SELECT kt.name, kt.decimals, ap.price_usd
-           FROM known_tokens kt
-           JOIN asset_prices ap ON ap.asset_id = kt.asset_id
-          WHERE kt.name = ANY($1::text[])`,
-        [preprod.tokens.map((token) => token.name)],
-      )).rows.map((row) => [String(row.name), tokenPriceFromAsset(String(row.price_usd), Number(row.decimals))]));
-      expect(prices.get("TWBTC")).toBe("0.00077387");
-      expect(prices.get("TWETH")).toBe("0.00000000000000239328");
-      expect(prices.get("TWUSDC")).toBe("0.000000999818");
-      expect(prices.get("TWUSDM")).toBe("0.000001001");
-      expect(prices.get("UTWUSDC")).toBe("0.000000999818");
-      expect(prices.get("UTWBTC")).toBe("0.00077387");
+      expect(await knownTokens(client)).toEqual([NIGHT_ROW]);
+      expect(await registryState(client)).toEqual([]);
     });
   });
 
-  test("same-network import is idempotent and published Preview/Stagenet replace seeded Preprod", async () => {
+  test("the network CHECK accepts preview, preprod and mainnet and refuses stagenet and undeployed", async () => {
     await withFreshDatabase(async (client) => {
-      const selectRows = async () => (await client.query(
-        "SELECT token_color, name, kind, decimals, asset_id FROM known_tokens WHERE name LIKE 'TW%' OR name LIKE 'UTW%' ORDER BY name",
-      )).rows;
-      const preprod = validateCanonicalRegistry(await pinnedRegistry("preprod"), "preprod");
-      const before = await selectRows();
-      await applyCanonicalRegistry(client, preprod);
-      expect(await selectRows()).toEqual(before);
-
-      for (const network of ["preview", "stagenet"] as const) {
-        const replacement = validateCanonicalRegistry(await pinnedRegistry(network), network);
-        await applyCanonicalRegistry(client, replacement);
-        expect(await selectRows()).toEqual(replacement.tokens.map((token) => ({
-          token_color: token.tokenColor,
-          name: token.name,
-          kind: token.kind,
-          decimals: token.decimals,
-          asset_id: token.assetId,
-        })).sort((a, b) => a.name.localeCompare(b.name)));
-        expect((await client.query(
-          "SELECT DISTINCT network, registry_revision FROM canonical_token_registry_state",
-        )).rows).toEqual([{ network, registry_revision: replacement.revision }]);
+      const insert = (name: string, net: string) =>
+        client.query(
+          "INSERT INTO canonical_token_registry_state (name, token_color, network, registry_revision) VALUES ($1, $2, $3, 'r')",
+          [name, name.toLowerCase().padEnd(64, "0"), net],
+        );
+      for (const net of REGISTRY_NETWORKS) await insert(`A${net.toUpperCase()}`, net);
+      for (const net of ["stagenet", "undeployed"]) {
+        await expect(insert(`B${net.toUpperCase()}`, net)).rejects.toThrow(/check constraint/);
       }
+      expect((await registryState(client)).map((row) => row.network).sort()).toEqual(["mainnet", "preprod", "preview"]);
     });
   });
 
-  test("an unreachable registry leaves the fresh Preprod defaults unchanged", async () => {
-    await withFreshDatabase(async (client, databasePort) => {
-      const beforeKnown = (await client.query(
-        "SELECT token_color, name, kind, decimals, asset_id FROM known_tokens ORDER BY name",
-      )).rows;
-      const beforeState = (await client.query(
-        "SELECT name, token_color, network, registry_revision FROM canonical_token_registry_state ORDER BY name",
-      )).rows;
-      const unavailablePort = await freePort();
-      const outcome = await runOptionalRegistryImport({
-        baseUrl: `http://127.0.0.1:${unavailablePort}/`,
-        network: "preprod",
-        timeoutMs: 75,
-        db: {
-          host: "127.0.0.1",
-          port: databasePort,
-          user: "postgres",
-          password: "postgres",
-          database: "postgres",
-        },
-      });
-      expect(outcome.status).toBe("skipped");
-      expect((await client.query(
-        "SELECT token_color, name, kind, decimals, asset_id FROM known_tokens ORDER BY name",
-      )).rows).toEqual(beforeKnown);
-      expect((await client.query(
-        "SELECT name, token_color, network, registry_revision FROM canonical_token_registry_state ORDER BY name",
-      )).rows).toEqual(beforeState);
+  test("the importer's own table definition (a database without the table) has the same CHECK", async () => {
+    await withFreshDatabase(async (client) => {
+      await client.query("DROP TABLE canonical_token_registry_state");
+      await applyCanonicalRegistry(client, validateCanonicalRegistry(await v2Registry("preprod"), "preprod"));
+      await client.query(
+        "INSERT INTO canonical_token_registry_state (name, token_color, network, registry_revision) VALUES ('M', $1, 'mainnet', 'r')",
+        ["c".repeat(64)],
+      );
+      await expect(
+        client.query(
+          "INSERT INTO canonical_token_registry_state (name, token_color, network, registry_revision) VALUES ('S', $1, 'stagenet', 'r')",
+          ["d".repeat(64)],
+        ),
+      ).rejects.toThrow(/check constraint/);
     });
+  });
+});
+
+describe("per-network import (registry source → database)", () => {
+  test("preview with a 1.x-labelled file: skipped with one reason naming the network and the file, nothing imported", async () => {
+    const registry = serveRegistry({ preview: await v1Registry("preview") });
+    try {
+      await withFreshDatabase(async (client, databasePort) => {
+        const outcome = await runRegistryImport(importConfig(registry.baseUrl, "preview", databasePort), {
+          createClient: noDatabase,
+        });
+        expect(outcome).toEqual({
+          status: "skipped",
+          network: "preview",
+          reason:
+            `preview registry file ${registry.baseUrl}metadata.preview.json is labelled midnight-1.x (profile v1); ` +
+            "only midnight-2.x registries are imported; nothing imported",
+        });
+        expect(registry.requested).toEqual(["/metadata.preview.json"]);
+        expect(await knownTokens(client)).toEqual([NIGHT_ROW]);
+        expect(await registryState(client)).toEqual([]);
+      });
+    } finally {
+      registry.server.stop(true);
+    }
+  });
+
+  test("preprod with a 1.x-labelled file is skipped the same way", async () => {
+    const registry = serveRegistry({ preprod: await v1Registry("preprod") });
+    try {
+      const outcome = await runRegistryImport(importConfig(registry.baseUrl, "preprod"), { createClient: noDatabase });
+      expect(outcome.status).toBe("skipped");
+      expect(outcome.status === "skipped" && outcome.reason).toContain(
+        `preprod registry file ${registry.baseUrl}metadata.preprod.json is labelled midnight-1.x`,
+      );
+    } finally {
+      registry.server.stop(true);
+    }
+  });
+
+  test("a missing file (404) is skipped naming the network and the file", async () => {
+    const registry = serveRegistry({});
+    try {
+      for (const key of ["preview", "preprod"] as const) {
+        const outcome = await runRegistryImport(importConfig(registry.baseUrl, key), { createClient: noDatabase });
+        expect(outcome).toEqual({
+          status: "skipped",
+          network: key,
+          reason: `${key} registry file ${registry.baseUrl}metadata.${key}.json is missing (HTTP 404); nothing imported`,
+        });
+      }
+    } finally {
+      registry.server.stop(true);
+    }
+  });
+
+  test("preprod with the 2.x fixture: imports the six tokens at their published price scales", async () => {
+    const document = await v2Registry("preprod");
+    const registry = serveRegistry({ preprod: document });
+    try {
+      await withFreshDatabase(async (client, databasePort) => {
+        const outcome = await runRegistryImport(importConfig(registry.baseUrl, "preprod", databasePort));
+        expect(outcome).toEqual({
+          status: "applied",
+          network: "preprod",
+          revision: V2_FIXTURE_REVISION,
+          source: `${registry.baseUrl}metadata.preprod.json`,
+        });
+        const expected = validateCanonicalRegistry(document, "preprod");
+        const rows = await knownTokens(client);
+        expect(rows.find((row) => row.name === "NIGHT")).toEqual(NIGHT_ROW);
+        expect(rows.filter((row) => row.name !== "NIGHT")).toEqual(
+          expected.tokens
+            .map((token) => ({
+              token_color: token.tokenColor,
+              name: token.name,
+              kind: token.kind,
+              decimals: token.decimals,
+              asset_id: token.assetId,
+            }))
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+        expect(await registryState(client)).toEqual(
+          expected.tokens
+            .map((token) => ({
+              name: token.name,
+              token_color: token.tokenColor,
+              network: "preprod",
+              registry_revision: V2_FIXTURE_REVISION,
+            }))
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+
+        const prices = new Map((await client.query(
+          `SELECT kt.name, kt.decimals, ap.price_usd
+             FROM known_tokens kt
+             JOIN asset_prices ap ON ap.asset_id = kt.asset_id`,
+        )).rows.map((row) => [String(row.name), tokenPriceFromAsset(String(row.price_usd), Number(row.decimals))]));
+        expect(prices.get("TWBTC")).toBe("0.00077387");
+        expect(prices.get("TWETH")).toBe("0.00000000000000239328");
+        expect(prices.get("TWUSDC")).toBe("0.000000999818");
+        expect(prices.get("TWUSDM")).toBe("0.000001001");
+        expect(prices.get("UTWUSDC")).toBe("0.000000999818");
+        expect(prices.get("UTWBTC")).toBe("0.00077387");
+      });
+    } finally {
+      registry.server.stop(true);
+    }
+  });
+
+  test("preview with a 2.x file imports too, and a repeat import is a no-op", async () => {
+    const registry = serveRegistry({ preview: await v2Registry("preview") });
+    try {
+      await withFreshDatabase(async (client, databasePort) => {
+        const config = importConfig(registry.baseUrl, "preview", databasePort);
+        expect((await runRegistryImport(config)).status).toBe("applied");
+        const first = { known: await knownTokens(client), state: await registryState(client) };
+        expect(first.known).toHaveLength(7);
+        expect(new Set(first.state.map((row) => row.network))).toEqual(new Set(["preview"]));
+        expect((await runRegistryImport(config)).status).toBe("applied");
+        expect({ known: await knownTokens(client), state: await registryState(client) }).toEqual(first);
+      });
+    } finally {
+      registry.server.stop(true);
+    }
+  });
+
+  test("mainnet has no source: skipped without fetching or connecting, and NIGHT is the only token", async () => {
+    await withFreshDatabase(async (client) => {
+      let fetched = false;
+      const outcome = await runRegistryImport(importConfig("https://registry.invalid/", "mainnet"), {
+        fetchImpl: async () => {
+          fetched = true;
+          throw new Error("must not fetch");
+        },
+        createClient: noDatabase,
+      });
+      expect(outcome).toEqual({
+        status: "skipped",
+        network: "mainnet",
+        reason: "mainnet has no canonical token source yet; NIGHT is the only token listed there",
+      });
+      expect(fetched).toBe(false);
+      expect(await knownTokens(client)).toEqual([NIGHT_ROW]);
+    });
+  });
+
+  test("undeployed (a local chain) is skipped without fetching", async () => {
+    let fetched = false;
+    const outcome = await runRegistryImport(importConfig("https://registry.invalid/", "undeployed"), {
+      fetchImpl: async () => {
+        fetched = true;
+        throw new Error("must not fetch");
+      },
+      createClient: noDatabase,
+    });
+    expect(outcome).toEqual({
+      status: "skipped",
+      network: "undeployed",
+      reason: "undeployed is a local network with no public canonical registry",
+    });
+    expect(fetched).toBe(false);
+  });
+
+  test("an unreachable registry fails and leaves the database unchanged", async () => {
+    await withFreshDatabase(async (client, databasePort) => {
+      const unavailablePort = await freePort();
+      const outcome = await runRegistryImport(
+        importConfig(`http://127.0.0.1:${unavailablePort}/`, "preprod", databasePort, 75),
+      );
+      expect(outcome.status).toBe("failed");
+      expect(await knownTokens(client)).toEqual([NIGHT_ROW]);
+      expect(await registryState(client)).toEqual([]);
+    });
+  });
+
+  test("a 2.x file for the wrong network fails as invalid instead of being imported", async () => {
+    const registry = serveRegistry({ preview: await v2Registry("preprod") });
+    try {
+      const outcome = await runRegistryImport(importConfig(registry.baseUrl, "preview"), { createClient: noDatabase });
+      expect(outcome.status).toBe("failed");
+      expect(outcome.status === "failed" && outcome.reason).toMatch(
+        /^preview registry file .*metadata\.preview\.json is invalid: network\.key must be "preview"$/,
+      );
+    } finally {
+      registry.server.stop(true);
+    }
+  });
+});
+
+describe("registry sources and configuration", () => {
+  test("each network has its source: a file for preview and preprod, none for mainnet and undeployed", () => {
+    expect(registrySourceFor("preview", "https://example.test/base")).toEqual({
+      kind: "registry-file",
+      network: "preview",
+      url: "https://example.test/base/metadata.preview.json",
+    });
+    expect(registrySourceFor("preprod", "https://example.test/")).toEqual({
+      kind: "registry-file",
+      network: "preprod",
+      url: "https://example.test/metadata.preprod.json",
+    });
+    expect(registrySourceFor("mainnet", "https://example.test/")).toMatchObject({ kind: "none", network: "mainnet" });
+    expect(registrySourceFor("undeployed", "https://example.test/")).toMatchObject({ kind: "none", network: "undeployed" });
+    expect(registryUrl("https://example.test/base", "preview")).toBe("https://example.test/base/metadata.preview.json");
+  });
+
+  test("the network follows TOKEN_REGISTRY_NETWORK, then MIDNIGHT_NETWORK_ID, then the kernel's default undeployed", () => {
+    expect(loadRegistryImportConfig({}).network).toBe("undeployed");
+    expect(loadRegistryImportConfig({ MIDNIGHT_NETWORK_ID: "mainnet" }).network).toBe("mainnet");
+    expect(loadRegistryImportConfig({ MIDNIGHT_NETWORK_ID: "preview", TOKEN_REGISTRY_NETWORK: "preprod" }).network)
+      .toBe("preprod");
+    expect(loadRegistryImportConfig({ MIDNIGHT_NETWORK_ID: "preview", TOKEN_REGISTRY_NETWORK: "" }).network)
+      .toBe("preview");
+  });
+
+  test("stagenet and unknown networks are refused naming the supported list", () => {
+    for (const env of [{ TOKEN_REGISTRY_NETWORK: "stagenet" }, { MIDNIGHT_NETWORK_ID: "testnet-02" }]) {
+      expect(() => loadRegistryImportConfig(env)).toThrow(
+        /TOKEN_REGISTRY_NETWORK must be one of preview, preprod, mainnet, undeployed/,
+      );
+    }
   });
 });
 
@@ -320,7 +581,7 @@ describe("transactional canonical registry import", () => {
       `CREATE TABLE IF NOT EXISTS canonical_token_registry_state (
          name TEXT PRIMARY KEY,
          token_color TEXT UNIQUE NOT NULL,
-         network TEXT NOT NULL CHECK (network IN ('preview', 'preprod', 'stagenet')),
+         network TEXT NOT NULL CHECK (network IN ('preview', 'preprod', 'mainnet')),
          registry_revision TEXT NOT NULL,
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
        )`,
@@ -351,8 +612,8 @@ describe("transactional canonical registry import", () => {
       "SELECT token_color, name, kind, decimals, asset_id FROM known_tokens WHERE name LIKE 'TW%' OR name LIKE 'UTW%' ORDER BY name",
     )).rows).toEqual(firstRows);
 
-    // A fresh SQL seed can be adopted without provenance only when every
-    // existing field exactly matches the incoming canonical record.
+    // Rows can be adopted without provenance only when every existing field
+    // exactly matches the incoming canonical record.
     await client.query("DELETE FROM canonical_token_registry_state");
     await applyCanonicalRegistry(client, first);
     expect((await client.query("SELECT * FROM canonical_token_registry_state")).rows).toHaveLength(6);
@@ -381,6 +642,7 @@ describe("transactional canonical registry import", () => {
       .toMatchObject({ price_usd: "42", source: "manual" });
     expect((await client.query("SELECT token_color FROM offer_file_tokens_history WHERE offer_file_id = 7")).rows[0]?.token_color)
       .toBe(oldTwbtc);
+    expect((await client.query("SELECT name FROM known_tokens WHERE name = 'NIGHT'")).rows).toHaveLength(1);
   });
 
   test("an unrelated color collision rolls the complete replacement back", async () => {
@@ -456,27 +718,16 @@ describe("transactional canonical registry import", () => {
   });
 });
 
-describe("optional fetch failure", () => {
-  const config = (baseUrl: string, timeoutMs = 75): RegistryImportConfig => ({
-    baseUrl,
-    network: "preprod",
-    timeoutMs,
-    db: { host: "127.0.0.1", port: 5432, user: "postgres", password: "postgres", database: "postgres" },
-  });
-
-  test("builds the selected metadata path", () => {
-    expect(registryUrl("https://example.test/base", "preview")).toBe("https://example.test/base/metadata.preview.json");
-  });
-
-  test("refused connection is bounded and resolves as skipped", async () => {
+describe("fetch failures", () => {
+  test("refused connection is bounded and resolves as failed", async () => {
     const port = await freePort();
     const started = performance.now();
-    const outcome = await runOptionalRegistryImport(config(`http://127.0.0.1:${port}/`));
-    expect(outcome.status).toBe("skipped");
+    const outcome = await runRegistryImport(importConfig(`http://127.0.0.1:${port}/`, "preprod", 5432, 75));
+    expect(outcome.status).toBe("failed");
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 
-  test("stalled response body is aborted and resolves as skipped", async () => {
+  test("stalled response body is aborted and resolves as failed", async () => {
     const port = await freePort();
     const server = Bun.serve({
       port,
@@ -485,97 +736,31 @@ describe("optional fetch failure", () => {
     });
     try {
       const started = performance.now();
-      const outcome = await runOptionalRegistryImport(config(`http://127.0.0.1:${port}/`, 30));
-      expect(outcome.status).toBe("skipped");
+      const outcome = await runRegistryImport(importConfig(`http://127.0.0.1:${port}/`, "preprod", 5432, 30));
+      expect(outcome.status).toBe("failed");
       expect(performance.now() - started).toBeLessThan(1_000);
     } finally {
       server.stop(true);
     }
   });
 
-  test("HTTP error, invalid JSON and unavailable metadata all resolve as skipped", async () => {
+  test("HTTP error, invalid JSON, an unlabelled document and unavailable metadata all resolve as failed", async () => {
     for (const response of [
       new Response("down", { status: 503 }),
       new Response("{invalid", { status: 200 }),
+      Response.json({ schemaVersion: "1.0.0" }),
       Response.json({ ...readyRegistry(), status: "unavailable" }),
     ]) {
-      const outcome = await runOptionalRegistryImport(config("https://example.test/"), {
+      const outcome = await runRegistryImport(importConfig("https://example.test/", "preprod"), {
         fetchImpl: async () => response,
+        createClient: noDatabase,
       });
-      expect(outcome.status).toBe("skipped");
+      expect(outcome.status).toBe("failed");
     }
   });
-
-  test("an explicit local network skips without fetching", async () => {
-    let fetched = false;
-    const outcome = await runOptionalRegistryImport({ ...config("https://example.test/"), network: "undeployed" }, {
-      fetchImpl: async () => {
-        fetched = true;
-        throw new Error("must not fetch");
-      },
-    });
-    expect(outcome).toEqual({
-      status: "skipped",
-      reason: "undeployed is a local network with no public canonical registry",
-    });
-    expect(fetched).toBe(false);
-  });
 });
 
-const snight = async (client: InstanceType<typeof pg.Client>) =>
-  (await client.query("SELECT token_color FROM known_tokens WHERE name = 'SNIGHT'")).rows;
-
-describe("stagenet imports and SNIGHT (00050 FR-005)", () => {
-
-  test("the seeded SNIGHT is the Preprod colour", async () => {
-    await withFreshDatabase(async (client) => {
-      expect(await snight(client)).toEqual([{ token_color: PREPROD_SNIGHT_TOKEN_COLOR }]);
-    });
-  });
-
-  test("a stagenet import removes the Preprod SNIGHT in the same transaction", async () => {
-    await withFreshDatabase(async (client) => {
-      await applyCanonicalRegistry(client, validateCanonicalRegistry(await pinnedRegistry("stagenet"), "stagenet"));
-      expect(await snight(client)).toEqual([]);
-      // The rest of the non-canonical seed is untouched.
-      expect((await client.query("SELECT name FROM known_tokens WHERE name = 'NIGHT'")).rows).toHaveLength(1);
-    });
-  });
-
-  test("Preview and Preprod imports leave SNIGHT alone (unchanged behaviour)", async () => {
-    await withFreshDatabase(async (client) => {
-      for (const network of ["preprod", "preview"] as const) {
-        await applyCanonicalRegistry(client, validateCanonicalRegistry(await pinnedRegistry(network), network));
-        expect(await snight(client)).toEqual([{ token_color: PREPROD_SNIGHT_TOKEN_COLOR }]);
-      }
-    });
-  });
-
-  test("an operator-set (non-Preprod) SNIGHT colour survives a stagenet import", async () => {
-    await withFreshDatabase(async (client) => {
-      await client.query("UPDATE known_tokens SET token_color = $1 WHERE name = 'SNIGHT'", ["c".repeat(64)]);
-      await applyCanonicalRegistry(client, validateCanonicalRegistry(await pinnedRegistry("stagenet"), "stagenet"));
-      expect(await snight(client)).toEqual([{ token_color: "c".repeat(64) }]);
-    });
-  });
-
-  test("a rejected stagenet import rolls the SNIGHT removal back with everything else", async () => {
-    await withFreshDatabase(async (client) => {
-      await client.query(
-        "INSERT INTO known_tokens (token_color, name, kind, decimals, asset_id) VALUES ($1, 'LOCALONLY', 'shielded', 6, NULL)",
-        ["e".repeat(64)],
-      );
-      const colliding = clone((await pinnedRegistry("stagenet")) as any);
-      colliding.tokens[0].deployments.find((d: any) => d.status === "active").tokenId = "e".repeat(64);
-      await expect(
-        applyCanonicalRegistry(client, validateCanonicalRegistry(colliding, "stagenet")),
-      ).rejects.toThrow(/collision.*LOCALONLY/);
-      expect(await snight(client)).toEqual([{ token_color: PREPROD_SNIGHT_TOKEN_COLOR }]);
-    });
-  });
-});
-
-describe("import-token-registry CLI --required (00050 FR-004)", () => {
+describe("import-token-registry CLI", () => {
   const cli = new URL("./import-token-registry.ts", import.meta.url);
   const run = async (args: string[], vars: Record<string, string>) => {
     const proc = Bun.spawn([process.execPath, "run", Bun.fileURLToPath(cli), ...args], {
@@ -590,61 +775,85 @@ describe("import-token-registry CLI --required (00050 FR-004)", () => {
     ]);
     return { stdout, stderr, code };
   };
+  const lines = (text: string) => text.split("\n").filter((line) => line.trim() !== "");
 
-  test("without --required an unreachable registry is a skip and exits 0 (dev orchestrator unchanged)", async () => {
+  test("preview with the published 1.x file: one warning naming the network and the file; exit 3 with --required, 0 without", async () => {
+    const registry = serveRegistry({ preview: await v1Registry("preview") });
+    try {
+      const expected =
+        `[token-registry] skipped: preview registry file ${registry.baseUrl}metadata.preview.json ` +
+        "is labelled midnight-1.x (profile v1); only midnight-2.x registries are imported; nothing imported";
+      for (const [args, code] of [[["--required"], EXIT_NOTHING_TO_IMPORT], [[], 0]] as const) {
+        const result = await run([...args], {
+          TOKEN_REGISTRY_NETWORK: "preview",
+          TOKEN_REGISTRY_BASE_URL: registry.baseUrl,
+          // Nothing listens here: a skipped import must never connect.
+          DB_HOST: "127.0.0.1",
+          DB_PORT: String(await freePort()),
+        });
+        expect(result.code, result.stderr).toBe(code);
+        expect(lines(result.stderr)).toEqual([expected]);
+        expect(result.stdout).toBe("");
+      }
+    } finally {
+      registry.server.stop(true);
+    }
+  });
+
+  test("mainnet: one warning, nothing fetched; exit 3 with --required", async () => {
+    const registry = serveRegistry({});
+    try {
+      const result = await run(["--required"], { MIDNIGHT_NETWORK_ID: "mainnet", TOKEN_REGISTRY_BASE_URL: registry.baseUrl });
+      expect(result.code).toBe(EXIT_NOTHING_TO_IMPORT);
+      expect(lines(result.stderr)).toEqual([
+        "[token-registry] skipped: mainnet has no canonical token source yet; NIGHT is the only token listed there",
+      ]);
+      expect(registry.requested).toEqual([]);
+    } finally {
+      registry.server.stop(true);
+    }
+  });
+
+  test("an unreachable registry: exit 0 without --required, a loud failure (exit 1) with it", async () => {
     const port = await freePort();
-    const result = await run([], {
-      TOKEN_REGISTRY_NETWORK: "stagenet",
+    const vars = {
+      TOKEN_REGISTRY_NETWORK: "preprod",
       TOKEN_REGISTRY_BASE_URL: `http://127.0.0.1:${port}/`,
       TOKEN_REGISTRY_TIMEOUT_MS: "200",
-    });
-    expect(result.code).toBe(0);
-    expect(result.stderr).toContain("[token-registry] skipped:");
+    };
+    const optional = await run([], vars);
+    expect(optional.code).toBe(0);
+    expect(optional.stderr).toContain("[token-registry] failed (optional step, nothing imported):");
+    const required = await run(["--required"], vars);
+    expect(required.code).toBe(1);
+    expect(required.stderr).toContain("[token-registry] FAILED (required import did not apply)");
   });
 
-  test("with --required the same skip is a loud failure (exit 1)", async () => {
-    const port = await freePort();
-    const result = await run(["--required"], {
-      TOKEN_REGISTRY_NETWORK: "stagenet",
-      TOKEN_REGISTRY_BASE_URL: `http://127.0.0.1:${port}/`,
-      TOKEN_REGISTRY_TIMEOUT_MS: "200",
-    });
+  test("a removed network (stagenet) is a configuration failure naming the supported networks", async () => {
+    const result = await run(["--required"], { TOKEN_REGISTRY_NETWORK: "stagenet" });
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("[token-registry] FAILED (required import did not apply)");
+    expect(result.stderr).toContain("TOKEN_REGISTRY_NETWORK must be one of preview, preprod, mainnet, undeployed");
   });
 
-  test("with --required, undeployed (no public registry) fails loudly too", async () => {
-    const result = await run(["--required"], { TOKEN_REGISTRY_NETWORK: "undeployed" });
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain("undeployed is a local network with no public canonical registry");
-  });
-
-  test("with --required a served stagenet registry applies to the database and exits 0", async () => {
-    const fixture = await pinnedRegistry("stagenet");
-    const registry = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch: (request) =>
-        new URL(request.url).pathname === "/metadata.stagenet.json"
-          ? Response.json(fixture)
-          : new Response("not found", { status: 404 }),
-    });
+  test("with --required a served 2.x preprod registry applies to the database and exits 0", async () => {
+    const registry = serveRegistry({ preprod: await v2Registry("preprod") });
     try {
       await withFreshDatabase(async (client, databasePort) => {
         const result = await run(["--required"], {
-          TOKEN_REGISTRY_NETWORK: "stagenet",
-          TOKEN_REGISTRY_BASE_URL: `http://127.0.0.1:${registry.port}/`,
+          TOKEN_REGISTRY_NETWORK: "preprod",
+          TOKEN_REGISTRY_BASE_URL: registry.baseUrl,
           DB_HOST: "127.0.0.1",
           DB_PORT: String(databasePort),
         });
         expect(result.code, result.stderr).toBe(0);
-        expect(result.stdout).toContain(
-          "[token-registry] applied network=stagenet revision=59041d2fd2acfdad53e437e5a4d2ba88a6f24e4f9e55869b66f465f3da11a0d1",
-        );
-        expect(await snight(client)).toEqual([]);
+        expect(lines(result.stdout)).toEqual([
+          `[token-registry] applied network=preprod revision=${V2_FIXTURE_REVISION} source=${registry.baseUrl}metadata.preprod.json`,
+        ]);
+        expect(await knownTokens(client)).toHaveLength(7);
+        expect(new Set((await registryState(client)).map((row) => row.network))).toEqual(new Set(["preprod"]));
       });
     } finally {
-      registry.stop(true);
+      registry.server.stop(true);
     }
   });
 });

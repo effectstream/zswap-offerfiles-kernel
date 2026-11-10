@@ -33,11 +33,14 @@ Dependency order: `validator` first, then `offer-guard`, which depends on it.
 
 Not meant to be published:
 
-- The COW solver's e2e suite reaches into kernel internals
-  (`packages/database/test-pglite.ts`, `packages/database/mod.ts`,
-  `packages/node/offer-consumption-read.ts`, `packages/tests/lib/*`). These are
-  not meant to be published as they are. The suite has to move onto published
-  APIs, or keep its own copies, before the submodule can go (step 6).
+- The COW solver's tests reach into kernel internals through the submodule:
+  its book-mirror test and its release-hardening e2e harness import
+  `packages/database/test-pglite.ts`, `packages/database/mod.ts`,
+  `packages/node/offer-consumption-read.ts`, `packages/node/api.ts`,
+  `packages/node/event-bus.ts` and `packages/node/sync-health.ts`. These are
+  not meant to be published as they are. Those tests have to move onto
+  published APIs, or keep their own copies, before the submodule can go
+  (step 6).
 
 ### 1. Naming and scope
 
@@ -129,7 +132,7 @@ Not meant to be published:
 2. In `effectstream/cow-solver`, replace the submodule-backed dependency entries
    with exact versions (for example `"@zswap-da/api-contracts": "0.1.0"`), and
    regenerate the lockfile.
-3. Move its e2e suite off the kernel internals listed under "What to publish".
+3. Move its tests off the kernel internals listed under "What to publish".
 4. Remove the submodule (`git submodule deinit`, `git rm`, `.gitmodules`) and
    the submodule checkout step from its CI.
 5. Run its unit tests, typecheck and e2e suite against a kernel image of the
@@ -164,24 +167,41 @@ repository no longer contains it. Everything below happens there.
     `fixtures/relay-ws/v1/`).
 - [ ] Run the Compose e2e through the relay on the ledger-9 stack: taker intent
   → relay → solver → settlement.
-- [ ] Run the moved grand-e2e solver runners against the pinned backend.
+- [ ] Run the moved grand-e2e solver runners against the pinned backend
+  (`solver-offerfiles-e2e.ts`, `solver-release-hardening-e2e.ts`,
+  `relay-fixture-e2e.ts`). They need a running kernel stack, and the
+  relay-driven ones need the ledger-9 relay. `effectstream/cow-solver` PR #1
+  found two more blockers:
+  - they still assume this repository's single-repository layout: for
+    example `REAL_E1_REQUIRED_SOURCE_PATHS` in `solver-offerfiles-e2e.ts`
+    names `packages/node/offer-validation.ts`, which sits under `kernel/`
+    there;
+  - `lib/solver-offerfiles-real-runtime-smoke.ts` imports a hard-coded Bun
+    store path of `@effectstream/runtime` 0.103.1, which neither repository
+    installs (both pin `@effectstream/*` 0.300.x).
 - [ ] Re-audit the solver for real funds and get a new owner decision. Real
   funds are NO-GO: the last conditional approval covered only the audited
   commit `381022d`, and the solver has changed since, including its ledger-9
   port. The mainnet dry-run default and `SOLVER_MAINNET_LIVE_TRADING_ACK` stay.
 - [ ] Switch from the kernel submodule to the published npm packages (see
   "Publish the backend packages to npm", step 6).
-- [ ] `effectstream/cow-solver` PR #1 (the submodule wiring): delete the copies
-  of `wallet.ts`, `api-client.ts` and `batcher.ts` (with
-  `batcher.test-support.ts` and their tests) that the history filter carried
-  into its `solver-core`, and import them from `@zswap-da/kernel-client`
-  through the submodule, so that no copy is kept.
-- [ ] Carry the two solver-only files the history filter did not include. They
-  lived outside the solver paths and were removed here with the solver; the
-  last copy of each is at `ee82ff4`: `packages/node/offer-updates-mirror.test.ts`
-  (the solver's book mirror against the node's real API; it needs the kernel
-  through the submodule) and `docs/protocol-scope.md` (the superseded scoping
-  draft of the solver, history only).
+- [ ] Merge `effectstream/cow-solver` PR #1
+  (https://github.com/effectstream/cow-solver/pull/1). It wires this
+  repository in as a git submodule and makes the solver build and test on its
+  own:
+  - it deletes the copies of `wallet.ts`, `api-client.ts` and `batcher.ts`
+    (with `batcher.test-support.ts` and their tests) that the history filter
+    carried into its `solver-core`, and imports `@zswap-da/kernel-client`
+    through the submodule instead, so that no copy is kept;
+  - it carries the two solver-only files the history filter did not include
+    (they lived outside the solver paths and were removed here with the
+    solver; the last copy of each is at `ee82ff4`):
+    `packages/node/offer-updates-mirror.test.ts`, now
+    `packages/solver/offer-updates-mirror.test.ts` (the solver's book mirror
+    against the node's real API), and `docs/protocol-scope.md` (the superseded
+    scoping draft of the solver, history only);
+  - it ports the 13 solver and relay launch gates that this repository's
+    `deploy/gates.sh` dropped with the solver.
 - [ ] Deploy the solver. It is not deployed anywhere today.
 
 ## Kernel follow-ups

@@ -11,8 +11,11 @@
 # kill live listeners on 9944/8088/6300 (`stopProcessAtPort`). Every entrypoint
 # is a single `exec`d process so
 # the container's PID 1 is the real workload and Compose signals reach it.
+# The one exception is entrypoint-pglite.sh: it supervises the PGlite server and
+# its forwarder and passes the stop signals on to both (see that script).
 #
-#   entrypoint-pglite.sh    the Postgres-wire server the kernel talks to
+#   entrypoint-pglite.sh    the Postgres-wire server the kernel talks to, on
+#                           loopback, plus pglite-forwarder.ts on DB_PORT
 #   entrypoint-kernel.sh    exec bun run packages/node/main.<dev|public>.ts (:9999)
 #   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.<dev|public>.ts (:3334)
 #                           (from MIDNIGHT_NETWORK_ID: undeployed → .dev.ts; preview,
@@ -81,6 +84,8 @@ COPY . .
 # Entrypoints last: editing one must not invalidate the install or the compile.
 COPY deploy/images/kernel/entrypoint-common.sh   /usr/local/bin/entrypoint-common.sh
 COPY deploy/images/kernel/entrypoint-pglite.sh   /usr/local/bin/entrypoint-pglite.sh
+COPY deploy/images/kernel/pglite-forwarder.ts    /usr/local/bin/pglite-forwarder.ts
+COPY deploy/images/kernel/pglite-healthcheck.ts  /usr/local/bin/pglite-healthcheck.ts
 COPY deploy/images/kernel/entrypoint-kernel.sh   /usr/local/bin/entrypoint-kernel.sh
 COPY deploy/images/kernel/entrypoint-batcher.sh  /usr/local/bin/entrypoint-batcher.sh
 COPY deploy/images/kernel/entrypoint-solver.sh   /usr/local/bin/entrypoint-solver.sh

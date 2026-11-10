@@ -226,12 +226,13 @@ services:
       - pglite-data:/var/lib/pglite/data
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${HOST_PGLITE_PORT:-15432}:5432"
+    # The PGlite server listens on 127.0.0.1 inside this container; the
+    # forwarder serves DB_PORT on every interface (entrypoint-pglite.sh). The
+    # healthcheck goes through the forwarder on this container's own
+    # non-loopback address, the path the kernel and the price-feed use, and
+    # needs a Postgres answer, not just a TCP accept.
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          bun -e 'const s = await Bun.connect({hostname:"127.0.0.1",port:5432,socket:{data(){}}});
-          s.end(); process.exit(0);'
+      test: ["CMD", "bun", "/usr/local/bin/pglite-healthcheck.ts"]
       interval: 5s
       timeout: 10s
       retries: 40

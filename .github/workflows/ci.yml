@@ -37,8 +37,9 @@ jobs:
       # `deploy/scripts/lib` is not a workspace member, so it is easy to forget:
       # its suites cover the deployment scripts' own logic (the offer poster's
       # config, journal, quote sizing, scheduler, health and pinned coin
-      # selection) and are self-contained in the same way — no PGlite, no
-      # network, no Compact output.
+      # selection, the pglite service's entrypoint, forwarder and healthcheck)
+      # and are self-contained in the same way — PGlite from node_modules and
+      # this host's own addresses only, no outside network, no Compact output.
       - name: Run unit suites
         run: >
           bun test

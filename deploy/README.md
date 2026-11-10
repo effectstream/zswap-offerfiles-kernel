@@ -59,6 +59,9 @@ The core stack keeps the existing chain and offer flow:
 - `midnight-node`, `indexer`, and `proof-server` provide Midnight access.
 - `celestia` provides the local DA chain used by the kernel and batcher.
 - `pglite`, `kernel`, and `batcher` provide the offer API and settlement path.
+  The `pglite` container runs the PGlite server on its loopback interface and
+  a forwarder on port 5432 that other containers and `HOST_PGLITE_PORT`
+  reach; it has no password (`BIND_ADDR` keeps that port on loopback).
 - `relay`, `solver`, and `solver-frontend` provide intent intake, solving and
   monitoring.
 - `solver-provision` is a one-shot external-inventory check. It never funds a

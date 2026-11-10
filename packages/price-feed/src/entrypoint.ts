@@ -4,7 +4,7 @@
 // database its DB_* variables point at, and CoinGecko has no notion of a
 // Midnight network. It is logged so a preprod log line cannot be mistaken for
 // a dev one, and the entrypoints exist for symmetry with every other component
-// (packages/solver, packages/batcher), which is what deploy/ expects to find.
+// (packages/node, packages/batcher), which is what deploy/ expects to find.
 
 import { loadPriceFeedConfig } from "./config.ts";
 import { main } from "./run.ts";

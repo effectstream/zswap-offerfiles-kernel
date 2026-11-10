@@ -745,7 +745,7 @@ function productionTypescriptFiles(directory: string): string[] {
 
 test("guardOffer is not called by a production package", () => {
   const repositoryRoot = resolve(import.meta.dir, "..", "..");
-  const callers = ["node", "api-contracts", "kernel-client", "batcher", "solver", "solver-core"]
+  const callers = ["node", "api-contracts", "kernel-client", "batcher"]
     .flatMap((name) => productionTypescriptFiles(join(repositoryRoot, "packages", name)))
     .filter((path) => /\bguardOffer\b/.test(readFileSync(path, "utf8")))
     .map((path) => relative(repositoryRoot, path));

@@ -8,14 +8,13 @@
 // (`test-support/print-token-url-at-exit.ts`) that prints a token-bearing
 // Blockfrost URL through console.log, console.error and a raw stderr write
 // when the process exits. Each entry is driven to an early exit that needs no
-// network beyond this host (a disabled service, a missing required setting, a
+// network beyond this host (a missing required setting, a
 // refused connection to a closed local port, or a local stand-in for a
 // Blockfrost indexer that answers 403 "Network token mismatch"), after the
 // point where the guard must be installed. The token must not appear anywhere
 // in the output.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,7 +27,7 @@ const PRELOAD = join(HERE, "test-support", "print-token-url-at-exit.ts");
 
 const TOKEN = "logGuardTestProjectId000000000000";
 const REDACTED = "project_id=<redacted>";
-/** A seed that is neither the solver's nor any other public dev seed. */
+/** A seed that is not a public dev seed. */
 const NON_DEV_SEED = "5a".repeat(32);
 /** Port 1 is closed in every test environment: a request there is refused at once. */
 const CLOSED = `http://127.0.0.1:1/api/v0?project_id=${TOKEN}`;
@@ -68,8 +67,6 @@ type EntryCase = {
   marker: string;
 };
 
-const SOLVER_DISABLED = "[solver] SOLVER_ENABLED=false — exiting without starting";
-
 const CASES: EntryCase[] = [
   // Public-network services.
   {
@@ -96,32 +93,7 @@ const CASES: EntryCase[] = [
     exitCode: 78,
     marker: "[offer-poster] configuration error",
   },
-  // Solver entries.
-  {
-    entry: "start.solver.ts",
-    env: { MIDNIGHT_NETWORK_ID: "preprod", SOLVER_ENABLED: "false" },
-    exitCode: 0,
-    marker: SOLVER_DISABLED,
-  },
-  {
-    entry: "packages/solver/solver.preview.ts",
-    env: { MIDNIGHT_NETWORK_ID: "preview", SOLVER_ENABLED: "false" },
-    exitCode: 0,
-    marker: SOLVER_DISABLED,
-  },
-  {
-    entry: "packages/solver/solver.mainnet.ts",
-    env: { MIDNIGHT_NETWORK_ID: "mainnet", SOLVER_SEED: NON_DEV_SEED, SOLVER_ENABLED: "false" },
-    exitCode: 0,
-    marker: SOLVER_DISABLED,
-  },
   // Operator scripts.
-  {
-    entry: "deploy/scripts/provision-solver-fees.ts",
-    env: { MIDNIGHT_NETWORK_ID: "preprod" },
-    exitCode: 1,
-    marker: "SOLVER_SEED is required",
-  },
   {
     entry: "deploy/scripts/read-wallet.ts",
     env: { MIDNIGHT_NETWORK_ID: "preprod" },
@@ -133,24 +105,6 @@ const CASES: EntryCase[] = [
     env: { MIDNIGHT_NETWORK_ID: "preprod" },
     exitCode: 1,
     marker: "GIVE_TOKEN and WANT_TOKEN are required",
-  },
-  {
-    entry: "deploy/scripts/e2e.ts",
-    env: { MIDNIGHT_NETWORK_ID: "preprod" },
-    exitCode: 1,
-    marker: "FATAL",
-  },
-  {
-    entry: "deploy/scripts/live-cow-case.ts",
-    env: { MIDNIGHT_NETWORK_ID: "preprod" },
-    exitCode: 1,
-    marker: "COW_LIVE_SCENARIO_FILE is required",
-  },
-  {
-    entry: "deploy/scripts/live-cow-read.ts",
-    env: { MIDNIGHT_NETWORK_ID: "preprod" },
-    exitCode: 1,
-    marker: "COW_LIVE_SCENARIO_FILE is required",
   },
   {
     entry: "deploy/scripts/probe-backend-currentness.ts",
@@ -170,42 +124,35 @@ const CASES: EntryCase[] = [
 
 describe("entries install the process-wide log guard before any exit", () => {
   test.each(CASES.map((c) => [c.entry, c] as const))("%s", async (_name, c) => {
-    const scratch = mkdtempSync(join(tmpdir(), "entry-log-redaction-"));
-    try {
-      // Asynchronous on purpose: the stand-in indexer runs in this process.
-      const child = Bun.spawn(
-        [process.execPath, "--preload", PRELOAD, join(REPO, c.entry), ...(c.args ?? [])],
-        {
-          cwd: REPO,
-          env: {
-            PATH: process.env["PATH"] ?? "",
-            HOME: process.env["HOME"] ?? "",
-            MIDNIGHT_BLOCKFROST_PROJECT_ID: TOKEN,
-            LOG_GUARD_TEST_TOKEN: TOKEN,
-            // Scripts that write evidence on a fatal exit write it here.
-            E2E_EVIDENCE_DIR: scratch,
-            ...(typeof c.env === "function" ? c.env() : c.env),
-          },
-          stdout: "pipe",
-          stderr: "pipe",
-          timeout: 90_000,
+    // Asynchronous on purpose: the stand-in indexer runs in this process.
+    const child = Bun.spawn(
+      [process.execPath, "--preload", PRELOAD, join(REPO, c.entry), ...(c.args ?? [])],
+      {
+        cwd: REPO,
+        env: {
+          PATH: process.env["PATH"] ?? "",
+          HOME: process.env["HOME"] ?? "",
+          MIDNIGHT_BLOCKFROST_PROJECT_ID: TOKEN,
+          LOG_GUARD_TEST_TOKEN: TOKEN,
+          ...(typeof c.env === "function" ? c.env() : c.env),
         },
-      );
-      const [out, err, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      const all = out + err;
-      expect(exitCode, all).toBe(c.exitCode);
-      expect(all).toContain(c.marker);
-      expect(all).not.toContain(TOKEN);
-      // The preload's three lines, each redacted.
-      expect(out).toContain(`API-WS: disconnected from wss://rpc.midnight-preprod.blockfrost.io/?${REDACTED}`);
-      expect(err).toContain(`connection lost: wss://rpc.midnight-preprod.blockfrost.io/?${REDACTED}`);
-      expect(err).toContain(`raw write wss://rpc.midnight-preprod.blockfrost.io/?${REDACTED}`);
-    } finally {
-      rmSync(scratch, { recursive: true, force: true });
-    }
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 90_000,
+      },
+    );
+    const [out, err, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    const all = out + err;
+    expect(exitCode, all).toBe(c.exitCode);
+    expect(all).toContain(c.marker);
+    expect(all).not.toContain(TOKEN);
+    // The preload's three lines, each redacted.
+    expect(out).toContain(`API-WS: disconnected from wss://rpc.midnight-preprod.blockfrost.io/?${REDACTED}`);
+    expect(err).toContain(`connection lost: wss://rpc.midnight-preprod.blockfrost.io/?${REDACTED}`);
+    expect(err).toContain(`raw write wss://rpc.midnight-preprod.blockfrost.io/?${REDACTED}`);
   }, 120_000);
 });

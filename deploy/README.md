@@ -1,9 +1,11 @@
 # Local multi-service deployment
 
 This Compose stack runs the Midnight node, indexer and proof server, Celestia,
-the kernel, batcher, reference relay, solver, and optional offer tools. It does
-not deploy an asset issuer, mint tokens, or register deployment-generated token
-IDs. Asset inventory must already exist on the selected network.
+the kernel, batcher, and optional offer and price tools. It does not deploy an
+asset issuer, mint tokens, or register deployment-generated token IDs. Asset
+inventory must already exist on the selected network. The COW solver, its relay
+and its monitor site have their own stack in
+[effectstream/cow-solver](https://github.com/effectstream/cow-solver).
 
 The stack is the local `undeployed` devnet on Midnight 2.x / ledger 9
 (`MIDNIGHT_NETWORK_ID=undeployed`). The kernel image it builds also runs the
@@ -50,9 +52,10 @@ docker compose up -d
 docker compose ps
 ```
 
-`bootstrap.sh` creates the gitignored `.env` and generates local bearer tokens.
-Review that file before startup. `./down.sh` tears down containers, networks and
-named volumes; those volumes hold chain, database, wallet and journal state.
+`bootstrap.sh` creates the gitignored `.env` and generates the indexer's
+secret. Review that file before startup. `./down.sh` tears down containers,
+networks and named volumes; those volumes hold chain, database, wallet and
+journal state.
 
 The core stack keeps the existing chain and offer flow:
 
@@ -62,32 +65,15 @@ The core stack keeps the existing chain and offer flow:
   The `pglite` container runs the PGlite server on its loopback interface and
   a forwarder on port 5432 that other containers and `HOST_PGLITE_PORT`
   reach; it has no password (`BIND_ADDR` keeps that port on loopback).
-- `relay`, `solver`, and `solver-frontend` provide intent intake, solving and
-  monitoring.
-- `solver-provision` is a one-shot external-inventory check. It never funds a
-  wallet or writes prices. It verifies prefunded NIGHT can produce usable DUST
-  and writes a factual balance receipt.
 - `maker-offer` is a disabled-by-default one-shot that posts one offer from an
   already funded maker wallet.
 
 ## External inventory prerequisites
 
-Before enabling solver provisioning, maker seeding, the poster, or E2E, obtain
-the 64-hex token IDs from the selected network registry and fund the relevant
-wallets through that network's supported issuer or funding process. The
-deployment has no fallback issuer.
-
-For solver provisioning set:
-
-```dotenv
-SOLVER_PROVISION_ENABLED=true
-```
-
-`SOLVER_SEED` must already hold unshielded NIGHT. Provisioning fails unless its
-NIGHT is registered, or already registered, and the wallet reports usable DUST.
-The receipt records `inventorySource: "external"`, `dustReady: true`, measured
-balances, and `pricingSource: "live-offer-files-book"`. When provisioning is
-disabled, the service exits successfully without creating a pricing artifact.
+Before enabling maker seeding or the poster, obtain the 64-hex token IDs from
+the selected network registry and fund the relevant wallets through that
+network's supported issuer or funding process. The deployment has no fallback
+issuer.
 
 For the maker one-shot set `MAKER_OFFER_ENABLED=true`,
 `MAKER_OFFER_GIVE_TOKEN`, and `MAKER_OFFER_WANT_TOKEN`. The maker wallet must
@@ -153,17 +139,9 @@ lists it until its proof root leaves the chain's `past_roots`, root last-seen
 in its journal (`ttlSec`); re-offers follow the kernel's reported status, not
 this value.
 
-## E2E profile
-
-The E2E driver performs real local chain and Celestia settlement. Configure
-`E2E_TOKEN_IN` and `E2E_TOKEN_OUT` with explicit IDs and prefund the maker and
-taker wallets before running it. No E2E command should target a public network
-unless an operator has deliberately supplied that network's endpoints and
-funding.
-
 ## Validation
 
-`./gates.sh` renders every profile, builds images, validates retained startup
-edges and rejects the removed local funding services. Focused poster and
-provisioning unit tests run in the pinned `oven/bun:1.3.11` container. See
-`scripts/README.md` for script ownership and receipts.
+`./gates.sh` renders every profile, builds images, validates the startup edges
+and rejects removed services (the local funding services and the COW solver
+services). Focused poster unit tests run in the pinned `oven/bun:1.3.11`
+container. See `scripts/README.md` for script ownership.

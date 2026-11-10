@@ -2,9 +2,10 @@
 
 A decentralized token swap platform that combines **Midnight Network** (privacy-preserving ZK contracts) with **Celestia** (data availability layer). Users create atomic swap offers that are published to Celestia, indexed by the sync node, and completed on Midnight.
 
-This repo is the **backend**: sync node, batcher, chain launchers, database, validator, the COW
-solver (a separate process that quotes and settles against a Midnight Intents relay), and
-e2e tests. It is frontend-agnostic — an example browser frontend lives in the [effectstream monorepo](https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da) (see [Frontend](#frontend)).
+This repo is the **backend**: sync node, batcher, offer poster, price feed, chain launchers,
+database, validator, the API wire-contract and client packages, and e2e tests. The COW solver
+lives in [effectstream/cow-solver](https://github.com/effectstream/cow-solver) (see
+[The COW solver](#the-cow-solver)). It is frontend-agnostic — an example browser frontend lives in the [effectstream monorepo](https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da) (see [Frontend](#frontend)).
 
 - **Backend (this repo):** https://github.com/effectstream/zswap-offerfiles-kernel
 - **Example frontend:** https://github.com/effectstream/effectstream/tree/v-next/templates/zswap-da
@@ -103,14 +104,12 @@ Fresh local chains require a separately provisioned same-chain fixture.
 | Node entry | `packages/node/main.dev.ts` | `packages/node/main.public.ts` (`bun run start:public`) |
 | Batcher entry | `packages/batcher/batcher.dev.ts` | `packages/batcher/batcher.public.ts` (`bun run start:batcher:public`) |
 | Orchestrator | `start.dev.ts` | none: one process per service (the kernel image, or systemd units) |
-| COW solver | **separate process** — `bun run start:solver` (or `packages/solver/solver.dev.ts`) | **separate process** — `bun run start:solver` (or `packages/solver/solver.{preview,mainnet}.ts`) |
 | Price feed | **separate process, optional** — `bun run --filter @zswap-da/price-feed start` (or `… once` for a single refresh) | same, plus the `price-feed` compose service (`--profile prices`) |
 
 The public networks are described in
 [Running on preview, preprod and mainnet](#running-on-preview-preprod-and-mainnet).
 
-**`start.dev.ts` does not launch the solver.** It brings up chain, database,
-node and batcher only; see [Running the COW solver](#running-the-cow-solver).
+`start.dev.ts` brings up chain, database, node and batcher only.
 
 **The price feed is optional.** `start.dev.ts` registers it only when
 `COINGECKO_API_KEY` is set, and never as a system-dependency, because
@@ -226,218 +225,17 @@ Roll out with the defaults (`warn` + `allow`), read a day of
 `would refuse (policy=warn) — NOT_SPONSORED: …` lines from both processes, then
 switch `BATCHER_SPONSOR_POLICY=enforce`.
 
-## Running the COW solver
+## The COW solver
 
-The solver is a **component of its own**, not part of the backend command. It is
-one process that attaches to an already-running kernel API and to a Midnight
-Intents relay, mirrors the Offer Files book, publishes price ladders, and
-settles relay-dispatched swap jobs from its own wallet.
-
-```bash
-bun run start:solver          # the one documented deployment entrypoint
-```
-
-No backend entry (`start.dev.ts`, `main.public.ts`, the kernel image's
-kernel and batcher) starts it. Trading must be an
-explicit act: folding the solver into the backend command would let an operator
-who only wanted an indexer end up with a wallet-spending process attached to a
-relay. The per-network entrypoints (`packages/solver/solver.{dev,preview,mainnet}.ts`)
-remain available for local work; `start.solver.ts` is the network-agnostic one a
-container runs.
-
-**Mandatory configuration.** `start:solver` resolves and validates everything
-below *before* it opens a wallet, a socket, or the journal, and a startup that
-is missing or malformed values exits non-zero listing **every** problem at once
-(one restart shows the whole list):
-
-| Variable | Why it is mandatory |
-|---|---|
-| `MIDNIGHT_NETWORK_ID` | The SDK silently defaults to `undeployed`; a deployment must declare its network. An unknown value is refused. |
-| `ZSWAP_API` | Kernel Offer Files REST/SSE base. Otherwise defaults to `http://127.0.0.1:9999`, a developer default. |
-| `SOLVER_RELAY_WS_URL` | Outbound Midnight Intents solver socket (`ws://`/`wss://`, no embedded credentials). |
-| `SOLVER_RELAY_HTTP_URL` | The relay's public HTTP base for durable `GET /jobs/:jobId` recovery. Never derived from the websocket URL — deployed prefixes differ (for example `/api/v1`). |
-| `SOLVER_RELAY_AUTH_TOKEN` | Shared relay bearer, at least 32 characters (the relay refuses shorter). The kernel exact-files read stays unauthenticated. |
-| `SOLVER_JOURNAL_PATH` | Absolute path on a persistent per-instance volume. `:memory:` is impossible here. |
-| `SOLVER_SEED` | An unset seed silently selects the repository's public dev seed. That seed is accepted only on `MIDNIGHT_NETWORK_ID=undeployed`. |
-
-The relay URLs, the token and the journal are required **in dry-run too**: a
-rehearsal that leaves half the configuration unvalidated is not a rehearsal.
-`SOLVER_ENABLED=false` exits 0 without demanding any of it. On `mainnet`,
-`SOLVER_DRY_RUN` defaults to `true` and live settlement additionally requires the
-exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` — the same boundary
-`solver.mainnet.ts` enforces, so this entrypoint is not a cheaper route to live
-trading. Startup prints the resolved topology with no secret in it (the seed
-never appears; the bearer only as its length).
-
-A container deployment runs exactly this command as its solver service, with the
-journal path pointing into a mounted volume, and depends on the kernel and relay
-services rather than launching them.
-
-### Monitoring
-
-The solver has an optional **read-only status listener** and a separate
-**monitor site** that renders it. Both are opt-in and neither changes how the
-solver trades.
-
-```bash
-# on the solver process — unset SOLVER_STATUS_PORT means no listener at all
-SOLVER_STATUS_PORT=9100 \
-SOLVER_STATUS_HOST=127.0.0.1 \
-SOLVER_STATUS_AUTH_TOKEN=<at least 32 characters> \
-bun run start:solver
-
-# the site, as its own process (it must outlive the solver to be useful)
-SOLVER_FRONTEND_SOLVER_STATUS_URL=http://127.0.0.1:9100 \
-SOLVER_FRONTEND_SOLVER_STATUS_TOKEN=<the same token> \
-SOLVER_FRONTEND_ZSWAP_API=http://127.0.0.1:9999 \
-SOLVER_FRONTEND_RELAY_HTTP_URL=http://127.0.0.1:3000 \
-bun run start:solver-frontend            # http://127.0.0.1:8080
-```
-
-The listener serves `GET /health` (open, so a container healthcheck needs no
-secret), `GET /status/snapshot` and `GET /status/stream`. **Every `/status/*`
-route requires the bearer**: the snapshot carries the solver's whole internal
-state, so `SOLVER_STATUS_AUTH_TOKEN` is mandatory whenever the port is set and
-must be at least 32 characters — the same rule the relay applies to its own
-bearer. Collection reads in-memory state only: no wallet call, no proof, no
-network I/O, and a section that fails degrades to `{ error }` rather than taking
-the snapshot with it. **Never publish the status port to a public interface.**
-
-In the Compose stack both come up as the `solver-frontend` service and the
-solver's `SOLVER_STATUS_*` variables, with the bearer generated by
-`deploy/bootstrap.sh` — see `deploy/README.md` → "Observing the solver".
-
-The site answers "is the solver quoting, and if not, why" from one screen: a
-status pill, a six-stage health strip, alarms, and published ladders with
-direct/composed witnesses, token contributions, point-specific receipts and
-shared physical-file dependencies. Source eligibility failures are distinguished
-from limitations on another route that uses the same file. It aggregates the
-solver's status stream with the kernel's book and the
-relay's public token list, so it keeps rendering (and shows "last seen
-HH:MM:SS") while the solver is down. It has no authentication of its own; bind
-it to loopback and reverse-proxy it if it must be reachable more widely.
-
-**Breaking observability change: status and monitor contracts are v3.** Witness
-`input`/`output` are net external amounts; required `tokenBalances` rows carry
-decimal-string `gives`, `wants` and signed `net`, including zero-net intermediates.
-Witness accounting survives the separate 500-offer book display cap. Actual
-search limits/work and withholding reasons are exposed. Deploy producer and
-consumer together: the monitor labels old/unknown versions and does not interpret
-their incompatible payloads. See the [status contract](packages/solver-core/status-contract.ts).
-
-See [`packages/solver-frontend/README.md`](packages/solver-frontend/README.md)
-for the full environment contract, the routes, the reverse-proxy note and how to
-run the page against fixture data with no stack at all.
-
-
-### What the solver supports (and what it does not)
-
-- **Midnight 2.x / ledger-v9 only**, single-leg **shielded** offers with two
-  distinct token colors and positive amounts, at most **8 complete maker
-  files** per job. Unshielded legs, mixed value layers, multi-leg baskets and
-  legacy Midnight 1.x / ledger-v8 transactions are refused before admission.
-- Maker offers are built `payFees:false`, so the maker's offer carries no fee
-  payment: **the settling side pays**. The solver sizes and pays DUST for the
-  settlement it submits, under the `SOLVER_DUST_*` admission budget. Sizing that
-  fee requires **no swap-token inventory at all** — see
-  [`SOLVER_FEE_SIZING_TAKER_INPUTS`](#fee-sizing-solver_fee_sizing_taker_inputs).
-  The solver still needs NIGHT/DUST to pay the fee itself.
-- Published ladders are indicative data for the relay's own interpolation, not
-  reservations. Job admission is re-decided at job time against the current
-  book and policy, and the exact winning files are claimed atomically.
-
-### Whole-offer staircase pricing and settlement
-
-For each directed pair, the solver examines the current eligible Offer Files and
-uses one policy for direct and composed sets of at most eight complete physical
-files: maximize affordable **net taker output**, then break ties by lower genuine
-net input, fewer files and lexicographically sorted full hashes. Surplus is never
-a pricing reward, tie preference or reason to reduce advertised output. For each
-token, maker net supply is `sum(gives) - sum(wants)`; only the external input may
-be negative, the output must be positive, and all intermediate nets must be
-nonnegative. Endpoint allowlists apply to the taker pair, allowing internal legs
-whose own pairs are not advertised.
-
-For example, a maker giving **10 A for 3 B** and another giving **6 B for 5 D**
-support direct taker directions B→A and D→B, plus composed **5 D → 10 A**
-(`tokenIn=D`, `tokenOut=A`), retaining **3 B**. Both files execute once in the
-same atomic settlement. These quotes share physical files; their amounts cannot
-be added as independent inventory, and claiming a file affects every dependent
-quote. If the taker instead signs **16 D → 9 A** against that 10 A quote, the
-solver receives **11 D + 1 A + 3 B**.
-
-The unchanged relay wire encodes improvements as a staircase: flat sections end
-one input base unit before the next improvement; the last genuine threshold has
-a fixed **10x input** plateau, safely capped by numeric, wire-point or omitted-
-improvement bounds. Exact derivation has hard ceilings of 4,096 sources, eight
-selected files, 100,000 visited subsets per pair, 200,000 total, 64 wire points
-per pair and 64 published pairs. Lower-only controls additionally cap
-`maxCandidatePairs` at **4,096** and `maxDiscoveryWork` at **1,000,000**. Discovery
-and safe merge-order fallback share that work budget; `safeMergeOrderWork` is
-also reported separately. See the [canonical limits](packages/solver-core/ladder-derivation.ts).
-Work exhaustion withholds unproved pairs while retaining independently completed
-pairs; cancellation, an oversized source book or stale state withdraws the whole
-snapshot. No approximate or direct-only fallback replaces an incomplete search.
-
-A dispatched job may request less output than the selected files supply and may
-provide more input than those files require. Every selected maker file executes
-unchanged and in full. The taker receives exactly its signed output; excess
-input, excess output and every positive intermediate remainder go to the
-solver's shielded address through the existing residual transaction. Receipts
-are aggregated by token, and zero amounts create no outputs. The solver
-never partially consumes an offer and never pays a swap-token shortfall from
-pre-existing inventory, even a one-base-unit intermediate deficit. Funded and empty swap-token wallets therefore produce
-the same prices and route choices. The solver still needs NIGHT/DUST for fees.
-
-Jobs above the advertised output are still refused, as are jobs outside the
-published ladder, non-positive demands, stale routes, disallowed pairs,
-below-minimum outputs, incompatible maker sets and routes that exceed resource
-limits.
-
-**Numeric boundary clarification.** The supported ledger-v9 exposed source legs,
-taker input/output and individual receipts are bounded by **M = `2^127-1`**;
-**U = `2^128-1`** is the coin-format maximum only. This corrects the prior u128
-settlement-bound assumption: pinned ledger-v9 1.0.0-rc.3 SDK
-probes show singleton delta clamping above M and signed merge overflow. Those
-construction probes do not establish on-chain settlement at the boundary. Gross
-gives/wants use exact bigint arithmetic and may exceed U; a safe maker merge
-order must keep every per-token prefix within `[-M,M]`, with actual SDK deltas
-checked against exact arithmetic. The [accounting helper](packages/solver-core/whole-offer-balance.ts)
-and its [boundary tests](packages/solver-core/whole-offer-balance.test.ts) encode
-this supported domain.
-
-> **Breaking pricing/configuration change.** The former cumulative-prefix,
-> inventory-funded interpolation, direct-fill and crossing/cycle generators are
-> removed. `SOLVER_LADDER_CONFIG`, manual `pairs[].levels`,
-> `SOLVER_ENABLE_PATH_B`, `SOLVER_ENABLE_CYCLES`, and
-> `SOLVER_ENABLE_RESIDUAL_TOPUPS` are invalid upgrade leftovers and fail startup
-> with migration guidance. Delete them; there is no ladder file or pricing-mode
-> replacement. Token aliases come from the live book's actual token colors.
-
-### Fee sizing: `SOLVER_FEE_SIZING_TAKER_INPUTS`
-
-The solver never sees the taker's half — the relay merges it — so it cannot know
-how many zswap inputs the taker's own coin selection produced. It therefore
-models a fixed number, and that number is the one knob:
-
-| | |
-|---|---|
-| `SOLVER_FEE_SIZING_TAKER_INPUTS` | Optional. Integer in `[1, 64]`, default **1**. Malformed values are a listed `start:solver` launch problem, never a silent default. |
-
-**Coverage rule (measured).** A stand-in modelling `n` taker inputs funds a real
-taker half of up to **`n + 2`** zswap inputs. The default of 1 therefore covers
-takers paying from up to three coins, which is what the deployed E2E exercises,
-and it reserves exactly the DUST the previous mirror-based design did.
-
-**Raising it costs real DUST.** Each extra modelled input adds **12–14 %** to the
-reserved fee, and the DUST intent *spends* the estimate rather than merely
-holding it — so a higher value also consumes `SOLVER_DUST_MAX_PER_JOB` /
-`SOLVER_DUST_MAX_PER_WINDOW` budget faster. Raise it only if settlements start
-failing at submit time because a taker's balance is fragmented across many small
-coins; that failure is an availability failure (the chain rejects the merged
-transaction, the relay reports `submit-failed`, and the solver's contribution is
-reverted), not a loss of funds. The startup banner prints the effective model and
-its coverage.
+The COW solver (the process that mirrors this backend's Offer Files book,
+publishes price ladders to a Midnight Intents relay and settles the relay's
+swap jobs), its relay image, its monitor site, its Compose services and its
+end-to-end runners live in
+[effectstream/cow-solver](https://github.com/effectstream/cow-solver), with
+their history. It consumes this backend through `@zswap-da/api-contracts` (the
+API wire contracts) and `@zswap-da/kernel-client` (the API client, the offer
+merging and balance checks, and the wallet helpers). This repository ships no
+solver.
 
 ## Running on preview, preprod and mainnet
 
@@ -610,9 +408,12 @@ Every step below is done by hand; none of it is automated here.
 
 1. **Batcher DUST.** Send NIGHT to the unshielded address of
    `BATCHER_WALLET_SEED`, then register it for DUST **with the batcher
-   stopped**, because only one wallet facade may run per seed. The existing
-   provision script does it, reading the seed from `SOLVER_SEED` (the
-   Blockfrost token comes from the environment, never the command line):
+   stopped**, because only one wallet facade may run per seed. This repository
+   has no registration script of its own; the provision script of
+   [effectstream/cow-solver](https://github.com/effectstream/cow-solver)
+   (`deploy/scripts/provision-solver-fees.ts`, run from a checkout of that
+   repository) does it, reading the seed from `SOLVER_SEED` (the Blockfrost
+   token comes from the environment, never the command line):
 
    ```bash
    MIDNIGHT_NETWORK_ID=preprod \
@@ -636,14 +437,12 @@ Every step below is done by hand; none of it is automated here.
 
 ### Real funds: NO-GO
 
-The mainnet profile ships, but **real funds stay NO-GO** on this line. The
-owner's 2026-08-21 conditional GO covered only the audited solver sha
-`381022d`; the solver has changed since (the ledger-9 port included), so real
-funds stay NO-GO until a re-audit and a new owner decision. The mainnet
-profile is proven read-only only (offline profile tests and refusals; a
-mainnet kernel does not start until its reference parameters are pinned). The
-solver's own guard stays: on mainnet it runs dry-run by default, and live
-settlement additionally requires `SOLVER_MAINNET_LIVE_TRADING_ACK=true`.
+The mainnet profile ships, but **real funds stay NO-GO** on this line: the
+mainnet profile is proven read-only only (offline profile tests and refusals;
+a mainnet kernel does not start until its reference parameters are pinned).
+This repository ships no solver; the COW solver's own real-funds status and
+mainnet guards are documented in
+[effectstream/cow-solver](https://github.com/effectstream/cow-solver).
 
 ### Not covered here
 
@@ -682,45 +481,13 @@ Fund the `celestia1...` address shown by `celestia state account-address` with T
 | `CELESTIA_POLLING_INTERVAL_MS` | optional | Sync cadence. Defaults: devnet 6 000 ms, mainnet 30 000 ms. |
 | `MIDNIGHT_START_BLOCK` | default | `1`, which matches the NTP anchor; the nullifier set must be complete. |
 | `NTP_START_TIME` | default | `1773843582000`, mainnet block 1 (2026-03-18T14:19:42Z); an override is warned about. |
-| `API_RATE_LIMIT_MAX`, `API_RATE_LIMIT_ALLOWLIST` | optional | Per-client-IP budget for `/v1/*` per minute (default 600; `/v1/health*` exempt) and comma-separated IPs exempt from it. Size it for a solver plus its console on one address (~450/min worst case); `deploy/` sets 6000. |
+| `API_RATE_LIMIT_MAX`, `API_RATE_LIMIT_ALLOWLIST` | optional | Per-client-IP budget for `/v1/*` per minute (default 600; `/v1/health*` exempt) and comma-separated IPs exempt from it. Size it for the co-located automated clients on one address (a book mirror such as the COW solver plus its console: ~450/min worst case); `deploy/` sets 6000. |
 | `BATCHER_SUBMIT_TIMEOUT_MS` | optional | Absolute batcher fetch + receipt-body deadline; default 310 000 ms, bounded to 1 000–600 000 ms. |
 | `API_SSE_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/stream` cap; default 100. Excess clients receive `503 SSE_CAPACITY`. |
 | `API_UPDATES_MAX_CONNECTIONS` | optional | Per-node concurrent `/v1/offers/updates` websocket cap; default 100. Excess clients are refused the connection (this endpoint's refusals are disconnects, not HTTP statuses — see API.md). |
 | `OFFER_FILES_READ_TIMEOUT_MS` | optional | Exact-files read decision budget, default 15 000 ms and capped at 60 000 ms. Native synchronous proof work cannot be preempted; a retained concurrency slot bounds unfinished work. |
-| `ZSWAP_API` / `SOLVER_SEED` / `MIDNIGHT_NETWORK_ID` | **required by `start:solver`** | Kernel API base, solver wallet seed, and the declared network. Each has a silent developer default (`http://127.0.0.1:9999`, the public dev seed, `undeployed`) that `start:solver` refuses to assume — see [Running the COW solver](#running-the-cow-solver). |
-| `SOLVER_RELAY_WS_URL` / `SOLVER_RELAY_AUTH_TOKEN` | required for live solver mode (and by `start:solver` in every mode) | Outbound Midnight Intents solver WebSocket and its shared bearer (at least 32 characters). The backend exact-files read is unauthenticated. |
-| `SOLVER_RELAY_HTTP_URL` | **required for relay job execution** | Explicit public relay HTTP base for durable `GET /jobs/:jobId` recovery. It is validated independently and is never derived by rewriting the websocket URL. |
-| `SOLVER_JOURNAL_PATH` | **required for relay job execution** | Absolute path to the solver-local SQLite wallet-operation journal on a persistent mounted volume. Startup fails closed if it is missing, unwritable, corrupt, locked, full, or schema-incompatible. |
-| `SOLVER_RELAY_MAX_PARALLEL_SWAPS` | optional | Advertised and enforced concurrent proof-build bound; default 8. |
-| `SOLVER_RELAY_PUSH_INTERVAL_MS` / `SOLVER_RELAY_RECONNECT_DELAY_MS` | optional | Complete ladder replacement cadence (default 1 000 ms) and reconnect delay (default 2 000 ms). |
-| `SOLVER_STATUS_POLL_MS` / `SOLVER_SETTLE_TTL_MINUTES` | optional | Backend-consumption backstop cadence and chain-TTL wallet rollback window. |
-| `SOLVER_SUPPORTED_PAIRS` | optional (UNSET is OPEN + warning) | Strict JSON array of unique directed lowercase `64hex->64hex` taker endpoint pairs. SET is enforced in publication (including after a reconnect) and admission; internal maker legs may use other pairs. |
-| `SOLVER_MIN_JOB_OUTPUT` | optional (UNSET is OPEN + warning) | Strict JSON object from lowercase output-token `64hex` to positive canonical integer strings. A SET map omits tokens without a minimum and sub-minimum rungs/jobs. |
-| `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` / `SOLVER_DUST_WINDOW_MS` | optional as one group (UNSET is OPEN + warning) | All three must be SET together. Amounts are positive canonical decimal bigints; window is a positive safe integer in ms. Reservations are journal-durable and rolling-window bounded. |
-| `SOLVER_ADMISSION_WARNING_INTERVAL_MS` | optional | Startup/periodic warning cadence for every UNSET admission group; positive safe integer, default 900000. |
-| `SOLVER_DRY_RUN` / `SOLVER_MAINNET_LIVE_TRADING_ACK` | mainnet safety boundary | Mainnet defaults to dry-run, which now requires and syncs the real funded wallet and loads read-only Stock while starting no relay jobs. Live settlement additionally requires the exact `SOLVER_MAINNET_LIVE_TRADING_ACK=true` acknowledgement. |
 
 A complete mainnet env template lives at `.env.mainnet.example`.
-
-> **BREAKING DEPLOYMENT REQUIREMENT (RF1/RF2):** relay job execution now requires
-> both a durable `SOLVER_JOURNAL_PATH` and an explicit
-> `SOLVER_RELAY_HTTP_URL`. Provision one persistent volume per solver
-> instance and mount it at a stable absolute path (for example,
-> `/var/lib/cow-solver/operations.sqlite`) before upgrading. Never share one
-> journal file between instances. `:memory:` is rejected by production code;
-> its explicit escape hatch exists only for isolated test harnesses. Configure
-> the relay's public HTTP base directly; do not infer it from the websocket URL.
-
-> **BREAKING DRY-RUN DEPLOYMENT CHANGE (RF3):** mainnet dry-run now refuses the
-> repository dev seed, opens and syncs the configured real wallet, and loads a
-> read-only inventory snapshot. It starts no relay socket/job executor and calls
-> no mutating wallet method. Operators must therefore provision `SOLVER_SEED`
-> and wallet/indexer/proof connectivity for dry-run as well as live mode.
-
-Admission groups deliberately preserve the pre-RF3 OPEN default when wholly
-UNSET, but log a contained `[ADMISSION]` warning at startup and every configured
-warning interval. Malformed or partially-set groups fail startup; there is no
-silent coercion. For real-funds rollout, SET all three policy groups explicitly.
 
 ## Effectstream whole-block fail-stop operations
 
@@ -737,9 +504,9 @@ Use this operating sequence:
 1. **Detect and contain.** Treat a repeatedly failing block, a stalled
    `effectstream.effectstream_blocks` height, or an application-transition
    failure followed by PostgreSQL `25P02` as a fail-stop incident. Stop the
-   affected node and its restart loop. Stop solver job execution that depends
-   on that backend and confirm it is no longer publishing routable ladders
-   before touching state.
+   affected node and its restart loop. Stop the clients that act on that
+   backend's book (for example a COW solver's job execution) and confirm they
+   no longer publish or settle against it before touching state.
 2. **Preserve evidence.** Record the deployed commit and Effectstream version,
    the last committed and failing heights, the exception/SQLSTATE, and the
    suspected scheduled-input identity and payload. Take a storage snapshot or
@@ -772,17 +539,15 @@ Use this operating sequence:
    `effectstream.rollup_inputs`; the direct deletion in the regression test is
    test-only and is not a production procedure.
 5. **Recover in isolation.** Apply the reviewed fix while all writers remain
-   stopped. Start one node first, with solver execution still withdrawn, and
+   stopped. Start one node first, with dependent clients still withdrawn, and
    let it replay from the last committed boundary. Restore replicas only after
-   that node is current and stable; restore the solver only after its backend
-   mirror re-establishes currentness and its normal journal reconciliation
-   completes.
+   that node is current and stable; restore the dependent clients only after
+   their book mirrors are current again.
 6. **Verify replay before closing the incident.** Confirm the blocked height
    commits exactly once and later heights advance; the retained input either
    completes normally or has the reviewed disposition; no pre-fault partial
-   row or duplicate application event exists; and backend health, offer
-   liveness, solver empty-to-current ladder recovery, and durable wallet-job
-   reconciliation are all healthy. Archive the queries, logs, backup identity,
+   row or duplicate application event exists; and backend health and offer
+   liveness are healthy, as are the dependent clients' own recovery checks. Archive the queries, logs, backup identity,
    remediation artifact, and verification results with the incident.
 
 The long-term fix is upstream savepoint-based per-input database and rejected-
@@ -851,16 +616,14 @@ and skipping safely when the offer comes out give-only.
 
 ```
 zswap-offerfile-kernel/
-├── start.dev.ts                              # Local orchestrator config (no solver)
-├── start.solver.ts                           # COW solver component (bun run start:solver)
+├── start.dev.ts                              # Local orchestrator config
 ├── packages/
 │   ├── node/                                 # @zswap-da/node
 │   ├── database/                             # @zswap-da/database
 │   ├── validator/                            # @zswap-da/validator (shared offer validation)
 │   ├── api-contracts/                        # @zswap-da/api-contracts (wire contracts of the kernel API)
+│   ├── kernel-client/                        # @zswap-da/kernel-client (API client, offer merging, wallet helpers)
 │   ├── batcher/                              # @zswap-da/batcher
-│   ├── solver/                               # @zswap-da/solver (book mirror, ladders, swap-job settlement)
-│   ├── solver-core/                          # @zswap-da/solver-core (shared clients and ladder derivation)
 │   ├── offer-guard/                          # @zswap-da/offer-guard (checks node + batcher must agree on)
 │   ├── price-feed/                           # @zswap-da/price-feed (daily CoinGecko refresh; optional process)
 │   ├── midnight-infra/                       # Midnight node/indexer/proof-server launch scripts
@@ -882,9 +645,8 @@ monorepo at
 | `batcher/` | `batcher.{dev,public}.ts`, `public-network.ts` (public-network checks), `config.ts`, `midnight-balancing.ts`, `celestia.ts` (`ZswapCelestiaAdapter.validateInput` — pre-fee offer gate) |
 | `midnight-infra/` | `package.json` (Midnight node, indexer and proof-server process scripts) |
 | `contracts-celestia/` | `package.json` (`celestia-{node,bridge,fund}:*` scripts), `fund-bridge.ts` |
-| `solver/` | `solver.{dev,preview,mainnet}.ts` (per-network entrypoints), `env.ts`, `src/launch.ts` (the `start:solver` configuration contract), `src/run.ts` (`runSolver`), `src/book-sync.ts`, `src/ladder-source.ts`, `src/relay-client.ts`, `src/swap-job-executor.ts`, `src/stock.ts`, `src/operation-journal.ts` |
 | `api-contracts/` | the versioned wire contracts the node serves and its clients parse: `amount.ts` (whole coins ⇄ base units), `receipt-client.ts` (bounded relay and backend receipt reads), `exact-files-contract.ts` (`POST /v1/offers/files`), `offer-updates-contract.ts` (`GET /v1/offers/updates`), `validation-contract.ts` (offer validation verdicts) |
-| `solver-core/` | `api-client.ts` (kernel REST/SSE + exact files), `ladder-derivation.ts`, `admission-policy.ts` (one typed policy for publication and admission), `relay-ws-contract.ts`, `batcher.ts`, `wallet.ts` |
+| `kernel-client/` | `api-client.ts` (the kernel REST, update-stream and exact-files client), `batcher.ts` (offer merging and token-balance checks), `wallet.ts` (wallet facade for a seed, sync, balances, shielded transfer) |
 | `offer-guard/` | `mod.ts` (offer hash, guard ladder, dedup store), `public-networks.ts` (supported networks, endpoint / dev-seed / reference-parameter rules, log redaction), `sponsorship.ts` (`evaluateSponsorship()` — the ONE fee-sponsorship rule, shared by the quote, the node pre-check and the batcher) |
 | `price-feed/` | `price-feed.{dev,preview,mainnet}.ts`, `src/config.ts`, `src/coingecko.ts` (one asset per request, key as a header), `src/cycle.ts` (spacing, 429 stop, status row), `src/run.ts` (`--once` vs loop, retry ladder, exit codes) |
 | `tests/` | `run-tests.ts`, `start.test.ts` (test orchestrator), `helpers.ts`, `lib/db.ts`, `infra/{celestia,midnight}-ready.test.ts`, `stm/{zswap-flow,api,multi-token,unshielded-only,root-unknown}.test.ts` |
@@ -902,7 +664,6 @@ monorepo at
 | Midnight node | 9944 |
 | Midnight indexer | 8088 |
 | Midnight proof server | 6300 |
-| COW solver | Trading is outbound (kernel API + relay websocket); optional read-only status listener on `SOLVER_STATUS_HOST` / `SOLVER_STATUS_PORT` |
 | Price feed | **none** — outbound only (CoinGecko) plus the database; it listens on no port |
 
 ## Grammar / state-machine inputs

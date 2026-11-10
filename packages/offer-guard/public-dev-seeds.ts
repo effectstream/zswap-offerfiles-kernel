@@ -10,21 +10,22 @@
 //
 // The list mirrors the seed block in `deploy/.env.example` and the defaults in
 // the code (genesis …01, API-example taker …02, batcher fallback …03 in
-// `packages/batcher/config.ts`, solver `DEV_SEED` …21, E1 maker/taker …31 and
-// …32). The rule below is deliberately wider than the list: every dev seed in
-// this repository is a 32-byte value whose first 31 bytes are zero, and so is
-// any seed a human types while testing ("…05", "…ff"), so ANY such small-integer
-// seed counts as public. A real seed has 256 bits of entropy; the chance of one
+// `packages/batcher/config.ts`), plus the dev seeds of the COW solver and its
+// end-to-end maker/taker (…21, …31, …32), which run against this backend from
+// https://github.com/effectstream/cow-solver. The rule below is deliberately
+// wider than the list: every one of these dev seeds is a 32-byte value whose
+// first 31 bytes are zero, and so is any seed a human types while testing
+// ("…05", "…ff"), so ANY such small-integer seed counts as public. A real seed has 256 bits of entropy; the chance of one
 // landing in that range is 2^-248.
 
-/** The dev seeds this repository ships, for documentation and tests. */
+/** The known public dev seeds, for documentation and tests. */
 export const KNOWN_PUBLIC_DEV_SEEDS: readonly string[] = [
   "0000000000000000000000000000000000000000000000000000000000000001", // genesis / local fee wallet
   "0000000000000000000000000000000000000000000000000000000000000002", // api-examples taker
   "0000000000000000000000000000000000000000000000000000000000000003", // batcher fallback (config.ts)
-  "0000000000000000000000000000000000000000000000000000000000000021", // solver DEV_SEED
-  "0000000000000000000000000000000000000000000000000000000000000031", // E1 maker
-  "0000000000000000000000000000000000000000000000000000000000000032", // E1 taker
+  "0000000000000000000000000000000000000000000000000000000000000021", // COW solver dev seed
+  "0000000000000000000000000000000000000000000000000000000000000031", // COW end-to-end maker
+  "0000000000000000000000000000000000000000000000000000000000000032", // COW end-to-end taker
 ];
 
 /** Lowercased, trimmed, `0x`-stripped — so `0xAB…` and `ab…` compare equal. */

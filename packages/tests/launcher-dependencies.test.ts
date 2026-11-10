@@ -19,7 +19,9 @@ function processByName(config: LauncherConfig, name: string): ProcessSpec {
   return found;
 }
 
-const REMOVED = ["compact-check", "compact-build", "midnight-contract", "midnight-mint-test-tokens"];
+// The local contract and mint steps are gone (inventory is externally
+// prefunded), and the COW solver runs from https://github.com/effectstream/cow-solver.
+const REMOVED = ["compact-check", "compact-build", "midnight-contract", "midnight-mint-test-tokens", "solver"];
 
 function expectNetworkOnlyStartup(
   config: LauncherConfig,
@@ -78,7 +80,7 @@ test("node grammar retains native offer events without the removed contract snap
 
 test.serial("start.dev.ts launches chain services with no local contract", async () => {
   const config = (await import("../../start.dev.ts")).default as unknown as LauncherConfig;
-  expectNetworkOnlyStartup(config, localMidnightReady, ["batcher", "solver"]);
+  expectNetworkOnlyStartup(config, localMidnightReady, ["batcher"]);
 });
 
 test.serial("packages/tests/start.test.ts uses the same network-only health edge", async () => {
@@ -101,7 +103,7 @@ test.serial("start.attach.ts waits on external chain and kernel health only", as
   }
   try {
     const config = (await import("../../start.attach.ts")).default as unknown as LauncherConfig;
-    expectNetworkOnlyStartup(config, ["chain-wait"], ["batcher", "solver"]);
+    expectNetworkOnlyStartup(config, ["chain-wait"], ["batcher"]);
     expect(processByName(config, "sync-api-health").args?.at(-1)).toBe(
       "http-get://attached-kernel:9999/v1/health",
     );

@@ -11,8 +11,11 @@
 > `main` is `3b76604`. A mainnet kernel does not start yet (its ledger-9
 > reference parameters are not pinned), and real funds stay NO-GO. The
 > current env contract and runbook are in README.md ("Running on preview,
-> preprod and mainnet"); the last section below records the move to that
-> state. Everything above it is history.
+> preprod and mainnet"); the last two sections below record the move to that
+> state. Everything above them is history. The COW solver, its relay image and
+> its Compose services left this repository on 2026-11-10 for
+> [effectstream/cow-solver](https://github.com/effectstream/cow-solver); the
+> solver mentions above that date are history.
 
 > **Historical migration record.** The ledger-v9 SDK and runtime pins remain,
 > but this repository no longer ships, compiles or deploys the OfferFiles demo
@@ -399,3 +402,20 @@ midnight-js 5.0.0-beta.6, the wallet-sdk betas, node `2.0.0-rc.4`, indexer
 * **Token registry.** Registry networks `preview`, `preprod`, `mainnet`;
   imports accept only `midnight-2.x` documents; mainnet has no source; the
   schema seeds NIGHT only.
+
+---
+
+## The backend alone (2026-11-10)
+
+* **The COW solver moved** to
+  [effectstream/cow-solver](https://github.com/effectstream/cow-solver) with
+  its history: `packages/solver`, `packages/solver-core`,
+  `packages/solver-frontend`, the solver runners of the grand e2e,
+  `start.solver*.ts`, the solver typecheck, the solver deploy scripts, the
+  relay image and the solver entrypoints of the kernel image.
+* **Compose** no longer has the `relay`, `solver`, `solver-frontend`,
+  `solver-provision` and `scripts` services or their volumes and settings.
+* **Packages the solver consumes stay here**: `@zswap-da/api-contracts` (the
+  API wire contracts) and `@zswap-da/kernel-client` (the API client, offer
+  merging and balance checks, and the wallet helpers, formerly
+  `solver-core`'s `api-client`, `batcher` and `wallet`).

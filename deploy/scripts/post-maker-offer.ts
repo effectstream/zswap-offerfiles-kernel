@@ -42,7 +42,7 @@ const ttlMs = Number(process.env["TTL_MINUTES"] ?? "120") * 60_000;
 log(`kernel   : ${api.base}`);
 log(`give     : ${giveAmount} of ${give.slice(0, 16)}…`);
 log(`want     : ${wantAmount} of ${want.slice(0, 16)}…`);
-log(`=> the solver quotes this as tokenIn=${want.slice(0, 8)}… tokenOut=${give.slice(0, 8)}…`);
+log(`=> a taker fills this as tokenIn=${want.slice(0, 8)}… tokenOut=${give.slice(0, 8)}…`);
 
 await postMakerOfferWithWallet(buildWallet, MAKER_SEED, {
   api,

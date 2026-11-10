@@ -1,6 +1,6 @@
-// Legacy pre-relay network surface retained only for its historical unit test
-// and manual test-support probe. This module is deliberately absent from the
-// package exports map and must never be imported by production source.
+// Direct batcher submission (POST /send-input) for the e2e suite and its unit
+// test. This module is deliberately absent from the package exports map and
+// must never be imported by production source.
 
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import { nonDustImbalances } from "./batcher.ts";

@@ -267,11 +267,13 @@ const HEX_SEED = /^[0-9a-f]+$/;
  * Wallet seeds that may legitimately be present in the poster's environment and
  * that the poster must NOT share.
  *
- * FR-001 names the first four. The remaining three are in `deploy/.env.example`
- * (`:90-94`) and are just as dangerous: one wallet facade per seed is an SDK
- * rule, and two processes on one seed fight over the same coins. A superset is
- * strictly safer here — nothing legitimate wants the poster to run on the
- * genesis, maker or taker wallet.
+ * The batcher's, the maker-offer one-shot's and the genesis wallet's seeds are
+ * this repository's own; SOLVER_SEED, MAKER_SEED and TAKER_SEED are the wallets
+ * of a COW solver and its end-to-end maker/taker deployed beside the poster
+ * (https://github.com/effectstream/cow-solver). All are just as dangerous: one
+ * wallet facade per seed is an SDK rule, and two processes on one seed fight
+ * over the same coins. A superset is strictly safer here — nothing legitimate
+ * wants the poster to run on any of them.
  */
 export const COLLIDING_SEED_VARS: readonly string[] = [
   "MIDNIGHT_WALLET_SEED",

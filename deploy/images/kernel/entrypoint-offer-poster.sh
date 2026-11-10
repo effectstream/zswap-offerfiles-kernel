@@ -6,9 +6,9 @@
 # and posts one ZSwap offer whose ONLY input is that exact coin.
 #
 # ── Why there is no marker file ──────────────────────────────────────────────
-# entrypoint-maker-offer.sh and entrypoint-solver-provision.sh write a marker
-# and exit early on a restart, because they are ONE-SHOTS: re-running them would
-# re-prove and re-post the same seeding artifact every time the stack bounced.
+# entrypoint-maker-offer.sh writes a marker and exits early on a restart,
+# because it is a ONE-SHOT: re-running it would re-prove and re-post the same
+# seeding offer every time the stack bounced.
 # This service is the opposite — a LOOP whose whole job is to keep posting, so a
 # marker would make a restart a permanent no-op. Idempotence lives one level
 # down instead, in the JOURNAL (POSTER_JOURNAL_FILE, on its own volume): it is
@@ -19,11 +19,11 @@
 #
 # ── One facade per seed, ever ────────────────────────────────────────────────
 # Two wallet facades on one seed against one Midnight node force each other's
-# connection down (the same rule solver-provision waits on). POSTER_SEED must
-# therefore be a DEDICATED seed — distinct from MIDNIGHT_WALLET_SEED /
-# MIDNIGHT_GENESIS_SEED, BATCHER_WALLET_SEED, SOLVER_SEED, MAKER_SEED /
-# MAKER_OFFER_SEED and TAKER_SEED — and this service must never be scaled past
-# one replica. `deploy/scripts/lib/poster-config.ts` refuses to start (exit 78,
+# connection down. POSTER_SEED must therefore be a DEDICATED seed — distinct
+# from MIDNIGHT_WALLET_SEED / MIDNIGHT_GENESIS_SEED, BATCHER_WALLET_SEED,
+# MAKER_SEED / MAKER_OFFER_SEED, and the SOLVER_SEED and TAKER_SEED of a COW
+# solver deployed beside it — and this service must never be scaled past one
+# replica. `deploy/scripts/lib/poster-config.ts` refuses to start (exit 78,
 # EX_CONFIG) if POSTER_SEED collides with any of those seven, which is also why
 # compose spells the Midnight endpoints out here instead of merging the
 # `*midnight-endpoints` anchor: that anchor carries MIDNIGHT_WALLET_SEED.

@@ -1,6 +1,6 @@
-// Production-pure transaction algebra retained after the solver moved to the
-// Midnight Intents relay. No network request or legacy batcher acknowledgement
-// parser belongs on this exported surface.
+// Production-pure transaction algebra: merge independently proven offers and
+// check token balance. No network request or batcher acknowledgement parser
+// belongs on this exported surface.
 
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 

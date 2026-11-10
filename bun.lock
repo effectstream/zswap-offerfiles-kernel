@@ -182,47 +182,6 @@
         "@types/pg": "^8.11.10",
       },
     },
-    "packages/solver": {
-      "name": "@zswap-da/solver",
-      "version": "0.1.0",
-      "dependencies": {
-        "@effectstream/midnight-contracts": "0.300.2",
-        "@effectstream/mip-zswap-offer": "0.4.0",
-        "@effectstream/utils": "0.300.2",
-        "@midnightntwrk/ledger-v9": "1.0.0",
-        "@zswap-da/api-contracts": "workspace:*",
-        "@zswap-da/kernel-client": "workspace:*",
-        "@zswap-da/solver-core": "workspace:*",
-        "@zswap-da/validator": "workspace:*",
-        "rxjs": "^7.8.2",
-      },
-      "devDependencies": {
-        "@midnightntwrk/wallet-sdk-capabilities": "4.0.0",
-        "@midnightntwrk/wallet-sdk-facade": "5.0.0",
-      },
-    },
-    "packages/solver-core": {
-      "name": "@zswap-da/solver-core",
-      "version": "0.1.0",
-      "dependencies": {
-        "@effectstream/midnight-contracts": "0.300.2",
-        "@effectstream/mip-zswap-offer": "0.4.0",
-        "@midnight-ntwrk/midnight-js-contracts": "5.0.0",
-        "@midnightntwrk/ledger-v9": "1.0.0",
-        "@midnightntwrk/wallet-sdk-address-format": "4.0.0",
-        "@zswap-da/api-contracts": "workspace:*",
-        "@zswap-da/kernel-client": "workspace:*",
-        "rxjs": "^7.8.2",
-      },
-    },
-    "packages/solver-frontend": {
-      "name": "@zswap-da/solver-frontend",
-      "version": "0.1.0",
-      "dependencies": {
-        "@zswap-da/api-contracts": "workspace:*",
-        "@zswap-da/solver-core": "workspace:*",
-      },
-    },
     "packages/tests": {
       "name": "@zswap-da/tests",
       "version": "0.1.0",
@@ -1196,12 +1155,6 @@
     "@zswap-da/offer-guard": ["@zswap-da/offer-guard@workspace:packages/offer-guard"],
 
     "@zswap-da/price-feed": ["@zswap-da/price-feed@workspace:packages/price-feed"],
-
-    "@zswap-da/solver": ["@zswap-da/solver@workspace:packages/solver"],
-
-    "@zswap-da/solver-core": ["@zswap-da/solver-core@workspace:packages/solver-core"],
-
-    "@zswap-da/solver-frontend": ["@zswap-da/solver-frontend@workspace:packages/solver-frontend"],
 
     "@zswap-da/tests": ["@zswap-da/tests@workspace:packages/tests"],
 

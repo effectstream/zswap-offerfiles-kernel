@@ -30,7 +30,7 @@ const installFetch = (implementation: typeof fetch): void => {
 // independently of the small nonDustImbalances filter.
 const nonDust = (tx: unknown) => tokenImbalances(tx as any).filter((i) => i.tag !== "dust");
 
-// The non-dust imbalance check is the guard that stops the solver handing the
+// The non-dust imbalance check is the guard that stops a client handing the
 // batcher a merge which spends the makers' inputs without delivering what they
 // asked for. It used to swallow every error and return an empty list, so a
 // changed SDK shape read as "balanced" — the guard failed OPEN, waving through

@@ -130,10 +130,9 @@ describe("check-env.ts — the public-network contract", () => {
       failed({
         ...complete("mainnet"),
         POSTER_SEED: "0".repeat(63) + "1",
-        SOLVER_SEED: "0".repeat(62) + "21",
-        MIDNIGHT_WALLET_SEED: "7e".repeat(32),
+        MIDNIGHT_WALLET_SEED: "0".repeat(62) + "21",
       }),
-    ).toEqual([...notPinned("mainnet"), "POSTER_SEED", "SOLVER_SEED"]);
+    ).toEqual([...notPinned("mainnet"), "POSTER_SEED", "MIDNIGHT_WALLET_SEED"]);
   });
 });
 
@@ -148,7 +147,6 @@ describe("the committed .env.<network>.example files", () => {
     DB_PW: "dummy-password",
     BATCHER_WALLET_SEED: "7f".repeat(32),
     POSTER_SEED: "6e".repeat(32),
-    SOLVER_SEED: "5d".repeat(32),
     GIVE_TOKEN: "12".repeat(32),
     WANT_TOKEN: "34".repeat(32),
   };

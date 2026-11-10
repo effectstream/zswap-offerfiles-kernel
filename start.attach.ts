@@ -82,15 +82,5 @@ export default {
       type: "system-dependency",
       dependsOn: [CHAIN_WAIT, SYNC_API_HEALTH],
     },
-
-    {
-      name: "solver",
-      description: "ZSwap-DA posted-price solver",
-      args: ["run", "packages/solver/solver.dev.ts"],
-      waitToExit: false,
-      // Not a system-dependency: the stack is usable without a solver, and a
-      // solver fault must never tear it down.
-      dependsOn: [CHAIN_WAIT, SYNC_API_HEALTH, "sync"],
-    },
   ],
 } satisfies OrchestratorConfig;

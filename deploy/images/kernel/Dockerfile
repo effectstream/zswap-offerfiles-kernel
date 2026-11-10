@@ -20,22 +20,16 @@
 #   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.<dev|public>.ts (:3334)
 #                           (from MIDNIGHT_NETWORK_ID: undeployed → .dev.ts; preview,
 #                           preprod, mainnet → .public.ts; anything else exits 78)
-#   entrypoint-solver.sh    exec bun run start.solver.ts
-#   entrypoint-solver-frontend.sh  exec bun run start.solver-frontend.ts (:8080)
 #   entrypoint-price-feed.sh  daily CoinGecko refresh of asset_prices
-#   entrypoint-scripts.sh   the E1 provisioning / assertion driver
-#   entrypoint-solver-provision.sh  one-shot: validate prefunding + write config
 #   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
 #   entrypoint-offer-poster.sh      loop: post prefunded coins, reuse on release
 #   entrypoint-token-registry.sh    one-shot: import the network's canonical token
 #                                   registry (TOKEN_REGISTRY_NETWORK); loud failure
 #
-# `solver-provision` and `maker-offer` are devnet SEEDING steps, and they are
-# services rather than README steps for one reason: without them every container
-# reports healthy, the solver connects to the relay, and it publishes an empty
-# ladder forever with no error logged anywhere (R2 made publication bounded by
-# the solver's own spendable inventory, and the ladder derives from the maker
-# book). Inventory is supplied before startup through an external issuer.
+# `maker-offer` is a devnet SEEDING step, and it is a service rather than a
+# README step so that a stack whose book must not start empty can be brought up
+# with one command. Inventory is supplied before startup through an external
+# issuer.
 #
 # entrypoint-offer-poster.sh is neither a one-shot nor part of the default
 # stack: it is the 00007 offer poster, opt-in behind the `poster` profile, and
@@ -70,9 +64,6 @@ COPY packages/offer-guard/package.json                              packages/off
 # which made `bun install --frozen-lockfile` refuse the committed lockfile and
 # the kernel image unbuildable from `main` (found at 00007-P-C).
 COPY packages/price-feed/package.json                               packages/price-feed/
-COPY packages/solver/package.json                                   packages/solver/
-COPY packages/solver-core/package.json                              packages/solver-core/
-COPY packages/solver-frontend/package.json                          packages/solver-frontend/
 COPY packages/tests/package.json                                    packages/tests/
 COPY packages/validator/package.json                                packages/validator/
 
@@ -90,13 +81,9 @@ COPY deploy/images/kernel/pglite-forwarder.ts    /usr/local/bin/pglite-forwarder
 COPY deploy/images/kernel/pglite-healthcheck.ts  /usr/local/bin/pglite-healthcheck.ts
 COPY deploy/images/kernel/entrypoint-kernel.sh   /usr/local/bin/entrypoint-kernel.sh
 COPY deploy/images/kernel/entrypoint-batcher.sh  /usr/local/bin/entrypoint-batcher.sh
-COPY deploy/images/kernel/entrypoint-solver.sh   /usr/local/bin/entrypoint-solver.sh
-COPY deploy/images/kernel/entrypoint-solver-frontend.sh /usr/local/bin/entrypoint-solver-frontend.sh
 COPY deploy/images/kernel/entrypoint-price-feed.sh /usr/local/bin/entrypoint-price-feed.sh
-COPY deploy/images/kernel/entrypoint-scripts.sh  /usr/local/bin/entrypoint-scripts.sh
-# Devnet seeding one-shots. Without these the stack comes up entirely healthy
-# and quotes nothing — see each script's header.
-COPY deploy/images/kernel/entrypoint-solver-provision.sh /usr/local/bin/entrypoint-solver-provision.sh
+# Devnet seeding one-shot: posts one real offer so the book does not start
+# empty — see the script's header.
 COPY deploy/images/kernel/entrypoint-maker-offer.sh      /usr/local/bin/entrypoint-maker-offer.sh
 # The 00007 offer poster: a LOOP, opt-in behind the `poster` compose profile.
 COPY deploy/images/kernel/entrypoint-offer-poster.sh     /usr/local/bin/entrypoint-offer-poster.sh

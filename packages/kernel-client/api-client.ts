@@ -33,7 +33,7 @@ const resolveApi = (override?: string): string => override ?? API;
 export const DEFAULT_API_TIMEOUT_MS = 15_000;
 
 /** The sync-health response is a small control-plane document. Bound its
- * complete decoded body so a faulty endpoint cannot make the solver retain an
+ * complete decoded body so a faulty endpoint cannot make the client retain an
  * arbitrarily large response while deciding whether trading is safe. */
 export const MAX_SYNC_HEALTH_BODY_BYTES = 1024 * 1024;
 
@@ -489,9 +489,9 @@ export async function postOffersStatus(
 
 /** The current `/v1/health/sync` wire contract has no body-level schema
  * version. The `/v1` route is therefore the only version discriminator. Keep
- * this parser strict for every field the solver consumes and return a
+ * this parser strict for every field a client consumes and return a
  * projected value so diagnostic fields added by the backend cannot silently
- * enter the solver's trusted state. */
+ * enter the client's trusted state. */
 export type BackendSyncStatus = "ok" | "syncing" | "error";
 
 export interface BackendNtpSyncPosition {
@@ -766,7 +766,7 @@ export const reportsBackendProjectionCurrent = (
 
 /** Job-time exact-files read (FR-006/008/010).
  *
- * This is intentionally the ONLY solver client for settlement bytes. It
+ * This is intentionally the ONLY client read for settlement bytes. It
  * canonicalizes every requested identity before dispatch, binds every returned
  * blob to its own content hash, and requires one response entry in the same
  * order for every request entry. A malformed/partial/reordered HTTP-200 is
@@ -900,7 +900,7 @@ export interface SseStreamOpts {
    * intentionally long-lived and remains owned by close(). */
   connectTimeoutMs?: number;
   /** Maximum bytes retained for one frame before its blank-line separator.
-   * Prevents a peer from growing the solver heap with an unterminated event. */
+   * Prevents a peer from growing the client heap with an unterminated event. */
   maxFrameBytes?: number;
 }
 
@@ -1127,7 +1127,7 @@ export function openSseStream(
         if (controller === connection) controller = null;
       }
       if (stopped) return;
-      // Jitter in [0.5, 1.5) so multiple solvers don't reconnect in lockstep.
+      // Jitter in [0.5, 1.5) so multiple clients don't reconnect in lockstep.
       const delay = Math.floor(Math.min(max, base * 2 ** attempt) * (0.5 + Math.random()));
       attempt += 1;
       await waitForBackoff(delay);
@@ -1190,7 +1190,7 @@ export interface OfferUpdatesStreamOpts {
   /** Deadline covering the socket open AND the `ready` frame. A socket that
    * opens but never announces a subscription is not a usable stream. */
   connectTimeoutMs?: number;
-  /** Largest accepted frame. A peer must not be able to grow the solver heap
+  /** Largest accepted frame. A peer must not be able to grow the client heap
    * with one enormous message. */
   maxFrameBytes?: number;
   /** Explicit seam for deterministic tests; production uses global WebSocket. */
@@ -1440,7 +1440,7 @@ export function openOfferUpdatesStream(
     while (!stopped) {
       await runSubscription();
       if (stopped) return;
-      // Jitter in [0.5, 1.5) so multiple solvers don't reconnect in lockstep.
+      // Jitter in [0.5, 1.5) so multiple clients don't reconnect in lockstep.
       const delay = Math.floor(Math.min(max, base * 2 ** attempt) * (0.5 + Math.random()));
       attempt = attempt + 1 > 30 ? 30 : attempt + 1;
       await waitForBackoff(delay);

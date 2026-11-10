@@ -8,8 +8,9 @@ describe("public dev seeds (00050)", () => {
     for (const seed of KNOWN_PUBLIC_DEV_SEEDS) expect(isPublicDevSeed(seed)).toBe(true);
   });
 
-  test("the batcher fallback and solver dev seed are in the list", () => {
-    // packages/batcher/config.ts BATCHER_SEED and packages/solver/env.ts DEV_SEED.
+  test("the batcher fallback and the COW solver dev seed are in the list", () => {
+    // packages/batcher/config.ts BATCHER_SEED, and the dev seed the COW solver
+    // (https://github.com/effectstream/cow-solver) uses against this backend.
     expect(KNOWN_PUBLIC_DEV_SEEDS).toContain("0".repeat(63) + "3");
     expect(KNOWN_PUBLIC_DEV_SEEDS).toContain("0".repeat(62) + "21");
   });

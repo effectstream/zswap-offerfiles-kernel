@@ -24,18 +24,14 @@ funds: NO-GO").
 and `bun run typecheck` runs both.
 
 - `bun run typecheck:backend` covers the 28 production `packages/node` roots
-  (it excludes node tests and the grand-E2E entrypoint) and
-  `packages/api-contracts`, the wire contracts the node serves, production and
-  test sources alike. Each package is its own program; the gate builds the real
-  dependency graph without modifying it and fails every diagnostic owned by a
-  gated package, and every fileless one.
-- `bun run typecheck:solver` covers the solver: `packages/solver`,
-  `packages/solver-core` and `packages/validator` — **production and test
-  sources alike** — plus every other first-party file that imports the solver's
-  source, discovered by scanning rather than by a maintained list. Zero
-  diagnostics are required. Test sources are inside this gate deliberately: the
-  drift it exists to catch (an E2E harness still passing callbacks the solver no
-  longer accepts) lived in a test file.
+  (it excludes node tests and the grand-E2E entrypoint) and, **production and
+  test sources alike**, `packages/validator` (the offer verification the node
+  and the batcher run), `packages/api-contracts` (the wire contracts the node
+  serves) and `packages/kernel-client` (the client that parses them). Each
+  package is its own program; the gate builds the real dependency graph
+  without modifying it and fails every diagnostic owned by a gated package,
+  and every fileless one.
+- `bun run typecheck:price-feed` covers `packages/price-feed` the same way.
 
 Neither gate is a workspace-wide typecheck: each reports, but does not fail on,
 diagnostics in dependencies outside its own roots. CI also bundles API examples
@@ -121,35 +117,6 @@ ROOT_WINDOW_SECONDS=                    # known-roots retention window. Default 
                                         # Override only for tests. Too wide ⇒ phantom
                                         # unfillable offers on the book; too narrow ⇒
                                         # valid offers rejected ROOT_UNKNOWN.
-
-# ── Solver process (packages/solver, started by `bun run start:solver`) ────────
-# The seven values below are MANDATORY for that entrypoint, in dry-run as well
-# as live mode; it validates all of them before opening a wallet, socket or
-# journal and exits non-zero listing every problem at once.
-MIDNIGHT_NETWORK_ID=undeployed           # declared explicitly: the SDK otherwise assumes undeployed
-ZSWAP_API=http://127.0.0.1:9999          # kernel Offer Files REST/SSE base
-SOLVER_SEED=...                          # the repository dev seed is accepted only on undeployed
-SOLVER_RELAY_WS_URL=wss://relay/solver   # outbound Midnight Intents solver socket
-SOLVER_RELAY_HTTP_URL=https://relay/api/v1  # public relay HTTP base for durable GET /jobs/:jobId
-                                        # never derived from the websocket URL
-SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer, >= 32 chars; backend exact-files is unauthenticated
-SOLVER_JOURNAL_PATH=/var/lib/cow-solver/operations.sqlite  # absolute, per-instance volume; :memory: refused
-
-SOLVER_DRY_RUN=true                      # mainnet default; mirrors the live Offer Files book,
-                                        # syncs the REAL wallet, starts no relay jobs, mutates nothing
-SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
-SOLVER_ENABLED=true                      # "false" exits 0 without requiring the values above
-SOLVER_RELAY_MAX_PARALLEL_SWAPS=8        # advertised and enforced proof-build capacity
-SOLVER_STATUS_POLL_MS=5000               # missed-signal backend-consumption backstop
-SOLVER_SETTLE_TTL_MINUTES=30             # wallet rollback window when no terminal signal arrives
-SOLVER_SUPPORTED_PAIRS=                  # JSON ["<64hex>-><64hex>"]; bounds publication AND admission
-SOLVER_MIN_JOB_OUTPUT=                   # JSON {"<64hex out-token>":"<min>"}; same two boundaries
-SOLVER_DUST_MAX_PER_JOB=                 # DUST admission budget; all three DUST values set together
-SOLVER_DUST_MAX_PER_WINDOW=
-SOLVER_DUST_WINDOW_MS=
-SOLVER_FEE_SIZING_TAKER_INPUTS=1          # taker zswap inputs the fee estimate models; [1,64]
-                                        # funds a real taker half of up to n+2 inputs
-                                        # each extra input costs 12-14% more DUST, actually spent
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -852,9 +819,7 @@ Validation consults the node's local state only — no live RPC calls are made. 
 
 > **Breaking compatibility note:** quote amounts that were previously sanitized
 > (for example `1_000` or `-100`) now return `400`; send canonical decimal u256
-> strings. Solver-level publication now requires bearer authentication plus a
-> positive `version`, and `pairs` is interpreted as a complete replacement.
-> Solver-backed `/v1/quote` precedence is default-off until explicitly enabled.
+> strings.
 
 #### `GET /v1/prices?tokens=<color>[,<color>…]`
 
@@ -1032,11 +997,10 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 | `from_source`, `to_source` | Per-leg provenance: `feed`, `seed`, `fixed`, `manual`, `fallback`, or `demo-fallback`. A UI should label the last two as demo rates |
 | `prices_updated_at` | The **older** of the two legs' `updated_at` — a quote is only as fresh as its stalest side. `null` when either leg is `demo-fallback` |
 
-This backend holds no solver state, so nothing else can win the quote. Solver
-ladders are pushed to the Midnight Intents relay, which does its own
-interpolation; the backend's job is the indexed book and its reads. What the
-solver publishes, and what it will settle, is described in
-[The COW solver](#the-cow-solver-midnight-intents-side) below.
+This backend holds no solver state, so nothing else can win the quote. A
+solver such as the COW solver pushes its ladders to the Midnight Intents relay,
+which does its own interpolation; the backend's job is the indexed book and its
+reads (see [The COW solver](#the-cow-solver) below).
 
 ---
 
@@ -1202,93 +1166,16 @@ The endpoint remains available without any application contract metadata.
 
 ---
 
-## The COW solver (Midnight Intents side)
+## The COW solver
 
-The solver is **not** part of this HTTP API and listens on no port. It is a
-separate process (`bun run start:solver`; see README → "Running the COW solver")
-that consumes this backend as a client — `GET /v1/offers`, `GET /v1/offers/updates`,
-`POST /v1/offers/files`, `GET /v1/health/sync` — and connects **outbound** to a
-Midnight Intents relay, where it publishes price ladders and settles the swap
-jobs the relay dispatches to it. Neither `bun run dev` nor the public-network
-entries (`main.public.ts`, `batcher.public.ts`) launch it.
-
-**Topology.** Kernel (node), batcher and solver are three independent processes.
-The kernel indexes and serves offers; the batcher publishes blobs to Celestia;
-the solver mirrors the kernel's book and owns its own wallet, journal and relay
-connection. A container deployment gives each of them its own service, with the
-solver depending on the kernel and relay rather than starting them.
-
-**Supported domain.** Midnight 2.x / ledger-v9 only. The solver settles offers
-that normalize to **one shielded give leg and one shielded want leg** with
-distinct token colors and positive amounts, using at most **8 complete maker
-files per job**. Unshielded legs, mixed value layers, multi-leg baskets, and
-legacy Midnight 1.x / ledger-v8 transactions are refused before admission. A
-maker file is never partially consumed.
-
-**Fees.** Maker offers are constructed with `payFees:false` (see
-[Encoding offers](#encoding-offers-swapoffer1)), so a maker's offer pays no fee
-itself. The settling side pays: for a relay job, the solver sizes and funds the
-DUST for the transaction it submits, bounded by the `SOLVER_DUST_*` admission
-budget. Sizing that fee requires **no swap-token inventory**: the taker's half is
-modelled by a synthetic transaction built from ledger primitives with the taker
-half's shape, because the DUST fee is a function of transaction structure only,
-not of any coin's value, token type or owner. Earlier builds spent — and
-immediately reverted — the job's full `amountIn` of the input token out of the
-solver's own wallet to do this. The solver still needs NIGHT/DUST for the fee
-itself. See `SOLVER_FEE_SIZING_TAKER_INPUTS` below.
-
-**Quotes are indicative.** A published ladder is authenticated market data for
-the relay's interpolation, not a reservation: nothing is held, and admission is
-re-decided at job time against the current book and policy. The kernel's
-`GET /v1/quote` is a separate, `token_prices`-backed contract and is not replaced
-by solver data.
-
-**A job's `amountOut` is the taker's exact demand, and may be below the quote.**
-For the job's input, the solver chooses the single advertised whole-file
-combination whose genuine threshold supports the demand. Every selected file
-executes unchanged and in full:
-
-| Case | Disposition |
-|---|---|
-| Selected files require exactly `amountIn` and supply exactly `amountOut` | Settles with no swap-token surplus. |
-| Selected files require less than `amountIn` | Excess taker input is paid to the solver's shielded address. |
-| Selected files supply more than `amountOut` | Excess maker output is paid to the solver's shielded address. |
-| Selected files supply less than `amountOut` | Refused; the solver never pays the shortfall from inventory. |
-
-Out-of-ladder sizes, non-positive demands, stale routes, disallowed pairs,
-below-minimum outputs, incompatible maker sets, exhausted resource limits and
-DUST-budget violations remain refusals.
-
-**Published liquidity comes only from the live Offer Files book.** For each
-directed pair, the solver searches all affordable compatible combinations of at
-most eight complete files and publishes every strict improvement in maximum
-maker output. Flat sections end one input base unit before the next improvement.
-The last genuine threshold has one fixed flat endpoint at 10 times its input;
-that synthetic point never creates maker liquidity. Search, numeric, freshness,
-64-wire-point and 64-pair limits fail closed by withholding or withdrawing the
-affected pair.
-
-Swap-token wallet balances do not affect published prices or route choice. The
-solver contributes empty swap-token input maps and needs only NIGHT/DUST for
-fees. Excess taker input and excess maker output are both explicit settlement
-outputs to the solver.
-
-**Breaking configuration change.** `SOLVER_LADDER_CONFIG`, manual
-`pairs[].levels`, `SOLVER_ENABLE_PATH_B`, `SOLVER_ENABLE_CYCLES`, and
-`SOLVER_ENABLE_RESIDUAL_TOPUPS` were removed. Their presence is an upgrade error;
-delete them instead of replacing them with another pricing source.
-
-**`SOLVER_FEE_SIZING_TAKER_INPUTS`** (optional; integer `[1, 64]`, default `1`).
-The relay dispatches a numeric job and merges the taker's own half, so the solver
-cannot know how many zswap inputs the taker's coin selection produced. This is
-how many it models when sizing the fee. Measured coverage: a stand-in modelling
-`n` inputs funds a real taker half of up to **`n + 2`** inputs. Each extra
-modelled input costs **12–14 %** more DUST, actually spent (not merely reserved),
-and consumes `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` budget
-faster. Under-modelling is an availability failure — the chain rejects the merged
-transaction, the relay reports `submit-failed`, and the solver's contribution is
-reverted — never a loss of funds. A malformed value is a listed `start:solver`
-launch problem; the startup banner prints the effective model and its coverage.
+The COW solver is not part of this repository or of this HTTP API. It lives in
+[effectstream/cow-solver](https://github.com/effectstream/cow-solver), with its
+relay, monitor site, configuration and pricing and settlement rules. It
+consumes this backend as a client — `GET /v1/offers`, `GET /v1/offers/updates`,
+`POST /v1/offers/files`, `GET /v1/health/sync` — through
+`@zswap-da/kernel-client` and `@zswap-da/api-contracts`, and connects
+**outbound** to a Midnight Intents relay. Neither `bun run dev` nor the
+public-network entries (`main.public.ts`, `batcher.public.ts`) launch it.
 
 ---
 

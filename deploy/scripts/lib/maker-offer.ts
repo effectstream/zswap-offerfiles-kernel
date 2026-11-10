@@ -4,8 +4,8 @@
 //
 //   * `bun run seed:market` writes rows straight into the database with a
 //     PLACEHOLDER blob. Its own header says so: those offers are DISPLAY-real
-//     and "NOT settle-able". They would let the solver publish a ladder that
-//     could never be filled — a green smoke covering for a broken stack.
+//     and "NOT settle-able". A book built from them can be quoted but never
+//     filled — a green smoke covering for a broken stack.
 //   * `api-examples/10-submit-offer.ts` builds a real offer but is stale against
 //     the current wallet SDK: it passes `state.address.coinPublicKeyString()`
 //     (a STRING) as `receiverAddress`, and the SDK now dereferences
@@ -18,13 +18,14 @@
 //
 // The offer is intentionally UNBALANCED — it GIVES `giveAmount` of `giveToken`
 // and WANTS `wantAmount` of `wantToken` routed back to the maker. That is what
-// an Offer File is, and it is what the solver mirrors and quotes against.
+// an Offer File is, and it is what a taker, or a quoting service that mirrors
+// the book, fills.
 //
 // Note the resulting direction: an offer GIVING A / WANTING B is filled by a
-// taker who pays B and receives A, so for the solver that pair is tokenIn=B,
-// tokenOut=A. The solver needs NEITHER token to quote and settle this complete
-// file: the maker supplies output, the taker supplies input, and the solver pays
-// only the fee. The 00006-V1 unfunded rerun remains the control for that fact.
+// taker who pays B and receives A, so from the taker's side that pair is
+// tokenIn=B, tokenOut=A. Whoever settles this complete file needs NEITHER
+// token: the maker supplies the output, the taker supplies the input, and the
+// settling party pays only the fee.
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 

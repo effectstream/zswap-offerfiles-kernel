@@ -62,7 +62,7 @@ const healthyResponse = () => ({
     pct: 100,
     lag_blocks: 4,
   },
-  // These backend diagnostics are deliberately not part of the trusted solver
+  // These backend diagnostics are deliberately not part of the trusted client
   // projection. Their presence remains forward-compatible.
   sets: {},
   recent_rejections: [],

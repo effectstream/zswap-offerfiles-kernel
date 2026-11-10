@@ -62,7 +62,7 @@ const pass = (label: string): Result => ({ label, ok: true });
 const fail = (label: string, hint?: string): Result => ({ label, ok: false, hint });
 
 /** Seed variables a public deployment's services read; each is checked when set. */
-const OPTIONAL_SEED_VARS = ["POSTER_SEED", "SOLVER_SEED", "MIDNIGHT_WALLET_SEED"] as const;
+const OPTIONAL_SEED_VARS = ["POSTER_SEED", "MIDNIGHT_WALLET_SEED"] as const;
 
 // ── static checks ──────────────────────────────────────────────────────────────
 

@@ -41,13 +41,14 @@ BRIDGE_FUND_FEES="${CELESTIA_BRIDGE_FUND_FEES:-2000utia}"
 # a persistent ~10-13 block deficit, while `deriveSyncStatus` calls anything
 # past `MAX_CELESTIA_LAG_BLOCKS = 4` "syncing". Everything gated on
 # `requireCurrentBackend` then refuses — including `POST /v1/offers/files`, the
-# read the solver makes at job time to rebuild a maker's exact bytes, so every
-# dispatched swap dies `exact_files_unavailable` and nothing can ever settle.
+# read a settling client makes at job time to rebuild a maker's exact bytes, so
+# such a client can never settle anything.
 # Measured at 1s: 60/60 exact-files reads answered 503 "backend is not
 # synchronized".
 #
-# 3s is this repo's own answer to the same problem: its acceptance harness
-# (`packages/tests/grand-e2e/lib/solver-offerfiles-real-e1.ts`) pins
+# 3s is the established answer to the same problem: the COW solver's acceptance
+# harness (`packages/tests/grand-e2e/lib/solver-offerfiles-real-e1.ts` in
+# https://github.com/effectstream/cow-solver) pins
 # `celestiaBlockTime: "3s"` with the note that at 1s the backend "could never
 # stay inside the production threshold MAX_CELESTIA_LAG_BLOCKS = 4 — see e2e
 # open question E1-Q4", and calls 3s the cadence "matching current Celestia

@@ -25,7 +25,7 @@ that consumers can depend on versions instead.
 | `@zswap-da/validator` | `packages/validator` | Offer decoding and validation: `validateZswapOffer`, reference state, liveness, pinned ledger parameters (`./reference-parameters`) | node, batcher, offer-guard, the COW solver |
 | `@zswap-da/offer-guard` | `packages/offer-guard` | Offer hash, guard ladder, dedup store, fee sponsorship; `./public-networks` (supported networks, endpoint and dev-seed rules, log redaction) | node, batcher, the deploy scripts, the COW solver |
 | `@zswap-da/api-contracts` | `packages/api-contracts` | The versioned wire contracts of the kernel API: `./amount`, `./receipt-client`, `./exact-files-contract`, `./offer-updates-contract`, `./validation-contract` | node, the docs playground, the COW solver and its monitor site |
-| `@zswap-da/kernel-client` | `packages/kernel-client` (arrives when the solver is removed from this repository) | The client side of the kernel: the wallet helpers (`wallet.ts`), the kernel REST / SSE / websocket client (`api-client.ts`) and the offer-merge helpers (`batcher.ts`), today in `packages/solver-core` | the offer poster, maker-offer, `read-wallet`, the `packages/tests` e2e helpers, the COW solver |
+| `@zswap-da/kernel-client` | `packages/kernel-client` (available) | The client side of the kernel: the wallet helpers (`./wallet`), the kernel REST / SSE / websocket client (`./api-client`) and the offer merging and token-balance checks (`./batcher`) | the offer poster, maker-offer, `read-wallet`, the `packages/tests` e2e helpers, the node's update-stream test, the COW solver |
 
 Dependency order: `validator` first, then `offer-guard`, which depends on it.
 `api-contracts` has no dependencies. `kernel-client` depends on
@@ -147,8 +147,8 @@ Not meant to be published:
 
 ## COW solver follow-ups (`effectstream/cow-solver`)
 
-The COW solver moves to `effectstream/cow-solver` with its history; moving it
-is the only solver change in this repository. Everything below happens there.
+The COW solver moved to `effectstream/cow-solver` with its history, and this
+repository no longer contains it. Everything below happens there.
 
 - [ ] Port the Midnight Intents relay to ledger 9. The reference relay is
   `shieldedtech/midnight-intents-swaps`, subtree `phase1-native-swaps`, which
@@ -171,10 +171,17 @@ is the only solver change in this repository. Everything below happens there.
   port. The mainnet dry-run default and `SOLVER_MAINNET_LIVE_TRADING_ACK` stay.
 - [ ] Switch from the kernel submodule to the published npm packages (see
   "Publish the backend packages to npm", step 6).
-- [ ] Delete the copies of `wallet.ts`, `api-client.ts` and `batcher.ts` (with
-  `batcher.test-support.ts` and their tests) that the history filter carries
-  into `effectstream/cow-solver`'s `solver-core`, and import them from
-  `@zswap-da/kernel-client` through the submodule, so that no copy is kept.
+- [ ] `effectstream/cow-solver` PR #1 (the submodule wiring): delete the copies
+  of `wallet.ts`, `api-client.ts` and `batcher.ts` (with
+  `batcher.test-support.ts` and their tests) that the history filter carried
+  into its `solver-core`, and import them from `@zswap-da/kernel-client`
+  through the submodule, so that no copy is kept.
+- [ ] Carry the two solver-only files the history filter did not include. They
+  lived outside the solver paths and were removed here with the solver; the
+  last copy of each is at `ee82ff4`: `packages/node/offer-updates-mirror.test.ts`
+  (the solver's book mirror against the node's real API; it needs the kernel
+  through the submodule) and `docs/protocol-scope.md` (the superseded scoping
+  draft of the solver, history only).
 - [ ] Deploy the solver. It is not deployed anywhere today.
 
 ## Kernel follow-ups
@@ -182,6 +189,9 @@ is the only solver change in this repository. Everything below happens there.
 - [ ] Pin mainnet's ledger-9 reference parameters (the `TODO(mainnet)` in
   `packages/validator/reference-parameters.ts`). Until then a mainnet kernel
   refuses to start.
+- [ ] A backend script that registers the batcher's NIGHT for DUST on a public
+  network. The README's funding runbook uses the COW solver's
+  `deploy/scripts/provision-solver-fees.ts` until one exists here.
 - [ ] Drop the PGlite forwarder (`deploy/images/kernel/pglite-forwarder.ts` and
   its supervision in `entrypoint-pglite.sh`) once `@effectstream/db`'s
   `start-pglite` can bind a non-loopback address (a host option in

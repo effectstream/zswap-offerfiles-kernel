@@ -125,6 +125,18 @@ describe("check-env.ts — the public-network contract", () => {
     expect(failed({ ...complete(network), BATCHER_STORAGE_DIR: "batcher-data" })).toEqual([...np, "BATCHER_STORAGE_DIR"]);
   });
 
+  test("SYNC_HEALTH_* thresholds: defaults and set values are shown; a malformed one fails by name", () => {
+    const labels = staticChecks(map(complete("preprod"))).map((r) => r.label);
+    expect(labels).toContain("SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS — 4 (default)");
+    expect(labels).toContain("SYNC_HEALTH_HYSTERESIS_SAMPLES — 3 (default)");
+    const set = staticChecks(map({ ...complete("preprod"), SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: "30" }));
+    expect(set.map((r) => r.label)).toContain("SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS — 30");
+    expect(set.filter((r) => !r.ok)).toEqual([]);
+    const bad = staticChecks(map({ ...complete("preprod"), SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS: "0" })).filter((r) => !r.ok);
+    expect(bad.map((r) => r.label)).toEqual(["SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS"]);
+    expect(bad[0]!.hint).toContain("must be an integer from 1 to 86400 (default 180)");
+  });
+
   test("every other wallet seed in the file is refused when it is a dev seed", () => {
     expect(
       failed({

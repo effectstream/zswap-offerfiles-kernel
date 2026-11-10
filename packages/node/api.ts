@@ -58,7 +58,7 @@ import {
   resolveTokenPrice,
 } from "./prices.ts";
 import { realStats, realHistory } from "./trade-data.ts";
-import { getSyncStatus } from "./sync-health.ts";
+import { getHealthVerdict, getSyncStatus } from "./sync-health.ts";
 import { evaluateOfferLivenessFromDatabase } from "./offer-liveness.ts";
 import {
   checkOfferSponsorship,
@@ -763,16 +763,17 @@ export const apiRouter: StartConfigApiRouter = async function (
   // Uses effectstream.effectstream_blocks for NTP and
   // effectstream.sync_protocol_pagination for parallel chains.
   // Chain tips are fetched from the Midnight indexer / Celestia RPC and cached 60 s.
+  // `status` is the latest sample's own verdict (no hysteresis).
   // Exempt from the per-IP API budget — UIs poll this as a liveness probe.
   server.get("/v1/health/sync", { config: { rateLimit: false } }, async () => {
     return getSyncStatus(dbConn);
   });
 
-  // GET /v1/health — MIP-0006 indexer liveness. Lightweight {status,synced}
-  // derived from the sync state; /v1/health/sync is the detailed extension.
+  // GET /v1/health — MIP-0006 indexer liveness. `status` / `synced` are the
+  // verdict damped by hysteresis; `raw_status`, `reasons`, `freshness` and
+  // `hysteresis` say why. /v1/health/sync is the detailed extension.
   server.get("/v1/health", { config: { rateLimit: false } }, async () => {
-    const sync = await getSyncStatus(dbConn).catch(() => null as any);
-    return { status: sync?.status ?? "error", synced: sync?.status === "ok" };
+    return getHealthVerdict(dbConn);
   });
 
   // GET /v1/pairs — all known trading pairs from pair_stats (historical) merged

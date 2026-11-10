@@ -186,8 +186,50 @@ curl http://host:9999/health
 #### `GET /v1/health`
 
 Aggregate protocol-readiness probe. It uses the same state as the
-detailed endpoint below and returns `{ "status": "ok|syncing|error", "synced":
-true|false }`. Unlike `/health`, this is not merely HTTP-process liveness.
+detailed endpoint below. Unlike `/health`, this is not merely HTTP-process
+liveness.
+
+`status` / `synced` are the verdict **damped by hysteresis**: it changes only
+after `SYNC_HEALTH_HYSTERESIS_SAMPLES` (default 3) consecutive samples disagree
+with it. A sample is one read of the chain tips, and tips are cached 60 s, so
+one slow light-node or indexer read cannot flip `ok`, and a real outage shows
+after about three minutes of polling. The state is in memory: the first sample
+after a restart is published as is. `/v1/health/sync` and offer validation use
+the latest sample's own verdict (`raw_status` here), with no damping.
+
+```json
+{
+  "status": "ok",
+  "synced": true,
+  "raw_status": "syncing",
+  "reasons": [
+    { "source": "celestia", "rule": "lag", "message": "celestia is 9 blocks behind its tip (limit 4)",
+      "lag_blocks": 9, "max_lag_blocks": 4 }
+  ],
+  "freshness": {
+    "midnight": { "state": "fresh", "tip_height": 3355188, "tip_time": "2026-11-10T00:09:50.000Z",
+                  "age_seconds": 16, "max_age_seconds": 180 },
+    "celestia": { "state": "unknown", "tip_height": 345, "tip_time": null,
+                  "age_seconds": null, "max_age_seconds": 180 }
+  },
+  "hysteresis": { "samples_to_change": 3, "disagreeing_samples": 1 }
+}
+```
+
+| Field | Description |
+|---|---|
+| `status`, `synced` | The damped verdict; `synced` is `status == "ok"` |
+| `raw_status` | The latest sample's own verdict (what `/v1/health/sync` reports) |
+| `reasons[]` | Why `raw_status` is not `ok`: `source` (`ntp`, `midnight`, `celestia`, `node`), `rule` (`no_finalized_block`, `position_unknown`, `tip_unknown`, `lag`, `stale`, `state_unreadable`), a `message`, and the numbers of the rule (`lag_blocks` / `max_lag_blocks`, `lag_seconds` / `max_lag_seconds`, `age_seconds` / `max_age_seconds`). Empty when `raw_status` is `ok` |
+| `freshness.<source>` | The tip's block time compared with wall-clock: `state` is `fresh`, `stale` (older than `max_age_seconds`: the source is frozen, even if heights look caught up) or `unknown` (the source gave no time; the height rules decide alone). `null` when the sync state could not be read |
+| `hysteresis` | `samples_to_change` and how many consecutive samples currently disagree with `status` |
+
+Thresholds come from env, with these defaults: `SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS`
+12, `SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS` 4, `SYNC_HEALTH_MAX_NTP_LAG_BLOCKS` 2
+(NTP blocks of `BLOCK_TIME_MS`), `SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS` 180,
+`SYNC_HEALTH_MAX_CELESTIA_TIP_AGE_SECONDS` 180, `SYNC_HEALTH_HYSTERESIS_SAMPLES` 3.
+Each must be a positive integer; a public node refuses a malformed value at
+startup with exit 78 naming it.
 
 ---
 
@@ -229,7 +271,7 @@ curl http://host:9999/v1/health/sync
 
 | Field | Description |
 |---|---|
-| `status` | `"ok"` only when NTP is within 2 configured blocks, both chain tips are reachable, Midnight is ≤12 blocks behind, and Celestia is ≤4 blocks behind; `"syncing"` when a chain is unknown/behind; `"error"` when no NTP block has finalized |
+| `status` | The latest sample's verdict, without hysteresis. `"ok"` only when NTP is within `SYNC_HEALTH_MAX_NTP_LAG_BLOCKS` (2) blocks, both chain tips are reachable, Midnight is ≤ `SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS` (12) blocks behind, Celestia is ≤ `SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS` (4) blocks behind, and neither tip's block time is older than its `SYNC_HEALTH_MAX_*_TIP_AGE_SECONDS` (180 s); `"syncing"` when a chain is unknown, behind or stale; `"error"` when no NTP block has finalized. `GET /v1/health` gives the reasons and the damped verdict |
 | `ntp.lag_seconds` | Seconds of history remaining to process |
 | `midnight.tip` | Live Midnight chain tip (cached 60 s; `null` if unreachable) |
 | `celestia.tip` | Live Celestia chain tip (cached 60 s; `null` if unreachable) |

@@ -17,7 +17,9 @@ them. A mainnet kernel does not start yet: its ledger-9 reference parameters
 are not pinned.
 Real funds stay NO-GO for this backend until its first ledger-9 version is
 ready for review; the repository owner then reviews the NO-GO.
-See the repository README, "Running on preview, preprod and mainnet".
+See the repository README, "Running on preview, preprod and mainnet", and
+[`PRODUCTION.md`](PRODUCTION.md) for running them natively under systemd (no
+orchestrator, no Compose).
 `GATES_ONLY=public ./gates.sh` runs the offline public-network gates (G8)
 against the kernel image.
 

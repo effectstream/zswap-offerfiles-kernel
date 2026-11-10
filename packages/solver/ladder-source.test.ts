@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ApiZswap } from "@zswap-da/solver-core/api-client";
+import type { ApiZswap } from "@zswap-da/kernel-client/api-client";
 import { parsePriceLevels, parseSolverCapabilities } from "@zswap-da/solver-core/relay-ws-contract";
 
 import { Book, bookOfferFromApi } from "./src/book.ts";

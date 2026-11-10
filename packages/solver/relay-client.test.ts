@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { admissionPairKey } from "@zswap-da/solver-core/admission-policy";
-import type { ApiZswap } from "@zswap-da/solver-core/api-client";
+import type { ApiZswap } from "@zswap-da/kernel-client/api-client";
 import {
   parsePriceLevels,
   parseSolverCapabilities,

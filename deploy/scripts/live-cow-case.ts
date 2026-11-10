@@ -12,7 +12,7 @@ import {
   shieldedBalances,
   shieldedKeys,
   waitForSync,
-} from "../../packages/solver-core/wallet.ts";
+} from "../../packages/kernel-client/wallet.ts";
 import {
   canonicalRelayExtrinsicHash,
   getOfferConsumptionEvidence,

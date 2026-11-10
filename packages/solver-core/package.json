@@ -6,10 +6,7 @@
   "exports": {
     ".": "./mod.ts",
     "./admission-policy": "./admission-policy.ts",
-    "./api-client": "./api-client.ts",
-    "./batcher": "./batcher.ts",
     "./fee-sizing": "./fee-sizing.ts",
-    "./wallet": "./wallet.ts",
     "./ladder-derivation": "./ladder-derivation.ts",
     "./whole-offer-balance": "./whole-offer-balance.ts",
     "./ladder-schema": "./ladder-schema.ts",
@@ -21,6 +18,7 @@
   },
   "dependencies": {
     "@zswap-da/api-contracts": "workspace:*",
+    "@zswap-da/kernel-client": "workspace:*",
     "@effectstream/midnight-contracts": "0.300.2",
     "@effectstream/mip-zswap-offer": "0.4.0",
     "@midnightntwrk/ledger-v9": "1.0.0",

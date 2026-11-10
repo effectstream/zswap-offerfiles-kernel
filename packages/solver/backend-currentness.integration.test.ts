@@ -4,7 +4,7 @@ import {
   ApiRequestError,
   type BackendSyncHealth,
   type OfferUpdatesStreamOpts,
-} from "@zswap-da/solver-core/api-client";
+} from "@zswap-da/kernel-client/api-client";
 import { createInventoryRefreshController } from "./src/run.ts";
 import {
   startBookSync,

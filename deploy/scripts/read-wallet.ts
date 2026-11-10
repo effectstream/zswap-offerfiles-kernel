@@ -42,7 +42,7 @@ import {
   shieldedBalances,
   unshieldedBalances,
   waitForSync,
-} from "../../packages/solver-core/wallet.ts";
+} from "../../packages/kernel-client/wallet.ts";
 
 globalThis.WebSocket = WebSocket;
 // The wallet SDK's RPC client logs the node URL it loses, query string

@@ -222,7 +222,7 @@ export function validateZswapOfferBytes(
   // ── 3. Deserialize (Lace-shaped <signature, proof, binding>) ──
   let tx: UnprovenTransaction;
   try {
-    // `as unknown as`, matching `reconstructOffer` in solver-core/api-client.ts:
+    // `as unknown as`, matching `reconstructOffer` in kernel-client/api-client.ts:
     // the markers deserialize the PROVEN shape (ledger `Transaction<SignatureEnabled,
     // Proof, Binding>`), while `UnprovenTransaction` is this repo's alias for the
     // offer shape it then inspects. Without the `unknown` hop the assignment's

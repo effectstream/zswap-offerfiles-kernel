@@ -51,7 +51,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { interpolateQuote } from "../../solver-core/relay-ws-contract.ts";
-import type { ApiZswap } from "../../solver-core/api-client.ts";
+import type { ApiZswap } from "../../kernel-client/api-client.ts";
 import { Book, bookOfferFromApi } from "../../solver/src/book.ts";
 import { deriveLadderPush, type LadderCache } from "../../solver/src/ladder-source.ts";
 import {

@@ -39,7 +39,7 @@ import {
   type OfferUpdatesStreamHandle,
   type OfferUpdatesSubscription,
   type SseEvent,
-} from "@zswap-da/solver-core/api-client";
+} from "@zswap-da/kernel-client/api-client";
 import { heightAtLeast } from "@zswap-da/api-contracts/offer-updates-contract";
 
 import { Book, bookOfferFromApi, type BookOffer } from "./book.ts";

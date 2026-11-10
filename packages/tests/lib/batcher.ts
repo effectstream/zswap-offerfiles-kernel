@@ -1,5 +1,5 @@
-export * from "@zswap-da/solver-core/batcher";
+export * from "@zswap-da/kernel-client/batcher";
 export {
   batcherInputFingerprint,
   settleViaBatcher,
-} from "../../solver-core/batcher.test-support.ts";
+} from "../../kernel-client/batcher.test-support.ts";

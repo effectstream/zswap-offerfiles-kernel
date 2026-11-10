@@ -28,14 +28,14 @@
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
-// RELATIVE, not the `@zswap-da/solver-core/wallet` specifier the in-package
+// RELATIVE, not the `@zswap-da/kernel-client/wallet` specifier the in-package
 // scripts use. Bun links workspace packages into their DEPENDENTS'
-// node_modules (`packages/solver/node_modules/@zswap-da/solver-core`), never
+// node_modules (`packages/tests/node_modules/@zswap-da/kernel-client`), never
 // into the workspace root — and this file lives in `deploy/`, which is not a
 // workspace member, so module resolution walks up to `/app/node_modules` and
 // finds no `@zswap-da` at all. The npm dependencies DO resolve from there, so
 // only the first-party imports need the relative form.
-import { shieldedKeys, waitForSync } from "../../../packages/solver-core/wallet.ts";
+import { shieldedKeys, waitForSync } from "../../../packages/kernel-client/wallet.ts";
 import { KernelApi } from "./kernel-api.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

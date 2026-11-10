@@ -16,7 +16,7 @@ import {
   shieldedBalances,
   unshieldedBalances,
   waitForSync,
-} from "../../packages/solver-core/wallet.ts";
+} from "../../packages/kernel-client/wallet.ts";
 import { ensureSolverDustReady } from "./lib/solver-provision.ts";
 
 globalThis.WebSocket = WebSocket;

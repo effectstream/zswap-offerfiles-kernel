@@ -6,7 +6,7 @@ import {
 } from "@effectstream/midnight-contracts/midnight-env";
 import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 
-import { buildWallet, shieldedBalances, waitForSync } from "../../packages/solver-core/wallet.ts";
+import { buildWallet, shieldedBalances, waitForSync } from "../../packages/kernel-client/wallet.ts";
 
 globalThis.WebSocket = WebSocket;
 // The wallet SDK's RPC client logs the node URL it loses, query string

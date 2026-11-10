@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import type { Imbalance } from "@zswap-da/solver-core/batcher";
+import type { Imbalance } from "@zswap-da/kernel-client/batcher";
 
 import {
   armBookReadyDecisionGate,

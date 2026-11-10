@@ -39,7 +39,7 @@ import {
 import {
   readExactOfferFiles,
   reconstructOffer,
-} from "@zswap-da/solver-core/api-client";
+} from "@zswap-da/kernel-client/api-client";
 import {
   canonicalRelayExtrinsicHash,
   getOfferConsumptionEvidence,
@@ -79,7 +79,7 @@ import {
   mergeFinalized,
   tokenImbalances,
   type Imbalance,
-} from "@zswap-da/solver-core/batcher";
+} from "@zswap-da/kernel-client/batcher";
 import {
   buildTakerHalfStandIn,
   DEFAULT_MODELLED_TAKER_INPUTS,

@@ -9,8 +9,8 @@
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
-import { getOfferStatus, submitOffer } from "@zswap-da/solver-core/api-client";
-import { buildWallet, shieldedBalances, shieldedKeys, waitForSync } from "@zswap-da/solver-core/wallet";
+import { getOfferStatus, submitOffer } from "@zswap-da/kernel-client/api-client";
+import { buildWallet, shieldedBalances, shieldedKeys, waitForSync } from "@zswap-da/kernel-client/wallet";
 
 globalThis.WebSocket = WebSocket;
 

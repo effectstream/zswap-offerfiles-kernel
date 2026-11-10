@@ -68,7 +68,7 @@ import {
   unshieldedBalances,
   waitForShielded,
   waitForSync,
-} from "../../packages/solver-core/wallet.ts";
+} from "../../packages/kernel-client/wallet.ts";
 import {
   buildTakerHalfStandIn,
   takerHalfStandInSpec,

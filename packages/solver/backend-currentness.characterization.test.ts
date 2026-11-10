@@ -3,7 +3,7 @@ import { afterEach, expect, mock, test } from "bun:test";
 import {
   getBackendSyncHealth,
   reportsBackendProjectionCurrent,
-} from "@zswap-da/solver-core/api-client";
+} from "@zswap-da/kernel-client/api-client";
 import { startBookSync } from "./src/book-sync.ts";
 
 const originalFetch = globalThis.fetch;

@@ -14,7 +14,7 @@
 import { redactBlockfrostProjectId } from "@effectstream/midnight-contracts/midnight-env";
 
 import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
-import { buildWallet } from "../../packages/solver-core/wallet.ts";
+import { buildWallet } from "../../packages/kernel-client/wallet.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
 import { postMakerOfferWithWallet, resolveExplicitTokens } from "./lib/maker-offer.ts";
 

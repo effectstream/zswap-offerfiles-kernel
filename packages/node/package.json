@@ -40,7 +40,7 @@
   },
   "devDependencies": {
     "@types/ws": "8.18.1",
-    "@zswap-da/solver-core": "workspace:*",
+    "@zswap-da/kernel-client": "workspace:*",
     "fastify": "^5.0.0",
     "pg": "^8.16.3"
   }

@@ -4,10 +4,11 @@ import { resolve, sep } from "node:path";
 const projectRoot = resolve(import.meta.dir, "..");
 
 // Each gated package compiles as its own program with its own strict tsconfig.
-// packages/node gates its production files; packages/api-contracts gates its
-// production files and tests, because its tests are the executable description
-// of the wire contracts the node serves and its clients parse.
-const GATED_PACKAGES = ["packages/node", "packages/api-contracts"] as const;
+// packages/node gates its production files; packages/api-contracts and
+// packages/kernel-client gate their production files and tests, because their
+// tests are the executable description of the wire contracts the node serves
+// and of the client that parses them.
+const GATED_PACKAGES = ["packages/node", "packages/api-contracts", "packages/kernel-client"] as const;
 
 let failed = false;
 for (const packageDir of GATED_PACKAGES) {

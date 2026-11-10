@@ -5,7 +5,7 @@ import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/m
 import { getEnv } from "@effectstream/utils/runtime";
 
 import { forwardAdmissionPolicy } from "@zswap-da/solver-core/admission-policy";
-import { buildWallet, shieldedBalances, shieldedKeys, waitForSync } from "@zswap-da/solver-core/wallet";
+import { buildWallet, shieldedBalances, shieldedKeys, waitForSync } from "@zswap-da/kernel-client/wallet";
 import { DEFAULT_LADDER_RESOURCE_LIMITS } from "@zswap-da/solver-core/ladder-derivation";
 
 import {
@@ -486,7 +486,7 @@ export async function runSolver(opts: SolverOptions = {}): Promise<SolverHandle>
   const admission = opts.admission ?? loadSolverAdmissionEnv();
   const feeSizingTakerInputs = opts.feeSizingTakerInputs ?? loadSolverFeeSizingTakerInputs();
   // 00006 FR-001. `net.id` is the SINGLE source the wallet facade
-  // (`solver-core/wallet.ts` → `buildWalletFacade(…, net.id)`) and the fee-sizing
+  // (`kernel-client/wallet.ts` → `buildWalletFacade(…, net.id)`) and the fee-sizing
   // stand-in both read, so they cannot disagree — but an unrecognized value is
   // still a misconfiguration, and the ledger accepts ANY string as a network id
   // and only refuses at merge time. Assert it here so every entrypoint fails at

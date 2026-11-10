@@ -39,7 +39,7 @@ import {
   waitForShielded,
   waitForSync,
   waitForUnshielded,
-} from "@zswap-da/solver-core/wallet";
+} from "@zswap-da/kernel-client/wallet";
 import {
   collectNullifiers,
   collectOutputCommitments,

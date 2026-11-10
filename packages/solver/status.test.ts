@@ -24,7 +24,7 @@
  */
 import { describe, expect, test } from "bun:test";
 
-import type { ApiZswap } from "@zswap-da/solver-core/api-client";
+import type { ApiZswap } from "@zswap-da/kernel-client/api-client";
 import {
   isStatusSectionError,
   STATUS_BOOK_OFFER_CAP,

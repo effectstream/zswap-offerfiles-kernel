@@ -25,13 +25,13 @@ import { dirname, isAbsolute } from "node:path";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
-import { tokenImbalances } from "@zswap-da/solver-core/batcher";
+import { tokenImbalances } from "@zswap-da/kernel-client/batcher";
 import {
   buildWallet,
   shieldedBalances,
   shieldedKeys,
   waitForSync,
-} from "@zswap-da/solver-core/wallet";
+} from "@zswap-da/kernel-client/wallet";
 import {
   runSolver,
   type SolverHandle,

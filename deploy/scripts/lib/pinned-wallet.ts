@@ -112,7 +112,7 @@ export interface PinnedCoinRef {
 export type ShieldedCoinSelection = CoinSelection<QualifiedShieldedCoinInfo>;
 
 /** The endpoints `buildPinnedWallet` needs. Structurally the `NetworkUrls` that
- *  `packages/solver-core/wallet.ts` already assembles from `midnightNetworkConfig`
+ *  `packages/kernel-client/wallet.ts` already assembles from `midnightNetworkConfig`
  *  (which is why `id` is optional and unused here — it is carried for parity). */
 export interface PinnedNetworkUrls {
   readonly indexer: string;

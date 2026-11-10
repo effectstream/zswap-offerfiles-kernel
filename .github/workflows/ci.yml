@@ -47,6 +47,7 @@ jobs:
           packages/validator
           packages/node
           packages/api-contracts
+          packages/kernel-client
           packages/offer-guard
           packages/batcher
           packages/solver-core
@@ -110,7 +111,7 @@ jobs:
         run: bunx tsc -b
 
   backend-typecheck:
-    name: Backend typecheck (strict packages/node and packages/api-contracts)
+    name: Backend typecheck (strict packages/node, packages/api-contracts and packages/kernel-client)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

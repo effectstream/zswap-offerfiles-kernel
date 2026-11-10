@@ -13,7 +13,7 @@ import {
 } from "@zswap-da/solver-core/fee-sizing";
 import type { ExactFilesResponse } from "@zswap-da/api-contracts/exact-files-contract";
 import type { OfferValidationVerdict } from "@zswap-da/api-contracts/validation-contract";
-import type { Imbalance } from "@zswap-da/solver-core/batcher";
+import type { Imbalance } from "@zswap-da/kernel-client/batcher";
 import type { SwapMessage } from "@zswap-da/solver-core/relay-ws-contract";
 
 import { Book, type BookOffer } from "./src/book.ts";

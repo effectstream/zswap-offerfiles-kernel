@@ -63,6 +63,7 @@ COPY packages/batcher/package.json                                  packages/bat
 COPY packages/contracts-celestia/package.json                       packages/contracts-celestia/
 COPY packages/midnight-infra/package.json                           packages/midnight-infra/
 COPY packages/database/package.json                                 packages/database/
+COPY packages/kernel-client/package.json                            packages/kernel-client/
 COPY packages/node/package.json                                     packages/node/
 COPY packages/offer-guard/package.json                              packages/offer-guard/
 # Added upstream by the token price service (PRs #54-#56) but never listed here,

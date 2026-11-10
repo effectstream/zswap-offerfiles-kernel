@@ -44,7 +44,7 @@ import {
 import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 
 import { collectNullifiers } from "../../packages/validator/derive.ts";
-import { shieldedKeys } from "../../packages/solver-core/wallet.ts";
+import { shieldedKeys } from "../../packages/kernel-client/wallet.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
 import { buildPinnedWallet, withPinnedCoin, type PinnedWalletResult } from "./lib/pinned-wallet.ts";
 import {
@@ -115,7 +115,7 @@ function shieldedAddressText(address: unknown, networkId: string): string {
 
 /** The slice of `Rx.Observable` the facade's `state()` actually needs to expose.
  *
- *  `rxjs` is a dependency of `packages/solver-core` and of
+ *  `rxjs` is a dependency of `packages/kernel-client` and of
  *  `@effectstream/midnight-contracts`, but NOT of the repository root — and
  *  `deploy/` is not a workspace member, so a bare `import "rxjs"` here resolves
  *  to nothing (the same resolution rule `maker-offer.ts:35-41` documents for

@@ -134,7 +134,10 @@ beforeAll(async () => {
   // point deliberately go un-adjudicated — the read fallback covers them, and
   // letting them exercise it is worth more than uniformity here.
   await adjudicateAll();
-});
+  // A fresh PGlite, every migration and 133 seeded fills: about 1 s locally,
+  // but more than bun's 5 s default hook budget on a slow CI runner
+  // (2026-11-10, GitHub ubuntu runner, twice in a row).
+}, 60_000);
 
 afterAll(async () => {
   await closeTestPglite(handle, client);

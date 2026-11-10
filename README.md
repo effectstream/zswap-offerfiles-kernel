@@ -436,9 +436,11 @@ Every step below is done by hand; none of it is automated here.
 
 ### Real funds: NO-GO
 
-The mainnet profile ships, but **real funds stay NO-GO** on this line: the
-mainnet profile is proven read-only only (offline profile tests and refusals;
-a mainnet kernel does not start until its reference parameters are pinned).
+Real funds stay NO-GO for this backend until its first ledger-9 version is
+ready for review; the repository owner then reviews the NO-GO.
+The mainnet profile ships, proven read-only only (offline profile tests and
+refusals; a mainnet kernel does not start until its reference parameters are
+pinned).
 This repository ships no solver; the COW solver's own real-funds status and
 mainnet guards are documented in
 [effectstream/cow-solver](https://github.com/effectstream/cow-solver).
@@ -454,8 +456,10 @@ mainnet guards are documented in
 The mainnet profile is the public-network contract above with Celestia
 mainnet; [`.env.mainnet.example`](.env.mainnet.example) is the complete
 template. **A mainnet kernel does not start yet** (its ledger-9 reference
-parameters are not pinned), and **real funds stay NO-GO** (see
-[Real funds: NO-GO](#real-funds-no-go)).
+parameters are not pinned).
+Real funds stay NO-GO for this backend until its first ledger-9 version is
+ready for review; the repository owner then reviews the NO-GO.
+See [Real funds: NO-GO](#real-funds-no-go).
 
 The Celestia RPC can be a light node you run yourself:
 

@@ -17,8 +17,10 @@ inspect balances or open the external faucet (`VITE_FAUCET_URL`, default
 `preprod` and the local `undeployed` devnet. Any other `MIDNIGHT_NETWORK_ID` is
 refused at startup naming those four. **A mainnet kernel does not start yet**:
 its ledger-9 reference parameters are not pinned (README, "Running on preview,
-preprod and mainnet"). Real funds stay NO-GO on this line (README, "Real
-funds: NO-GO").
+preprod and mainnet").
+Real funds stay NO-GO for this backend until its first ledger-9 version is
+ready for review; the repository owner then reviews the NO-GO.
+See README, "Real funds: NO-GO".
 
 **Repository validation scope.** There are two strict, no-emit TypeScript gates,
 and `bun run typecheck` runs both.

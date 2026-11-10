@@ -9,11 +9,13 @@
 > `v4.4.0-rc.6-ledger9final`, proof-server 9.0.1). Ledger-8 networks,
 > transactions and databases are not supported; the last ledger-8 state of
 > `main` is `3b76604`. A mainnet kernel does not start yet (its ledger-9
-> reference parameters are not pinned), and real funds stay NO-GO. The
-> current env contract and runbook are in README.md ("Running on preview,
-> preprod and mainnet"); the last two sections below record the move to that
-> state. Everything above them is history. The COW solver, its relay image and
-> its Compose services left this repository on 2026-11-10 for
+> reference parameters are not pinned).
+> Real funds stay NO-GO for this backend until its first ledger-9 version is
+> ready for review; the repository owner then reviews the NO-GO.
+> The current env contract and runbook are in README.md ("Running on
+> preview, preprod and mainnet"); the last two sections below record the move
+> to that state. Everything above them is history. The COW solver, its relay
+> image and its Compose services left this repository on 2026-11-10 for
 > [effectstream/cow-solver](https://github.com/effectstream/cow-solver); the
 > solver mentions above that date are history.
 

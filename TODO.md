@@ -186,6 +186,8 @@ repository no longer contains it. Everything below happens there.
 
 ## Kernel follow-ups
 
+- [ ] Repository owner: review the real-funds NO-GO when the first ledger-9
+  version of this backend is ready for review (README, "Real funds: NO-GO").
 - [ ] Pin mainnet's ledger-9 reference parameters (the `TODO(mainnet)` in
   `packages/validator/reference-parameters.ts`). Until then a mainnet kernel
   refuses to start.

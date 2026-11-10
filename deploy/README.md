@@ -14,9 +14,12 @@ their own env contract (`.env.<network>.example` at the repository root;
 Blockfrost endpoints through `MIDNIGHT_BLOCKFROST_PROJECT_ID`, Celestia mocha or
 mainnet on the MIP-0006 namespace `mn-swap-v1`); this directory deploys none of
 them. A mainnet kernel does not start yet: its ledger-9 reference parameters
-are not pinned. Real funds stay NO-GO. See the repository README, "Running on
-preview, preprod and mainnet". `GATES_ONLY=public ./gates.sh` runs the offline
-public-network gates (G8) against the kernel image.
+are not pinned.
+Real funds stay NO-GO for this backend until its first ledger-9 version is
+ready for review; the repository owner then reviews the NO-GO.
+See the repository README, "Running on preview, preprod and mainnet".
+`GATES_ONLY=public ./gates.sh` runs the offline public-network gates (G8)
+against the kernel image.
 
 ## Chain images
 

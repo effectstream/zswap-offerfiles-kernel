@@ -13,8 +13,10 @@ Base URL: `http://<host>:9999`. All offer-related endpoints moved from `/api/*` 
 **Networks.** The backend runs **Midnight 2.x / ledger 9** only, on `mainnet`,
 `preview`, `preprod` and the local `undeployed` devnet; a Midnight 1.x /
 ledger-8 wallet or offer does not work against it. A mainnet backend does not
-start yet (its ledger-9 reference parameters are not pinned), and real funds
-stay NO-GO. Preview, preprod and mainnet endpoints are Blockfrost-hosted:
+start yet (its ledger-9 reference parameters are not pinned).
+Real funds stay NO-GO for this backend until its first ledger-9 version is
+ready for review; the repository owner then reviews the NO-GO.
+Preview, preprod and mainnet endpoints are Blockfrost-hosted:
 `GET /v1/midnight/config` returns them with `project_id=<redacted>`, so the
 frontend supplies its own Blockfrost project token for the network.
 

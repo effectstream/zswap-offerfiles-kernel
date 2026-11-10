@@ -7,9 +7,9 @@ Open work for this repository, written 2026-11-10. Four sections:
 3. [Kernel follow-ups](#kernel-follow-ups)
 4. [Upstream (effectstream)](#upstream-effectstream)
 
-The items added on 2026-11-10 after the first production host ran the kernel
-on preprod (`offer-files-1`) carry what that host showed, so that each one can
-be acted on without the host's notes.
+The items added on 2026-11-10, after the kernel's first production host ran
+it on preprod, carry what that host showed, so that each one can be acted on
+without the host's notes.
 
 ## Publish the backend packages to npm
 

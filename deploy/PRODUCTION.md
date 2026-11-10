@@ -46,7 +46,8 @@ Contents:
 
 The kernel and the batcher listen on every interface (the runtime has no bind
 address setting): keep 9999, 3334 and 6300 closed in the host firewall and
-publish only nginx. The offer poster (`deploy/scripts/offer-poster.ts`) is an
+publish only nginx. The kernel's runtime also opens MQTT servers on 8883 and
+9883, bound to loopback. The offer poster (`deploy/scripts/offer-poster.ts`) is an
 optional extra service with the same env contract; see the
 [README's "Services" table](../README.md#services).
 
@@ -58,6 +59,8 @@ optional extra service with the same env contract; see the
   times with this host's clock (section 12), and the NTP chain is
   wall-clock based. Check with `timedatectl` (`System clock synchronized:
   yes`); Debian's `systemd-timesyncd` is enough.
+- The commands below run as an administrator with `sudo` (install it first on
+  a minimal system: `apt-get install sudo`).
 - One unprivileged user and its directories:
 
   ```bash
@@ -147,10 +150,12 @@ ldd /usr/local/bin/midnight-proof-server | grep "not found" && echo "MISSING LIB
 On its first start it downloads its ZK parameters from `srs.midnight.network`
 and opens its port only once they are in place.
 
-**Memory.** Each worker holds its own proving keys in memory. On a host with
-16 GB or less run one worker (`MIDNIGHT_PROOF_SERVER_NUM_WORKERS=1` in its
-unit, section 9): with two, a large proof was killed for memory on a 16 GB
-host. A killed worker leaves its caller waiting for an answer that never
+**Memory.** The proof server runs two workers by default (`--num-workers`,
+`MIDNIGHT_PROOF_SERVER_NUM_WORKERS`), and each holds its own proving keys in
+memory. On a host with 16 GB or less run one worker
+(`MIDNIGHT_PROOF_SERVER_NUM_WORKERS=1` in its unit, section 9): with two, a
+large proof was killed for memory on a 16 GB host. Its own job timeout is
+600 s (`--job-timeout`). A killed worker leaves its caller waiting for an answer that never
 comes; the kernel's wallet tools stop waiting after
 `MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS` (default 600000 ms) and name the proof
 server. The batcher's own proofs have no deadline yet (`TODO.md`, "Upstream").
@@ -165,8 +170,12 @@ mocha (follow Celestia's own install guide for the binary), then:
 celestia light init --p2p.network mocha
 celestia light start --p2p.network mocha --core.ip <mocha-consensus-host> --core.port 9090
 celestia light auth admin --p2p.network mocha   # the bearer token: CELESTIA_AUTH_TOKEN
-celestia state account-address --p2p.network mocha   # fund it with mocha TIA (section 11)
+celestia state account-address --node.store <light-node-home>   # fund it with mocha TIA (section 11)
 ```
+
+The node's RPC commands (`celestia state …`, `celestia header …`) find the
+running node and its credentials through `--node.store`, its home directory;
+`--url` and `--token` are the alternative.
 
 - **Auth.** The kernel and the batcher send `CELESTIA_AUTH_TOKEN` as a bearer
   token. A light node started with `--rpc.skip-auth` needs none: then set
@@ -222,18 +231,18 @@ Optional knobs this guide uses: `CELESTIA_RPC_TIMEOUT_MS`,
 (section 5) and the `SYNC_HEALTH_*` thresholds (section 12).
 
 Never put a secret on a command line or in the checkout. `check-env.ts` reads
-`.env` at the root of the checkout; link the file there to check it (the link
-is git-ignored and holds no copy of the secrets):
+`.env` at the root of the checkout, so link the file there (the link is
+git-ignored and holds no copy of the secrets):
 
 ```bash
 cd /opt/zswap-kernel
 sudo -u zswap ln -sf /etc/zswap-kernel/preprod.env .env
-sudo -u zswap bun check-env.ts
-sudo -u zswap bun run packages/node/public-network-profile.ts   # the node's own preflight
 ```
 
-Both name every problem at once; the services refuse the same problems with
-exit 78 (`EX_CONFIG`).
+Bun also loads `.env` from its working directory, so every unit of section 9
+(working directory `/opt/zswap-kernel`) sees the same file through this link
+as well as through its `EnvironmentFile=`. Check the file once the start
+heights are set (end of section 8).
 
 ## 8. First start on a fresh database
 
@@ -262,7 +271,14 @@ printf 'header = "Authorization: Bearer %s"\n' "$CELESTIA_AUTH_TOKEN" |
 Set `MIDNIGHT_START_BLOCK` a few blocks below the Midnight tip,
 `NTP_START_TIME` to **that block's** `timestamp` (the startup log then warns
 that it overrides the block-1 anchor; that is expected), and
-`CELESTIA_START_HEIGHT` a little below the light node's head. A start near the
+`CELESTIA_START_HEIGHT` a little below the light node's head. Read the start
+block's timestamp by height (here 20 below a tip of 3368116):
+
+```bash
+printf 'url = "https://midnight-preprod.blockfrost.io/api/v0?project_id=%s"\n' "$MIDNIGHT_BLOCKFROST_PROJECT_ID" |
+  curl -fsS -K - -H 'content-type: application/json' \
+    --data '{"query":"{ block(offset: { height: 3368096 }) { height timestamp } }"}'
+``` A start near the
 tip has a cost: the kernel judges an offer's inputs against what it indexed,
 so a coin spent before `MIDNIGHT_START_BLOCK` is not in its nullifier set
 (settlement of such an offer then fails on chain), and an offer proven against
@@ -281,6 +297,17 @@ request per block) are not settable yet (`TODO.md`); they keep well ahead of
 Midnight's ~6 s blocks, but a catch-up step is 500 parallel requests to
 Blockfrost, so a start far below the tip spends the plan's request quota
 quickly.
+
+Then check the whole file, and the node's own preflight:
+
+```bash
+cd /opt/zswap-kernel
+sudo -u zswap bun check-env.ts
+sudo -u zswap bun run packages/node/public-network-profile.ts
+```
+
+Both name every problem at once; the services refuse the same problems with
+exit 78 (`EX_CONFIG`).
 
 Start the units in this order: Postgres, proof server, light node, kernel,
 batcher; then run the token-registry one-shot once (section 9). The kernel
@@ -525,7 +552,8 @@ read for ever (section 13), so the node does not stop on its own. Alert when
 `/v1/health` has not been `ok` for longer than you accept, and when
 `reasons` names `celestia` with `stale` or `tip_unknown`; a timer that runs
 `curl -fsS http://127.0.0.1:9999/v1/health` is enough. Also alert on the
-light node's own head (`celestia header network-head`) standing still.
+light node's own head (`celestia header network-head --node.store
+<light-node-home>`) standing still.
 
 ## 13. Recovery runbooks
 
@@ -533,7 +561,9 @@ light node's own head (`celestia header network-head`) standing still.
 below Tail` (or another "pruned" answer) for the same height, and
 `/v1/health` stays `syncing` with a growing Celestia lag. The light node no
 longer has the heights the node still needs; effectstream's Celestia client
-retries that for ever (`TODO.md`, "Upstream"). Two ways out:
+retries that for ever (`TODO.md`, "Upstream"). `celestia header tail
+--node.store <light-node-home>` prints the oldest header the light node still
+has; its height is above the one in the log. Two ways out:
 
 - **Re-anchor on a fresh database.** Stop the kernel and the batcher, drop and
   recreate the database (section 4), pick new start heights near the tips

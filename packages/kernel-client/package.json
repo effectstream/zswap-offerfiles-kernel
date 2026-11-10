@@ -7,7 +7,8 @@
   "exports": {
     "./api-client": "./api-client.ts",
     "./batcher": "./batcher.ts",
-    "./wallet": "./wallet.ts"
+    "./wallet": "./wallet.ts",
+    "./wallet-timeouts": "./wallet-timeouts.ts"
   },
   "scripts": {
     "test": "bun test"

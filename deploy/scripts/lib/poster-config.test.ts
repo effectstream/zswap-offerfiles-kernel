@@ -346,3 +346,32 @@ describe("logged configuration redacts the Blockfrost token", () => {
     expect((await parse(PREPROD)).networkUrls.node).toBe(`https://rpc.midnight-preprod.blockfrost.io?project_id=${PROJECT_ID}`);
   });
 });
+
+describe("wallet sync wait and proof deadline", () => {
+  test("defaults: 180 s sync wait, 10 min proof deadline", async () => {
+    const cfg = await parse();
+    expect(cfg.syncTimeoutMs).toBe(180_000);
+    expect(cfg.proofRequestTimeoutMs).toBe(600_000);
+  });
+
+  test("MIDNIGHT_WALLET_SYNC_TIMEOUT_MS sets the poster's first-sync wait; POSTER_SYNC_TIMEOUT_MS still wins", async () => {
+    expect((await parse({ MIDNIGHT_WALLET_SYNC_TIMEOUT_MS: "3600000" })).syncTimeoutMs).toBe(3_600_000);
+    expect(
+      (await parse({ MIDNIGHT_WALLET_SYNC_TIMEOUT_MS: "3600000", POSTER_SYNC_TIMEOUT_MS: "20000" })).syncTimeoutMs,
+    ).toBe(20_000);
+  });
+
+  test("MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS sets the proof deadline", async () => {
+    expect((await parse({ MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS: "120000" })).proofRequestTimeoutMs).toBe(120_000);
+  });
+
+  test.each([
+    ["MIDNIGHT_WALLET_SYNC_TIMEOUT_MS", "500"],
+    ["MIDNIGHT_WALLET_SYNC_TIMEOUT_MS", "1h"],
+    ["MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS", "0"],
+    ["MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS", "86400001"],
+  ])("a malformed %s=%s is a configuration error naming it", async (name, value) => {
+    await expect(parse({ [name]: value })).rejects.toMatchObject({ code: "MALFORMED", variable: name });
+    await expect(parse({ [name]: value })).rejects.toThrow(`${name} must be an integer number of milliseconds`);
+  });
+});

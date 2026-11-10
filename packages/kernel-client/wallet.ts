@@ -7,6 +7,7 @@ import { UnshieldedAddress, type MidnightBech32m } from "@midnightntwrk/wallet-s
 import { buildWalletFacade } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
+import { walletSyncTimeoutMs, withProofDeadline } from "./wallet-timeouts.ts";
 
 const networkUrls = {
   id: net.id,
@@ -31,12 +32,15 @@ const sumBalances = (b: Map<string, bigint> | Record<string, bigint> | undefined
 };
 
 /** Wait until shielded + unshielded (+ dust) subtrees are strictly synced.
- *  When `requireUnshieldedFunds` is set, also wait for NIGHT > 0 (genesis). */
+ *  When `requireUnshieldedFunds` is set, also wait for NIGHT > 0 (genesis).
+ *  `timeoutMs` defaults to MIDNIGHT_WALLET_SYNC_TIMEOUT_MS, else 180 s; a
+ *  malformed variable throws naming it. */
 export async function waitForSync(
   w: WalletResult,
   opts: { requireUnshieldedFunds?: boolean; timeoutMs?: number } = {},
 ): Promise<void> {
-  const { requireUnshieldedFunds = false, timeoutMs = 180_000 } = opts;
+  const { requireUnshieldedFunds = false } = opts;
+  const timeoutMs = opts.timeoutMs ?? walletSyncTimeoutMs();
   await Rx.firstValueFrom(
     (w.wallet as any).state().pipe(
       Rx.filter((s: any) => {
@@ -66,6 +70,11 @@ export async function waitForSync(
  * transactions, zero pending coins on all three subtrees, strict-complete
  * progress. Port of the settlement gate that took the effectstream e2e from
  * a timing-sensitive 170 to a deterministic pass.
+ *
+ * Keeps its own 180 s default rather than MIDNIGHT_WALLET_SYNC_TIMEOUT_MS: it
+ * runs after a submission on a wallet that is already synced and waits a few
+ * blocks for the wallet to see its own transaction, not for a replay of the
+ * chain's history.
  */
 export async function waitForWalletSettlement(
   w: WalletResult,
@@ -190,7 +199,12 @@ export async function transferShielded(
     [{ type: "shielded", outputs: [{ type: color, amount, receiverAddress: toShieldedAddress as any }] }],
     { ttl: new Date(Date.now() + ttlMs), payFees: true },
   );
-  const finalized = await from.wallet.finalizeRecipe(recipe);
+  // Bounded by MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS: the facade proves at the
+  // proof server and the SDK has no deadline of its own.
+  const finalized = await withProofDeadline(
+    () => from.wallet.finalizeRecipe(recipe),
+    { proofServerUrl: networkUrls.proofServer },
+  );
   await from.wallet.submitTransaction(finalized);
   // Never leave the facade with stale DUST state: a caller that immediately
   // sends again (serial transfers are common in these tests) would hit rc.4

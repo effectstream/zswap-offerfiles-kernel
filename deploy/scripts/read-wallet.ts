@@ -41,6 +41,7 @@ import {
   unshieldedBalances,
   waitForSync,
 } from "../../packages/kernel-client/wallet.ts";
+import { walletTimeoutProblems } from "../../packages/kernel-client/wallet-timeouts.ts";
 
 globalThis.WebSocket = WebSocket;
 // The wallet SDK's RPC client logs the node URL it loses, query string
@@ -48,6 +49,13 @@ globalThis.WebSocket = WebSocket;
 installLogRedaction(redactBlockfrostProjectId);
 
 const log = (msg: string) => console.log(`[read-wallet] ${msg}`);
+
+// A malformed wallet timeout stops the script before it opens a wallet.
+const timeoutProblems = walletTimeoutProblems(process.env);
+if (timeoutProblems.length > 0) {
+  for (const problem of timeoutProblems) console.error(`[read-wallet] ${problem}`);
+  process.exit(78);
+}
 
 const seed = process.env["READ_SEED"] ?? "";
 if (!/^[0-9a-f]{64}$/.test(seed)) {

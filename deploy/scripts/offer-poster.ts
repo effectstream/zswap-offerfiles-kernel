@@ -388,6 +388,8 @@ async function startup(cfg: PosterConfig): Promise<Started> {
     cfg.networkUrls,
     cfg.networkId as never,
     "all",
+    undefined,
+    { proofRequestTimeoutMs: cfg.proofRequestTimeoutMs },
   );
 
   // `ShieldedAddress` has NO `asString()` — unlike the unshielded keystore's

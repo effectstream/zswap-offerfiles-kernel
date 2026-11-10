@@ -137,6 +137,18 @@ describe("check-env.ts — the public-network contract", () => {
     expect(bad[0]!.hint).toContain("must be an integer from 1 to 86400 (default 180)");
   });
 
+  test("wallet sync wait and proof deadline: defaults shown, set values shown, a malformed one fails by name", () => {
+    const labels = staticChecks(map(complete("preprod"))).map((r) => r.label);
+    expect(labels).toContain("MIDNIGHT_WALLET_SYNC_TIMEOUT_MS — 180000 (default)");
+    expect(labels).toContain("MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS — 600000 (default)");
+    const set = staticChecks(map({ ...complete("preprod"), MIDNIGHT_WALLET_SYNC_TIMEOUT_MS: "3600000" }));
+    expect(set.map((r) => r.label)).toContain("MIDNIGHT_WALLET_SYNC_TIMEOUT_MS — 3600000");
+    expect(set.filter((r) => !r.ok)).toEqual([]);
+    const bad = staticChecks(map({ ...complete("preprod"), MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS: "10m" })).filter((r) => !r.ok);
+    expect(bad.map((r) => r.label)).toEqual(["MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS"]);
+    expect(bad[0]!.hint).toContain("must be an integer number of milliseconds from 1000 to 86400000 (default 600000)");
+  });
+
   test("every other wallet seed in the file is refused when it is a dev seed", () => {
     expect(
       failed({

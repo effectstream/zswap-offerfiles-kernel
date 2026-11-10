@@ -14,6 +14,13 @@ import { fileURLToPath } from "url";
 import { MIP6_NAMESPACE_SUFFIX_HEX, resolvePublicNodeProfile } from "./packages/node/public-network-profile.ts";
 import { SYNC_HEALTH_SETTINGS } from "./packages/node/sync-health-config.ts";
 import {
+  DEFAULT_PROOF_REQUEST_TIMEOUT_MS,
+  DEFAULT_WALLET_SYNC_TIMEOUT_MS,
+  PROOF_REQUEST_TIMEOUT_ENV,
+  WALLET_SYNC_TIMEOUT_ENV,
+  walletTimeoutProblems,
+} from "./packages/kernel-client/wallet-timeouts.ts";
+import {
   CELESTIA_NETWORK_FOR,
   isPublicMidnightNetwork,
   publicDevSeedProblem,
@@ -152,6 +159,17 @@ function publicChecks(networkId: "preview" | "preprod" | "mainnet", env: Map<str
   for (const setting of SYNC_HEALTH_SETTINGS) {
     const value = get(setting.name);
     check(setting.name, `${setting.name} — ${value || `${setting.defaultValue} (default)`}`);
+  }
+
+  // Wallet tools (poster, maker offer, read-wallet, DUST provisioning): sync
+  // wait and proof-request deadline, optional.
+  const timeoutProblems = walletTimeoutProblems(Object.fromEntries(env));
+  for (const [name, fallback] of [
+    [WALLET_SYNC_TIMEOUT_ENV, DEFAULT_WALLET_SYNC_TIMEOUT_MS],
+    [PROOF_REQUEST_TIMEOUT_ENV, DEFAULT_PROOF_REQUEST_TIMEOUT_MS],
+  ] as const) {
+    const problem = timeoutProblems.find((p) => p.startsWith(name));
+    results.push(problem ? fail(name, problem) : pass(`${name} — ${get(name) || `${fallback} (default)`}`));
   }
 
   // Batcher: a dedicated funded seed (never a repository dev seed) and a volume.

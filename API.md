@@ -229,7 +229,11 @@ Thresholds come from env, with these defaults: `SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLO
 (NTP blocks of `BLOCK_TIME_MS`), `SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS` 180,
 `SYNC_HEALTH_MAX_CELESTIA_TIP_AGE_SECONDS` 180, `SYNC_HEALTH_HYSTERESIS_SAMPLES` 3.
 Each must be a positive integer; a public node refuses a malformed value at
-startup with exit 78 naming it.
+startup with exit 78 naming it. The lag rules compare the tips with the
+positions the node has merged, and it merges once per NTP block
+(`BLOCK_TIME_MS`): on a public network with ten-minute NTP blocks, size both
+lag limits for one NTP block of each chain, as
+[`deploy/PRODUCTION.md`](deploy/PRODUCTION.md#12-health-and-monitoring) says.
 
 ---
 

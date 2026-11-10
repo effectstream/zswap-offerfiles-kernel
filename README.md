@@ -573,6 +573,13 @@ the public node logs a warning while it is unset. **Start on an empty
 database**: data written by a ledger-8 kernel does not deserialize under
 ledger 9, and no migration is offered. The kernel applies its own migrations
 when it processes its first block, and a fresh database lists NIGHT only.
+**Install the [`pg_ivm`](https://github.com/sraoss/pg_ivm) extension** in that
+Postgres: the effectstream runtime builds its materialized views with it.
+Without it the node does not start, and with `@effectstream/*` 0.300.2 it fails
+silently: nothing is printed after `[MidnightClient] Using indexer …`, the API
+never listens, and Postgres logs `extension "pg_ivm" is not available`.
+`ALLOW_NO_PG_IVM=true` selects the engine's plain-view fallback instead, which
+effectstream marks as dev/test only (reads slow down as the tables grow).
 This repository's tests and CI run on PGlite; no gate here exercises a real
 Postgres.
 

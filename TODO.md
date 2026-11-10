@@ -189,9 +189,13 @@ repository no longer contains it. Everything below happens there.
 - [ ] Pin mainnet's ledger-9 reference parameters (the `TODO(mainnet)` in
   `packages/validator/reference-parameters.ts`). Until then a mainnet kernel
   refuses to start.
-- [ ] A backend script that registers the batcher's NIGHT for DUST on a public
-  network. The README's funding runbook uses the COW solver's
-  `deploy/scripts/provision-solver-fees.ts` until one exists here.
+- [ ] Remove the duplicate DUST provisioning script. This repository keeps a
+  copy of `effectstream/cow-solver`'s `deploy/scripts/provision-solver-fees.ts`
+  and `deploy/scripts/lib/solver-provision.ts` (with its test) only so that the
+  README's funding runbook can register the batcher's NIGHT for DUST. Replace
+  it with a backend-named script (a batcher-named seed input instead of
+  `SOLVER_SEED`) or with one package both repositories share, and delete the
+  duplicate.
 - [ ] Drop the PGlite forwarder (`deploy/images/kernel/pglite-forwarder.ts` and
   its supervision in `entrypoint-pglite.sh`) once `@effectstream/db`'s
   `start-pglite` can bind a non-loopback address (a host option in

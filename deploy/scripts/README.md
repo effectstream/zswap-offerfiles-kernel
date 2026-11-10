@@ -5,6 +5,7 @@ deploy an issuer or create token inventory.
 
 | Script | Caller | Responsibility |
 |---|---|---|
+| `provision-solver-fees.ts` | manual, with the batcher stopped (README, "Funding runbook", step 1) | Validate externally prefunded NIGHT and usable DUST; write a factual fee-inventory receipt. |
 | `post-maker-offer.ts` | `maker-offer` one-shot | Post one real offer using explicit token IDs and an already funded maker wallet. |
 | `offer-poster.ts` | opt-in `offer-poster` loop | Adopt matching spendable coins, journal before build, quote, post, verify and re-offer released inventory. |
 | `read-wallet.ts` | manual, with the target service stopped | Measure and assert wallet balances without changing them. |
@@ -15,10 +16,20 @@ Token amounts are base units; use the network registry to determine decimals.
 Wallet seeds must be funded through the selected network's supported external
 issuer or funding process before these scripts start.
 
+`provision-solver-fees.ts` calls `registerNightForDust` only for NIGHT the
+wallet of `SOLVER_SEED` already holds; the funding runbook runs it with the
+batcher's seed. A `false` return or error is fatal and includes the external
+NIGHT/DUST prerequisite. Its receipt (`SOLVER_PROVISION_RECEIPT`) records
+`inventorySource`, `dustReady`, the live-book pricing source and measured
+balances. It accepts no pair or ladder input and does not claim a successful
+state after a failed registration. The same script lives in
+[effectstream/cow-solver](https://github.com/effectstream/cow-solver) for the
+solver's own wallet.
+
 The poster's decision code lives in `lib/poster-{config,journal,tick,scheduler,
 health}.ts`. Tests cover arbitrary explicit token IDs, wallet inventory filters,
 durable recovery, reconciliation, exact-input/nullifier safety, quote and
 sponsorship failures, retry/refusal taxonomy, cadence and health reporting.
 
-The COW solver's provisioning, end-to-end and live acceptance scripts live in
+The COW solver's end-to-end and live acceptance scripts live in
 [effectstream/cow-solver](https://github.com/effectstream/cow-solver).

@@ -95,6 +95,12 @@ const CASES: EntryCase[] = [
   },
   // Operator scripts.
   {
+    entry: "deploy/scripts/provision-solver-fees.ts",
+    env: { MIDNIGHT_NETWORK_ID: "preprod" },
+    exitCode: 1,
+    marker: "SOLVER_SEED is required",
+  },
+  {
     entry: "deploy/scripts/read-wallet.ts",
     env: { MIDNIGHT_NETWORK_ID: "preprod" },
     exitCode: 78,

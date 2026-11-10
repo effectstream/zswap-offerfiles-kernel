@@ -412,7 +412,10 @@ midnight-js 5.0.0-beta.6, the wallet-sdk betas, node `2.0.0-rc.4`, indexer
   its history: `packages/solver`, `packages/solver-core`,
   `packages/solver-frontend`, the solver runners of the grand e2e,
   `start.solver*.ts`, the solver typecheck, the solver deploy scripts, the
-  relay image and the solver entrypoints of the kernel image.
+  relay image and the solver entrypoints of the kernel image. This repository
+  keeps its own copy of `deploy/scripts/provision-solver-fees.ts` (with
+  `deploy/scripts/lib/solver-provision.ts`): the funding runbook registers the
+  batcher's NIGHT for DUST with it.
 * **Compose** no longer has the `relay`, `solver`, `solver-frontend`,
   `solver-provision` and `scripts` services or their volumes and settings.
 * **Packages the solver consumes stay here**: `@zswap-da/api-contracts` (the

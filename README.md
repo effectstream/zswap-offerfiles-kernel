@@ -408,12 +408,11 @@ Every step below is done by hand; none of it is automated here.
 
 1. **Batcher DUST.** Send NIGHT to the unshielded address of
    `BATCHER_WALLET_SEED`, then register it for DUST **with the batcher
-   stopped**, because only one wallet facade may run per seed. This repository
-   has no registration script of its own; the provision script of
-   [effectstream/cow-solver](https://github.com/effectstream/cow-solver)
-   (`deploy/scripts/provision-solver-fees.ts`, run from a checkout of that
-   repository) does it, reading the seed from `SOLVER_SEED` (the Blockfrost
-   token comes from the environment, never the command line):
+   stopped**, because only one wallet facade may run per seed. This
+   repository's provision script, `deploy/scripts/provision-solver-fees.ts`,
+   does it from the root of a checkout (after `bun install`), reading the seed
+   from `SOLVER_SEED` and writing its receipt to `SOLVER_PROVISION_RECEIPT`
+   (the Blockfrost token comes from the environment, never the command line):
 
    ```bash
    MIDNIGHT_NETWORK_ID=preprod \

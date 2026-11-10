@@ -7,7 +7,7 @@
 // rules must run BEFORE midnight-env is evaluated, because midnight-env
 // resolves (and, without a Blockfrost token, throws on) the endpoints at import.
 //
-// Endpoints. `@effectstream/midnight-contracts` 0.300.2's
+// Endpoints. `@effectstream/midnight-contracts` 0.300.3's
 // `defaultMidnightNetworkConfig` points preview, preprod and mainnet at the
 // Blockfrost-hosted indexer and node, with `?project_id=<token>` taken from
 // MIDNIGHT_BLOCKFROST_PROJECT_ID; an explicit MIDNIGHT_INDEXER_HTTP,

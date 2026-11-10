@@ -1,7 +1,7 @@
 # deploy/images/indexer/Dockerfile — midnight indexer-standalone v4.4.0-rc.6-ledger9final.
 #
 # THE INDEXER PIN IS NOT A GUESS. This repo's own pinned dependency,
-# `@effectstream/npm-midnight-indexer@0.300.2/binary.js`, has
+# `@effectstream/npm-midnight-indexer@0.300.3/binary.js`, has
 # `CURRENT_BINARY_VERSION = "v4.4.0-rc.6-ledger9final"` — the build `bun run dev`
 # runs against midnight-node 2.1.0-806ff70-ledger9final. Release 0.3.120
 # publishes it for both linux/amd64 and linux/arm64. The `-ledger9final` build
@@ -50,7 +50,7 @@ RUN set -eux; \
     rm -f /tmp/ldd.txt
 
 # config.yaml is copied VERBATIM from
-# `@effectstream/npm-midnight-indexer@0.300.2/indexer-standalone/config.yaml`
+# `@effectstream/npm-midnight-indexer@0.300.3/indexer-standalone/config.yaml`
 # (the file that package ships and runs the binary against, MIT/Apache-2.0).
 # It is on the schema this binary requires: `infra.ledger_db` takes
 # `cache_max_nodes` (a config with only the older `cache_size` key is refused

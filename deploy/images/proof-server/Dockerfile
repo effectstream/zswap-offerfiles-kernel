@@ -1,6 +1,6 @@
 # deploy/images/proof-server/Dockerfile — Midnight proof server 9.0.1.
 #
-# Version provenance: `@effectstream/npm-midnight-proof-server@0.300.2`
+# Version provenance: `@effectstream/npm-midnight-proof-server@0.300.3`
 # (a pinned dependency of this repo) hard-codes
 # `CURRENT_BINARY_VERSION = "9.0.1"`, the stable ledger-9 proof server that
 # matches the workspace's `@midnightntwrk/ledger-v9: 1.0.0` override. A proof

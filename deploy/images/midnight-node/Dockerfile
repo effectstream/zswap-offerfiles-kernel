@@ -1,6 +1,6 @@
 # deploy/images/midnight-node/Dockerfile — Midnight substrate node 2.1.0-806ff70-ledger9final (dev preset).
 #
-# Version provenance: this is NOT a version we chose. `@effectstream/npm-midnight-node@0.300.2`
+# Version provenance: this is NOT a version we chose. `@effectstream/npm-midnight-node@0.300.3`
 # — a pinned dependency of this repo, and what `bun run dev` actually launches —
 # hard-codes `CURRENT_BINARY_VERSION = "2.1.0-806ff70-ledger9final"` and the release URL
 # `https://github.com/effectstream/binaries/releases/download/0.3.120/…`. Running

@@ -15,7 +15,7 @@
     "@effectstream/mip-zswap-offer": "0.4.0",
     "@midnightntwrk/ledger-v9": "1.0.0",
     "@midnight-ntwrk/dapp-connector-api": "4.1.0",
-    "@effectstream/wallets": "0.300.2"
+    "@effectstream/wallets": "0.300.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.7",

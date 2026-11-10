@@ -17,7 +17,7 @@
 //
 //     .withCoinSelection(() => selector)
 //
-// `@effectstream/midnight-contracts@0.300.2`'s `buildWalletFacade`
+// `@effectstream/midnight-contracts@0.300.3`'s `buildWalletFacade`
 // (`src/get-wallet-info.ts`) builds its shielded wallet through a
 // module-private `buildShieldedWallet` = `ShieldedWallet(config).startWithSeed(seed)`
 // and exposes no hook, so this module reproduces `buildWalletFacade` verbatim
@@ -25,7 +25,7 @@
 // wallet's batching and cost parameters, the unshielded keystore, the facade
 // wiring, the seed-based `start`, the dust-only option, the returned
 // `WalletResult` — is a faithful copy of the upstream function at
-// `@effectstream/midnight-contracts@0.300.2` (wallet-sdk 2.0.0: `createKeystore`
+// `@effectstream/midnight-contracts@0.300.3` (wallet-sdk 2.0.0: `createKeystore`
 // takes a tagged secret, the facade's sub-wallet factories receive their
 // configuration, the facade starts from the three role seeds, and the DUST
 // address is derived from the DUST public key). If that package is upgraded,

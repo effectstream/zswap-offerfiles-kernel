@@ -7,7 +7,7 @@
     "test": "bun run run-tests.ts"
   },
   "dependencies": {
-    "@effectstream/midnight-contracts": "0.300.2",
+    "@effectstream/midnight-contracts": "0.300.3",
     "@midnightntwrk/ledger-v9": "1.0.0",
     "@midnight-ntwrk/midnight-js-contracts": "5.0.0",
     "@noble/curves": "^1.9.7",

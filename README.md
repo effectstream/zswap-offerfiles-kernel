@@ -286,7 +286,7 @@ bun check-env.ts                # static checks plus a live Celestia probe
 | Token registry | `mint-test-tokens` `metadata.preview.json`, imported only when labelled `midnight-2.x` | `metadata.preprod.json`, same rule | no source yet: NIGHT only |
 
 - **Endpoints.** The defaults are effectstream's `defaultMidnightNetworkConfig`
-  (`@effectstream/midnight-contracts` 0.300.2): the Blockfrost-hosted indexer
+  (`@effectstream/midnight-contracts` 0.300.3): the Blockfrost-hosted indexer
   and node, each with `?project_id=<MIDNIGHT_BLOCKFROST_PROJECT_ID>`. Without
   the token every service refuses to start, naming the variable.
   `MIDNIGHT_INDEXER_HTTP`, `MIDNIGHT_INDEXER_WS` and `MIDNIGHT_NODE_HTTP` stay
@@ -373,9 +373,9 @@ ledger 9, and no migration is offered. The kernel applies its own migrations
 when it processes its first block, and a fresh database lists NIGHT only.
 **Install the [`pg_ivm`](https://github.com/sraoss/pg_ivm) extension** in that
 Postgres: the effectstream runtime builds its materialized views with it.
-Without it the node does not start, and with `@effectstream/*` 0.300.2 it fails
-silently: nothing is printed after `[MidnightClient] Using indexer …`, the API
-never listens, and Postgres logs `extension "pg_ivm" is not available`.
+Without it the node does not start: it exits non-zero with `Effectstream
+startup aborted: the pg_ivm PostgreSQL extension is not available …`, and
+Postgres logs `extension "pg_ivm" is not available`.
 `ALLOW_NO_PG_IVM=true` selects the engine's plain-view fallback instead, which
 effectstream marks as dev/test only (reads slow down as the tables grow).
 This repository's tests and CI run on PGlite; no gate here exercises a real

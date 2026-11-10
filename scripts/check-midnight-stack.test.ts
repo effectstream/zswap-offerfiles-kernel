@@ -33,7 +33,7 @@ function validLock(): BunLock {
         `${ONCHAIN_RUNTIME_V4}@${ONCHAIN_RUNTIME_V4_VERSION}`,
       ),
       [LEDGER_V8]: entry(`${LEDGER_V8}@${TRANSITIVE_LEDGER_V8_VERSION}`),
-      "@effectstream/midnight-contracts": entry("@effectstream/midnight-contracts@0.300.2"),
+      "@effectstream/midnight-contracts": entry("@effectstream/midnight-contracts@0.300.3"),
       "@midnightntwrk/wallet-sdk-facade": entry("@midnightntwrk/wallet-sdk-facade@5.0.0"),
       "@zswap-da/node": ["@zswap-da/node@workspace:packages/node"],
     },

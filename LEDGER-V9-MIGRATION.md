@@ -2,7 +2,7 @@
 
 > **Current state (2026-11-09).** This repository supports **Midnight 2.x /
 > ledger 9 only**, on `mainnet`, `preview`, `preprod` and the local
-> `undeployed` devnet, on the stable stack: `@effectstream/*` 0.300.2,
+> `undeployed` devnet, on the stable stack: `@effectstream/*` 0.300.3,
 > `@midnightntwrk/ledger-v9` 1.0.0, `onchain-runtime-v4` 4.0.0, midnight-js
 > 5.0.0, wallet-sdk 2.0.0, compact-runtime 0.21.0 / compactc 0.36.0, and the
 > ledger9final chain images (node `2.1.0-806ff70-ledger9final`, indexer
@@ -419,3 +419,7 @@ midnight-js 5.0.0-beta.6, the wallet-sdk betas, node `2.0.0-rc.4`, indexer
   API wire contracts) and `@zswap-da/kernel-client` (the API client, offer
   merging and balance checks, and the wallet helpers, formerly
   `solver-core`'s `api-client`, `batcher` and `wallet`).
+* **`@effectstream/*` 0.300.3.** Its only functional change from 0.300.2 is
+  that the runtime's `start()` throws a startup failure to its caller: a
+  kernel whose Postgres lacks `pg_ivm` (and `ALLOW_NO_PG_IVM` unset) now exits
+  non-zero with effectstream's message instead of hanging silently.

@@ -28,10 +28,10 @@
     "test:held-open": "bun test ./packages/database/held-open-transaction.pgtest.ts"
   },
   "dependencies": {
-    "@effectstream/celestia": "0.300.2",
-    "@effectstream/midnight-contracts": "0.300.2",
+    "@effectstream/celestia": "0.300.3",
+    "@effectstream/midnight-contracts": "0.300.3",
     "@effectstream/mip-zswap-offer": "0.4.0",
-    "@effectstream/orchestrator": "0.300.2",
+    "@effectstream/orchestrator": "0.300.3",
     "@electric-sql/pglite": "^0.3.14",
     "@midnight-ntwrk/compact-runtime": "0.21.0",
     "@midnightntwrk/ledger-v9": "1.0.0",

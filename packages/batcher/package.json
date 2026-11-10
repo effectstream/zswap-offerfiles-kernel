@@ -11,9 +11,9 @@
     "start:public": "bun run batcher.public.ts"
   },
   "dependencies": {
-    "@effectstream/batcher-sdk": "0.300.2",
-    "@effectstream/midnight-contracts": "0.300.2",
-    "@effectstream/utils": "0.300.2",
+    "@effectstream/batcher-sdk": "0.300.3",
+    "@effectstream/midnight-contracts": "0.300.3",
+    "@effectstream/utils": "0.300.3",
     "@zswap-da/validator": "workspace:*",
     "effection": "^3.5.0",
     "@zswap-da/offer-guard": "workspace:*"

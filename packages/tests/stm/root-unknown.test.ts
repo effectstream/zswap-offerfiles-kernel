@@ -4,7 +4,6 @@
 import type { Client } from "pg";
 import { assert } from "../helpers.ts";
 import { count, waitFor } from "../lib/db.ts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -28,7 +27,6 @@ const WANT_TOKEN = "ff".repeat(32);
 const WANT = 5_000_000n;
 
 export async function rootUnknownTest(db: Client): Promise<void> {
-  setNetworkId(net.id as any);
 
   console.log(`${TAG} building genesis…`);
   const [G, ADVANCE] = requireDistinctTokenColors([
@@ -60,7 +58,6 @@ export async function rootUnknownTest(db: Client): Promise<void> {
           outputs: [{ type: WANT_TOKEN, amount: WANT, receiverAddress: addr }],
         } as any,
       ],
-      shieldedKeys(genesis),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const finalized = await genesis.wallet.finalizeTransaction(recipe.transaction);

@@ -10,7 +10,7 @@
 // the exact byte offset of the root in the Input AND confirms the encoding is
 // directly comparable — the foundation for a verified byte-slice extractor.
 
-import { Transaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { Buffer } from "node:buffer";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
@@ -49,7 +49,6 @@ async function main(): Promise<void> {
     const recipe = await wallet.initSwap(
       { shielded: { [give]: 1_000_000n } },
       [{ type: "shielded", outputs: [{ type: "ff".repeat(32), amount: 5_000_000n, receiverAddress: address }] } as any],
-      { shieldedSecretKeys: zswapSecretKeys, dustSecretKey },
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const finalized = await wallet.finalizeTransaction(recipe.transaction);

@@ -4,38 +4,34 @@
 //
 //   * `bun run seed:market` writes rows straight into the database with a
 //     PLACEHOLDER blob. Its own header says so: those offers are DISPLAY-real
-//     and "NOT settle-able". They would let the solver publish a ladder that
-//     could never be filled — a green smoke covering for a broken stack.
-//   * `api-examples/10-submit-offer.ts` builds a real offer but is stale against
-//     the current wallet SDK: it passes `state.address.coinPublicKeyString()`
-//     (a STRING) as `receiverAddress`, and the SDK now dereferences
-//     `receiverAddress.coinPublicKey.toHexString()`, so it dies with
-//     "TypeError: undefined is not an object". The maintained path
-//     (`packages/tests/two-wallet-swap-e2e.ts`) passes the address OBJECT from
-//     `wallet.shielded.getAddress()`. This module follows the maintained one.
-//     Fixing the api-example itself would be source scope, not deployment
-//     scope, so the defect is recorded in the plan instead.
+//     and "NOT settle-able". A book built from them can be quoted but never
+//     filled — a green smoke covering for a broken stack.
+//   * `api-examples/10-submit-offer.ts` builds the same kind of offer for a
+//     person to run by hand. The wallet SDK dereferences
+//     `receiverAddress.coinPublicKey`, so both pass the address OBJECT from
+//     `wallet.shielded.getAddress()`, never `coinPublicKeyString()`.
 //
 // The offer is intentionally UNBALANCED — it GIVES `giveAmount` of `giveToken`
 // and WANTS `wantAmount` of `wantToken` routed back to the maker. That is what
-// an Offer File is, and it is what the solver mirrors and quotes against.
+// an Offer File is, and it is what a taker, or a quoting service that mirrors
+// the book, fills.
 //
 // Note the resulting direction: an offer GIVING A / WANTING B is filled by a
-// taker who pays B and receives A, so for the solver that pair is tokenIn=B,
-// tokenOut=A. The solver needs NEITHER token to quote and settle this complete
-// file: the maker supplies output, the taker supplies input, and the solver pays
-// only the fee. The 00006-V1 unfunded rerun remains the control for that fact.
+// taker who pays B and receives A, so from the taker's side that pair is
+// tokenIn=B, tokenOut=A. Whoever settles this complete file needs NEITHER
+// token: the maker supplies the output, the taker supplies the input, and the
+// settling party pays only the fee.
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
-// RELATIVE, not the `@zswap-da/solver-core/wallet` specifier the in-package
+// RELATIVE, not the `@zswap-da/kernel-client/wallet` specifier the in-package
 // scripts use. Bun links workspace packages into their DEPENDENTS'
-// node_modules (`packages/solver/node_modules/@zswap-da/solver-core`), never
+// node_modules (`packages/tests/node_modules/@zswap-da/kernel-client`), never
 // into the workspace root — and this file lives in `deploy/`, which is not a
 // workspace member, so module resolution walks up to `/app/node_modules` and
 // finds no `@zswap-da` at all. The npm dependencies DO resolve from there, so
 // only the first-party imports need the relative form.
-import { shieldedKeys, waitForSync } from "../../../packages/solver-core/wallet.ts";
+import { shieldedKeys, waitForSync } from "../../../packages/kernel-client/wallet.ts";
 import { KernelApi } from "./kernel-api.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -100,6 +96,9 @@ export async function postMakerOffer(opts: PostMakerOfferOptions): Promise<Poste
     wantToken,
     giveAmount,
     wantAmount,
+    // initSwap `ttl`: an INTENT TTL only. This shielded-only payFees:false
+    // offer carries no intent, so it is inert here (00056); a shielded offer
+    // expires when its proof root leaves the root window.
     ttlMs = 120 * 60_000,
     liveTries = 40,
     liveIntervalMs = 5_000,
@@ -130,7 +129,6 @@ export async function postMakerOffer(opts: PostMakerOfferOptions): Promise<Poste
         outputs: [{ type: wantToken, amount: wantAmount, receiverAddress: makerShieldedAddr }],
       } as never,
     ],
-    shieldedKeys(maker),
     // payFees:false — an Offer File is settled by whoever takes it.
     { ttl: new Date(Date.now() + ttlMs), payFees: false },
   );

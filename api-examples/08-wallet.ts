@@ -5,10 +5,10 @@
 // On Preview/Mainnet you need a funded wallet seed:
 //   MIDNIGHT_NETWORK_ID=preview bun mnemonic-to-seed.ts  # converts a 24-word phrase
 //   export WALLET_SEED=<printed hex>
+//   export MIDNIGHT_NODE_HTTP=<the network's Midnight node RPC URL>
 //   bun run api-examples/08-wallet.ts
 
-import { config, header } from "./config.ts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import { config, header, midnightNodeUrl } from "./config.ts";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { get } from "./config.ts";
 
@@ -16,7 +16,8 @@ globalThis.WebSocket = WebSocket;
 
 header("Wallet");
 
-// Midnight config is served by the node — no need to hard-code it.
+// The indexer and proof-server URLs are served by the kernel; the Midnight
+// node's RPC URL is not (see midnightNodeUrl in config.ts).
 const midnightCfg = await get<{
   indexerUri: string;
   indexerWsUri: string;
@@ -24,13 +25,11 @@ const midnightCfg = await get<{
   networkId: string;
 }>("/v1/midnight/config");
 
-setNetworkId(midnightCfg.networkId as any);
-
 const networkUrls = {
   id:          midnightCfg.networkId as any,
   indexer:     midnightCfg.indexerUri,
   indexerWS:   midnightCfg.indexerWsUri,
-  node:        midnightCfg.indexerUri,          // Midnight node behind indexer
+  node:        midnightNodeUrl(),
   proofServer: midnightCfg.proofServerUri,
 };
 
@@ -63,7 +62,7 @@ if (Object.keys(balances).length === 0) {
 }
 
 console.log("\nKeys available for offer construction:");
-console.log(`  zswapSecretKeys : ${zswapSecretKeys?.length ?? 0} key(s)`);
+console.log(`  zswapSecretKeys : ${zswapSecretKeys ? "yes" : "no"}`);
 console.log(`  dustSecretKey   : ${dustSecretKey ? "yes" : "no"}`);
 
 await wallet.stop().catch(() => {});

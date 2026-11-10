@@ -1,24 +1,28 @@
-# deploy/images/proof-server/Dockerfile — Midnight proof server, ledger-8.1.0.
+# deploy/images/proof-server/Dockerfile — Midnight proof server 9.0.1.
 #
-# Version provenance: `@effectstream/npm-midnight-proof-server@0.103.1`
+# Version provenance: `@effectstream/npm-midnight-proof-server@0.300.3`
 # (a pinned dependency of this repo) hard-codes
-# `CURRENT_BINARY_VERSION = "ledger-8.1.0"` against release 0.3.120. It matches
-# the workspace's `@midnight-ntwrk/ledger-v8: 8.1.0` override, which the root
-# package.json pins for every package — a proof server on a different ledger
-# line would reject the proofs this stack builds.
+# `CURRENT_BINARY_VERSION = "9.0.1"`, the stable ledger-9 proof server that
+# matches the workspace's `@midnightntwrk/ledger-v9: 1.0.0` override. A proof
+# server on a different ledger line rejects the proofs this stack builds.
 #
-# The official `midnightnetwork/proof-server:8.1.0` image exists (the reference
-# repo's own compose uses it, and `@effectstream/npm-midnight-proof-server`
-# falls back to it on unsupported platforms) and is the recorded fallback if the
-# raw binary ever fights this base image. The binary route is preferred because
-# it is byte-identical to what the dev stack runs and it is sha256-pinned here.
+# The binary comes from the effectstream/binaries 0.3.120 release (published
+# for linux amd64 and arm64), fetched at BUILD time and verified against the
+# sha256 the release reports, like the node and indexer images: a rolling
+# re-tag of the mirror release fails the build instead of swapping the prover.
+#
+# On first start the proof server downloads its ZK parameters from
+# srs.midnight.network and binds its port only once they are in place, so any
+# HTTP answer on the port means it is ready; the kernel entrypoints wait on it
+# (`wait_http` on MIDNIGHT_PROOF_SERVER_URL) instead of a Compose healthcheck.
 FROM debian:trixie-slim
 
 ARG TARGETARCH
 ARG BINARIES_RELEASE=0.3.120
-ARG PROOF_SERVER_VERSION=ledger-8.1.0
-ARG SHA256_ARM64=13aa2fb681012b21e59f0c9db0048ecff146d08b38c6699c62c99106179d8221
-ARG SHA256_AMD64=21d9893c947948fd183711d15db3e0b16563ef44fb2849f417fe36724f9df279
+ARG PROOF_SERVER_VERSION=9.0.1
+# sha256 of the release assets (gh release view 0.3.120 --repo effectstream/binaries).
+ARG SHA256_ARM64=66e52887dea95912b434a123d9520abcbc164e4201f10aaeb8a51a05773628ec
+ARG SHA256_AMD64=1f8e75ff08c5535da7242768c7aafc3f2e64f57add50ce54c8e1701db46cdbc2
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl unzip \
@@ -39,10 +43,10 @@ RUN set -eux; \
       /usr/local/bin/midnight-proof-server; \
     rm -rf /tmp/ps.zip /tmp/ps
 
-# Link check + smoke. Two of the four chain binaries in release 0.3.120 need
-# GLIBC 2.38 (bookworm has 2.36) and fail only at RUN time, so every chain image
-# proves its binary actually links and starts at BUILD time. This one has no
-# `--version`; `--help` exits 0 and is the equivalent.
+# Link check + smoke, as for the node and indexer: an unresolved library or
+# symbol version fails the build next to the base image that caused it. The
+# binary has no --version flag (its version is the pinned asset above, and it
+# answers GET /version once running); --help proves it starts.
 RUN set -eux; \
     ldd /usr/local/bin/midnight-proof-server > /tmp/ldd.txt 2>&1 || true; \
     cat /tmp/ldd.txt; \
@@ -51,12 +55,10 @@ RUN set -eux; \
       exit 1; \
     fi; \
     rm -f /tmp/ldd.txt; \
-    /usr/local/bin/midnight-proof-server --help
+    /usr/local/bin/midnight-proof-server --help > /dev/null
 
 ENV RUST_BACKTRACE=full
-# The proof server keeps no durable state; its working dir only holds transient
-# proving scratch.
-WORKDIR /var/lib/proof-server
-
+ENV PORT=6300
 EXPOSE 6300
-ENTRYPOINT ["/usr/local/bin/midnight-proof-server"]
+# PID 1 is the proof server itself, so Compose signals reach it.
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/midnight-proof-server --port \"${PORT}\""]

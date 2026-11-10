@@ -13,49 +13,58 @@ settle via the batcher's `midnight-balancer` target, and connect a wallet to
 inspect balances or open the external faucet (`VITE_FAUCET_URL`, default
 `https://mint-test-tokens.pages.dev/`; default network `preprod`).
 
+**Supported domain: Midnight 2.x / ledger 9** on `mainnet`, `preview`,
+`preprod` and the local `undeployed` devnet. Any other `MIDNIGHT_NETWORK_ID` is
+refused at startup naming those four. **A mainnet kernel does not start yet**:
+its ledger-9 reference parameters are not pinned (README, "Running on preview,
+preprod and mainnet").
+Real funds stay NO-GO for this backend until its first ledger-9 version is
+ready for review; the repository owner then reviews the NO-GO.
+See README, "Real funds: NO-GO".
+
 **Repository validation scope.** There are two strict, no-emit TypeScript gates,
 and `bun run typecheck` runs both.
 
-- `bun run typecheck:backend` covers the 27 production `packages/node` roots
-  only; it excludes node tests and the grand-E2E entrypoint, builds the real
-  dependency graph without modifying it, and fails all node-owned or fileless
-  compiler diagnostics.
-- `bun run typecheck:solver` covers the solver: `packages/solver`,
-  `packages/solver-core` and `packages/validator` — **production and test
-  sources alike** — plus every other first-party file that imports the solver's
-  source, discovered by scanning rather than by a maintained list. Zero
-  diagnostics are required. Test sources are inside this gate deliberately: the
-  drift it exists to catch (an E2E harness still passing callbacks the solver no
-  longer accepts) lived in a test file.
+- `bun run typecheck:backend` covers the 28 production `packages/node` roots
+  (it excludes node tests and the grand-E2E entrypoint) and, **production and
+  test sources alike**, `packages/validator` (the offer verification the node
+  and the batcher run), `packages/api-contracts` (the wire contracts the node
+  serves) and `packages/kernel-client` (the client that parses them). Each
+  package is its own program; the gate builds the real dependency graph
+  without modifying it and fails every diagnostic owned by a gated package,
+  and every fileless one.
+- `bun run typecheck:price-feed` covers `packages/price-feed` the same way.
 
 Neither gate is a workspace-wide typecheck: each reports, but does not fail on,
-diagnostics in dependencies outside its own roots — including the gitignored
-Compact output, which CI stubs as declarations for both gates. CI also bundles
-API examples 01, 03, 05, 07, and 11 before running the docs playground
-typecheck. Example 11's Midnight network-id and ledger-v8 imports are direct
-root dependencies, not transitive assumptions.
+diagnostics in dependencies outside its own roots. CI also bundles API examples
+01, 03, 05, 07, and 11 before running the docs playground typecheck. Example
+11's Midnight network-id and ledger-v9 imports are direct root dependencies,
+not transitive assumptions.
 
 ---
 
 ## Environments
 
-Three configurations ship out of the box. All endpoints and env-var names are identical across environments; only the values differ.
+Four networks are supported. All endpoints and env-var names are identical across environments; only the values differ. Preview, preprod and mainnet share one entry pair (`main.public.ts`, `batcher.public.ts`) and one env-driven config (`config.preview.ts`); the per-network values below are their defaults.
 
-| | **Undeployed (local dev)** | **Preview** | **Mainnet** |
-|---|---|---|---|
-| `MIDNIGHT_NETWORK_ID` | `undeployed` | `preview` | `mainnet` |
-| `CELESTIA_NETWORK` | `devnet` | `mocha` | `mainnet` |
-| `CELESTIA_RPC_URL` | `http://127.0.0.1:26658` | QuickNode Mocha-4 URL | QuickNode / self-hosted |
-| `CELESTIA_POLLING_INTERVAL_MS` | `6000` | `3000` | `30000` |
-| `CELESTIA_START_HEIGHT` | `1` | `10620000` ¹ | set to your deployment block |
-| `MIDNIGHT_START_BLOCK` | `1` | `1` | set to your deployment block |
-| `OFFER_TTL_SECONDS` | fallback only; default = root window (1 h) ² | fallback only; default = root window (1 h) ² | fallback only; default = root window (1 h) ² |
-| Node API port | `9999` | `9999` | `9999` |
-| Batcher port | `3334` | `3334` | `3334` |
-| Config file | `config.dev.ts` | `config.preview.ts` | `config.mainnet.ts` |
+| | **Undeployed (local dev)** | **Preview** | **Preprod** | **Mainnet** |
+|---|---|---|---|---|
+| `MIDNIGHT_NETWORK_ID` | `undeployed` | `preview` | `preprod` | `mainnet` |
+| Midnight endpoints | local node / indexer | Blockfrost `midnight-preview` (`MIDNIGHT_BLOCKFROST_PROJECT_ID`) | Blockfrost `midnight-preprod` (`MIDNIGHT_BLOCKFROST_PROJECT_ID`) | Blockfrost `midnight-mainnet` (`MIDNIGHT_BLOCKFROST_PROJECT_ID`) |
+| `CELESTIA_NETWORK` | `devnet` | `mocha` | `mocha` | `mainnet` |
+| `CELESTIA_NAMESPACE` | MIP-0006 `mn-swap-v1` (`6d6e2d737761702d7631`) | same | same | same |
+| `CELESTIA_RPC_URL` | `http://127.0.0.1:26658` | required (mocha) | required (mocha) | required (Celestia mainnet) |
+| `CELESTIA_POLLING_INTERVAL_MS` | `6000` | `3000` | `3000` | `30000` |
+| `CELESTIA_START_HEIGHT` | `1` | required, pinned | required, pinned | required, pinned |
+| `NTP_START_TIME` (default) | `1774400742000` | `1784214468491` (block 1) | `1774031004000` (block 1) | `1773843582000` (block 1) |
+| `MIDNIGHT_START_BLOCK` | `1` | `1` | `1` | `1` |
+| Reference ledger parameters | pinned | pinned | pinned | **not pinned yet: does not start** |
+| `OFFER_TTL_SECONDS` | fallback only; default = root window (14 days) ¹ | same ¹ | same ¹ | same ¹ |
+| Node API port | `9999` | `9999` | `9999` | `9999` |
+| Batcher port | `3334` | `3334` | `3334` | `3334` |
+| Node entry | `main.dev.ts` | `main.public.ts` | `main.public.ts` | `main.public.ts` |
 
-¹ Mocha-4 block equivalent to Midnight Preview genesis (2026-03-25T01:05:42 UTC).  
-² Ledger 8 (node 1.x: preview, preprod, mainnet) hardcodes a ~1-hour zswap Merkle-root window. **Offer expiry follows the ledger** (see "Offer expiry" under `GET /v1/offers`): shielded (zswap) inputs carry **no TTL** and expire when their proof root leaves that window; intents (unshielded legs, fee intents) carry a **mandatory TTL**, which the ledger accepts while `tblock ≤ ttl ≤ tblock + global_ttl`, and `global_ttl` is 1,209,600 s (14 days) on every network. `OFFER_TTL_SECONDS` no longer caps offers: it is only the fallback for an offer with no root and no intent (no well-formed two-sided offer is in that case), and setting it logs a startup warning.
+¹ The root window is the ledger's `global_ttl`: 1,209,600 s (14 days) on every network. Ledger 9 keeps past zswap Merkle roots for exactly `global_ttl`, which changes only through a governance parameter update. **Offer expiry follows the ledger** (see "Offer expiry" under `GET /v1/offers`): shielded (zswap) inputs carry **no TTL** and expire when their proof root leaves the window; intents (unshielded legs, fee intents) carry a **mandatory TTL**, which the ledger accepts while `tblock ≤ ttl ≤ tblock + global_ttl`. `OFFER_TTL_SECONDS` no longer caps offers: it is only the fallback for an offer with no root and no intent (no well-formed two-sided offer is in that case), and setting it logs a startup warning. Celestia mocha prunes blobs after about 7 days, so a kernel that syncs from scratch cannot re-read offers older than that, although they stay fillable on chain for 14 days (see README, "Celestia data retention").
 
 ### Environment variables (complete reference)
 
@@ -67,19 +76,26 @@ CELESTIA_NAMESPACE=6d6e2d737761702d7631   # 10-byte namespace id suffix (hex, no
                                         # Default = the MIP-0006 SHARED namespace
                                         # ("mn-swap-v1"): one namespace = one liquidity
                                         # pool. Override only for isolated dev/e2e.
-CELESTIA_AUTH_TOKEN=                    # bearer token; leave empty for QuickNode (auth is in the URL)
-CELESTIA_START_HEIGHT=1                 # skip blocks before your deployment
+CELESTIA_AUTH_TOKEN=                    # bearer token; on a public network either this or
+CELESTIA_AUTH_IN_URL=false              # true when CELESTIA_RPC_URL carries the credential (QuickNode)
+CELESTIA_START_HEIGHT=1                 # skip blocks before your deployment; REQUIRED on public networks
 CELESTIA_POLLING_INTERVAL_MS=6000       # how often to poll for new blocks
 CELESTIA_STEP_SIZE=200                  # blocks per fetch window
 CELESTIA_FETCH_CONCURRENCY=12           # parallel RPC calls per window
 
 # ── Midnight ─────────────────────────────────────────────────────────────────
-MIDNIGHT_NETWORK_ID=undeployed|preview|mainnet
+MIDNIGHT_NETWORK_ID=undeployed|preview|preprod|mainnet
+MIDNIGHT_BLOCKFROST_PROJECT_ID=          # SECRET; required on preview/preprod/mainnet: the default
+                                        # endpoints are Blockfrost-hosted with ?project_id=<token>
+MIDNIGHT_INDEXER_HTTP=                   # optional full overrides (all three set = no token needed);
+MIDNIGHT_INDEXER_WS=                     # the retired indexer./rpc.<preprod|mainnet>.midnight.network
+MIDNIGHT_NODE_HTTP=                      # hosts are refused at startup
 MIDNIGHT_START_BLOCK=1
 MIDNIGHT_DELAY_MS=30000                 # indexer poll delay
 
 # ── NTP timing ────────────────────────────────────────────────────────────────
-NTP_START_TIME=1774400742000            # epoch anchor (ms); default = Preview block 1
+NTP_START_TIME=                         # epoch anchor (ms); default = the network's block 1
+                                        # (undeployed: 1774400742000)
 BLOCK_TIME_MS=600000                    # 10 min/block keeps catch-up short
 NTP_STEP_SIZE=1000
 
@@ -95,43 +111,14 @@ OFFER_TTL_SECONDS=                      # FALLBACK lifetime only, for an offer w
 OFFER_MAX_BYTES=1048576                 # max decoded offer size (DoS guard)
 ENABLE_TOKEN_REGISTRY=false             # POST /v1/known-tokens; names are UNVERIFIED — dev/e2e only
 OFFER_FILES_READ_TIMEOUT_MS=15000        # exact-files read decision budget; max 60000
-ROOT_WINDOW_SECONDS=                    # known-roots retention window. Defaults PER NETWORK:
-                                        # 3600 (1 h) on the ledger-8 networks this line
-                                        # serves. Must mirror the zswap crate's past_roots
-                                        # window (hardcoded 1 h through node 1.x; ledger 9 /
-                                        # node 2.x uses global_ttl) — NOT the on-chain
-                                        # global_ttl (14 days), which bounds intent TTLs.
-                                        # Too wide ⇒ phantom unfillable offers on the book;
-                                        # too narrow ⇒ valid offers rejected ROOT_UNKNOWN.
-
-# ── Solver process (packages/solver, started by `bun run start:solver`) ────────
-# The seven values below are MANDATORY for that entrypoint, in dry-run as well
-# as live mode; it validates all of them before opening a wallet, socket or
-# journal and exits non-zero listing every problem at once.
-MIDNIGHT_NETWORK_ID=undeployed           # declared explicitly: the SDK otherwise assumes undeployed
-ZSWAP_API=http://127.0.0.1:9999          # kernel Offer Files REST/SSE base
-SOLVER_SEED=...                          # the repository dev seed is accepted only on undeployed
-SOLVER_RELAY_WS_URL=wss://relay/solver   # outbound Midnight Intents solver socket
-SOLVER_RELAY_HTTP_URL=https://relay/api/v1  # public relay HTTP base for durable GET /jobs/:jobId
-                                        # never derived from the websocket URL
-SOLVER_RELAY_AUTH_TOKEN=...              # relay upgrade bearer, >= 32 chars; backend exact-files is unauthenticated
-SOLVER_JOURNAL_PATH=/var/lib/cow-solver/operations.sqlite  # absolute, per-instance volume; :memory: refused
-
-SOLVER_DRY_RUN=true                      # mainnet default; mirrors the live Offer Files book,
-                                        # syncs the REAL wallet, starts no relay jobs, mutates nothing
-SOLVER_MAINNET_LIVE_TRADING_ACK=false    # must be exactly true as well as DRY_RUN=false for live mainnet
-SOLVER_ENABLED=true                      # "false" exits 0 without requiring the values above
-SOLVER_RELAY_MAX_PARALLEL_SWAPS=8        # advertised and enforced proof-build capacity
-SOLVER_STATUS_POLL_MS=5000               # missed-signal backend-consumption backstop
-SOLVER_SETTLE_TTL_MINUTES=30             # wallet rollback window when no terminal signal arrives
-SOLVER_SUPPORTED_PAIRS=                  # JSON ["<64hex>-><64hex>"]; bounds publication AND admission
-SOLVER_MIN_JOB_OUTPUT=                   # JSON {"<64hex out-token>":"<min>"}; same two boundaries
-SOLVER_DUST_MAX_PER_JOB=                 # DUST admission budget; all three DUST values set together
-SOLVER_DUST_MAX_PER_WINDOW=
-SOLVER_DUST_WINDOW_MS=
-SOLVER_FEE_SIZING_TAKER_INPUTS=1          # taker zswap inputs the fee estimate models; [1,64]
-                                        # funds a real taker half of up to n+2 inputs
-                                        # each extra input costs 12-14% more DUST, actually spent
+ROOT_WINDOW_SECONDS=                    # known-roots retention window. Default 1209600
+                                        # (14 days) on every network: the ledger-9
+                                        # global_ttl, which is also the zswap past_roots
+                                        # retention (it changes only through a governance
+                                        # parameter update).
+                                        # Override only for tests. Too wide ⇒ phantom
+                                        # unfillable offers on the book; too narrow ⇒
+                                        # valid offers rejected ROOT_UNKNOWN.
 ```
 
 **Retention model.** The three liveness sets are deliberately asymmetric, and the differences are load-bearing:
@@ -140,7 +127,7 @@ SOLVER_FEE_SIZING_TAKER_INPUTS=1          # taker zswap inputs the fee estimate 
 |---|---|---|
 | `nullifiers` | **Forever** | A shielded spend is permanent. Coin commitments stay in the Merkle tree after being spent, so a maker can always build a valid current-root proof for a long-spent coin — the nullifier is the only thing that catches it. There is intentionally no TTL. |
 | `created_unshielded` | **Live-set** | Create inserts, spend deletes; absence means "spent or never existed". Self-trimming, so no TTL is needed. |
-| `known_roots` | **TTL-limited** (`ROOT_WINDOW_SECONDS`) | Unlike a spend, a root's validity genuinely expires. The ledger's `past_roots` is a *TimeFilterMap*: the current root is re-inserted every block and entries older than `tblock − window` are evicted — so a root stays valid while it keeps being current, and our prune mirrors that by aging on **last-seen**. Independent from the on-chain `global_ttl`, which bounds intent TTLs and is 14 days on every network; ledger 8 hardcodes this root window at 1 h. |
+| `known_roots` | **TTL-limited** (`ROOT_WINDOW_SECONDS`) | Unlike a spend, a root's validity genuinely expires. The ledger's `past_roots` is a *TimeFilterMap*: the current root is re-inserted every block and entries older than `tblock − window` are evicted — so a root stays valid while it keeps being current, and our prune mirrors that by aging on **last-seen**. On ledger 9 the window is the `global_ttl` ledger parameter (which also bounds intent TTLs): 14 days on every network. |
 
 ---
 
@@ -198,7 +185,7 @@ curl http://host:9999/health
 
 #### `GET /v1/health`
 
-Compact protocol-readiness probe. It uses the same aggregate state as the
+Aggregate protocol-readiness probe. It uses the same state as the
 detailed endpoint below and returns `{ "status": "ok|syncing|error", "synced":
 true|false }`. Unlike `/health`, this is not merely HTTP-process liveness.
 
@@ -287,7 +274,7 @@ Returns the current live offer book — offers published to Celestia, validated,
       "wants": [
         { "token": "70ce…b569", "amount": "500000", "type": "SHIELDED" }
       ],
-      "expiresAt": "2026-06-01T13:00:00.000Z",
+      "expiresAt": "2026-06-15T12:00:00.000Z",
       "inputNullifiers": ["7c1d9b…"],
       "firstSeenAt": "2026-06-01T12:00:00.000Z",
       "status": "live"
@@ -304,8 +291,8 @@ ledger limits, computed once at ingestion:
 
 | Offer part | Ledger limit | `expiresAt` contribution |
 |---|---|---|
-| Shielded (zswap) inputs | **No TTL.** The input proves against a Merkle root, which ledger 8 keeps in `past_roots` for 1 h after the last block in which it was current | root last-seen + `ROOT_WINDOW_SECONDS` (a conservative floor) |
-| Intents (unshielded legs, fee intents) | **Mandatory TTL**, valid while `tblock ≤ ttl ≤ tblock + global_ttl` (14 days) | the earliest intent `ttl` |
+| Shielded (zswap) inputs | **No TTL.** The input proves against a Merkle root, which the ledger keeps in `past_roots` for `global_ttl` (14 days) after the last block in which it was current | root last-seen + `ROOT_WINDOW_SECONDS` (a conservative floor) |
+| Intents (unshielded legs, fee intents) | **Mandatory TTL**, valid while `tblock ≤ ttl ≤ tblock + global_ttl` | the earliest intent `ttl` |
 | DUST fee spends | valid while `ctime ≤ tblock ≤ ctime + dust_grace_period` (3 h) | earliest `ctime` + grace (such offers cannot pass validation today) |
 
 A mixed transaction gets the minimum. There is no kernel-side cap on top;
@@ -354,11 +341,11 @@ curl "http://host:9999/v1/offers/9f2c4a...e1"
   "offerId": "9f2c4a…e1",
   "offerBech32": "swapoffer1...",
   "blockHeight": "1281600",
-  "ttlSeconds": "3600",
+  "ttlSeconds": "1209600",
   "computed": {
     "gives": [ { "token": "00…00", "amount": "1000000", "type": "UNSHIELDED" } ],
     "wants": [ { "token": "70ce…69", "amount": "500000", "type": "SHIELDED" } ],
-    "expiresAt": "2026-06-01T13:00:00.000Z",
+    "expiresAt": "2026-06-15T12:00:00.000Z",
     "inputNullifiers": ["7c1d9b…"],
     "firstSeenAt": "2026-06-01T12:00:00.000Z",
     "status": "live"
@@ -604,7 +591,7 @@ a basket does not appear as a market at all.
 #### `GET /v1/known-tokens`
 
 > **⚠️ Mixed registry endpoint — do not treat the endpoint itself as a source of truth.**
-> Fresh databases contain six records pinned from the external canonical test-token registry, while local operators may also add manually curated rows. Use the published registry revision when provenance matters.
+> A fresh database lists NIGHT only. Other rows come from the network's registry import or from operators adding curated rows. Use the published registry revision when provenance matters.
 
 All registered token colors.
 
@@ -612,32 +599,27 @@ All registered token colors.
 curl http://host:9999/v1/known-tokens
 ```
 
+A fresh database:
+
 ```json
 [
-  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded", "decimals": 6, "asset_id": "midnight-3" },
-  { "id": 2, "token_color": "8fac382b0d91ad68cf3e2479bf4d21a127f187b83151a11773a8b04bd4576819", "name": "SNIGHT", "kind": "shielded", "decimals": 6, "asset_id": "midnight-3" },
-  { "id": 3, "token_color": "b11bd7c7ac94a584ef66e53e1ecd91a304cc452a5ad67399ae82e5919d2058dc", "name": "TWBTC", "kind": "shielded", "decimals": 8, "asset_id": "bitcoin" }
+  { "id": 1, "token_color": "0000000000000000000000000000000000000000000000000000000000000000", "name": "NIGHT", "kind": "unshielded", "decimals": 6, "asset_id": "midnight-3" }
 ]
 ```
 
-`NIGHT`, `SNIGHT`, `TWBTC`, `TWETH`, `TWUSDC`, `TWUSDM`, `UTWUSDC` and
-`UTWBTC` are seeded by the schema. The six `TW*`/`UTW*` records exactly match
-the pinned ready Preprod registry revision
-`ebd5eaba58ab2a7789d1e13cac3c1cc793f163e2e6f372f7839029c7f2d9f4bc`;
-their complete source fixture and checksum are in
-`packages/database/fixtures/`. The optional `start.dev.ts` import can replace
-those six rows in an existing database for an explicitly selected network. A
-failed import preserves all current values, and editing `000-init.sql` alone
-never changes an already initialized database.
+`NIGHT` is the only row the schema seeds. On preview and preprod the
+token-registry one-shot (`entrypoint-token-registry.sh`, or the optional
+`start.dev.ts` step) adds the network's six canonical `TW*`/`UTW*` records,
+but only from a registry file labelled for ledger 9 (`midnight-2.x`); a
+1.x-labelled or missing file is skipped with a warning and imports nothing.
+Mainnet has no token source yet, so it lists NIGHT only. A failed import
+preserves all current values.
 
 `SNIGHT` — the
 [shielded-night](https://github.com/effectstream/shielded-night) wrapper, NIGHT
-held as a shielded token — is the one seed whose colour depends on the network,
-because it derives from the contract address. The schema seeds **Preprod**
-(`8fac382b…6819`, shown above); Preview is `793c29c9…f99c`, and `mainnet` has
-no deployment yet. An operator selecting another network patches that separate
-row before a fresh database is created, or updates it deliberately in an
-existing database. It carries NIGHT's `decimals` and prices off the same asset,
+held as a shielded token — is not seeded: its colour derives from the wrapper
+contract's address and differs per network. Register it deliberately where a
+deployment exists; it carries NIGHT's `decimals` and prices off the same asset,
 so equal base units are at par.
 
 Token colors are **not** auto-registered when an offer is indexed. A color
@@ -743,7 +725,7 @@ current HTTP route does not emit directly.
 | `NULLIFIER_SPENT` | A shielded input coin is already spent on Midnight |
 | `UTXO_SPENT` | Optional validator callback found an already-spent unshielded UTXO; the HTTP route folds this and unknown UTXOs into `UTXO_NOT_LIVE` |
 | `UTXO_UNKNOWN` | Optional validator callback found a UTXO never created on-chain; the HTTP route folds this into `UTXO_NOT_LIVE` |
-| `ROOT_UNKNOWN` | The shielded input proves against a Merkle root outside the `ROOT_WINDOW_SECONDS` retention window |
+| `ROOT_UNKNOWN` | The shielded input proves against a Merkle root outside the `ROOT_WINDOW_SECONDS` retention window (default 14 days = the ledger's `global_ttl`) |
 | `ROOT_UNREADABLE` | The input's Merkle root could not be extracted (fail-closed) |
 | `DUPLICATE` | Optional validator dedup callback found an existing identity; production HTTP/STM content dedup reports `DUPLICATE_OFFER` instead |
 
@@ -839,9 +821,7 @@ Validation consults the node's local state only — no live RPC calls are made. 
 
 > **Breaking compatibility note:** quote amounts that were previously sanitized
 > (for example `1_000` or `-100`) now return `400`; send canonical decimal u256
-> strings. Solver-level publication now requires bearer authentication plus a
-> positive `version`, and `pairs` is interpreted as a complete replacement.
-> Solver-backed `/v1/quote` precedence is default-off until explicitly enabled.
+> strings.
 
 #### `GET /v1/prices?tokens=<color>[,<color>…]`
 
@@ -1019,11 +999,10 @@ curl "http://host:9999/v1/quote?from_token=0000...0000&to_token=70ce...b569&from
 | `from_source`, `to_source` | Per-leg provenance: `feed`, `seed`, `fixed`, `manual`, `fallback`, or `demo-fallback`. A UI should label the last two as demo rates |
 | `prices_updated_at` | The **older** of the two legs' `updated_at` — a quote is only as fresh as its stalest side. `null` when either leg is `demo-fallback` |
 
-This backend holds no solver state, so nothing else can win the quote. Solver
-ladders are pushed to the Midnight Intents relay, which does its own
-interpolation; the backend's job is the indexed book and its reads. What the
-solver publishes, and what it will settle, is described in
-[The COW solver](#the-cow-solver-midnight-intents-side) below.
+This backend holds no solver state, so nothing else can win the quote. A
+solver such as the COW solver pushes its ladders to the Midnight Intents relay,
+which does its own interpolation; the backend's job is the indexed book and its
+reads (see [The COW solver](#the-cow-solver) below).
 
 ---
 
@@ -1166,7 +1145,11 @@ correct consumer of this stream already implements it.
 
 #### `GET /v1/midnight/config`
 
-Public Midnight network configuration the browser wallet needs. Never includes secrets.
+Public Midnight network configuration the browser wallet needs. Never includes
+secrets: every URL passes through effectstream's `redactBlockfrostProjectId`,
+so a Blockfrost endpoint shows `project_id=<redacted>` instead of the
+operator's project token. A client that dials these URLs brings its own
+Blockfrost token for the network.
 
 ```bash
 curl http://host:9999/v1/midnight/config
@@ -1174,10 +1157,10 @@ curl http://host:9999/v1/midnight/config
 
 ```json
 {
-  "indexerUri":      "https://indexer.midnight.network:8088/graphql",
-  "indexerWsUri":    "wss://indexer.midnight.network:8088/graphql",
-  "proofServerUri":  "https://proof.midnight.network",
-  "networkId":       "preview"
+  "indexerUri":      "https://midnight-preprod.blockfrost.io/api/v0?project_id=<redacted>",
+  "indexerWsUri":    "wss://midnight-preprod.blockfrost.io/api/v0/ws?project_id=<redacted>",
+  "proofServerUri":  "http://proof-server:6300",
+  "networkId":       "preprod"
 }
 ```
 
@@ -1185,93 +1168,16 @@ The endpoint remains available without any application contract metadata.
 
 ---
 
-## The COW solver (Midnight Intents side)
+## The COW solver
 
-The solver is **not** part of this HTTP API and listens on no port. It is a
-separate process (`bun run start:solver`; see README → "Running the COW solver")
-that consumes this backend as a client — `GET /v1/offers`, `GET /v1/offers/updates`,
-`POST /v1/offers/files`, `GET /v1/health/sync` — and connects **outbound** to a
-Midnight Intents relay, where it publishes price ladders and settles the swap
-jobs the relay dispatches to it. Neither `bun run dev` nor `bun run start:mainnet`
-launches it.
-
-**Topology.** Kernel (node), batcher and solver are three independent processes.
-The kernel indexes and serves offers; the batcher publishes blobs to Celestia;
-the solver mirrors the kernel's book and owns its own wallet, journal and relay
-connection. A container deployment gives each of them its own service, with the
-solver depending on the kernel and relay rather than starting them.
-
-**Supported domain.** Midnight 1.x / ledger-v8 only. The solver settles offers
-that normalize to **one shielded give leg and one shielded want leg** with
-distinct token colors and positive amounts, using at most **8 complete maker
-files per job**. Unshielded legs, mixed value layers, multi-leg baskets, and
-Midnight 2.x are refused before admission. A maker file is never partially
-consumed.
-
-**Fees.** Maker offers are constructed with `payFees:false` (see
-[Encoding offers](#encoding-offers-swapoffer1)), so a maker's offer pays no fee
-itself. The settling side pays: for a relay job, the solver sizes and funds the
-DUST for the transaction it submits, bounded by the `SOLVER_DUST_*` admission
-budget. Sizing that fee requires **no swap-token inventory**: the taker's half is
-modelled by a synthetic transaction built from ledger primitives with the taker
-half's shape, because the DUST fee is a function of transaction structure only,
-not of any coin's value, token type or owner. Earlier builds spent — and
-immediately reverted — the job's full `amountIn` of the input token out of the
-solver's own wallet to do this. The solver still needs NIGHT/DUST for the fee
-itself. See `SOLVER_FEE_SIZING_TAKER_INPUTS` below.
-
-**Quotes are indicative.** A published ladder is authenticated market data for
-the relay's interpolation, not a reservation: nothing is held, and admission is
-re-decided at job time against the current book and policy. The kernel's
-`GET /v1/quote` is a separate, `token_prices`-backed contract and is not replaced
-by solver data.
-
-**A job's `amountOut` is the taker's exact demand, and may be below the quote.**
-For the job's input, the solver chooses the single advertised whole-file
-combination whose genuine threshold supports the demand. Every selected file
-executes unchanged and in full:
-
-| Case | Disposition |
-|---|---|
-| Selected files require exactly `amountIn` and supply exactly `amountOut` | Settles with no swap-token surplus. |
-| Selected files require less than `amountIn` | Excess taker input is paid to the solver's shielded address. |
-| Selected files supply more than `amountOut` | Excess maker output is paid to the solver's shielded address. |
-| Selected files supply less than `amountOut` | Refused; the solver never pays the shortfall from inventory. |
-
-Out-of-ladder sizes, non-positive demands, stale routes, disallowed pairs,
-below-minimum outputs, incompatible maker sets, exhausted resource limits and
-DUST-budget violations remain refusals.
-
-**Published liquidity comes only from the live Offer Files book.** For each
-directed pair, the solver searches all affordable compatible combinations of at
-most eight complete files and publishes every strict improvement in maximum
-maker output. Flat sections end one input base unit before the next improvement.
-The last genuine threshold has one fixed flat endpoint at 10 times its input;
-that synthetic point never creates maker liquidity. Search, numeric, freshness,
-64-wire-point and 64-pair limits fail closed by withholding or withdrawing the
-affected pair.
-
-Swap-token wallet balances do not affect published prices or route choice. The
-solver contributes empty swap-token input maps and needs only NIGHT/DUST for
-fees. Excess taker input and excess maker output are both explicit settlement
-outputs to the solver.
-
-**Breaking configuration change.** `SOLVER_LADDER_CONFIG`, manual
-`pairs[].levels`, `SOLVER_ENABLE_PATH_B`, `SOLVER_ENABLE_CYCLES`, and
-`SOLVER_ENABLE_RESIDUAL_TOPUPS` were removed. Their presence is an upgrade error;
-delete them instead of replacing them with another pricing source.
-
-**`SOLVER_FEE_SIZING_TAKER_INPUTS`** (optional; integer `[1, 64]`, default `1`).
-The relay dispatches a numeric job and merges the taker's own half, so the solver
-cannot know how many zswap inputs the taker's coin selection produced. This is
-how many it models when sizing the fee. Measured coverage: a stand-in modelling
-`n` inputs funds a real taker half of up to **`n + 2`** inputs. Each extra
-modelled input costs **12–14 %** more DUST, actually spent (not merely reserved),
-and consumes `SOLVER_DUST_MAX_PER_JOB` / `SOLVER_DUST_MAX_PER_WINDOW` budget
-faster. Under-modelling is an availability failure — the chain rejects the merged
-transaction, the relay reports `submit-failed`, and the solver's contribution is
-reverted — never a loss of funds. A malformed value is a listed `start:solver`
-launch problem; the startup banner prints the effective model and its coverage.
+The COW solver is not part of this repository or of this HTTP API. It lives in
+[effectstream/cow-solver](https://github.com/effectstream/cow-solver), with its
+relay, monitor site, configuration and pricing and settlement rules. It
+consumes this backend as a client — `GET /v1/offers`, `GET /v1/offers/updates`,
+`POST /v1/offers/files`, `GET /v1/health/sync` — through
+`@zswap-da/kernel-client` and `@zswap-da/api-contracts`, and connects
+**outbound** to a Midnight Intents relay. Neither `bun run dev` nor the
+public-network entries (`main.public.ts`, `batcher.public.ts`) launch it.
 
 ---
 

@@ -1,5 +1,5 @@
-import { Transaction } from "@midnight-ntwrk/ledger-v8";
-import type { UnprovenTransaction } from "@midnight-ntwrk/ledger-v8";
+import { Transaction } from "@midnightntwrk/ledger-v9";
+import type { UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles, OFFER_HRP } from "@effectstream/mip-zswap-offer/mip5";
 import { P2pAtomicSwaps } from "@effectstream/mip-zswap-offer/mip6";
 
@@ -63,8 +63,8 @@ function errMsg(e: unknown): string {
  * The reject code for a `wellFormed` failure message. The ledger's intent TTL
  * check (`ttl_check_weak`, run first in `wellFormed`) reports "Intent TTL has
  * expired" / "Intent TTL is too far in the future" (midnight-ledger
- * `ledger-8.1.0` ledger/src/error.rs:1116,1121); those get their own codes
- * instead of PROOF_INVALID (00056 FR-004). Exported for tests.
+ * `ledger-9.1.0.0` ledger/src/error.rs:1173-1182); those get their own
+ * codes instead of PROOF_INVALID (00056 FR-004). Exported for tests.
  */
 export function wellFormedFailureCode(message: string): OfferRejectCode {
   if (/Intent TTL has expired/i.test(message)) return "INTENT_TTL_EXPIRED";
@@ -106,13 +106,32 @@ function maxEncodedChars(maxBytes: number): number {
  */
 export function verifyOfferCrypto(
   tx: UnprovenTransaction,
-  opts: Pick<ValidateOpts, "refState" | "tblock">,
-): { ok: true } | { ok: false; code: OfferRejectCode; reason: string } {
+  opts: Pick<ValidateOpts, "refState" | "tblock" | "contractMakerRetry">,
+): { ok: true; contractMaker?: boolean } | { ok: false; code: OfferRejectCode; reason: string } {
   try {
     tx.wellFormed(opts.refState, buildStrictness(), opts.tblock);
     return { ok: true };
   } catch (e) {
     const m = errMsg(e);
+    // Contract-maker lane (see ValidateOpts.contractMakerRetry): strict ran
+    // first, and ONLY the exact missing-contract failure class widens — the
+    // reference state (parameters only, no contracts) cannot hold the maker
+    // contract's verifier keys.
+    // Native proofs and signatures are still verified on the retry; the
+    // contract-call proof is verified by the node at settlement.
+    if (opts.contractMakerRetry && /non-existant contract|non-existent contract/i.test(m)) {
+      try {
+        tx.wellFormed(opts.refState, buildStrictness({ verifyContractProofs: false }), opts.tblock);
+        return { ok: true, contractMaker: true };
+      } catch (e2) {
+        const m2 = errMsg(e2);
+        return {
+          ok: false,
+          code: wellFormedFailureCode(m2),
+          reason: `wellFormed failed (contract-maker retry): ${m2}`,
+        };
+      }
+    }
     return {
       ok: false,
       code: wellFormedFailureCode(m),
@@ -203,7 +222,7 @@ export function validateZswapOfferBytes(
   // ── 3. Deserialize (Lace-shaped <signature, proof, binding>) ──
   let tx: UnprovenTransaction;
   try {
-    // `as unknown as`, matching `reconstructOffer` in solver-core/api-client.ts:
+    // `as unknown as`, matching `reconstructOffer` in kernel-client/api-client.ts:
     // the markers deserialize the PROVEN shape (ledger `Transaction<SignatureEnabled,
     // Proof, Binding>`), while `UnprovenTransaction` is this repo's alias for the
     // offer shape it then inspects. Without the `unknown` hop the assignment's

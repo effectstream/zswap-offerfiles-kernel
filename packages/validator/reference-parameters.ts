@@ -1,30 +1,38 @@
-// Pinned ledger parameters per Midnight network — the reference state the
-// offer validator checks `Transaction.wellFormed` against (00056 FR-001).
+// Pinned ledger parameters per Midnight network: the reference state the
+// offer validator checks `Transaction.wellFormed` against.
 //
 // Why pinned bytes and not a live read: the state machine must reach the same
 // verdict on every kernel and on every replay, so the parameters it validates
-// with are part of the code, selected by MIDNIGHT_NETWORK_ID. `global_ttl` is
-// static per network (changing it is a hard fork), and it is the only
-// parameter the validator's checks depend on today (the intent TTL bound,
-// `tblock <= ttl <= tblock + global_ttl`, midnight-ledger `ledger-8.1.0`
-// ledger/src/verify.rs:1664-1682). The DUST grace period is read from here
-// too (state-machine expiry derivation).
+// with are part of the code, selected by MIDNIGHT_NETWORK_ID. The validator's
+// checks depend on `global_ttl`, the intent TTL bound
+// `tblock <= ttl <= tblock + global_ttl` (midnight-ledger `ledger-9.1.0.0`,
+// ledger/src/verify.rs:641-645 and :1731-1750). The state machine also reads
+// the DUST grace period from here (offer expiry derivation).
 //
 // Why not `LedgerState.blank(networkId)`: a blank state carries the ledger's
-// INITIAL_PARAMETERS, whose `global_ttl` is 3600 s, so a validator on a blank
-// state refuses every intent TTL more than one hour ahead, although every
-// network accepts up to 1,209,600 s (14 days).
+// INITIAL_PARAMETERS, whose `global_ttl` is 3600 s
+// (ledger/src/structure.rs:1371), so a validator on a blank state refuses
+// every intent TTL more than one hour ahead, although every network accepts
+// up to 1,209,600 s (14 days).
 //
 // `LedgerParameters` has no public constructor, so each entry is the
-// serialized `LedgerParameters` (`midnight:ledger-parameters[v5]:` — ledger 8)
-// with its provenance. All decode to `global_ttl` = 1,209,600 s and
-// `dust_grace_period` = 10,800 s, and differ only in their fee prices
-// (reference-parameters.test.ts pins this).
+// serialized `LedgerParameters` (`midnight:ledger-parameters[v8]:`, ledger 9)
+// with its provenance. Every entry decodes to `global_ttl` = 1,209,600 s and
+// `dust_grace_period` = 10,800 s (reference-parameters.test.ts pins this).
 //
-// Only ledger-8 networks can appear here. Stagenet runs ledger 9
-// (`ledger-parameters[v8]`), whose bytes and transactions this ledger-v8 build
-// cannot read. An id without an entry fails at startup
-// (refstate.ts `requireReferenceParameters`).
+// A live chain's parameters change from block to block in `fee_prices` only:
+// the ledger moves the four price factors after each block. A snapshot is
+// therefore "the parameters at block N", and its sha256 equals the live
+// chain's only while those factors stay put. Fee prices play no part in the
+// validator's verdicts (open offers are checked with balancing off).
+//
+// An id without an entry fails at startup (refstate.ts
+// `requireReferenceParameters`). A network the kernel supports but has not
+// pinned yet is listed in UNPINNED_REFERENCE_PARAMETERS below with the reason,
+// so its startup error says "not pinned yet" instead of "unknown network".
+//
+// This module has no imports on purpose: the startup profiles read it before
+// the ledger WASM or midnight-env is loaded.
 
 export interface ReferenceParametersSnapshot {
   /** Midnight network id (`MIDNIGHT_NETWORK_ID`). */
@@ -37,15 +45,26 @@ export interface ReferenceParametersSnapshot {
   readonly source: string;
 }
 
+/**
+ * Keyed by network id, in the order the startup error lists them. Live
+ * networks name the block they were read at; re-derive one with the indexer
+ * query `{ block(offset: { height: N }) { hash ledgerParameters } }` or the
+ * node RPC `state_call("MidnightRuntimeApi_get_ledger_parameters", "0x",
+ * <block hash>)` (a SCALE `Ok(Vec<u8>)` around the same bytes).
+ */
 export const REFERENCE_PARAMETERS: Readonly<Record<string, ReferenceParametersSnapshot>> = Object.freeze({
-  // The local devnet's node: midnight-node tag `node-1.0.0`,
-  // `res/genesis/genesis_state_undeployed.mn` (sha256
-  // bed6ed25287753e4fb7475ce8f13e9f423df87dc458a42503e1993de81cf6556,
-  // `ledger-state[v13]`), `LedgerState.deserialize(...).parameters.serialize()`.
+  // The local devnet. midnight-node `2.1.0-806ff70-ledger9final`
+  // (effectstream/binaries release 0.3.120, built from midnight-node
+  // `release/node-2.1.0` @ 806ff702f74908503c674035f478eb43d9539239) compiles
+  // `res/genesis/genesis_state_undeployed.mn` into its dev chain spec; the
+  // linux arm64 and amd64 binaries both embed that file byte for byte. The
+  // entry is `LedgerState.deserialize(file).parameters.serialize()`. It
+  // differs from the public networks' parameters in `max_contract_metadata_size`
+  // (10,485,760 instead of 50,000) and in the fee prices.
   undeployed: Object.freeze({
     networkId: "undeployed",
     hex:
-    "6d69646e696768743a6c65646765722d706172616d65746572735b76355d3ac64a0600008e0a8c0072618b007eed6000" +
+    "6d69646e696768743a6c65646765722d706172616d65746572735b76385d3ac64a0600008e0a8c0072618b007eed6000" +
     "4ec66a008ef07200feaf7200f6d97c00a247090156426700c647eb00161f30005a1469008a7ab1005e5f74005298b100" +
     "762490008abe8d008e4d7300d208840000466dba00e507fed717b0b25a040000163c060000da4f5000d2726f009e0e65" +
     "0066552a0015065ec12a000d068abc7700d27877000a1c10007ec71a00ba0cab000afb1800567e9300f200100052dd1a" +
@@ -55,24 +74,29 @@ export const REFERENCE_PARAMETERS: Readonly<Record<string, ReferenceParametersSn
     "0c03fe61940286150100314a1e86fa01aa46010049209e8b6402d6606e0389fc00e2e21f029d4c3d427e550703e6704c" +
     "0a0e910200ce3a140100b28587038a891f17226ffc05d6f96506ea8201003a2a43010082f361028aa450187e622b066e" +
     "3f060002ff3217d54926142a420320c6305b034df61ec3f2051601aa90d15012f316001e3e791e82759d140076447102" +
-    "ea503eb0bae1912312eea6549608753602127a0002fd431410000284d71700000200400002127a000700d6117e030b00" +
-    "204aa9d1010b00204aa9d10102093d00420d030002c2eb0b000000000000008000000000000000000700f2052a012d81" +
-    "302a0000000000000000000000000000f08c38a72a94c4fc090000000000000028e118e559ee74fd0000000000000000" +
-    "6d9361e01d12e0ff0000000000000000d8667893958031ff000000000000000093240da7f27e79030100000000000000" +
-    "007512000000000000000000000000000000000000000040000000000000000000000000000000006400000000000000" +
-    "d107a10f",
-    sha256: "8d0aa065806432fadb7f2eeb6eacaaafba4aef8f7851c7c01c8bda9c7d6d6474",
+    "ea503eb0bae1912312eea6549608753602127a0002fd4314000284d71700000000000000000040000000000000000000" +
+    "000000000000000100000000000000000000000000000001000000000000000200400002127a000700d6117e030b0020" +
+    "4aa9d1010b00204aa9d10102093d00420d030002c2eb0b00000000000000800000000000000000020080020700f2052a" +
+    "012d81302a000000000000000000000000000000000000000000000a0000000000000025d4d53c1379effc0000000000" +
+    "000000ccc0fdbed66917ff000000000000000019d3a8865c58ac010100000000000000f597837db9c44c020100000000" +
+    "000000007512000000000000000000000000000000000000000040000000000000000000000000000000006400000000" +
+    "000000d107a10f00000000000000000a00000000000000",
+    sha256: "d7d5f27e5dba936f21c14a8a8a1d5128c65f17fd09b2958c5b3c3593a94cd708",
     source:
-      "midnight-node node-1.0.0 res/genesis/genesis_state_undeployed.mn " +
-      "(sha256 bed6ed25287753e4fb7475ce8f13e9f423df87dc458a42503e1993de81cf6556), .parameters",
+      "midnight-node 2.1.0-806ff70-ledger9final (effectstream/binaries 0.3.120; source " +
+      "release/node-2.1.0 @ 806ff702f74908503c674035f478eb43d9539239) " +
+      "res/genesis/genesis_state_undeployed.mn " +
+      "(sha256 203123b300a29319040208b420251738e1c1b5e01c644ea67d87da9b706df4d2, ledger-state[v18]), " +
+      ".parameters, read 2026-11-09",
   }),
-  // The live chain: preview indexer `{ block { ledgerParameters } }` at block
-  // 1,043,071 (efe8a4cfacee0226f9d62162b7fce658bce9f4c0444526a28ae30950646fe258), 2026-09-27T02:39:48Z,
-  // protocol version 1000000.
+  // The public preview chain (node 2.1.101, runtime spec 2001100), read from
+  // the Midnight-hosted indexer at its tip on 2026-11-09. The node RPC's
+  // `MidnightRuntimeApi_get_ledger_parameters` at the same block hash
+  // (https://rpc.preview.midnight.network) returned the same bytes.
   preview: Object.freeze({
     networkId: "preview",
     hex:
-    "6d69646e696768743a6c65646765722d706172616d65746572735b76355d3ac64a0600008e0a8c0072618b007eed6000" +
+    "6d69646e696768743a6c65646765722d706172616d65746572735b76385d3ac64a0600008e0a8c0072618b007eed6000" +
     "4ec66a008ef07200feaf7200f6d97c00a247090156426700c647eb00161f30005a1469008a7ab1005e5f74005298b100" +
     "762490008abe8d008e4d7300d208840000466dba00e507fed717b0b25a040000163c060000da4f5000d2726f009e0e65" +
     "0066552a0015065ec12a000d068abc7700d27877000a1c10007ec71a00ba0cab000afb1800567e9300f200100052dd1a" +
@@ -82,24 +106,28 @@ export const REFERENCE_PARAMETERS: Readonly<Record<string, ReferenceParametersSn
     "0c03fe61940286150100314a1e86fa01aa46010049209e8b6402d6606e0389fc00e2e21f029d4c3d427e550703e6704c" +
     "0a0e910200ce3a140100b28587038a891f17226ffc05d6f96506ea8201003a2a43010082f361028aa450187e622b066e" +
     "3f060002ff3217d54926142a420320c6305b034df61ec3f2051601aa90d15012f316001e3e791e82759d140076447102" +
-    "ea503eb0bae1912312eea6549608753602127a0002fd431410000284d71700000200400002127a000700d6117e030b00" +
-    "204aa9d1010b00204aa9d10102093d00420d030002c2eb0b000000000000008000000000000000000700f2052a012d81" +
-    "302a0000000000000000000000000000640000000000000000000000000000007d832466d37737910000000000000000" +
-    "7d832466d3773791000000000000000017eb249b0b31b3980000000000000000f10d92984ddfdd440200000000000000" +
-    "007512000000000000000000000000000000000000000040000000000000000000000000000000006400000000000000" +
-    "d107a10f",
-    sha256: "1e8997eea5742d76136b3e3ff078755d693716c758438dd69afcca80078491ab",
+    "ea503eb0bae1912312eea6549608753602127a0002fd4314000284d71700000000000000000040000000000000000000" +
+    "000000000000000100000000000000000000000000000001000000000000000200400002127a000700d6117e030b0020" +
+    "4aa9d1010b00204aa9d10102093d00420d030002c2eb0b00000000000000800000000000000000420d03000700f2052a" +
+    "012d81302a000000000000000000000000000000000000000000000a000000000000009881701be6d127920000000000" +
+    "0000009881701be6d12792000000000000000071f65c5b9b14119300000000000000005f06c26d98479f480200000000" +
+    "000000007512000000000000000000000000000000000000000040000000000000000000000000000000006400000000" +
+    "000000d107a10f00000000000000000a00000000000000",
+    sha256: "a6e7a3192b21b75725038921a88074211fc75bd56106851a8797c8d1f579a4a1",
     source:
-      "preview indexer https://indexer.preview.midnight.network/api/v3/graphql block 1043071 " +
-      "(efe8a4cfacee0226f9d62162b7fce658bce9f4c0444526a28ae30950646fe258), ledgerParameters, 2026-09-27T02:39:48Z",
+      "preview indexer https://indexer.preview.midnight.network/api/v4/graphql block 40171 " +
+      "(ef0ad3d78498a5bf0f4573f489f22210ca77f7d6cb0f2c57efe940e25d9ab504, 2026-11-09T20:02:06Z), " +
+      "ledgerParameters, read 2026-11-09",
   }),
-  // The live chain: preprod indexer `{ block { ledgerParameters } }` at block
-  // 2,726,518 (070b54894a6bef6fb6a22fa5c8333dbe61058c89425bb5e96be60e9ec05178cd), 2026-09-27T02:39:42Z,
-  // protocol version 1000300.
+  // The public preprod chain (node 2.1.101, runtime spec 2001100), read from
+  // the Blockfrost indexer at its tip on 2026-11-09 (the endpoint takes a
+  // per-project token in `project_id`; it is not part of the provenance). The
+  // Blockfrost node RPC's `MidnightRuntimeApi_get_ledger_parameters` at the
+  // same block hash returned the same bytes.
   preprod: Object.freeze({
     networkId: "preprod",
     hex:
-    "6d69646e696768743a6c65646765722d706172616d65746572735b76355d3ac64a0600008e0a8c0072618b007eed6000" +
+    "6d69646e696768743a6c65646765722d706172616d65746572735b76385d3ac64a0600008e0a8c0072618b007eed6000" +
     "4ec66a008ef07200feaf7200f6d97c00a247090156426700c647eb00161f30005a1469008a7ab1005e5f74005298b100" +
     "762490008abe8d008e4d7300d208840000466dba00e507fed717b0b25a040000163c060000da4f5000d2726f009e0e65" +
     "0066552a0015065ec12a000d068abc7700d27877000a1c10007ec71a00ba0cab000afb1800567e9300f200100052dd1a" +
@@ -109,42 +137,38 @@ export const REFERENCE_PARAMETERS: Readonly<Record<string, ReferenceParametersSn
     "0c03fe61940286150100314a1e86fa01aa46010049209e8b6402d6606e0389fc00e2e21f029d4c3d427e550703e6704c" +
     "0a0e910200ce3a140100b28587038a891f17226ffc05d6f96506ea8201003a2a43010082f361028aa450187e622b066e" +
     "3f060002ff3217d54926142a420320c6305b034df61ec3f2051601aa90d15012f316001e3e791e82759d140076447102" +
-    "ea503eb0bae1912312eea6549608753602127a0002fd431410000284d71700000200400002127a000700d6117e030b00" +
-    "204aa9d1010b00204aa9d10102093d00420d030002c2eb0b000000000000008000000000000000000700f2052a012d81" +
-    "302a00000000000000000000000000006400000000000000000000000000000049922449922449920000000000000000" +
-    "499224499224499200000000000000004992244992244992000000000000000026499224499224490200000000000000" +
-    "007512000000000000000000000000000000000000000040000000000000000000000000000000006400000000000000" +
-    "d107a10f",
-    sha256: "e9ed712e6e7a5aa8f24bee63fb755fd725dc39d88fa555ddb1cad2207f025bcc",
+    "ea503eb0bae1912312eea6549608753602127a0002fd4314000284d71700000000000000000040000000000000000000" +
+    "000000000000000100000000000000000000000000000001000000000000000200400002127a000700d6117e030b0020" +
+    "4aa9d1010b00204aa9d10102093d00420d030002c2eb0b00000000000000800000000000000000420d03000700f2052a" +
+    "012d81302a000000000000000000000000000000000000000000000a00000000000000420e6112fdae40700000000000" +
+    "00000061f9a57e66560398000000000000000058bf7425a83eb936010000000000000006398449f4bb02c10100000000" +
+    "000000007512000000000000000000000000000000000000000040000000000000000000000000000000006400000000" +
+    "000000d107a10f00000000000000000a00000000000000",
+    sha256: "2d96bd99f58d85d54dd6474a5e391405fe0ddbacf4dcebff78f7476b0f7daaf3",
     source:
-      "preprod indexer https://indexer.preprod.midnight.network/api/v3/graphql block 2726518 " +
-      "(070b54894a6bef6fb6a22fa5c8333dbe61058c89425bb5e96be60e9ec05178cd), ledgerParameters, 2026-09-27T02:39:42Z",
+      "preprod indexer https://midnight-preprod.blockfrost.io/api/v0 block 3352707 " +
+      "(a0e9d746493144e8c719804f37e5ae7165d5a3fd87c2d6f322f3b5f04b8ee508, 2026-11-09T20:01:30Z), " +
+      "ledgerParameters, read 2026-11-09",
   }),
-  // The live chain: mainnet indexer `{ block { ledgerParameters } }` at block
-  // 2,759,513 (7a2ab3b4aca154b386d4499f00367926fa783c25c6b764483d719bab75e1c2a8), 2026-09-27T02:39:48Z,
-  // protocol version 1000300.
-  mainnet: Object.freeze({
-    networkId: "mainnet",
-    hex:
-    "6d69646e696768743a6c65646765722d706172616d65746572735b76355d3ac64a0600008e0a8c0072618b007eed6000" +
-    "4ec66a008ef07200feaf7200f6d97c00a247090156426700c647eb00161f30005a1469008a7ab1005e5f74005298b100" +
-    "762490008abe8d008e4d7300d208840000466dba00e507fed717b0b25a040000163c060000da4f5000d2726f009e0e65" +
-    "0066552a0015065ec12a000d068abc7700d27877000a1c10007ec71a00ba0cab000afb1800567e9300f200100052dd1a" +
-    "005e58ab00aa0f19007a1094005aee26001c624d060000824c9500763c8c000a4b7600e96df69ca80015660a5a81019d" +
-    "64004e4f2f0249c07212bd00004a586c0392ab6e175ee1200251c10241bd0000f2613903421045170a87e60012d65f00" +
-    "9248a200b6e55b00664599022a1a01005aa30100b622240200b56bd2f661026e4d760385fa00fe75470259f5ed236628" +
-    "0c03fe61940286150100314a1e86fa01aa46010049209e8b6402d6606e0389fc00e2e21f029d4c3d427e550703e6704c" +
-    "0a0e910200ce3a140100b28587038a891f17226ffc05d6f96506ea8201003a2a43010082f361028aa450187e622b066e" +
-    "3f060002ff3217d54926142a420320c6305b034df61ec3f2051601aa90d15012f316001e3e791e82759d140076447102" +
-    "ea503eb0bae1912312eea6549608753602127a0002fd431410000284d71700000200400002127a000700d6117e030b00" +
-    "204aa9d1010b00204aa9d10102093d00420d030002c2eb0b000000000000008000000000000000000700f2052a012d81" +
-    "302a00000000000000000000000000006400000000000000000000000000000032de9259117f34920000000000000000" +
-    "32de9259117f34920000000000000000d7ca8ee69705c5920000000000000000c6784b6645fcd1480200000000000000" +
-    "007512000000000000000000000000000000000000000040000000000000000000000000000000006400000000000000" +
-    "d107a10f",
-    sha256: "1d1b909eb7682e371c2d7898f341010a9af436ba0f7fa90fd491150fdba06c48",
-    source:
-      "mainnet indexer https://indexer.mainnet.midnight.network/api/v3/graphql block 2759513 " +
-      "(7a2ab3b4aca154b386d4499f00367926fa783c25c6b764483d719bab75e1c2a8), ledgerParameters, 2026-09-27T02:39:48Z",
-  }),
+  // TODO(mainnet): pin mainnet's ledger-9 parameters here. They are not
+  // pinned yet. The mainnet genesis in midnight-node is a ledger-8 state
+  // (`ledger-state[v13]`, which this ledger-v9 build refuses), so the ledger-9
+  // bytes exist only on the live chain: the node runtime API
+  // `MidnightRuntimeApi_get_ledger_parameters`, called with `state_call` at a
+  // block hash, returns them. Add a `mainnet` entry with the block hash,
+  // height and date of the read and the sha256 of the bytes, and remove
+  // `mainnet` from UNPINNED_REFERENCE_PARAMETERS. Until then
+  // MIDNIGHT_NETWORK_ID=mainnet stops at startup (node and batcher).
+});
+
+/**
+ * Networks the kernel supports whose parameters are not pinned yet, with the
+ * reason. Every service refuses to start on them, naming the reason, instead
+ * of reporting an unknown network. An id is never both here and in
+ * REFERENCE_PARAMETERS.
+ */
+export const UNPINNED_REFERENCE_PARAMETERS: Readonly<Record<string, string>> = Object.freeze({
+  mainnet:
+    "mainnet's ledger-9 parameters exist only on the live chain (the node runtime API " +
+    "MidnightRuntimeApi_get_ledger_parameters returns them at a block hash) and none has been pinned",
 });

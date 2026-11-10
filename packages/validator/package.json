@@ -3,15 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": "./mod.ts",
+  "exports": {
+    ".": "./mod.ts",
+    "./reference-parameters": "./reference-parameters.ts"
+  },
   "scripts": {
     "test": "bun test"
   },
   "dependencies": {
-    "@midnight-ntwrk/ledger-v8": "8.1.0",
+    "@midnightntwrk/ledger-v9": "1.0.0",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "@scure/base": "^2.0.0",
-    "@effectstream/mip-zswap-offer": "0.3.0"
+    "@effectstream/mip-zswap-offer": "0.4.0"
   }
 }

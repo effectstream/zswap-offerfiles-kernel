@@ -1,16 +1,16 @@
 // read-wallet.ts — report (and optionally assert) one wallet's balances.
 //
-// This exists for the one balance the E2E driver cannot read itself: the
-// SOLVER's. The solver service holds a live facade on SOLVER_SEED, and two
-// facades on one seed against one Midnight node force each other's connection
-// down — so the driver records the solver deltas it EXPECTS and this script
-// checks them once the solver container is stopped.
+// This exists for the balance a test driver cannot read itself: that of a
+// wallet a running service holds a live facade on. Two facades on one seed
+// against one Midnight node force each other's connection down, so the driver
+// records the deltas it EXPECTS and this script checks them once that service
+// is stopped. For the batcher's wallet, for example:
 //
-//   docker compose stop solver
+//   docker compose stop batcher
 //   docker compose run --rm --no-deps \
-//     -e READ_SEED="$SOLVER_SEED" \
+//     -e READ_SEED="$BATCHER_WALLET_SEED" \
 //     -e EXPECT_SHIELDED='{"<color>":"1000100000"}' \
-//     --entrypoint bun scripts run deploy/scripts/read-wallet.ts
+//     --entrypoint bun kernel run deploy/scripts/read-wallet.ts
 //
 // Env:
 //   READ_SEED         the seed to open (REQUIRED)
@@ -20,29 +20,32 @@
 //                     optional "true": in addition, NO unlisted color may hold
 //                     a non-zero balance. This is what turns the gate from
 //                     "the expected deltas landed" into "and the wallet holds
-//                     nothing else" — the decisive on-chain evidence for
-//                     00006 SC-004 that the solver was never provisioned any
-//                     token. A solver preloaded with a large balance would fail
-//                     it by nine orders of magnitude, whatever any receipt or
-//                     configuration file claimed.
+//                     nothing else" — on-chain evidence, for example, that
+//                     a fee-only wallet was never given any token, whatever
+//                     any receipt or configuration file claimed.
 //   OUT_FILE          optional path to write the JSON report to
 //
 // Exit 0 = read (and every expectation held).
 
 import { writeFileSync } from "node:fs";
 
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import {
+  midnightNetworkConfig as net,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
+import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 
 import {
   buildWallet,
   shieldedBalances,
   unshieldedBalances,
   waitForSync,
-} from "../../packages/solver-core/wallet.ts";
+} from "../../packages/kernel-client/wallet.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as never);
+// The wallet SDK's RPC client logs the node URL it loses, query string
+// included; on a public network that URL carries the Blockfrost project token.
+installLogRedaction(redactBlockfrostProjectId);
 
 const log = (msg: string) => console.log(`[read-wallet] ${msg}`);
 

@@ -39,8 +39,8 @@ const {
   OFFER_UPDATES_PATH,
   OFFER_UPDATES_PROTOCOL,
   decodeOfferUpdatesFrame,
-} = await import("@zswap-da/solver-core/offer-updates-contract");
-const { openOfferUpdatesStream } = await import("@zswap-da/solver-core/api-client");
+} = await import("@zswap-da/api-contracts/offer-updates-contract");
+const { openOfferUpdatesStream } = await import("@zswap-da/kernel-client/api-client");
 
 const BLOCK_HEIGHT = 42;
 const BLOCK_AT = "2026-08-20T12:34:56.000Z";

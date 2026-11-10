@@ -11,10 +11,10 @@
 //
 //   bun packages/tests/full-lifecycle-e2e.ts
 
-import { Transaction } from "@midnight-ntwrk/ledger-v8";
+import { type FinalizedTransaction, Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import pg from "pg";
-import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
+import { adoptInWallet, buildWalletAndWaitForFunds, unwrapInWallet } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { requireDistinctTokenColors } from "./lib/prefunded.ts";
 
@@ -98,7 +98,6 @@ try {
   const recipe = await wallet.initSwap(
     { shielded: { [colors.shieldedA]: GIVE_AMOUNT } },
     [{ type: "shielded", outputs: [{ type: colors.shieldedB, amount: WANT_AMOUNT, receiverAddress: address }] } as any],
-    keys,
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
   );
   const offerFinalized = await wallet.finalizeTransaction(recipe.transaction);
@@ -117,12 +116,15 @@ try {
   // ── 5. Taker settles: balance the finalized offer + submit to Midnight ──
   console.log("[lifecycle] balancing + settling the A↔B offer on Midnight…");
   const offerTx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(blob));
-  const balRecipe = await (wallet as any).balanceFinalizedTransaction(offerTx, keys, {
+  const balRecipe = await (wallet as any).balanceFinalizedTransaction(await adoptInWallet(wallet, "Finalized", offerTx), {
     ttl: new Date(Date.now() + 30 * 60_000),
   });
   const settleTx = await wallet.finalizeRecipe(balRecipe);
   await (wallet as any).submitTransaction(settleTx);
-  console.log("[lifecycle] settle submitted:", settleTx.transactionHash?.().toString?.().slice(0, 24) ?? "(tx)");
+  console.log(
+    "[lifecycle] settle submitted:",
+    (await unwrapInWallet<FinalizedTransaction>(wallet, settleTx)).transactionHash().toString().slice(0, 24),
+  );
 
   // ── 6. Nullifier consumed → spent_nullifiers + offer archived ──
   const spentOk = await waitFor("spent_nullifiers > before", async () =>
@@ -157,7 +159,6 @@ try {
     const uRecipe = await wallet.initSwap(
       { unshielded: { [colors.unshielded]: 1_000n } } as any,
       [{ type: "unshielded", outputs: [{ type: nightColor, amount: 1_000n, receiverAddress: unshieldedAddrObj }] } as any],
-      keys,
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const uFinalized = await wallet.finalizeTransaction(uRecipe.transaction);
@@ -175,7 +176,7 @@ try {
     if (uSub.status === 200) {
       check("STRETCH: unshielded-give offer accepted (existence check passed)", true);
       const uOfferTx = Transaction.deserialize("signature", "proof", "binding", OfferFiles.decode(uBlob));
-      const uBal = await (wallet as any).balanceFinalizedTransaction(uOfferTx, keys, { ttl: new Date(Date.now() + 30 * 60_000) });
+      const uBal = await (wallet as any).balanceFinalizedTransaction(await adoptInWallet(wallet, "Finalized", uOfferTx), { ttl: new Date(Date.now() + 30 * 60_000) });
       const uSettle = await wallet.finalizeRecipe(uBal);
       await (wallet as any).submitTransaction(uSettle);
       const uSpentOk = await waitFor("spent_unshielded > before", async () =>

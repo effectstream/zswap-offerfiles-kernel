@@ -12,18 +12,32 @@ set -euo pipefail
 
 _log() { echo "[wait-for] $*" >&2; }
 
+# _origin <url> — `scheme://host[:port]` and nothing else. A wait line never
+# prints a whole URL: its query, path or userinfo may carry a credential (a
+# Blockfrost `project_id`, a Celestia token in the path or userinfo).
+_origin() {
+  local url="$1" scheme rest
+  case "${url}" in
+    *://*) scheme="${url%%://*}"; rest="${url#*://}" ;;
+    *) echo "<not a URL>"; return 0 ;;
+  esac
+  rest="${rest%%[/?#]*}"
+  rest="${rest##*@}"
+  echo "${scheme}://${rest}"
+}
+
 # wait_http <url> <label> [timeout_s] — any HTTP response counts as "listening";
 # we are waiting for a socket to answer, not for a particular status.
 wait_http() {
   local url="$1" label="$2" timeout="${3:-180}" waited=0
-  _log "waiting for ${label} at ${url} (timeout ${timeout}s)"
+  _log "waiting for ${label} at $(_origin "${url}") (timeout ${timeout}s)"
   until bun -e "
     const r = await fetch(process.argv[1], { signal: AbortSignal.timeout(4000) }).catch(() => null);
     process.exit(r ? 0 : 1);
   " "${url}" >/dev/null 2>&1; do
     waited=$((waited + 2))
     if [ "${waited}" -ge "${timeout}" ]; then
-      _log "TIMEOUT after ${timeout}s waiting for ${label} at ${url}"
+      _log "TIMEOUT after ${timeout}s waiting for ${label} at $(_origin "${url}")"
       return 1
     fi
     sleep 2
@@ -62,7 +76,7 @@ wait_tcp() {
 # start the same way), and no transaction can be built against an empty chain.
 wait_node_block() {
   local url="$1" min_block="${2:-1}" timeout="${3:-300}" waited=0
-  _log "waiting for midnight-node block #${min_block} at ${url} (timeout ${timeout}s)"
+  _log "waiting for midnight-node block #${min_block} at $(_origin "${url}") (timeout ${timeout}s)"
   until bun -e "
     const [url, minBlock] = [process.argv[1], Number(process.argv[2])];
     const res = await fetch(url, {
@@ -77,7 +91,7 @@ wait_node_block() {
   " "${url}" "${min_block}" >/dev/null 2>&1; do
     waited=$((waited + 2))
     if [ "${waited}" -ge "${timeout}" ]; then
-      _log "TIMEOUT after ${timeout}s waiting for block #${min_block} at ${url}"
+      _log "TIMEOUT after ${timeout}s waiting for block #${min_block} at $(_origin "${url}")"
       return 1
     fi
     sleep 2

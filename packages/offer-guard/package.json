@@ -4,10 +4,11 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./mod.ts"
+    ".": "./mod.ts",
+    "./public-networks": "./public-networks.ts"
   },
   "dependencies": {
-    "@effectstream/mip-zswap-offer": "0.3.0",
+    "@effectstream/mip-zswap-offer": "0.4.0",
     "@zswap-da/validator": "workspace:*"
   },
   "devDependencies": {

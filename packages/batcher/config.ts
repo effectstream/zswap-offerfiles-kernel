@@ -3,6 +3,7 @@ import {
   MIP6_NAMESPACE_ID_SUFFIX_HEX,
   parseSponsorPolicy,
   parseUnpricedPolicy,
+  publicDevSeedProblem,
   type SponsorPolicy,
   type UnpricedPolicy,
 } from "@zswap-da/offer-guard";
@@ -95,11 +96,32 @@ const DEFAULT_STORAGE_DIR = path.join(
   "batcher-data",
 );
 
-// Dedicated seed for the zswap-da batcher wallet. Distinct from any wallet
-// the rest of the stack uses — running two wallets on the same seed against
-// a single Midnight node forces one to disconnect.
+// Dedicated seed for the zswap-da batcher wallet on the local devnet. Distinct
+// from any wallet the rest of the stack uses — running two wallets on the same
+// seed against a single Midnight node forces one to disconnect. It is in this
+// repository, so it is public: `undeployed` only.
 const BATCHER_SEED =
   "0000000000000000000000000000000000000000000000000000000000000003";
+
+/**
+ * BATCHER_WALLET_SEED for `networkId`. On `undeployed` an unset value falls
+ * back to the dev seed …03. On every other network there is no fallback: an
+ * unset value, or any repository dev seed, throws naming the variable, so no
+ * entry can reach a public network on a wallet anyone can drain.
+ */
+export function resolveBatcherWalletSeed(networkId: string, raw: string | undefined): string {
+  const seed = (raw ?? "").trim();
+  if (networkId === "undeployed") return seed || BATCHER_SEED;
+  if (seed === "") {
+    throw new Error(
+      `BATCHER_WALLET_SEED is required on ${networkId || "(unset network)"}: a dedicated, funded seed ` +
+        "(the public dev seed fallback exists only on undeployed)",
+    );
+  }
+  const devSeed = publicDevSeedProblem(networkId, "BATCHER_WALLET_SEED", seed);
+  if (devSeed !== undefined) throw new Error(devSeed);
+  return seed;
+}
 
 export const defaultMaxSlotsPerWallet = (networkId: string): number =>
   networkId === "undeployed" ? 5 : 1;
@@ -186,7 +208,7 @@ export function loadBatcherConfig(): BatcherConfig {
     port: ENV.getNumber("BATCHER_PORT", 3334),
     pollingIntervalMs: ENV.getNumber("BATCHER_POLLING_INTERVAL_MS", 250),
     storageDir: optionalString("BATCHER_STORAGE_DIR", DEFAULT_STORAGE_DIR),
-    walletSeed: ENV.getString("BATCHER_WALLET_SEED") || BATCHER_SEED,
+    walletSeed: resolveBatcherWalletSeed(midnightNetworkConfig.id, ENV.getString("BATCHER_WALLET_SEED", "")),
     maxSlotsPerWallet: ENV.getNumber(
       "BATCHER_MAX_SLOTS_PER_WALLET",
       defaultMaxSlotsPerWallet(midnightNetworkConfig.id),

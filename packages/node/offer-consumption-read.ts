@@ -11,7 +11,7 @@ import { getOfferConsumptionEvidence } from "@zswap-da/database";
 import {
   parseOfferConsumptionResponse,
   type OfferConsumptionResponse,
-} from "@zswap-da/solver-core/receipt-client";
+} from "@zswap-da/api-contracts/receipt-client";
 
 const OFFER_HASH = /^[0-9a-f]{64}$/;
 

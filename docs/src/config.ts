@@ -15,8 +15,9 @@ export const PROOF_SERVER_URL =
 export const NETWORK_ID =
   (import.meta.env.VITE_MIDNIGHT_NETWORK_ID as string | undefined) ?? 'undeployed'
 
-// With no public-network choice, Preprod is the canonical default. An explicit
-// Preview, Stagenet or local network remains visible instead of being relabelled.
+// With no public-network choice, Preprod is the faucet default. An explicit
+// network (preview, preprod, mainnet or the local undeployed) stays visible
+// instead of being relabelled.
 export const FAUCET_NETWORK =
   (import.meta.env.VITE_FAUCET_NETWORK as string | undefined)
   ?? (import.meta.env.VITE_MIDNIGHT_NETWORK_ID as string | undefined)

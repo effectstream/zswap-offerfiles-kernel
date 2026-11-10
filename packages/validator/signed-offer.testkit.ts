@@ -23,13 +23,14 @@
 import {
   Intent,
   LedgerParameters,
+  SignatureEnabled,
   Transaction,
   UnshieldedOffer,
   addressFromKey,
   sampleSigningKey,
   signData,
   signatureVerifyingKey,
-} from "@midnight-ntwrk/ledger-v8";
+} from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
 import { collectUnshieldedSpends } from "./derive.ts";
@@ -94,8 +95,7 @@ export async function signedUnshieldedOffer(
   // signed intents back (the getter hands out copies).
   const signed = new Map<number, any>();
   for (const [segment, it] of tx.intents as Map<number, any>) {
-    // ledger-v8 takes the plain hex Signature (v9 wraps it in SignatureEnabled).
-    const signature = signData(sk, it.signatureData(segment));
+    const signature = new SignatureEnabled(signData(sk, it.signatureData(segment)));
     it.guaranteedUnshieldedOffer = it.guaranteedUnshieldedOffer.addSignatures([signature]);
     signed.set(segment, it);
   }

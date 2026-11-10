@@ -1,5 +1,4 @@
 import type { ConnectedAPI } from '@midnight-ntwrk/dapp-connector-api'
-import { type NetworkId, setNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
 import { OfferFiles } from '@effectstream/mip-zswap-offer/mip5'
 import { fromHex } from '../hex'
 
@@ -30,7 +29,6 @@ function pickMakerIntentId(): number {
 /** Build a payFees:false maker offer blob via Lace makeIntent. */
 export async function buildMakerOfferBlob(
   connectedApi: ConnectedAPI,
-  networkId: string,
   gives: OfferLeg[],
   wants: OfferLeg[],
 ): Promise<string> {
@@ -55,6 +53,5 @@ export async function buildMakerOfferBlob(
     payFees: false,
   } as any)
 
-  setNetworkId(networkId as NetworkId)
   return OfferFiles.encode(decodeConnectorTx(tx))
 }

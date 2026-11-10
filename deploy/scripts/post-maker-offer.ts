@@ -11,15 +11,17 @@
 //   GIVE_TOKEN, WANT_TOKEN required 64-hex token IDs
 //   GIVE_AMOUNT, WANT_AMOUNT, TTL_MINUTES
 
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
+import { redactBlockfrostProjectId } from "@effectstream/midnight-contracts/midnight-env";
 
-import { buildWallet } from "../../packages/solver-core/wallet.ts";
+import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
+import { buildWallet } from "../../packages/kernel-client/wallet.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
 import { postMakerOfferWithWallet, resolveExplicitTokens } from "./lib/maker-offer.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as never);
+// The wallet SDK's RPC client logs the node URL it loses, query string
+// included; on a public network that URL carries the Blockfrost project token.
+installLogRedaction(redactBlockfrostProjectId);
 
 const log = (msg: string) => console.log(`[maker-offer] ${msg}`);
 
@@ -34,12 +36,13 @@ const { give, want } = resolveExplicitTokens({
 });
 const giveAmount = BigInt(process.env["GIVE_AMOUNT"] ?? "500000");
 const wantAmount = BigInt(process.env["WANT_AMOUNT"] ?? "750000");
+// Intent TTL only (inert for this shielded-only payFees:false offer; 00056).
 const ttlMs = Number(process.env["TTL_MINUTES"] ?? "120") * 60_000;
 
 log(`kernel   : ${api.base}`);
 log(`give     : ${giveAmount} of ${give.slice(0, 16)}…`);
 log(`want     : ${wantAmount} of ${want.slice(0, 16)}…`);
-log(`=> the solver quotes this as tokenIn=${want.slice(0, 8)}… tokenOut=${give.slice(0, 8)}…`);
+log(`=> a taker fills this as tokenIn=${want.slice(0, 8)}… tokenOut=${give.slice(0, 8)}…`);
 
 await postMakerOfferWithWallet(buildWallet, MAKER_SEED, {
   api,

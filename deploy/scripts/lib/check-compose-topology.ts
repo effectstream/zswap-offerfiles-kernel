@@ -10,9 +10,21 @@ interface ComposeModel {
   services?: Record<string, ComposeService>;
 }
 
-type DependencyCondition = "service_healthy" | "service_completed_successfully";
+type DependencyCondition = "service_started" | "service_healthy" | "service_completed_successfully";
 
-const REMOVED_SERVICES = ["offerfiles-deploy", "mint-test-tokens", "register-minted-tokens"];
+// The local deploy/mint/register services were replaced by externally
+// prefunded inventory. The COW solver services run from
+// https://github.com/effectstream/cow-solver, which consumes this backend.
+const REMOVED_SERVICES = [
+  "offerfiles-deploy",
+  "mint-test-tokens",
+  "register-minted-tokens",
+  "solver",
+  "solver-provision",
+  "solver-frontend",
+  "relay",
+  "scripts",
+];
 
 const REQUIRED_EDGES: ReadonlyArray<
   readonly [service: string, dependency: string, condition: DependencyCondition]
@@ -21,23 +33,10 @@ const REQUIRED_EDGES: ReadonlyArray<
   ["kernel", "pglite", "service_healthy"],
   ["kernel", "celestia", "service_healthy"],
   ["batcher", "celestia", "service_healthy"],
-  ["solver-provision", "midnight-node", "service_healthy"],
-  ["solver-provision", "proof-server", "service_healthy"],
-  ["solver-provision", "indexer", "service_healthy"],
   ["maker-offer", "kernel", "service_healthy"],
   ["offer-poster", "kernel", "service_healthy"],
-  ["relay", "midnight-node", "service_healthy"],
-  ["relay", "indexer", "service_healthy"],
-  ["relay", "proof-server", "service_healthy"],
-  ["solver", "kernel", "service_healthy"],
-  ["solver", "relay", "service_healthy"],
-  ["solver", "solver-provision", "service_completed_successfully"],
-  ["solver-frontend", "kernel", "service_healthy"],
   ["price-feed", "pglite", "service_healthy"],
   ["price-feed", "kernel", "service_healthy"],
-  ["scripts", "kernel", "service_healthy"],
-  ["scripts", "relay", "service_healthy"],
-  ["scripts", "batcher", "service_healthy"],
 ];
 
 function dependencyCondition(service: ComposeService, dependency: string): string | undefined {
@@ -52,7 +51,7 @@ export function assertComposeStartupTopology(model: ComposeModel): void {
   }
 
   for (const removed of REMOVED_SERVICES) {
-    if (services[removed]) throw new Error(`removed local-funding service is still present: ${removed}`);
+    if (services[removed]) throw new Error(`removed service is still present: ${removed}`);
   }
 
   for (const [serviceName, dependency, expected] of REQUIRED_EDGES) {

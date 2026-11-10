@@ -5,7 +5,7 @@
 // mirrors the book and must be able to PROVE it has missed nothing: it adds a
 // per-subscription sequence number and a subscription identity to the very
 // same lifecycle events, so a missed mutation is detectable rather than
-// invisible. See `@zswap-da/solver-core/offer-updates-contract` for the wire
+// invisible. See `@zswap-da/api-contracts/offer-updates-contract` for the wire
 // grammar and the reasoning behind each field.
 //
 // WHAT THIS ENDPOINT IS NOT. It keeps NO per-client state beyond the socket
@@ -60,7 +60,7 @@ import {
   OFFER_UPDATES_SCHEMA_VERSION,
   encodeOfferUpdatesFrame,
   type OfferUpdatesFrame,
-} from "@zswap-da/solver-core/offer-updates-contract";
+} from "@zswap-da/api-contracts/offer-updates-contract";
 
 import { apiUpdatesMaxConnections } from "./env.ts";
 import { eventBus, type AppEvent } from "./event-bus.ts";

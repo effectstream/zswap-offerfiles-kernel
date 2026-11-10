@@ -56,7 +56,11 @@ window). `scripts/check-preview-indexer.ts` confirms the on-chain fields these
 checks rely on exist and are populated:
 
 ```bash
-bun packages/validator/scripts/check-preview-indexer.ts        # preview
+# MIDNIGHT_BLOCKFROST_PROJECT_ID in the environment (never on the command line);
+# endpoints: effectstream's Blockfrost defaults for the network, or
+# MIDNIGHT_INDEXER_HTTP / MIDNIGHT_NODE_HTTP; printed with project_id=<redacted>
+bun packages/validator/scripts/check-preview-indexer.ts           # preview
+bun packages/validator/scripts/check-preview-indexer.ts preprod   # preprod
 ```
 
 ## Tests

@@ -1,1 +1,1 @@
-export * from "@zswap-da/solver-core/wallet";
+export * from "@zswap-da/kernel-client/wallet";

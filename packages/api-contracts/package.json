@@ -1,0 +1,17 @@
+{
+  "name": "@zswap-da/api-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Versioned wire contracts of the Offer Files kernel API: base-unit amounts, receipt reads, exact-files reads, the offer-updates stream and offer validation.",
+  "type": "module",
+  "exports": {
+    "./amount": "./amount.ts",
+    "./exact-files-contract": "./exact-files-contract.ts",
+    "./offer-updates-contract": "./offer-updates-contract.ts",
+    "./receipt-client": "./receipt-client.ts",
+    "./validation-contract": "./validation-contract.ts"
+  },
+  "scripts": {
+    "test": "bun test"
+  }
+}

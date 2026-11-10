@@ -88,7 +88,6 @@ async function main(): Promise<void> {
           ],
         } as any,
       ],
-      { shieldedSecretKeys: zswapSecretKeys, dustSecretKey },
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     console.log(`[fixture] initSwap recipe: ${recipe.type}`);

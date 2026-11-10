@@ -5,19 +5,24 @@
 import { writeFileSync } from "node:fs";
 
 import { registerNightForDust } from "@effectstream/midnight-contracts";
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import {
+  midnightNetworkConfig as net,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
 
+import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 import {
   buildWallet,
   shieldedBalances,
   unshieldedBalances,
   waitForSync,
-} from "../../packages/solver-core/wallet.ts";
+} from "../../packages/kernel-client/wallet.ts";
 import { ensureSolverDustReady } from "./lib/solver-provision.ts";
 
 globalThis.WebSocket = WebSocket;
-setNetworkId(net.id as never);
+// The wallet SDK's RPC client logs the node URL it loses, query string
+// included; on a public network that URL carries the Blockfrost project token.
+installLogRedaction(redactBlockfrostProjectId);
 
 const log = (message: string): void => console.log(`[provision-external] ${message}`);
 const HEX_TOKEN = /^[0-9a-f]{64}$/;

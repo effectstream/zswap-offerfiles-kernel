@@ -35,19 +35,23 @@
 
 import { createHash } from "node:crypto";
 
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
+import {
+  midnightNetworkConfig as net,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
+import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 
 import { collectNullifiers } from "../../packages/validator/derive.ts";
-import { shieldedKeys } from "../../packages/solver-core/wallet.ts";
+import { shieldedKeys } from "../../packages/kernel-client/wallet.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
 import { buildPinnedWallet, withPinnedCoin, type PinnedWalletResult } from "./lib/pinned-wallet.ts";
 import {
   ConfigError,
   configDump,
   parsePosterConfig,
+  redactNetworkUrls,
   type PosterConfig,
 } from "./lib/poster-config.ts";
 import { type Journal, openJournal, JournalError } from "./lib/poster-journal.ts";
@@ -73,6 +77,8 @@ import {
   type TickDeps,
   type TickWallet,
 } from "./lib/poster-tick.ts";
+import { unwrapInWallet } from "@effectstream/midnight-contracts";
+import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 
 // ---------------------------------------------------------------------------
 // Small shared helpers
@@ -109,7 +115,7 @@ function shieldedAddressText(address: unknown, networkId: string): string {
 
 /** The slice of `Rx.Observable` the facade's `state()` actually needs to expose.
  *
- *  `rxjs` is a dependency of `packages/solver-core` and of
+ *  `rxjs` is a dependency of `packages/kernel-client` and of
  *  `@effectstream/midnight-contracts`, but NOT of the repository root — and
  *  `deploy/` is not a workspace member, so a bare `import "rxjs"` here resolves
  *  to nothing (the same resolution rule `maker-offer.ts:35-41` documents for
@@ -284,13 +290,17 @@ function makeBuilder(walletResult: PinnedWalletResult): TickBuilder {
               ],
             } as never,
           ],
-          shieldedKeys(walletResult),
           // payFees:false — an Offer File is settled by whoever takes it, and
           // the batcher sponsors the Celestia fee.
           { ttl: new Date(Date.now() + args.ttlMs), payFees: false },
         ),
       );
-      const finalized = await walletResult.wallet.finalizeTransaction(recipe.transaction);
+      // The facade returns a sealed wallet handle; nullifier and input
+      // inspection need the ledger transaction it carries.
+      const finalized = await unwrapInWallet<FinalizedTransaction>(
+        walletResult.wallet,
+        await walletResult.wallet.finalizeTransaction(recipe.transaction),
+      );
       const raw = finalized.serialize();
       const blob = OfferFiles.encode(raw);
       return {
@@ -358,7 +368,8 @@ async function startup(cfg: PosterConfig): Promise<Started> {
   const api = new KernelApi(cfg.kernelBase);
 
   info(`kernel      : ${api.base}`);
-  info(`network     : ${cfg.networkId} (indexer ${cfg.networkUrls.indexer})`);
+  // Blockfrost URLs carry the project token: log them redacted.
+  info(`network     : ${cfg.networkId} (indexer ${redactNetworkUrls(cfg.networkUrls).indexer})`);
   if (cfg.giveRange === undefined) {
     info(`give        : ${cfg.giveToken}, exact prefunded coin size ${cfg.giveAmount} base units`);
   } else {
@@ -499,7 +510,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     }
     throw err;
   }
-  setNetworkId(cfg.networkId as never);
   if (net.id !== cfg.networkId) {
     warn(
       `MIDNIGHT_NETWORK_ID=${cfg.networkId} but @effectstream/midnight-contracts resolved ` +
@@ -680,6 +690,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
 }
 
 if (import.meta.main) {
+  // Every line the process prints — its own and its dependencies' (the wallet
+  // SDK's RPC client logs the node URL it loses, query string included) —
+  // goes through redactBlockfrostProjectId: a Blockfrost URL carries the
+  // project token. Installed here, not in main(), so importing the module
+  // (tests) leaves the console alone.
+  installLogRedaction(redactBlockfrostProjectId);
   const code = await main();
   process.exit(code);
 }

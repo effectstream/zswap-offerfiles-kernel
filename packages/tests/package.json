@@ -7,22 +7,21 @@
     "test": "bun run run-tests.ts"
   },
   "dependencies": {
-    "@effectstream/midnight-contracts": "0.104.3",
-    "@midnight-ntwrk/ledger-v8": "8.1.0",
-    "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
-    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+    "@effectstream/midnight-contracts": "0.300.3",
+    "@midnightntwrk/ledger-v9": "1.0.0",
+    "@midnight-ntwrk/midnight-js-contracts": "5.0.0",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "@scure/base": "^2.0.0",
     "@zswap-da/offer-guard": "workspace:*",
-    "@zswap-da/solver-core": "workspace:*",
+    "@zswap-da/kernel-client": "workspace:*",
     "@zswap-da/validator": "workspace:*",
     "effection": "^3.5.0",
-    "@effectstream/mip-zswap-offer": "0.3.0",
+    "@effectstream/mip-zswap-offer": "0.4.0",
     "pg": "^8.14.0",
     "rxjs": "^7.8.2",
-    "@midnightntwrk/wallet-sdk-hd": "3.0.3",
-    "@midnightntwrk/wallet-sdk-unshielded-wallet": "3.1.0"
+    "@midnightntwrk/wallet-sdk-hd": "4.0.0",
+    "@midnightntwrk/wallet-sdk-unshielded-wallet": "4.0.0"
   },
   "devDependencies": {
     "@types/pg": "^8.11.10"

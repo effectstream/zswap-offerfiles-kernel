@@ -58,7 +58,7 @@ const {
   EXACT_FILES_PROFILE,
   EXACT_FILES_SCHEMA_VERSION,
   parseExactFilesResponse,
-} = await import("@zswap-da/solver-core/exact-files-contract");
+} = await import("@zswap-da/api-contracts/exact-files-contract");
 const { resetSyncHealthCacheForTest } = await import("./sync-health.ts");
 const { gameStateTransitions } = await import("./state-machine.ts");
 const { startPglite } = await import("@effectstream/db/start-pglite");
@@ -745,7 +745,7 @@ function productionTypescriptFiles(directory: string): string[] {
 
 test("guardOffer is not called by a production package", () => {
   const repositoryRoot = resolve(import.meta.dir, "..", "..");
-  const callers = ["node", "batcher", "solver", "solver-core"]
+  const callers = ["node", "api-contracts", "kernel-client", "batcher"]
     .flatMap((name) => productionTypescriptFiles(join(repositoryRoot, "packages", name)))
     .filter((path) => /\bguardOffer\b/.test(readFileSync(path, "utf8")))
     .map((path) => relative(repositoryRoot, path));

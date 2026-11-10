@@ -14,8 +14,7 @@ import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 //       batcher's pre-fee gate and offer-guard (they all validate against the
 //       network's pinned reference parameters, global_ttl = 14 days);
 //   T2  expiry = min(root deadline, earliest intent TTL) for shielded-only,
-//       unshielded-only and mixed offers, with no OFFER_TTL_SECONDS cap
-//       (ledger 8: the root window stays 1 h, the intent bound is 14 days);
+//       unshielded-only and mixed offers, with no OFFER_TTL_SECONDS cap;
 //   T3  ttl_seconds / ttlSeconds is the per-offer lifetime;
 //   T4  replaying an input gives an identical verdict and row, and a network
 //       without reference parameters fails at startup.
@@ -40,7 +39,7 @@ const { bytesToLatin1, guardOffer, offerHashFromBytes } = await import("@zswap-d
 const { gameStateTransitions } = await import("./state-machine.ts");
 const { canonicalValidatorCode, checkedVerdict } = await import("./offer-validation.ts");
 const { ZswapCelestiaAdapter } = await import("../batcher/celestia.ts");
-const { UnknownNetworkParametersError } = await import("@zswap-da/validator");
+const { ReferenceParametersNotPinnedError, UnknownNetworkParametersError } = await import("@zswap-da/validator");
 const { apiRouter } = await import("./api.ts");
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
@@ -49,10 +48,6 @@ const fastify = (await import("fastify")).default;
 const HOUR_S = 3_600;
 const DAY_S = 86_400;
 const GLOBAL_TTL_S = 14 * DAY_S;
-/** Ledger 8's hardcoded zswap root window (network-windows.ts). */
-const ROOT_WINDOW_S = HOUR_S;
-/** How long ago the fixture's proof roots were last current in the T2 cases. */
-const ROOT_AGE_S = 20 * 60;
 const BLOCK_TIME_MS = Date.parse("2026-08-14T12:00:00.000Z");
 const TIP_HEIGHT = 1_000;
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
@@ -356,55 +351,103 @@ describe("T1 — batcher pre-fee gate and offer-guard (wall-clock tblock)", () =
 
   test("the batcher refuses to start for a network without reference parameters", () => {
     expect(() => adapter("stagenet")).toThrow(UnknownNetworkParametersError);
-    expect(() => adapter("stagenet")).toThrow("supported: mainnet, preprod, preview, undeployed");
-    expect(() => adapter("preprod")).not.toThrow();
+    expect(() => adapter("stagenet")).toThrow("supported: undeployed, preview, preprod");
+    for (const network of ["undeployed", "preview", "preprod"]) expect(() => adapter(network)).not.toThrow();
   });
+
+  test("the batcher refuses mainnet at startup: its reference parameters are not pinned yet", () => {
+    expect(() => adapter("mainnet")).toThrow(ReferenceParametersNotPinnedError);
+    expect(() => adapter("mainnet")).toThrow(
+      "reference ledger parameters for MIDNIGHT_NETWORK_ID='mainnet' are not pinned yet",
+    );
+  });
+});
+
+// ── the shared namespace ──────────────────────────────────────────────────
+//
+// Preview and preprod kernels (and kernels of other networks or of the ledger-8
+// era) post to the same MIP-0006 namespace, so every kernel ingests blobs it
+// can never accept. Each must be rejected and counted, and the next blob of the
+// kernel's own network must still be indexed.
+
+describe("shared namespace: another network's offers and ledger-8 blobs are rejected, the sync goes on", () => {
+  const LEDGER8_OFFER = OfferFiles.decode(
+    readFileSync(join(import.meta.dir, "..", "validator", "fixtures", "valid-offer.ledger8.bech32"), "utf8").trim(),
+  );
+
+  const rejectionCount = async (code: string) =>
+    Number((await client!.query(`SELECT count FROM offer_rejections WHERE code = $1`, [code])).rows[0]?.count ?? 0);
+
+  for (const [label, foreign] of [
+    ["an offer signed for preprod", async () => (await signedUnshieldedOffer(atBlock(2 * HOUR_S), "preprod")).bytes],
+    ["an offer signed for mainnet", async () => (await signedUnshieldedOffer(atBlock(2 * HOUR_S), "mainnet")).bytes],
+    ["a ledger-8 (Midnight 1.x) offer", async () => LEDGER8_OFFER],
+  ] as const) {
+    test(`${label}: rejected, counted, not indexed; the next own-network offer is indexed`, async () => {
+      const bytes = await foreign();
+      const own = await signedUnshieldedOffer(atBlock(2 * HOUR_S));
+      await inRolledBackTransaction(async () => {
+        await seedLiveUtxo(own.spend);
+        const rejected = await ingest(bytes);
+        const code = rejectionCode(rejected);
+        expect(code).not.toBeNull();
+        expect(rejected.events.some((e) => e.type === "offer_indexed")).toBe(false);
+        expect(await offerRow(bytes)).toBeUndefined();
+        expect(await rejectionCount(code!)).toBe(1);
+
+        const accepted = await ingest(own.bytes);
+        expect(rejectionCode(accepted)).toBeNull();
+        expect(accepted.events.some((e) => e.type === "offer_indexed")).toBe(true);
+        expect(await offerRow(own.bytes)).toBeDefined();
+      });
+    });
+  }
 });
 
 // ── T2 / T3 ───────────────────────────────────────────────────────────────
 
 describe("T2/T3 — STM expiry is the earliest real limit; ttl_seconds is per offer", () => {
-  const rootDeadlineMs = BLOCK_TIME_MS - ROOT_AGE_S * 1000 + ROOT_WINDOW_S * 1000;
-
-  test("shielded-only: root last-seen + the 1 h ledger-8 root window (no TTL of its own)", async () => {
+  test("shielded-only: root last-seen + 14 days (no TTL of its own)", async () => {
     await inRolledBackTransaction(async () => {
-      await seedFixtureRootsAged(ROOT_AGE_S);
+      await seedFixtureRootsAged(2 * HOUR_S);
       const observed = await ingest(FIXTURE_BYTES);
       expect(rejectionCode(observed)).toBeNull();
       const row = (await offerRow(FIXTURE_BYTES))!;
-      expect(new Date(row.metadata_expires_at).getTime()).toBe(rootDeadlineMs);
-      expect(Number(row.ttl_seconds)).toBe(ROOT_WINDOW_S - ROOT_AGE_S);
+      const expected = BLOCK_TIME_MS - 2 * HOUR_S * 1000 + GLOBAL_TTL_S * 1000;
+      expect(new Date(row.metadata_expires_at).getTime()).toBe(expected);
+      expect(Number(row.ttl_seconds)).toBe(GLOBAL_TTL_S - 2 * HOUR_S);
     });
   });
 
-  test("mixed, intent earlier: the intent TTL (30 min) wins over the root deadline (40 min)", async () => {
-    const mixed = await withIntent(FIXTURE_BYTES, atBlock(30 * 60));
+  test("mixed, intent earlier: the intent TTL (1 day) wins over the root deadline", async () => {
+    const mixed = await withIntent(FIXTURE_BYTES, atBlock(DAY_S));
     await inRolledBackTransaction(async () => {
-      await seedFixtureRootsAged(ROOT_AGE_S);
+      await seedFixtureRootsAged(2 * HOUR_S);
       const observed = await ingest(mixed.bytes);
       expect(rejectionCode(observed)).toBeNull();
       const row = (await offerRow(mixed.bytes))!;
       expect(new Date(row.metadata_expires_at).getTime()).toBe(mixed.ttl.getTime());
-      expect(Number(row.ttl_seconds)).toBe(30 * 60);
+      expect(Number(row.ttl_seconds)).toBe(DAY_S);
     });
   });
 
-  test("mixed, root earlier: the root deadline wins over a 3-day intent TTL", async () => {
-    const mixed = await withIntent(FIXTURE_BYTES, atBlock(3 * DAY_S));
+  test("mixed, root earlier: the root deadline wins over a 14 d − 1 min intent TTL", async () => {
+    const mixed = await withIntent(FIXTURE_BYTES, atBlock(GLOBAL_TTL_S - 60));
     await inRolledBackTransaction(async () => {
-      await seedFixtureRootsAged(ROOT_AGE_S);
+      await seedFixtureRootsAged(2 * HOUR_S);
       const observed = await ingest(mixed.bytes);
       expect(rejectionCode(observed)).toBeNull();
       const row = (await offerRow(mixed.bytes))!;
-      expect(new Date(row.metadata_expires_at).getTime()).toBe(rootDeadlineMs);
-      expect(Number(row.ttl_seconds)).toBe(ROOT_WINDOW_S - ROOT_AGE_S);
+      expect(new Date(row.metadata_expires_at).getTime())
+        .toBe(BLOCK_TIME_MS - 2 * HOUR_S * 1000 + GLOBAL_TTL_S * 1000);
+      expect(Number(row.ttl_seconds)).toBe(GLOBAL_TTL_S - 2 * HOUR_S);
     });
   });
 
   test("mixed with an intent TTL past the window is refused at ingestion (INTENT_TTL_TOO_FAR)", async () => {
     const mixed = await withIntent(FIXTURE_BYTES, atBlock(GLOBAL_TTL_S + 1));
     await inRolledBackTransaction(async () => {
-      await seedFixtureRootsAged(ROOT_AGE_S);
+      await seedFixtureRootsAged(2 * HOUR_S);
       expect(rejectionCode(await ingest(mixed.bytes))).toBe("INTENT_TTL_TOO_FAR");
     });
   });
@@ -473,8 +516,8 @@ describe("T4 — determinism: replay gives an identical verdict and row", () => 
   });
 
   test("a mixed offer", async () => {
-    const mixed = await withIntent(FIXTURE_BYTES, atBlock(30 * 60));
-    const [a, b] = await replayTwice(mixed.bytes, () => seedFixtureRootsAged(ROOT_AGE_S));
+    const mixed = await withIntent(FIXTURE_BYTES, atBlock(DAY_S));
+    const [a, b] = await replayTwice(mixed.bytes, () => seedFixtureRootsAged(2 * HOUR_S));
     expect(a!.code).toBeNull();
     expect(b).toEqual(a!);
   });
@@ -514,26 +557,45 @@ describe("T4 — startup: the node's env resolves reference parameters or fails"
     };
   };
 
-  test("undeployed, preview, preprod and mainnet start (1 h root window, 3 h DUST grace)", () => {
-    for (const network of ["undeployed", "preview", "preprod", "mainnet"]) {
-      const run = child({ MIDNIGHT_NETWORK_ID: network, OFFER_TTL_SECONDS: "", ROOT_WINDOW_SECONDS: "" });
+  test("undeployed, preview and preprod start (14-day window, 3 h DUST grace)", () => {
+    for (const network of ["undeployed", "preview", "preprod"]) {
+      // A placeholder Blockfrost token lets midnight-env resolve the hosted
+      // networks' default endpoints; nothing is dialled here.
+      const endpoints: Record<string, string> =
+        network === "undeployed" ? {} : { MIDNIGHT_BLOCKFROST_PROJECT_ID: "placeholder-project-id" };
+      const run = child({ MIDNIGHT_NETWORK_ID: network, OFFER_TTL_SECONDS: "", ROOT_WINDOW_SECONDS: "", ...endpoints });
       expect({ network, exitCode: run.exitCode, stderr: run.stderr }).toMatchObject({ network, exitCode: 0 });
       const out = JSON.parse(run.stdout.trim().split("\n").pop()!);
       expect(out).toMatchObject({
         network,
-        rootWindowSeconds: ROOT_WINDOW_S,
-        offerTtlSeconds: ROOT_WINDOW_S,
+        rootWindowSeconds: GLOBAL_TTL_S,
+        offerTtlSeconds: GLOBAL_TTL_S,
         dustGracePeriodSeconds: 10_800,
       });
       expect(run.stderr).not.toContain("OFFER_TTL_SECONDS=");
     }
   });
 
-  test("a network without reference parameters (stagenet, ledger 9) fails at startup, naming the supported ids", () => {
-    const run = child({ MIDNIGHT_NETWORK_ID: "stagenet" });
+  test("a network without reference parameters (stagenet) fails at startup, naming the supported ids", () => {
+    // midnight-env has no hosted default for stagenet: explicit (unreachable,
+    // never dialled) URLs let it load, so the failure is the missing reference
+    // parameters.
+    const run = child({
+      MIDNIGHT_NETWORK_ID: "stagenet",
+      MIDNIGHT_INDEXER_HTTP: "https://indexer.example.invalid/api/v4/graphql",
+      MIDNIGHT_INDEXER_WS: "wss://indexer.example.invalid/api/v4/graphql/ws",
+      MIDNIGHT_NODE_HTTP: "https://rpc.example.invalid",
+    });
     expect(run.exitCode).not.toBe(0);
     expect(run.stderr).toContain("no reference ledger parameters for MIDNIGHT_NETWORK_ID='stagenet'");
-    expect(run.stderr).toContain("supported: mainnet, preprod, preview, undeployed");
+    expect(run.stderr).toContain("supported: undeployed, preview, preprod");
+  });
+
+  test("mainnet fails at startup because its reference parameters are not pinned yet", () => {
+    const run = child({ MIDNIGHT_NETWORK_ID: "mainnet", MIDNIGHT_BLOCKFROST_PROJECT_ID: "placeholder-project-id" });
+    expect(run.exitCode).not.toBe(0);
+    expect(run.stderr).toContain("reference ledger parameters for MIDNIGHT_NETWORK_ID='mainnet' are not pinned yet");
+    expect(run.stderr).not.toContain("no reference ledger parameters");
   });
 
   test("an explicit OFFER_TTL_SECONDS warns and no longer caps offers", () => {

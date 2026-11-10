@@ -20,6 +20,15 @@
 
 import { createRequire } from "node:module";
 
+import { redactBlockfrostProjectId } from "@effectstream/midnight-contracts/midnight-env";
+
+import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
+
+// The sync-health probe below reads the Midnight indexer tip; on a public
+// network that endpoint carries the Blockfrost project token in its query
+// string, so every printed line goes through redactBlockfrostProjectId.
+installLogRedaction(redactBlockfrostProjectId);
+
 // `pg` is a dependency of packages/database, not of the workspace root, and
 // `deploy/` is not a workspace member — so a bare specifier does not resolve
 // from this file. Resolve it from the package that declares it, the same shape

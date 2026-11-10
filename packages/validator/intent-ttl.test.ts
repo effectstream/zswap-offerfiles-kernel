@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { LedgerState } from "@midnight-ntwrk/ledger-v8";
+import { LedgerState } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
 import { getReferenceState } from "./refstate.ts";
@@ -32,7 +32,7 @@ const CASES = [
   ["expired (−1 s)", -1, "INTENT_TTL_EXPIRED"],
 ] as const;
 
-const NETWORKS = ["undeployed", "preprod"] as const;
+const NETWORKS = ["undeployed", "preview", "preprod"] as const;
 /** Offers per network id: the reference state checks the tx's network id too. */
 const offers = new Map<string, SignedOffer>();
 const key = (network: string, label: string) => `${network}|${label}`;

@@ -3,11 +3,11 @@
 #
 # `docker compose down` alone leaves the volumes. That is the wrong default
 # here: every volume in this project is CHAIN-KEYED. The kernel's ledger
-# mirror, the indexer's SQLite, the batcher's parked inputs and the solver's
-# operation journal all describe one specific genesis. Keeping any of them
+# mirror, the indexer's SQLite, the batcher's parked inputs and the offer
+# poster's coin journal all describe one specific genesis. Keeping any of them
 # across a chain reset produces a stack that starts cleanly and is wrong —
 # offers that cannot be found, nullifiers that refer to nothing, and a journal
-# recovering operations against a different ledger. Volumes therefore go with
+# re-offering coins of a different ledger. Volumes therefore go with
 # the containers as one set.
 #
 #   ./down.sh                 containers + networks + volumes
@@ -36,11 +36,11 @@ PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null | cut -d= -f2- || t
 PROJECT="${PROJECT:-cow00005_e2e}"
 
 echo "== tearing down project ${PROJECT} =="
-docker compose --profile e2e --profile prices --profile poster down --volumes --remove-orphans --timeout 30 || true
+docker compose --profile prices --profile poster down --volumes --remove-orphans --timeout 30 || true
 
 if [ "${REMOVE_IMAGES}" -eq 1 ]; then
   echo "== removing images built by this project =="
-  docker compose --profile e2e --profile prices --profile poster down --rmi local --volumes --remove-orphans || true
+  docker compose --profile prices --profile poster down --rmi local --volumes --remove-orphans || true
 fi
 
 echo

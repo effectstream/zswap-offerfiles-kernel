@@ -20,9 +20,11 @@ import {
   resolveOfferCursor,
   findActiveOfferByCommitment,
   findActiveOfferByUnshieldedOutput,
+  ensureKnownRootsIndexes,
 } from "@zswap-da/database";
 
 import {
+  ALLOW_CONTRACT_MAKER_OFFERS,
   apiRateLimitAllowList,
   apiRateLimitMax,
   apiSseMaxConnections,
@@ -35,8 +37,11 @@ import {
   OFFER_MAX_BYTES,
   ROOT_WINDOW_SECONDS,
 } from "./env.ts";
-import { midnightNetworkConfig } from "@effectstream/midnight-contracts/midnight-env";
-import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/solver-core/amount";
+import {
+  midnightNetworkConfig,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
+import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/api-contracts/amount";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getReferenceState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
 import {
@@ -162,6 +167,17 @@ export const apiRouter: StartConfigApiRouter = async function (
   // BATCHER_SPONSOR_POLICY throws HERE — before the server is ready — instead
   // of on the first submission.
   console.log(`[API] ${describeSponsorshipPolicy()}`);
+
+  // known_roots holds up to ~201,600 roots at the 14-day root window. A
+  // database that synced before idx_known_roots_last_seen_height existed
+  // never re-runs 000-init.sql, so ensure the index here (idempotent; a no-op
+  // before the schema exists). Best effort: a failure costs prune speed, not
+  // correctness.
+  try {
+    await ensureKnownRootsIndexes(dbConn);
+  } catch (error) {
+    console.error("[API] could not ensure the known_roots indexes:", error);
+  }
 
   // GET /docs — interactive API playground (upload + accept/settle debugger).
   registerDocsRoutes(server);
@@ -729,13 +745,16 @@ export const apiRouter: StartConfigApiRouter = async function (
     },
   );
 
-  // GET /v1/midnight/config — expose public network endpoints for browser
-  // wallets. Offer Files has no application contract address.
+  // GET /v1/midnight/config — expose the network endpoints for browser
+  // wallets. Offer Files has no application contract address. The URLs pass
+  // through redactBlockfrostProjectId: a Blockfrost endpoint carries the
+  // operator's project token in its query string, and this route is public,
+  // so a client sees `project_id=<redacted>` and brings its own token.
   server.get("/v1/midnight/config", async () => {
     return {
-      indexerUri: midnightNetworkConfig.indexer,
-      indexerWsUri: midnightNetworkConfig.indexerWS,
-      proofServerUri: midnightNetworkConfig.proofServer,
+      indexerUri: redactBlockfrostProjectId(midnightNetworkConfig.indexer),
+      indexerWsUri: redactBlockfrostProjectId(midnightNetworkConfig.indexerWS),
+      proofServerUri: redactBlockfrostProjectId(midnightNetworkConfig.proofServer),
       networkId: midnightNetworkConfig.id,
     };
   });
@@ -945,13 +964,13 @@ export const apiRouter: StartConfigApiRouter = async function (
             hint:
               "Lace proved against a Merkle root this node has never synced. " +
               "Usually Lace's indexer URI differs from this node even when networkId matches " +
-              `(node networkId=${MIDNIGHT_NETWORK_ID}, indexer=${midnightNetworkConfig.indexer}). ` +
+              `(node networkId=${MIDNIGHT_NETWORK_ID}, indexer=${redactBlockfrostProjectId(midnightNetworkConfig.indexer)}). ` +
               "Configure Lace for this node's indexer, obtain same-chain inventory, then rebuild the offer. " +
               "Retrying the same blob will not help if the root is foreign.",
             diagnostics: {
               offerRoot: root,
               nodeNetworkId: MIDNIGHT_NETWORK_ID,
-              nodeIndexerUri: midnightNetworkConfig.indexer,
+              nodeIndexerUri: redactBlockfrostProjectId(midnightNetworkConfig.indexer),
               knownRootsTotal: rootsMeta?.total ?? null,
               knownRootsLatestHeight: rootsMeta?.latest_height ?? null,
               midnightTip: tip?.midnight?.tip ?? null,
@@ -971,6 +990,7 @@ export const apiRouter: StartConfigApiRouter = async function (
       const crypto = verifyOfferCrypto(validation.tx!, {
         refState: getReferenceState(MIDNIGHT_NETWORK_ID),
         tblock: new Date(),
+        contractMakerRetry: ALLOW_CONTRACT_MAKER_OFFERS,
       });
       if (!crypto.ok) {
         return reply.code(400).send({ error: crypto.code, reason: crypto.reason });

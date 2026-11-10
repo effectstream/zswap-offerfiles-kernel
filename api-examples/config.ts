@@ -8,27 +8,32 @@ export interface EnvConfig {
   nodeUrl: string;
   batcherUrl: string;
   networkId: NetworkId;
+  /** Midnight node RPC URL for the wallet examples ("" = none for this network). */
+  midnightNodeUrl: string;
   /** Hex wallet seed (64 chars). Required for wallet / offer / settle scripts. */
   walletSeed: string;
   /** Optional second wallet seed for taker-side settlement demo. */
   takerSeed: string;
 }
 
-const PRESETS: Record<NetworkId, Pick<EnvConfig, "nodeUrl" | "batcherUrl" | "networkId">> = {
+const PRESETS: Record<NetworkId, Pick<EnvConfig, "nodeUrl" | "batcherUrl" | "networkId" | "midnightNodeUrl">> = {
   undeployed: {
     networkId: "undeployed",
     nodeUrl:   "http://localhost:9999",
     batcherUrl:"http://localhost:3334",
+    midnightNodeUrl: "http://localhost:9944",
   },
   preview: {
     networkId: "preview",
     nodeUrl:   "https://api-zswap.zkdojo.com",
     batcherUrl:"https://api-zswap.zkdojo.com:3334",
+    midnightNodeUrl: "",
   },
   mainnet: {
     networkId: "mainnet",
     nodeUrl:   "https://api-zswap.zkdojo.com",   // update for mainnet deployment
     batcherUrl:"https://api-zswap.zkdojo.com:3334",
+    midnightNodeUrl: "",
   },
 };
 
@@ -39,6 +44,7 @@ export const config: EnvConfig = {
   ...preset,
   nodeUrl:    process.env.NODE_URL    ?? preset.nodeUrl,
   batcherUrl: process.env.BATCHER_URL ?? preset.batcherUrl,
+  midnightNodeUrl: process.env.MIDNIGHT_NODE_HTTP ?? preset.midnightNodeUrl,
   // Preview genesis wallet (seed 0x…0001) — has funds on undeployed only.
   // On preview/mainnet set WALLET_SEED to your own funded hex seed, or set
   // MIDNIGHT_WALLET_MNEMONIC and run mnemonic-to-seed.ts to derive it.
@@ -47,6 +53,23 @@ export const config: EnvConfig = {
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * The Midnight node RPC URL the wallet examples dial. GET /v1/midnight/config
+ * serves the indexer and the proof server but not the node, and the wallet
+ * submits transactions to the node, so the URL comes from MIDNIGHT_NODE_HTTP,
+ * with the local devnet node as the `undeployed` default. A public network has
+ * no default: its node is the operator's (or Blockfrost's RPC with your own
+ * project_id).
+ */
+export function midnightNodeUrl(): string {
+  if (!config.midnightNodeUrl) {
+    throw new Error(
+      `MIDNIGHT_NODE_HTTP is required on ${config.networkId}: the wallet needs the Midnight node's RPC URL`,
+    );
+  }
+  return config.midnightNodeUrl;
+}
 
 export async function get<T = unknown>(path: string): Promise<T> {
   const url = `${config.nodeUrl}${path}`;

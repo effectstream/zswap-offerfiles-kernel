@@ -40,7 +40,7 @@ const {
   EXACT_FILES_SCHEMA_VERSION,
   MAX_EXACT_FILES_PER_READ,
   parseExactFilesResponse,
-} = await import("@zswap-da/solver-core/exact-files-contract");
+} = await import("@zswap-da/api-contracts/exact-files-contract");
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const fastify = (await import("fastify")).default;

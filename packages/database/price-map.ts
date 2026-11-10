@@ -10,9 +10,9 @@
 //
 // SNIGHT is the same story with a fixed address: the shielded-night wrapper's
 // colour is derived from its contract address, so it differs per network.
-// 000-init.sql seeds the PREPROD colour and documents the patch other networks
-// need; the NAME entry below is what prices the row wherever it is registered
-// without an asset_id — a hand-patched colour on preprod included.
+// The schema does not seed it (a fresh database lists NIGHT only); the NAME
+// entry below is what prices an SNIGHT row wherever it is registered without
+// an asset_id.
 //
 // Resolution order for one token (D6 of the master plan):
 //   1. known_tokens.asset_id      — the operator wrote it into the DB
@@ -70,8 +70,8 @@ export const SEEDED_ASSET_IDS: readonly string[] = [
  *
  * SNIGHT is the shielded-night wrapper, locked 1:1 against NIGHT (1 base unit
  * = 1 Star), so it shares NIGHT's asset — no new asset id, SEEDED_ASSET_IDS
- * unchanged. Its colour is per-network; see the SNIGHT note in
- * migrations/000-init.sql.
+ * unchanged. Its colour is per-network (derived from the wrapper contract's
+ * address), so the schema does not seed it.
  */
 export const DEFAULT_NAME_ASSET_MAP: ReadonlyMap<string, PriceMapEntry> = new Map<
   string,
@@ -169,7 +169,7 @@ export function resolveAssetId(
 
   // The literal mirrors `known_tokens.decimals DEFAULT 6` in 000-init.sql —
   // this package IS the registry layer, so the schema is its authority, not the
-  // DEFAULT_TOKEN_DECIMALS constant the scripts share (@zswap-da/solver-core/
+  // DEFAULT_TOKEN_DECIMALS constant the scripts share (@zswap-da/api-contracts/
   // amount). Reached only when a CALLER hands over a partial token: the column
   // is NOT NULL, so a real row always carries its own value.
   const decimals = override?.decimals ?? token.decimals ?? 6;

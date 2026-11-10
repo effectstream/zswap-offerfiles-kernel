@@ -38,7 +38,7 @@ export default {
       args: ["run", "packages/node/main.dev.ts"],
       waitToExit: false,
       type: "system-dependency",
-      // Local clients (the solver's book mirror, e2e scripts) burst past the
+      // Local clients (a book mirror, e2e scripts) burst past the
       // shared per-IP budget during a page-through plus settlement polls.
       env: {
         PGLITE: "true",
@@ -81,17 +81,6 @@ export default {
       link: "http://localhost:3334",
       stopProcessAtPort: [3334],
       dependsOn: [...midnightDeps, syncApiHealth],
-    },
-
-    {
-      name: "solver",
-      description: "ZSwap-DA posted-price solver (matches crossings, fills from inventory)",
-      args: ["run", "packages/solver/solver.dev.ts"],
-      waitToExit: false,
-      // Deliberately not a system-dependency: the stack is fully usable without
-      // a solver, and a solver fault must never tear the stack down.
-      //
-      dependsOn: [...midnightDeps, syncApiHealth, "sync"],
     },
 
     // The price feed is deliberately NOT registered here (Q-11).

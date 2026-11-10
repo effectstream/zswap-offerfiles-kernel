@@ -30,7 +30,7 @@ const {
   OFFER_VALIDATION_PROFILE,
   OFFER_VALIDATION_SCHEMA_VERSION,
   parseOfferValidationVerdict,
-} = await import("@zswap-da/solver-core/validation-contract");
+} = await import("@zswap-da/api-contracts/validation-contract");
 
 const OFFER_ID = "ab".repeat(32);
 

@@ -8,19 +8,18 @@
   },
   "scripts": {
     "start": "bun run batcher.dev.ts",
-    "start:mainnet": "bun run batcher.mainnet.ts",
-    "start:preview": "bun run batcher.preview.ts"
+    "start:public": "bun run batcher.public.ts"
   },
   "dependencies": {
-    "@effectstream/batcher-sdk": "0.104.3",
-    "@effectstream/midnight-contracts": "0.104.3",
-    "@effectstream/utils": "0.104.3",
+    "@effectstream/batcher-sdk": "0.300.3",
+    "@effectstream/midnight-contracts": "0.300.3",
+    "@effectstream/utils": "0.300.3",
     "@zswap-da/validator": "workspace:*",
     "effection": "^3.5.0",
     "@zswap-da/offer-guard": "workspace:*"
   },
   "devDependencies": {
     "@scure/base": "^2.0.0",
-    "@effectstream/mip-zswap-offer": "0.3.0"
+    "@effectstream/mip-zswap-offer": "0.4.0"
   }
 }

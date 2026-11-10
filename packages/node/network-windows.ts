@@ -1,53 +1,59 @@
-// Per-network protocol windows, pure and testable — env.ts wires these into
-// the exported constants.
+// Protocol windows, pure and testable — env.ts wires these into the exported
+// constants.
 //
-// The root-recency window governs `past_roots` in the zswap crate: the chain
-// accepts shielded proofs only against Merkle roots inside this window, and
-// our known_roots retention must mirror it exactly. Too wide and the book
-// lists offers whose roots the chain already dropped (phantom, unfillable
-// offers — the same failure class the nullifier-retention fix closed); too
-// narrow and legitimate offers get rejected as ROOT_UNKNOWN.
+// The root-recency window governs zswap `past_roots`: the chain accepts
+// shielded proofs only against Merkle roots inside this window, and our
+// known_roots retention must mirror it exactly. Too wide and the book lists
+// offers whose roots the chain already dropped (phantom, unfillable offers —
+// the same failure class the nullifier-retention fix closed); too narrow and
+// legitimate offers get rejected as ROOT_UNKNOWN.
 //
-// On ledger 8 (node 1.x: preview, preprod, mainnet — this line) the zswap
-// crate HARDCODES a 3600 s window (midnight-ledger `ledger-8.1.0`
-// zswap/src/ledger.rs:253, `past_roots.filter(tblock - 3600 s)`), counted from
-// the last block in which the root was still current. A shielded (zswap)
-// offer carries NO TTL of its own: this window is its only expiry.
+// On ledger 9 — the only ledger this kernel runs against (node 2.x) — the
+// window IS the `global_ttl` ledger parameter. The post-block update prunes
+// zswap `past_roots` by `self.parameters.global_ttl`:
+//   - midnight-ledger `ledger-9.1.0.0`, ledger/src/semantics.rs:1716-1720
+//     (`zswap.post_block_update(tblock, self.parameters.global_ttl)`);
+//   - the same tag's zswap crate (9.0.0), zswap/src/ledger.rs:241-251
+//     (`past_roots.filter(tblock - retention_duration)`).
+// `global_ttl` is 1209600 s (14 days) in the network configs of
+// midnight-node `release/node-2.1.0` @ 806ff702
+// (`res/<network>/ledger-parameters-config.json` for dev, local, devnet,
+// govnet, perfnet, qanet, preview, preprod and mainnet), in the mainnet
+// genesis state there, and live on preview (block 40,171) and preprod (block
+// 3,352,707) on 2026-11-09.
 //
-// It is NOT the `global_ttl` ledger parameter. `global_ttl` bounds intent TTLs
-// (`tblock <= ttl <= tblock + global_ttl`) and is 1,209,600 s (14 days) on
-// every network (node `res/<net>/ledger-parameters-config.json`; live preview,
-// preprod and mainnet parameters, 2026-09-27). The offer validator reads it
+// The value is static on purpose: `global_ttl` changes only through a
+// governance system transaction (`SystemTransaction::OverwriteParameters`,
+// ledger/src/structure.rs:739), so the kernel uses one constant for every
+// network instead of reading the parameter at startup, and such a change means
+// a new release. ROOT_WINDOW_SECONDS still overrides it for tests and special
+// deployments. The same `global_ttl` also bounds intent TTLs
+// (`tblock <= ttl <= tblock + global_ttl`); the validator reads that bound
 // from the network's pinned ledger parameters
-// (packages/validator/reference-parameters.ts). Ledger 9 (node 2.x) prunes
-// past_roots by `global_ttl` instead — do not copy that onto this line.
+// (packages/validator/reference-parameters.ts), whose `global_ttl` equals this
+// constant (network-windows.test.ts checks every snapshot).
 //
-// Values are per-network and WILL change with ledger releases — treat a
-// mismatch as a deploy-config error, not a tunable.
+// Shielded (zswap) offers carry NO TTL of their own: this window — counted
+// from the last block in which the offer's root was still current — is their
+// only expiry.
+//
+// Ledger 8 (node 1.x) is different: its zswap crate hardcodes a 3600 s window
+// (zswap/src/ledger.rs:253 at ledger-8.1.x) and ignores `global_ttl`. Do not
+// copy this value onto a ledger-8 kernel.
 
-/** ~1 hour: the root-recency window on all currently deployed networks. */
-export const ROOT_WINDOW_CURRENT_NETWORKS_S = 3600;
-
-/**
- * STAGENET: runs ledger 9, whose root window is `global_ttl` (14 days). This
- * ledger-8 line cannot validate stagenet offers (it has no ledger-9 reference
- * parameters, so MIDNIGHT_NETWORK_ID=stagenet fails at startup); the value is
- * kept only so the table stays complete. The kernel's `ledger-v9` line serves
- * stagenet.
- */
-export const ROOT_WINDOW_STAGENET_S = 60 * 60 * 24 * 14;
+/** The ledger-9 `global_ttl`: 14 days, the root window on every network. */
+export const ROOT_WINDOW_DEFAULT_S = 1_209_600;
 
 /**
- * Default root window for a network id. Env (`ROOT_WINDOW_SECONDS`) always
- * wins over this — see resolveRootWindowSeconds.
+ * Default root window for a network id: the same static value for every id,
+ * known or not. The argument stays so callers do not change. Env
+ * (`ROOT_WINDOW_SECONDS`) always wins over this — see resolveRootWindowSeconds.
  */
-export function rootWindowDefaultSeconds(networkId: string): number {
-  return networkId.toLowerCase() === "stagenet"
-    ? ROOT_WINDOW_STAGENET_S
-    : ROOT_WINDOW_CURRENT_NETWORKS_S;
+export function rootWindowDefaultSeconds(_networkId: string): number {
+  return ROOT_WINDOW_DEFAULT_S;
 }
 
-/** Env override (validated positive integer) → else per-network default. */
+/** Env override (validated positive integer) → else the static default. */
 export function resolveRootWindowSeconds(
   networkId: string,
   envValue: string | undefined,
@@ -69,7 +75,7 @@ export function resolveRootWindowSeconds(
  *   - shielded (zswap) inputs: no TTL exists; the offer dies when its proof
  *     root leaves `past_roots` — root last-seen + ROOT_WINDOW_SECONDS;
  *   - intents (unshielded legs, fee intents): the earliest intent `ttl`,
- *     which the ledger bounds by `tblock + global_ttl` (14 days);
+ *     which the ledger bounds by `tblock + global_ttl`;
  *   - DUST spends: `ctime + dust_grace_period`.
  * Default: the root window. Env (`OFFER_TTL_SECONDS`) wins.
  */

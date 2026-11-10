@@ -16,7 +16,6 @@ import {
   offersGone,
   waitFor,
 } from "../lib/db.ts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { registerNightForDust } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
@@ -45,7 +44,6 @@ const P0_SEED = "000000000000000000000000000000000000000000000000000000000000003
 const P1_SEED = "0000000000000000000000000000000000000000000000000000000000000031";
 
 export async function apiTest(db: Client): Promise<void> {
-  setNetworkId(net.id as any);
 
   async function submitAndWaitRoot(blob: string, label: string): Promise<{ status: number; body: any }> {
     let sub = await submitOffer(blob);
@@ -98,7 +96,6 @@ export async function apiTest(db: Client): Promise<void> {
           outputs: [{ type: T1, amount: AMT, receiverAddress: p0Addr }],
         } as any,
       ],
-      shieldedKeys(p0),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const blob0 = OfferFiles.encode(
@@ -112,7 +109,6 @@ export async function apiTest(db: Client): Promise<void> {
           outputs: [{ type: T0, amount: AMT, receiverAddress: p1Addr }],
         } as any,
       ],
-      shieldedKeys(p1),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
     const blob1 = OfferFiles.encode(
@@ -140,6 +136,17 @@ export async function apiTest(db: Client): Promise<void> {
         o.computed.wants.some((w) => myColors.has(w.token)),
     );
     await assert("API returned my 2 offers", async () => apiOffers.length === 2);
+
+    // Resolve the DB row ids NOW, while the offers are still live in
+    // offer_file — after settlement they move to offer_file_history and a
+    // by-hash lookup in offer_file returns nothing (measured: the archive
+    // assertions timed out on exactly that).
+    const ids = (
+      await db.query<{ id: number }>(
+        `SELECT id FROM offer_file WHERE offer_hash = ANY($1::text[])`,
+        [apiOffers.map((o: any) => o.offerId)],
+      )
+    ).rows.map((r) => r.id);
 
     const giveColors = new Set(apiOffers.flatMap((o) => o.computed.gives.map((g) => g.token)));
     const wantColors = new Set(apiOffers.flatMap((o) => o.computed.wants.map((w) => w.token)));
@@ -200,7 +207,6 @@ export async function apiTest(db: Client): Promise<void> {
       async () => spentOk,
     );
 
-    const ids = apiOffers.map((o) => o.id);
     const archivedOk = await waitFor(
       "both offers archived",
       async () => offersGone(db, ids),
@@ -242,10 +248,18 @@ export async function apiTest(db: Client): Promise<void> {
     console.log(`${TAG} NEGATIVE: re-submitting the already-settled P0 offer…`);
     const beforeBad2 = await count(db, "offer_file");
     const badRes2 = await submitOffer(blob0);
+    // A BYTE-IDENTICAL re-submit hits the submit gate's dedup rule FIRST — it
+    // probes offer_file AND offer_file_history by hash (deliberately, see the
+    // api.ts comment: cheapest check against the cheapest attack), so an
+    // archived offer answers 409 DUPLICATE_OFFER before the nullifier
+    // liveness rule can answer 400 NULLIFIER_SPENT. Both are correct
+    // fee-free rejections of a spent offer; NULLIFIER_SPENT is reserved for a
+    // DIFFERENT offer spending the same coins.
     await assert(
-      "spent-offer re-submit rejected (NULLIFIER_SPENT)",
+      "spent-offer re-submit rejected (DUPLICATE_OFFER or NULLIFIER_SPENT)",
       async () =>
-        badRes2.status === 400 && badRes2.body?.error === "NULLIFIER_SPENT",
+        (badRes2.status === 409 && badRes2.body?.error === "DUPLICATE_OFFER") ||
+        (badRes2.status === 400 && badRes2.body?.error === "NULLIFIER_SPENT"),
     );
     await sleep(8000);
     await assert(

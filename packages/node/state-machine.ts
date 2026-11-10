@@ -3,7 +3,7 @@ import { World } from "@effectstream/coroutine";
 import { Stm } from "@effectstream/sm";
 import type { BaseStfInput } from "@effectstream/sm";
 import type { StartConfigGameStateTransitions } from "@effectstream/runtime";
-import { MidnightBech32m } from "@midnight-ntwrk/wallet-sdk-address-format";
+import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 import { Buffer } from "node:buffer";
 import { newScheduledTimestampData } from "@effectstream/db";
 import { AddressType } from "@effectstream/utils";
@@ -88,11 +88,12 @@ import {
   OFFER_MAX_BYTES,
   OFFER_TTL_SECONDS,
   ROOT_WINDOW_SECONDS,
+  ALLOW_CONTRACT_MAKER_OFFERS,
 } from "./env.ts";
 
 // Normalize a value that may be a Uint8Array or a hex string into lowercase
 // hex (no `0x` prefix). Used at offer-indexing for nullifiers, owner keys,
-// and intent hashes — ledger-v8 returns these as either form depending on
+// and intent hashes — the ledger returns these as either form depending on
 // the field.
 function bytesOrStringToHex(value: unknown): string {
   if (value instanceof Uint8Array) {
@@ -179,7 +180,7 @@ export function hasTransactionIntents(tx: unknown): boolean {
  * The earliest DUST deadline of a transaction: `ctime + graceSeconds` over
  * every intent whose DUST actions carry at least one spend (the ledger refuses
  * a DUST spend once `tblock > ctime + dust_grace_period`, midnight-ledger
- * `ledger-8.1.0` ledger/src/dust.rs:782-791). `null` when no intent
+ * `ledger-9.1.0.0` ledger/src/dust.rs:823-831). `null` when no intent
  * spends DUST. Registrations alone impose no deadline on the offer here.
  */
 export function earliestDustSpendDeadline(tx: unknown, graceSeconds: number): Date | null {
@@ -678,6 +679,7 @@ addTransition("celestia-zswap", function* (data) {
   const crypto = verifyOfferCrypto(result.tx!, {
     refState: getReferenceState(MIDNIGHT_NETWORK_ID),
     tblock: new Date(data.blockTimestamp),
+    contractMakerRetry: ALLOW_CONTRACT_MAKER_OFFERS,
   });
   if (!crypto.ok) {
     yield* rejectOffer(crypto.code, crypto.reason, { offerHash });
@@ -752,9 +754,10 @@ addTransition("celestia-zswap", function* (data) {
   //   applies — no well-formed two-sided offer is in that case. There is no
   //   kernel-side cap on top of the ledger limits any more (00056).
   //
-  // On ledger 8 the two limits are different windows: the zswap crate
-  // hardcodes a 1 h root window (network-windows.ts), while the intent TTL
-  // bound is the `global_ttl` ledger parameter, 14 days on every network.
+  // On ledger 9 the root window and the intent TTL bound are the same
+  // parameter, `global_ttl` (14 days on every network; network-windows.ts).
+  // They are still separate limits here, because an intent TTL is chosen per
+  // offer and can be shorter.
   //
   // ONE deadline, used for BOTH the advertised expiry and the scheduled
   // cleanup. They were computed separately before, which meant they could

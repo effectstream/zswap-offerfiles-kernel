@@ -1,0 +1,307 @@
+// kernel-entrypoints.test.ts — the kernel image's entrypoint scripts, RUN
+// (00050 FR-004, testing catalogue T1/T2/T3).
+//
+// The scripts are executed for real with bash, in a scratch copy where
+// `/usr/local/bin/` points at a temp directory and `bun` on PATH is a stub
+// that records every invocation: `bun -e …` (the wait-for.sh readiness probes)
+// succeeds at once, the public-network preflights exit with $FAKE_PREFLIGHT_EXIT,
+// the registry import with $FAKE_IMPORT_EXIT, and the final `exec bun run
+// <entry>` is recorded as EXEC. So each case proves, without a chain:
+//   * which entry MIDNIGHT_NETWORK_ID selects, and the exact argv it execs;
+//   * that `undeployed` still runs main.dev.ts / batcher.dev.ts after the same
+//     readiness waits and prints nothing new (T3);
+//   * that the public-network preflight runs BEFORE the waits and its refusal
+//     stops the script, and that no hosted Midnight or Celestia URL is waited
+//     on (or logged) there;
+//   * that an unsupported network or a missing variable exits 78 naming it.
+
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const IMAGE_DIR = join(REPO_ROOT, "deploy/images/kernel");
+
+let scratch = "";
+let binDir = "";
+let fakeRepo = "";
+
+const FAKE_BUN = `#!/usr/bin/env bash
+# A readiness probe's -e body is multi-line JavaScript: log only its target.
+if [ "$1" = "-e" ]; then echo "BUN -e <probe> \${@: -1}" >> "$FAKE_BUN_LOG"; exit 0; fi
+echo "BUN $*" >> "$FAKE_BUN_LOG"
+if [ "$1" = "run" ]; then
+  case "$2" in
+    packages/node/public-network-profile.ts) exit "\${FAKE_PREFLIGHT_EXIT:-0}" ;;
+    packages/database/import-token-registry.ts) exit "\${FAKE_IMPORT_EXIT:-0}" ;;
+  esac
+  for arg in "$@"; do
+    if [ "$arg" = "--check" ]; then exit "\${FAKE_PREFLIGHT_EXIT:-0}"; fi
+  done
+  echo "EXEC $*" >> "$FAKE_BUN_LOG"
+  exit 0
+fi
+exit 0
+`;
+
+beforeAll(() => {
+  scratch = mkdtempSync(join(tmpdir(), "k00050-entrypoints-"));
+  binDir = join(scratch, "usr-local-bin");
+  fakeRepo = join(scratch, "app");
+  const pathDir = join(scratch, "path");
+  for (const d of [binDir, fakeRepo, pathDir]) mkdirSync(d, { recursive: true });
+  for (const file of readdirSync(IMAGE_DIR)) {
+    if (!file.endsWith(".sh")) continue;
+    const src = readFileSync(join(IMAGE_DIR, file), "utf8").replaceAll("/usr/local/bin/", `${binDir}/`);
+    writeFileSync(join(binDir, file), src);
+    chmodSync(join(binDir, file), 0o755);
+  }
+  writeFileSync(join(pathDir, "bun"), FAKE_BUN);
+  chmodSync(join(pathDir, "bun"), 0o755);
+});
+
+afterAll(() => {
+  if (scratch) rmSync(scratch, { recursive: true, force: true });
+});
+
+interface Run {
+  code: number;
+  stderr: string;
+  calls: string[];
+}
+
+function runEntrypoint(script: string, vars: Record<string, string>): Run {
+  const log = join(scratch, `calls-${Math.random().toString(16).slice(2)}.log`);
+  writeFileSync(log, "");
+  const result = Bun.spawnSync(["bash", join(binDir, script)], {
+    cwd: fakeRepo,
+    env: {
+      PATH: `${join(scratch, "path")}:/usr/bin:/bin`,
+      HOME: scratch,
+      REPO_ROOT: fakeRepo,
+      FAKE_BUN_LOG: log,
+      ...vars,
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 30_000,
+  });
+  const calls = readFileSync(log, "utf8").split("\n").filter((l) => l.length > 0);
+  return { code: result.exitCode ?? -1, stderr: result.stderr.toString(), calls };
+}
+
+const kernelEnv = (network: string): Record<string, string> => ({
+  MIDNIGHT_NETWORK_ID: network,
+  MIDNIGHT_NODE_HTTP: "http://midnight-node:9944",
+  MIDNIGHT_INDEXER_HTTP: "http://indexer:8088/api/v4/graphql",
+  MIDNIGHT_INDEXER_WS: "ws://indexer:8088/api/v4/graphql/ws",
+  MIDNIGHT_PROOF_SERVER_URL: "http://proof-server:6300",
+  CELESTIA_RPC_URL: "http://celestia:26658",
+  DB_HOST: "pglite",
+  DB_PORT: "5432",
+});
+
+const batcherEnv = (network: string): Record<string, string> => {
+  const { DB_HOST: _h, DB_PORT: _p, ...rest } = kernelEnv(network);
+  return { ...rest, BATCHER_STORAGE_DIR: join(scratch, `batcher-${network}`) };
+};
+
+const probes = (run: Run) => run.calls.filter((c) => c.startsWith("BUN -e ")).length;
+const execs = (run: Run) => run.calls.filter((c) => c.startsWith("EXEC "));
+
+describe("entrypoint-kernel.sh selects the node entry from MIDNIGHT_NETWORK_ID", () => {
+  test("undeployed: exactly `bun run packages/node/main.dev.ts` after the five waits, nothing new logged (T3)", () => {
+    const run = runEntrypoint("entrypoint-kernel.sh", kernelEnv("undeployed"));
+    expect(run.code, run.stderr).toBe(0);
+    expect(probes(run)).toBe(5);
+    expect(execs(run)).toEqual(["EXEC run packages/node/main.dev.ts"]);
+    expect(run.calls.at(-1)).toBe("EXEC run packages/node/main.dev.ts");
+    expect(run.stderr).not.toContain("selected");
+    expect(run.stderr).toContain("starting kernel on :9999 (network undeployed)");
+  });
+
+  // What an operator sets on a public network: no Midnight URL (the Blockfrost
+  // defaults apply), a token- or credential-bearing Celestia URL.
+  const publicKernelEnv = (network: string): Record<string, string> => ({
+    MIDNIGHT_NETWORK_ID: network,
+    MIDNIGHT_BLOCKFROST_PROJECT_ID: "entrypointTestToken000000000000",
+    CELESTIA_RPC_URL: "https://user:secret@celestia.example.invalid/path-credential",
+    DB_HOST: "postgres",
+    DB_PORT: "5432",
+  });
+
+  test.each(["preview", "preprod", "mainnet"])(
+    "%s: the config preflight runs BEFORE the waits, then main.public.ts; only the database is waited on",
+    (network) => {
+      const run = runEntrypoint("entrypoint-kernel.sh", publicKernelEnv(network));
+      expect(run.code, run.stderr).toBe(0);
+      expect(run.calls[0]).toBe("BUN run packages/node/public-network-profile.ts");
+      expect(probes(run)).toBe(1);
+      expect(execs(run)).toEqual(["EXEC run packages/node/main.public.ts"]);
+      expect(run.stderr).toContain(`selected packages/node/main.public.ts for network ${network}`);
+      expect(run.stderr).not.toContain("entrypointTestToken");
+      expect(run.stderr).not.toContain("secret@");
+    },
+  );
+
+  test("a preflight refusal (exit 78) stops before any wait or exec", () => {
+    const run = runEntrypoint("entrypoint-kernel.sh", { ...publicKernelEnv("preprod"), FAKE_PREFLIGHT_EXIT: "78" });
+    expect(run.code).toBe(78);
+    expect(probes(run)).toBe(0);
+    expect(execs(run)).toEqual([]);
+  });
+
+  test.each(["stagenet", "devnet", "qanet"])("%s is refused with exit 78, naming the supported set", (network) => {
+    const run = runEntrypoint("entrypoint-kernel.sh", kernelEnv(network));
+    expect(run.code).toBe(78);
+    expect(run.stderr).toContain(
+      `no kernel entry for MIDNIGHT_NETWORK_ID='${network}' (supported: undeployed, preview, preprod, mainnet)`,
+    );
+    expect(run.calls).toEqual([]);
+  });
+
+  test("a missing required variable exits 78 naming it (unchanged)", () => {
+    const { DB_HOST: _omit, ...vars } = publicKernelEnv("preprod");
+    const run = runEntrypoint("entrypoint-kernel.sh", vars);
+    expect(run.code).toBe(78);
+    expect(run.stderr).toContain("missing required environment: DB_HOST");
+  });
+
+  test("undeployed still requires its explicit local endpoints", () => {
+    const { MIDNIGHT_NODE_HTTP: _omit, ...vars } = kernelEnv("undeployed");
+    const run = runEntrypoint("entrypoint-kernel.sh", vars);
+    expect(run.code).toBe(78);
+    expect(run.stderr).toContain("missing required environment: MIDNIGHT_NODE_HTTP");
+  });
+});
+
+describe("entrypoint-batcher.sh selects the batcher entry from MIDNIGHT_NETWORK_ID", () => {
+  test("undeployed: exactly `bun run packages/batcher/batcher.dev.ts` after the four waits (T3)", () => {
+    const run = runEntrypoint("entrypoint-batcher.sh", batcherEnv("undeployed"));
+    expect(run.code, run.stderr).toBe(0);
+    expect(probes(run)).toBe(4);
+    expect(execs(run)).toEqual(["EXEC run packages/batcher/batcher.dev.ts"]);
+    expect(run.stderr).not.toContain("selected");
+  });
+
+  const publicBatcherEnv = (network: string): Record<string, string> => ({
+    MIDNIGHT_NETWORK_ID: network,
+    MIDNIGHT_BLOCKFROST_PROJECT_ID: "entrypointTestToken000000000000",
+    MIDNIGHT_PROOF_SERVER_URL: "http://proof-server:6300",
+    CELESTIA_RPC_URL: "https://user:secret@celestia.example.invalid/path-credential",
+    BATCHER_STORAGE_DIR: join(scratch, `batcher-${network}`),
+  });
+
+  test.each(["preview", "preprod", "mainnet"])(
+    "%s: `batcher.public.ts --check` BEFORE the waits, then batcher.public.ts; only the proof server is waited on",
+    (network) => {
+      const run = runEntrypoint("entrypoint-batcher.sh", publicBatcherEnv(network));
+      expect(run.code, run.stderr).toBe(0);
+      expect(run.calls[0]).toBe("BUN run packages/batcher/batcher.public.ts --check");
+      expect(probes(run)).toBe(1);
+      expect(run.calls.filter((c) => c.startsWith("BUN -e ")).at(0)).toEndWith("http://proof-server:6300");
+      expect(execs(run)).toEqual(["EXEC run packages/batcher/batcher.public.ts"]);
+      expect(run.stderr).not.toContain("entrypointTestToken");
+      expect(run.stderr).not.toContain("secret@");
+    },
+  );
+
+  test("a --check refusal (exit 78: e.g. no seed, or a dev seed) stops before any wait or exec", () => {
+    const run = runEntrypoint("entrypoint-batcher.sh", { ...publicBatcherEnv("mainnet"), FAKE_PREFLIGHT_EXIT: "78" });
+    expect(run.code).toBe(78);
+    expect(probes(run)).toBe(0);
+    expect(execs(run)).toEqual([]);
+  });
+
+  test("an unsupported network exits 78", () => {
+    const run = runEntrypoint("entrypoint-batcher.sh", batcherEnv("stagenet"));
+    expect(run.code).toBe(78);
+    expect(run.stderr).toContain(
+      "no batcher entry for MIDNIGHT_NETWORK_ID='stagenet' (supported: undeployed, preview, preprod, mainnet)",
+    );
+  });
+});
+
+describe("entrypoint-token-registry.sh — the one-shot import (FR-004)", () => {
+  const registryEnv = (network: string): Record<string, string> => ({
+    TOKEN_REGISTRY_NETWORK: network,
+    DB_HOST: "postgres",
+    DB_PORT: "5432",
+    TOKEN_REGISTRY_RETRY_DELAY_S: "0",
+  });
+
+  test.each(["preview", "preprod", "mainnet"])("%s: runs the import with --required and exits 0 when it applies", (network) => {
+    const run = runEntrypoint("entrypoint-token-registry.sh", registryEnv(network));
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.calls).toContain("BUN run packages/database/import-token-registry.ts --required");
+    expect(run.stderr).toContain("token registry import applied");
+  });
+
+  test("exit 3 from the import (nothing to import for this network) succeeds at once, without a retry", () => {
+    const run = runEntrypoint("entrypoint-token-registry.sh", {
+      ...registryEnv("preview"),
+      FAKE_IMPORT_EXIT: "3",
+      TOKEN_REGISTRY_ATTEMPTS: "3",
+    });
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.calls.filter((c) => c.includes("import-token-registry.ts --required"))).toHaveLength(1);
+    expect(run.stderr).toContain("token registry import skipped: nothing to import for preview");
+    expect(run.stderr).not.toContain("token registry import applied");
+  });
+
+  test("a failing import is retried, then fails LOUDLY (exit 1) — never a silent skip", () => {
+    const run = runEntrypoint("entrypoint-token-registry.sh", {
+      ...registryEnv("preprod"),
+      FAKE_IMPORT_EXIT: "1",
+      TOKEN_REGISTRY_ATTEMPTS: "3",
+    });
+    expect(run.code).toBe(1);
+    expect(run.calls.filter((c) => c.includes("import-token-registry.ts --required"))).toHaveLength(3);
+    expect(run.stderr).toContain("token registry import FAILED after 3 attempt(s)");
+  });
+
+  test("waits for the kernel API when ZSWAP_API is set", () => {
+    const run = runEntrypoint("entrypoint-token-registry.sh", { ...registryEnv("preview"), ZSWAP_API: "http://kernel:9999" });
+    expect(run.code, run.stderr).toBe(0);
+    expect(run.calls.some((c) => c.startsWith("BUN -e ") && c.endsWith("http://kernel:9999/v1/health"))).toBe(true);
+  });
+
+  test.each([
+    [{}, "missing required environment: TOKEN_REGISTRY_NETWORK"],
+    [{ TOKEN_REGISTRY_NETWORK: "undeployed" }, "TOKEN_REGISTRY_NETWORK must be preview, preprod or mainnet"],
+    [{ TOKEN_REGISTRY_NETWORK: "stagenet" }, "TOKEN_REGISTRY_NETWORK must be preview, preprod or mainnet"],
+    [{ TOKEN_REGISTRY_ATTEMPTS: "0" }, "TOKEN_REGISTRY_ATTEMPTS must be a positive integer"],
+  ])("refuses %j with exit 78", (overrides, message) => {
+    const base = registryEnv("preprod");
+    if (!("TOKEN_REGISTRY_NETWORK" in overrides) && Object.keys(overrides).length === 0) {
+      delete (base as Record<string, string | undefined>)["TOKEN_REGISTRY_NETWORK"];
+    }
+    const run = runEntrypoint("entrypoint-token-registry.sh", { ...base, ...(overrides as Record<string, string>) });
+    expect(run.code).toBe(78);
+    expect(run.stderr).toContain(message);
+    expect(run.calls.some((c) => c.includes("import-token-registry"))).toBe(false);
+  });
+});
+
+describe("the image ships every entrypoint and every selected entry exists", () => {
+  const dockerfile = readFileSync(join(IMAGE_DIR, "Dockerfile"), "utf8");
+
+  test.each(readdirSync(IMAGE_DIR).filter((f) => /^entrypoint-.*\.sh$/.test(f)))("Dockerfile COPYs %s", (file) => {
+    expect(dockerfile).toMatch(
+      new RegExp(`^COPY\\s+deploy/images/kernel/${file.replace(".", "\\.")}\\s+/usr/local/bin/${file.replace(".", "\\.")}\\s*$`, "m"),
+    );
+  });
+
+  test.each([
+    "packages/node/main.dev.ts",
+    "packages/node/main.public.ts",
+    "packages/node/public-network-profile.ts",
+    "packages/batcher/batcher.dev.ts",
+    "packages/batcher/batcher.public.ts",
+    "packages/database/import-token-registry.ts",
+  ])("%s exists", (entry) => {
+    expect(() => readFileSync(join(REPO_ROOT, entry))).not.toThrow();
+  });
+});

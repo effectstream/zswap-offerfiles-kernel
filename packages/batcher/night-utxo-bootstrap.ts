@@ -102,10 +102,6 @@ async function defaultSubmitSelfSplit(
         })),
       } as any,
     ],
-    {
-      shieldedSecretKeys: walletResult.zswapSecretKeys,
-      dustSecretKey: walletResult.dustSecretKey,
-    },
     { ttl: new Date(Date.now() + 30 * 60_000), payFees: true },
   );
 
@@ -113,7 +109,7 @@ async function defaultSubmitSelfSplit(
   try {
     const signed = await (walletResult.wallet as any).signRecipe(
       recipe,
-      (payload: Uint8Array) => walletResult.unshieldedKeystore.signData(payload),
+      (payload: Uint8Array) => walletResult.unshieldedKeystore.signDataAsync(payload),
     );
     finalized = await walletResult.wallet.finalizeRecipe(signed);
     await walletResult.wallet.submitTransaction(finalized);

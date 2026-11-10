@@ -11,24 +11,25 @@
 # kill live listeners on 9944/8088/6300 (`stopProcessAtPort`). Every entrypoint
 # is a single `exec`d process so
 # the container's PID 1 is the real workload and Compose signals reach it.
+# The one exception is entrypoint-pglite.sh: it supervises the PGlite server and
+# its forwarder and passes the stop signals on to both (see that script).
 #
-#   entrypoint-pglite.sh    the Postgres-wire server the kernel talks to
-#   entrypoint-kernel.sh    exec bun run packages/node/main.dev.ts      (:9999)
-#   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.dev.ts (:3334)
-#   entrypoint-solver.sh    exec bun run start.solver.ts
-#   entrypoint-solver-frontend.sh  exec bun run start.solver-frontend.ts (:8080)
+#   entrypoint-pglite.sh    the Postgres-wire server the kernel talks to, on
+#                           loopback, plus pglite-forwarder.ts on DB_PORT
+#   entrypoint-kernel.sh    exec bun run packages/node/main.<dev|public>.ts (:9999)
+#   entrypoint-batcher.sh   exec bun run packages/batcher/batcher.<dev|public>.ts (:3334)
+#                           (from MIDNIGHT_NETWORK_ID: undeployed → .dev.ts; preview,
+#                           preprod, mainnet → .public.ts; anything else exits 78)
 #   entrypoint-price-feed.sh  daily CoinGecko refresh of asset_prices
-#   entrypoint-scripts.sh   the E1 provisioning / assertion driver
-#   entrypoint-solver-provision.sh  one-shot: validate prefunding + write config
 #   entrypoint-maker-offer.sh       one-shot: post one real offer into the book
 #   entrypoint-offer-poster.sh      loop: post prefunded coins, reuse on release
+#   entrypoint-token-registry.sh    one-shot: import the network's canonical token
+#                                   registry (TOKEN_REGISTRY_NETWORK); loud failure
 #
-# `solver-provision` and `maker-offer` are devnet SEEDING steps, and they are
-# services rather than README steps for one reason: without them every container
-# reports healthy, the solver connects to the relay, and it publishes an empty
-# ladder forever with no error logged anywhere (R2 made publication bounded by
-# the solver's own spendable inventory, and the ladder derives from the maker
-# book). Inventory is supplied before startup through an external issuer.
+# `maker-offer` is a devnet SEEDING step, and it is a service rather than a
+# README step so that a stack whose book must not start empty can be brought up
+# with one command. Inventory is supplied before startup through an external
+# issuer.
 #
 # entrypoint-offer-poster.sh is neither a one-shot nor part of the default
 # stack: it is the 00007 offer poster, opt-in behind the `poster` profile, and
@@ -51,19 +52,18 @@ WORKDIR /app
 # `--frozen-lockfile` refuses the install.
 COPY package.json bun.lock ./
 COPY docs/package.json                                              docs/
+COPY packages/api-contracts/package.json                            packages/api-contracts/
 COPY packages/batcher/package.json                                  packages/batcher/
 COPY packages/contracts-celestia/package.json                       packages/contracts-celestia/
 COPY packages/midnight-infra/package.json                           packages/midnight-infra/
 COPY packages/database/package.json                                 packages/database/
+COPY packages/kernel-client/package.json                            packages/kernel-client/
 COPY packages/node/package.json                                     packages/node/
 COPY packages/offer-guard/package.json                              packages/offer-guard/
 # Added upstream by the token price service (PRs #54-#56) but never listed here,
 # which made `bun install --frozen-lockfile` refuse the committed lockfile and
 # the kernel image unbuildable from `main` (found at 00007-P-C).
 COPY packages/price-feed/package.json                               packages/price-feed/
-COPY packages/solver/package.json                                   packages/solver/
-COPY packages/solver-core/package.json                              packages/solver-core/
-COPY packages/solver-frontend/package.json                          packages/solver-frontend/
 COPY packages/tests/package.json                                    packages/tests/
 COPY packages/validator/package.json                                packages/validator/
 
@@ -77,18 +77,19 @@ COPY . .
 # Entrypoints last: editing one must not invalidate the install or the compile.
 COPY deploy/images/kernel/entrypoint-common.sh   /usr/local/bin/entrypoint-common.sh
 COPY deploy/images/kernel/entrypoint-pglite.sh   /usr/local/bin/entrypoint-pglite.sh
+COPY deploy/images/kernel/pglite-forwarder.ts    /usr/local/bin/pglite-forwarder.ts
+COPY deploy/images/kernel/pglite-healthcheck.ts  /usr/local/bin/pglite-healthcheck.ts
 COPY deploy/images/kernel/entrypoint-kernel.sh   /usr/local/bin/entrypoint-kernel.sh
 COPY deploy/images/kernel/entrypoint-batcher.sh  /usr/local/bin/entrypoint-batcher.sh
-COPY deploy/images/kernel/entrypoint-solver.sh   /usr/local/bin/entrypoint-solver.sh
-COPY deploy/images/kernel/entrypoint-solver-frontend.sh /usr/local/bin/entrypoint-solver-frontend.sh
 COPY deploy/images/kernel/entrypoint-price-feed.sh /usr/local/bin/entrypoint-price-feed.sh
-COPY deploy/images/kernel/entrypoint-scripts.sh  /usr/local/bin/entrypoint-scripts.sh
-# Devnet seeding one-shots. Without these the stack comes up entirely healthy
-# and quotes nothing — see each script's header.
-COPY deploy/images/kernel/entrypoint-solver-provision.sh /usr/local/bin/entrypoint-solver-provision.sh
+# Devnet seeding one-shot: posts one real offer so the book does not start
+# empty — see the script's header.
 COPY deploy/images/kernel/entrypoint-maker-offer.sh      /usr/local/bin/entrypoint-maker-offer.sh
 # The 00007 offer poster: a LOOP, opt-in behind the `poster` compose profile.
 COPY deploy/images/kernel/entrypoint-offer-poster.sh     /usr/local/bin/entrypoint-offer-poster.sh
+# 00050: the canonical token-registry import for a public network's database —
+# a one-shot whose failure is an exit code, not a logged skip.
+COPY deploy/images/kernel/entrypoint-token-registry.sh   /usr/local/bin/entrypoint-token-registry.sh
 COPY deploy/images/kernel/wait-for.sh            /usr/local/bin/wait-for.sh
 RUN chmod +x /usr/local/bin/entrypoint-*.sh /usr/local/bin/wait-for.sh
 

@@ -10,9 +10,8 @@ import {
   offersGone,
   waitFor,
 } from "../lib/db.ts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
-import { registerNightForDust } from "@effectstream/midnight-contracts";
+import { registerNightForDust, unwrapInWallet } from "@effectstream/midnight-contracts";
 import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 import { requireDistinctTokenColors } from "../lib/prefunded.ts";
 import {
@@ -28,6 +27,7 @@ import {
   settleViaBatcher,
 } from "../lib/batcher.ts";
 import { submitOffer } from "../lib/api.ts";
+import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 
 globalThis.WebSocket = WebSocket;
 
@@ -41,7 +41,6 @@ const P0_SEED = "000000000000000000000000000000000000000000000000000000000000001
 const P1_SEED = "0000000000000000000000000000000000000000000000000000000000000011";
 
 export async function multiTokenTest(db: Client): Promise<void> {
-  setNetworkId(net.id as any);
 
   async function submitIndexed(blob: string, label: string): Promise<void> {
     let sub = await submitOffer(blob);
@@ -102,10 +101,9 @@ export async function multiTokenTest(db: Client): Promise<void> {
     const r0 = await p0.wallet.initSwap(
       { shielded: { [T0]: A0, [T1]: A1 } },
       [{ type: "shielded", outputs: [{ type: T2, amount: A2, receiverAddress: p0Addr }] } as any],
-      shieldedKeys(p0),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
-    const offer0 = await p0.wallet.finalizeTransaction(r0.transaction);
+    const offer0 = await unwrapInWallet<FinalizedTransaction>(p0.wallet, await p0.wallet.finalizeTransaction(r0.transaction));
 
     const r1 = await p1.wallet.initSwap(
       { shielded: { [T2]: A2 } },
@@ -118,10 +116,9 @@ export async function multiTokenTest(db: Client): Promise<void> {
           ],
         } as any,
       ],
-      shieldedKeys(p1),
       { ttl: new Date(Date.now() + 30 * 60_000), payFees: false },
     );
-    const offer1 = await p1.wallet.finalizeTransaction(r1.transaction);
+    const offer1 = await unwrapInWallet<FinalizedTransaction>(p1.wallet, await p1.wallet.finalizeTransaction(r1.transaction));
 
     await submitIndexed(OfferFiles.encode(offer0.serialize()), "P0 multi-give");
     await submitIndexed(OfferFiles.encode(offer1.serialize()), "P1 multi-want");

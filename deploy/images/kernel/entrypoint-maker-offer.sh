@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
 # entrypoint-maker-offer.sh — seed the kernel order book with ONE real offer.
 #
-# The solver's ladder is derived from the mirrored Offer Files book
-# (`deriveLadder(cache.book.all(), …)`). An empty book therefore means an empty
-# ladder no matter how well funded the solver is.
-#
-# So that a plain `docker compose up` produces the stack the deployment claims
-# to produce — a solver quoting a real pair at the relay — this one-shot posts a
-# single genuine offer from externally prefunded inventory. Set
-# MAKER_OFFER_ENABLED=false to skip it.
+# A client that mirrors the Offer Files book (a taker, a quoting service such as
+# the COW solver in https://github.com/effectstream/cow-solver) finds nothing
+# to fill or quote in an empty book. This one-shot posts a single genuine offer
+# from externally prefunded inventory so a fresh devnet book is not empty. It
+# is off unless MAKER_OFFER_ENABLED=true.
 #
 # It posts a REAL proven offer, not a database row: `bun run seed:market` writes
 # rows whose blob is a placeholder and which its own header calls NOT
-# settle-able, and a ladder built from those would let this smoke pass over a
+# settle-able, and a book built from those would let a smoke test pass over a
 # stack that can never fill anything.
 set -euo pipefail
 
@@ -31,7 +28,7 @@ fi
 
 require_env MAKER_SEED GIVE_TOKEN WANT_TOKEN
 
-# Idempotent for the same reason as the other one-shots: a restart should not
+# Idempotent, like the other one-shots: a restart should not
 # re-prove and re-post an offer (~30 s of proving) or silently deepen the book
 # every time the stack bounces.
 if [ -f "${MARKER}" ]; then
@@ -50,7 +47,7 @@ if bun run deploy/scripts/post-maker-offer.ts; then
   exit 0
 fi
 
-log "ERROR: could not post the maker offer — the solver will publish an EMPTY"
-log "ERROR: ladder. Fund MAKER_SEED with GIVE_TOKEN through the external issuer,"
-log "ERROR: verify both explicit token IDs, and retry."
+log "ERROR: could not post the maker offer — the book stays empty. Fund"
+log "ERROR: MAKER_SEED with GIVE_TOKEN through the external issuer, verify both"
+log "ERROR: explicit token IDs, and retry."
 exit 1

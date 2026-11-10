@@ -30,6 +30,27 @@
 
 import { Buffer } from "node:buffer";
 import { mnemonicToSeed } from "@scure/bip39";
+// Endpoint defaults are the SAME function the wallet facade's config comes
+// from, so the poster can never log one endpoint and dial another. It is pure:
+// it maps a network id (and a Blockfrost project token) to its default URLs.
+// `redactBlockfrostProjectId` is the one redactor for those URLs: Blockfrost
+// URLs carry the project token in their query string.
+import {
+  defaultMidnightNetworkConfig,
+  redactBlockfrostProjectId,
+} from "@effectstream/midnight-contracts/midnight-env";
+// The proof server is always local; `defaultMidnightNetworkConfig` returns this
+// for every network, and it is the fallback when no default was consulted.
+const LOCAL_PROOF_SERVER = "http://127.0.0.1:6300";
+// Relative, like offer-poster.ts's first-party imports: `deploy/` is not a
+// workspace member, so `@zswap-da/*` specifiers do not resolve from here.
+import {
+  isPublicMidnightNetwork,
+  isSupportedMidnightNetwork,
+  midnightEndpointProblems,
+  publicDevSeedProblem,
+  unsupportedNetworkProblem,
+} from "../../../packages/offer-guard/public-networks.ts";
 
 export interface GiveRange {
   minBase: bigint;
@@ -108,6 +129,9 @@ export type ConfigErrorCode =
   | "CONFLICT"
   | "MALFORMED"
   | "SEED_COLLISION"
+  | "PUBLIC_DEV_SEED"
+  | "UNSUPPORTED_NETWORK"
+  | "ENDPOINT"
   | "UNSUPPORTED_TOKEN";
 
 /** Every refusal in this module. `code` lets the caller pick an exit status
@@ -243,11 +267,13 @@ const HEX_SEED = /^[0-9a-f]+$/;
  * Wallet seeds that may legitimately be present in the poster's environment and
  * that the poster must NOT share.
  *
- * FR-001 names the first four. The remaining three are in `deploy/.env.example`
- * (`:90-94`) and are just as dangerous: one wallet facade per seed is an SDK
- * rule, and two processes on one seed fight over the same coins. A superset is
- * strictly safer here — nothing legitimate wants the poster to run on the
- * genesis, maker or taker wallet.
+ * The batcher's, the maker-offer one-shot's and the genesis wallet's seeds are
+ * this repository's own; SOLVER_SEED, MAKER_SEED and TAKER_SEED are the wallets
+ * of a COW solver and its end-to-end maker/taker deployed beside the poster
+ * (https://github.com/effectstream/cow-solver). All are just as dangerous: one
+ * wallet facade per seed is an SDK rule, and two processes on one seed fight
+ * over the same coins. A superset is strictly safer here — nothing legitimate
+ * wants the poster to run on any of them.
  */
 export const COLLIDING_SEED_VARS: readonly string[] = [
   "MIDNIGHT_WALLET_SEED",
@@ -397,37 +423,73 @@ function resolveLeg(env: EnvMap, key: string): ResolvedLeg {
 export async function parsePosterConfig(env: EnvMap): Promise<PosterConfig> {
   const { seed, source: seedSource } = await resolveSeed(env);
 
-  // Endpoint defaults MUST match `@effectstream/midnight-contracts`'s
-  // `midnightNetworkConfig`, which is what the wallet facade reads. The poster resolves them
-  // itself as well so the startup log can show them and a mismatch is visible.
+  // Endpoint defaults come from `@effectstream/midnight-contracts`'
+  // `defaultMidnightNetworkConfig`, the function behind the
+  // `midnightNetworkConfig` the wallet facade reads: loopback for `undeployed`,
+  // the Blockfrost-hosted indexer and node (with the project token from
+  // MIDNIGHT_BLOCKFROST_PROJECT_ID) for `preview`, `preprod` and `mainnet`.
+  // Explicit env always wins, and, as in `midnightNetworkConfig`, the defaults
+  // are consulted only while at least one of the three URLs is left to them.
+  // Only the four supported networks run (each has pinned ledger parameters),
+  // and on the public ones an override on a retired Midnight-hosted host is
+  // refused. The poster resolves the URLs itself as well so the startup log
+  // can show them (redacted) and a mismatch is visible.
   const networkId = readString(env, "MIDNIGHT_NETWORK_ID", "undeployed");
-  const isUndeployed = networkId === "undeployed";
+  if (!isSupportedMidnightNetwork(networkId)) {
+    throw new ConfigError("UNSUPPORTED_NETWORK", unsupportedNetworkProblem(networkId), "MIDNIGHT_NETWORK_ID");
+  }
+  if (isPublicMidnightNetwork(networkId)) {
+    const problems = midnightEndpointProblems(networkId, env);
+    if (problems.length > 0) {
+      const missingToken = problems.every((p) => p.startsWith("MIDNIGHT_BLOCKFROST_PROJECT_ID"));
+      throw new ConfigError(missingToken ? "MISSING" : "ENDPOINT", problems.join("; "));
+    }
+  }
+  const explicit = {
+    indexer: readEnv(env, "MIDNIGHT_INDEXER_HTTP"),
+    indexerWS: readEnv(env, "MIDNIGHT_INDEXER_WS"),
+    node: readEnv(env, "MIDNIGHT_NODE_HTTP"),
+  };
+  const needsDefaults =
+    networkId === "undeployed" ||
+    explicit.indexer === undefined ||
+    explicit.indexerWS === undefined ||
+    explicit.node === undefined;
+  let defaults: { indexer: string; indexerWS: string; node: string; proofServer: string } | undefined;
+  if (needsDefaults) {
+    try {
+      defaults = defaultMidnightNetworkConfig(
+        networkId as never,
+        readEnv(env, "MIDNIGHT_BLOCKFROST_PROJECT_ID") ?? "",
+      );
+    } catch (error) {
+      // The upstream message names the variables to set and carries no secret.
+      throw new ConfigError("MISSING", (error as Error).message);
+    }
+  }
   const networkUrls: PosterNetworkUrls = {
     id: networkId,
-    indexer: readString(
-      env,
-      "MIDNIGHT_INDEXER_HTTP",
-      isUndeployed
-        ? "http://127.0.0.1:8088/api/v3/graphql"
-        : `https://indexer.${networkId}.midnight.network/api/v3/graphql`,
-    ),
-    indexerWS: readString(
-      env,
-      "MIDNIGHT_INDEXER_WS",
-      isUndeployed
-        ? "ws://127.0.0.1:8088/api/v3/graphql/ws"
-        : `wss://indexer.${networkId}.midnight.network/api/v3/graphql/ws`,
-    ),
-    node: readString(
-      env,
-      "MIDNIGHT_NODE_HTTP",
-      isUndeployed ? "http://127.0.0.1:9944" : `https://rpc.${networkId}.midnight.network`,
-    ),
+    indexer: explicit.indexer ?? defaults!.indexer,
+    indexerWS: explicit.indexerWS ?? defaults!.indexerWS,
+    node: explicit.node ?? defaults!.node,
     proofServer:
       readEnv(env, "MIDNIGHT_PROOF_SERVER_URL") ??
       readEnv(env, "MIDNIGHT_PROOF_SERVER") ??
-      "http://127.0.0.1:6300",
+      defaults?.proofServer ??
+      LOCAL_PROOF_SERVER,
   };
+
+  // A repository dev seed is anyone's wallet. Off `undeployed` the poster
+  // refuses it by name instead of posting coins that whoever reads the
+  // repository can take.
+  const devSeed = publicDevSeedProblem(networkId, seedSource, seed);
+  if (devSeed !== undefined) {
+    throw new ConfigError(
+      "PUBLIC_DEV_SEED",
+      `${devSeed} (generate one with: openssl rand -hex 32)`,
+      seedSource,
+    );
+  }
 
   const kernelBase = (readEnv(env, "ZSWAP_API") ?? readEnv(env, "NODE_URL") ?? "http://kernel:9999").replace(
     /\/$/,
@@ -481,6 +543,10 @@ export async function parsePosterConfig(env: EnvMap): Promise<PosterConfig> {
     forcedWantAmount,
 
     postIntervalMs: readInt(env, "POST_INTERVAL_MS", 60_000, { min: 1 }),
+    // The initSwap `ttl`: an INTENT TTL (unshielded legs / payFees:true fee
+    // intents). The poster's shielded-only payFees:false offers carry no
+    // intent, so it does not change their bytes or expiry (00056; see
+    // deploy/README.md "Offer TTL knobs apply to intents only").
     offerTtlMinutes: readInt(env, "OFFER_TTL_MINUTES", 60, { min: 1 }),
     reconcileIntervalMs: readInt(env, "RECONCILE_INTERVAL_MS", 60_000, { min: 1 }),
     maxReoffersPerTick: readInt(env, "POSTER_MAX_REOFFERS_PER_TICK", 1, { min: 1 }),
@@ -510,9 +576,25 @@ export async function parsePosterConfig(env: EnvMap): Promise<PosterConfig> {
 // ---------------------------------------------------------------------------
 
 /** The seed replaced by a fixed marker plus its length — enough to tell a
- *  32-byte seed from a 64-byte one when debugging, and nothing else. FR-015. */
+ *  32-byte seed from a 64-byte one when debugging, and nothing else — and
+ *  every endpoint URL passed through `redactBlockfrostProjectId`. */
 export function redactConfig(cfg: PosterConfig): RedactedPosterConfig {
-  return { ...cfg, seed: `[redacted ${cfg.seed.length} hex chars]` };
+  return {
+    ...cfg,
+    seed: `[redacted ${cfg.seed.length} hex chars]`,
+    networkUrls: redactNetworkUrls(cfg.networkUrls),
+  };
+}
+
+/** The endpoints with any Blockfrost project token replaced. Safe to log. */
+export function redactNetworkUrls(urls: PosterNetworkUrls): PosterNetworkUrls {
+  return {
+    id: urls.id,
+    indexer: redactBlockfrostProjectId(urls.indexer),
+    indexerWS: redactBlockfrostProjectId(urls.indexerWS),
+    node: redactBlockfrostProjectId(urls.node),
+    proofServer: redactBlockfrostProjectId(urls.proofServer),
+  };
 }
 
 /** `JSON.stringify` of the redacted config, with bigints as decimal strings.

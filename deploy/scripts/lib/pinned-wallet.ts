@@ -10,19 +10,30 @@
 // so with several free WBTC coins in the wallet it would pick the wrong one.
 //
 // The ONLY injection point in the installed SDK is the shielded wallet's
-// variant builder:
+// variant builders. wallet-sdk-shielded 4.x's `ShieldedWallet(config)` is a
+// forking wallet: a V1 (ledger 8) variant below `config.forks.v9` and a V2
+// (ledger 9) variant from it, the V2 one carrying the cross-ledger migration.
+// This module builds the same forking wallet with one change on each builder:
 //
-//     CustomShieldedWallet(config, new V1Builder().withDefaults().withCoinSelection(() => selector))
+//     .withCoinSelection(() => selector)
 //
-// `@effectstream/midnight-contracts@0.103.1`'s `buildWalletFacade`
-// (`src/get-wallet-info.ts:909-937`) builds its shielded wallet through a
+// `@effectstream/midnight-contracts@0.300.3`'s `buildWalletFacade`
+// (`src/get-wallet-info.ts`) builds its shielded wallet through a
 // module-private `buildShieldedWallet` = `ShieldedWallet(config).startWithSeed(seed)`
 // and exposes no hook, so this module reproduces `buildWalletFacade` verbatim
-// with that one line swapped. Everything else — HD role derivation, the dust
+// with that one step swapped. Everything else — HD role derivation, the dust
 // wallet's batching and cost parameters, the unshielded keystore, the facade
-// wiring, the returned `WalletResult` — is a faithful copy of the upstream
-// function AT `@effectstream/midnight-contracts@0.103.1`. If that package is
-// upgraded, re-diff `src/get-wallet-info.ts:829-989` against this file.
+// wiring, the seed-based `start`, the dust-only option, the returned
+// `WalletResult` — is a faithful copy of the upstream function at
+// `@effectstream/midnight-contracts@0.300.3` (wallet-sdk 2.0.0: `createKeystore`
+// takes a tagged secret, the facade's sub-wallet factories receive their
+// configuration, the facade starts from the three role seeds, and the DUST
+// address is derived from the DUST public key). If that package is upgraded,
+// re-diff `deriveSeedForRole`, `createWalletConfiguration`,
+// `buildShieldedWallet`, `resolveDustBatchUpdates`, `buildDustWallet`,
+// `buildUnshieldedWallet` and `buildWalletFacade` in `src/get-wallet-info.ts`,
+// and `ShieldedWallet` in wallet-sdk-shielded's `dist/ShieldedWallet.js`,
+// against this file.
 //
 // Selector contract (the safety property the whole service rests on)
 // ------------------------------------------------------------------
@@ -47,20 +58,22 @@
 
 import { Buffer } from "node:buffer";
 
-import { DustSecretKey, LedgerParameters, ZswapSecretKeys } from "@midnight-ntwrk/ledger-v8";
-import type { QualifiedShieldedCoinInfo } from "@midnight-ntwrk/ledger-v8";
+import { DustSecretKey, LedgerParameters, ZswapSecretKeys } from "@midnightntwrk/ledger-v9";
+import type { QualifiedShieldedCoinInfo } from "@midnightntwrk/ledger-v9";
 import {
   InMemoryTransactionHistoryStorage,
   type NetworkId,
   TransactionHistoryStorage,
 } from "@midnightntwrk/wallet-sdk-abstractions";
-import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
+import { DustAddress } from "@midnightntwrk/wallet-sdk-address-format";
 import { type CoinSelection, chooseCoin } from "@midnightntwrk/wallet-sdk-capabilities";
+import { makeIndexerChainVersionProbe } from "@midnightntwrk/wallet-sdk-capabilities/chainVersion";
 import { DustWallet } from "@midnightntwrk/wallet-sdk-dust-wallet";
 import { type DefaultConfiguration, WalletFacade } from "@midnightntwrk/wallet-sdk-facade";
 import { HDWallet, Roles } from "@midnightntwrk/wallet-sdk-hd";
-import { CustomShieldedWallet } from "@midnightntwrk/wallet-sdk-shielded";
+import { CustomForkingShieldedWallet } from "@midnightntwrk/wallet-sdk-shielded";
 import { V1Builder } from "@midnightntwrk/wallet-sdk-shielded/v1";
+import { Migration, V2Builder } from "@midnightntwrk/wallet-sdk-shielded/v2";
 import {
   createKeystore,
   PublicKey,
@@ -74,10 +87,9 @@ import {
 // copying two magic numbers that could drift silently. P3 imports this barrel
 // anyway (registerNightForDust, waitForDustFunds, configureMidnightNodeProviders).
 import { CONSTANTS } from "@effectstream/midnight-contracts";
-// `getInitialDustState` and `suspendAuxWalletSyncForFees` are the same module
-// instance the barrel re-exports; the subpath keeps the intent obvious.
+// `suspendAuxWalletSyncForFees` is the same module instance the barrel
+// re-exports; the subpath keeps the intent obvious.
 import {
-  getInitialDustState,
   suspendAuxWalletSyncForFees,
   type WalletSyncMode,
 } from "@effectstream/midnight-contracts/wallet-info";
@@ -100,7 +112,7 @@ export interface PinnedCoinRef {
 export type ShieldedCoinSelection = CoinSelection<QualifiedShieldedCoinInfo>;
 
 /** The endpoints `buildPinnedWallet` needs. Structurally the `NetworkUrls` that
- *  `packages/solver-core/wallet.ts` already assembles from `midnightNetworkConfig`
+ *  `packages/kernel-client/wallet.ts` already assembles from `midnightNetworkConfig`
  *  (which is why `id` is optional and unused here — it is carried for parity). */
 export interface PinnedNetworkUrls {
   readonly indexer: string;
@@ -141,7 +153,7 @@ function normHex(value: string): string {
 }
 
 /** Colours (`RawTokenType`) and nonces (`Nonce`) are both 32-byte hex strings
- *  per `@midnight-ntwrk/ledger-v8`'s own type docs, and `maker-offer.ts` already
+ *  per `@midnightntwrk/ledger-v9`'s own type docs, and `maker-offer.ts` already
  *  validates colours with the same expression. Rejecting a malformed value at
  *  `pin()` turns a mystery `InsufficientFundsError` deep inside the balancer
  *  into an error naming the offending string. */
@@ -249,7 +261,7 @@ export const pinnedSelector: ShieldedCoinSelection = createPinnedSelector(() => 
 // Facade construction — a copy of `buildWalletFacade` with one line changed
 // ---------------------------------------------------------------------------
 
-/** `get-wallet-info.ts:118-136`. Not exported upstream, so reproduced here. */
+/** Upstream `deriveSeedForRole`. Not exported, so reproduced here. */
 function deriveSeedForRole(seed: string, role: (typeof Roles)[keyof typeof Roles]): Uint8Array {
   const seedBuffer = Buffer.from(seed, "hex");
   const hdWalletResult = HDWallet.fromSeed(seedBuffer);
@@ -260,10 +272,13 @@ function deriveSeedForRole(seed: string, role: (typeof Roles)[keyof typeof Roles
   if (derivationResult.type === "keyOutOfBounds") {
     throw new Error(`Key derivation out of bounds for role: ${role}`);
   }
-  return Buffer.from(derivationResult.key);
+  const derivedKey = Buffer.from(derivationResult.key);
+  // Upstream clears the HD wallet's key material once the role key is copied out.
+  hdWalletResult.hdWallet.clear();
+  return derivedKey;
 }
 
-/** `get-wallet-info.ts:806-826`. */
+/** Upstream `createWalletConfiguration`. */
 function createWalletConfiguration(
   networkUrls: PinnedNetworkUrls,
   networkId: NetworkId.NetworkId,
@@ -277,7 +292,7 @@ function createWalletConfiguration(
     relayURL: new URL(networkUrls.node.replace("http", "ws")),
     networkId,
     txHistoryStorage: new InMemoryTransactionHistoryStorage(
-      TransactionHistoryStorage.TransactionHistoryCommonSchema,
+      TransactionHistoryStorage.TransactionHistoryEntryCommonSchema,
     ),
     costParameters: {
       additionalFeeOverhead: CONSTANTS.DUST_FEE_OVERHEAD,
@@ -289,31 +304,60 @@ function createWalletConfiguration(
 }
 
 /**
- * THE ONE CHANGED LINE.
+ * THE ONE CHANGED STEP.
  *
- * Upstream (`get-wallet-info.ts:829-831`):
- *     ShieldedWallet(config).startWithSeed(seed)
- * which is `CustomShieldedWallet(config, new V1Builder().withDefaults())`
- * (`ShieldedWallet.js:63-65`). `withDefaults()` ends in
- * `.withCoinSelectionDefaults()` = `.withCoinSelection(() => chooseCoin)`
- * (`V1Builder.js:33-41,87-89`), so appending our own `withCoinSelection` after
- * `withDefaults()` overwrites exactly that one entry of the build state and
- * leaves sync / serialization / transacting / balances / history / keys alone.
+ * Upstream `buildShieldedWallet` is `ShieldedWallet(config).startWithSeed(seed)`.
+ * In wallet-sdk-shielded 4.x `ShieldedWallet(config)` is
+ *
+ *     CustomForkingShieldedWallet(
+ *       { ...config, chainVersionProbe: config.chainVersionProbe ?? makeIndexerChainVersionProbe(config) },
+ *       { builder: new V1Builder().withDefaults(), configuration: config },
+ *       { builder: new V2Builder().withDefaults().withMigration(() => Migration.makeCrossLedgerMigration()),
+ *         configuration: config },
+ *     )
+ *
+ * Both builders' `withDefaults()` end in `.withCoinSelectionDefaults()` =
+ * `.withCoinSelection(() => chooseCoin)`, so appending our own
+ * `withCoinSelection` overwrites exactly that one entry of each build state and
+ * leaves sync / serialization / transacting / balances / history / keys /
+ * migration alone. The selector goes on BOTH variants so the exact-coin
+ * guarantee does not depend on which side of the ledger-9 fork the wallet
+ * starts on; on a ledger-9 chain the probe starts it on V2.
  */
 function buildPinnedShieldedWallet(
   config: DefaultConfiguration,
   seed: Uint8Array,
   selector: ShieldedCoinSelection,
 ) {
-  return CustomShieldedWallet(
-    // deno-lint-ignore no-explicit-any -- upstream casts identically.
-    config as any,
-    new V1Builder().withDefaults().withCoinSelection(() => selector),
+  // deno-lint-ignore no-explicit-any -- upstream casts the configuration identically.
+  const configuration = config as any;
+  const withProbe = {
+    ...configuration,
+    chainVersionProbe:
+      configuration.chainVersionProbe ?? makeIndexerChainVersionProbe(configuration),
+  };
+  // The V1 variant's coin type is ledger-8's `QualifiedShieldedCoinInfo`; the
+  // selector reads only `type` and `nonce`, which both ledgers expose as hex.
+  // deno-lint-ignore no-explicit-any
+  const v1Selector = selector as any;
+  return CustomForkingShieldedWallet(
+    withProbe,
+    {
+      builder: new V1Builder().withDefaults().withCoinSelection(() => v1Selector),
+      configuration,
+    },
+    {
+      builder: new V2Builder()
+        .withDefaults()
+        .withMigration(() => Migration.makeCrossLedgerMigration())
+        .withCoinSelection(() => selector),
+      configuration,
+    },
     // deno-lint-ignore no-explicit-any
   ).startWithSeed(seed) as any;
 }
 
-/** `get-wallet-info.ts:845-865`: the dust wallet's sync batching, tuned for a
+/** Upstream `resolveDustBatchUpdates`: the dust wallet's sync batching, tuned for a
  *  headless backend. Upstream reads these through `@effectstream/utils`'
  *  `getEnv`; `@effectstream/utils` is not a root dependency, so read
  *  `process.env` directly (identical under bun) and keep the variable names. */
@@ -331,7 +375,7 @@ function resolveDustBatchUpdates(): { size: number; timeout: number; spacing: nu
   };
 }
 
-/** `get-wallet-info.ts:867-887`. */
+/** Upstream `buildDustWallet`. */
 function buildDustWallet(
   config: DefaultConfiguration,
   seed: Uint8Array,
@@ -347,6 +391,7 @@ function buildDustWallet(
     },
   };
   if (serializedState) {
+    console.info("Restoring dust wallet from cached state");
     // deno-lint-ignore no-explicit-any
     return DustWallet(dustConfig as any).restore(serializedState);
   }
@@ -355,12 +400,12 @@ function buildDustWallet(
   return DustWallet(dustConfig as any).startWithSeed(seed, dustParameters);
 }
 
-/** `get-wallet-info.ts:889-899`. */
+/** Upstream `buildUnshieldedWallet`. */
 function buildUnshieldedWallet(config: DefaultConfiguration, keystore: UnshieldedKeystore) {
   return UnshieldedWallet({
     ...config,
     txHistoryStorage: new InMemoryTransactionHistoryStorage(
-      TransactionHistoryStorage.TransactionHistoryCommonSchema,
+      TransactionHistoryStorage.TransactionHistoryEntryCommonSchema,
     ),
     // deno-lint-ignore no-explicit-any
   } as any).startWithPublicKey(PublicKey.fromKeyStore(keystore));
@@ -380,7 +425,7 @@ function buildUnshieldedWallet(config: DefaultConfiguration, keystore: Unshielde
  *
  * Side effect inherited from the upstream module: importing
  * `@effectstream/midnight-contracts` installs a `process.on('unhandledRejection')`
- * handler under bun (`get-wallet-info.ts:1-12`) that swallows graphql-ws close
+ * handler under bun (top of `src/get-wallet-info.ts`) that swallows graphql-ws close
  * rejections and `process.exit(1)`s on anything else.
  */
 export async function buildPinnedWallet(
@@ -389,6 +434,7 @@ export async function buildPinnedWallet(
   networkId: NetworkId.NetworkId,
   syncMode: WalletSyncMode = "all",
   dustSerializedState?: string | null,
+  options?: { stopAuxWalletsImmediately?: boolean },
 ): Promise<PinnedWalletResult> {
   const shieldedSeed = deriveSeedForRole(seed, Roles.Zswap);
   const dustSeed = deriveSeedForRole(seed, Roles.Dust);
@@ -396,26 +442,42 @@ export async function buildPinnedWallet(
 
   const config = createWalletConfiguration(networkUrls, networkId);
 
-  const unshieldedKeystore = createKeystore(unshieldedSeed, networkId);
-
-  const shieldedWallet = buildPinnedShieldedWallet(config, shieldedSeed, pinnedSelector);
-  const dustWallet = buildDustWallet(config, dustSeed, dustSerializedState);
-  const unshieldedWallet = buildUnshieldedWallet(config, unshieldedKeystore);
+  // wallet-sdk-unshielded-wallet 4.x takes a TAGGED secret (`schnorr` is the
+  // only kind the v2 SDK signs with); a bare seed is a type error now.
+  const unshieldedKeystore = createKeystore(
+    { kind: "schnorr", secret: unshieldedSeed },
+    networkId,
+  );
 
   const zswapSecretKeys = ZswapSecretKeys.fromSeed(shieldedSeed);
   const dustSecretKey = DustSecretKey.fromSeed(dustSeed);
 
+  // wallet-sdk-facade 5.x hands each sub-wallet factory the facade's own
+  // configuration (including the fork schedule the forking shielded wallet
+  // reads), so the wallets are built inside the factories, not ahead of `init`.
   const wallet: WalletFacade = await WalletFacade.init({
-    // deno-lint-ignore no-explicit-any -- upstream casts identically.
-    configuration: config as any,
-    shielded: () => shieldedWallet,
-    unshielded: () => unshieldedWallet,
-    dust: () => dustWallet,
+    configuration: config,
+    shielded: (walletConfig) =>
+      buildPinnedShieldedWallet(walletConfig, shieldedSeed, pinnedSelector),
+    unshielded: (walletConfig) =>
+      buildUnshieldedWallet(walletConfig, unshieldedKeystore),
+    dust: (walletConfig) =>
+      buildDustWallet(walletConfig, dustSeed, dustSerializedState),
   });
 
-  await wallet.start(zswapSecretKeys, dustSecretKey);
+  // wallet-sdk 2.0.0 starts every wallet from its role seed: each ledger
+  // version derives its own keys from the seed, so the same identity holds on
+  // both sides of the ledger-9 fork. Key objects of one ledger version are
+  // rejected (the facade wants both versions' keys or the seeds).
+  await wallet.start({
+    shielded: shieldedSeed,
+    unshielded: unshieldedSeed,
+    dust: dustSeed,
+  });
 
-  if (syncMode === "dust-only") {
+  const stopAuxNow =
+    syncMode === "dust-only" && (options?.stopAuxWalletsImmediately ?? true);
+  if (stopAuxNow) {
     // Kept for parity with `buildWalletFacade`. The poster never uses it: it
     // stops the shielded wallet, and a stopped shielded wallet cannot select,
     // pinned or otherwise.
@@ -423,19 +485,9 @@ export async function buildPinnedWallet(
   }
 
   const unshieldedAddress = unshieldedKeystore.getBech32Address().asString();
-  // `getInitialDustState` wants `{ state: Rx.Observable<unknown> }`; `rxjs` is
-  // not a root dependency, so borrow the parameter type rather than naming it.
-  const dustState = (await getInitialDustState(
-    wallet.dust as unknown as Parameters<typeof getInitialDustState>[0],
-  )) as { address: unknown };
-  // Upstream (`get-wallet-info.ts:948-952`) passes this `unknown` straight into
-  // `MidnightBech32m.encode`, whose parameter is `HasCodec<unknown>` — tsc flags
-  // it there too (that file is outside every typecheck gate, so nobody sees it).
-  // Cast explicitly here so this file has zero diagnostics of its own.
-  const dustAddress = MidnightBech32m.encode(
-    networkId,
-    dustState.address as Parameters<typeof MidnightBech32m.encode>[1],
-  ).asString();
+  // As upstream: on ledger 9 the DUST address is a pure function of the DUST
+  // public key, so nothing waits on the dust wallet's first state emission.
+  const dustAddress = DustAddress.encodePublicKey(networkId, dustSecretKey.publicKey);
 
   return {
     wallet,

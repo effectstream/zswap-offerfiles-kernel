@@ -26,6 +26,13 @@ import { DEFAULT_SPONSOR_DISCOUNT_BPS } from "./market-mock.ts";
 // rejected-blob cleanup can never drift apart.
 export const CELESTIA_PRIMITIVE_NAME = "ZswapBlob";
 
+// Accept offers whose maker is a CONTRACT CALL (e.g. an AA-Manager open swap).
+// Default OFF. See ValidateOpts.contractMakerRetry in @zswap-da/validator for
+// exactly what is and is not verified on this lane.
+export const ALLOW_CONTRACT_MAKER_OFFERS = /^(1|true|yes)$/i.test(
+  getEnv("ALLOW_CONTRACT_MAKER_OFFERS") ?? "",
+);
+
 export const CELESTIA_RPC_URL = getEnv("CELESTIA_RPC_URL") ?? "http://127.0.0.1:26658";
 // MIP-0006 shared namespace by default — see MIP6_NAMESPACE_ID_SUFFIX_HEX in
 // @zswap-da/offer-guard for why overriding re-silos liquidity (dev/e2e only).
@@ -75,8 +82,8 @@ export const CELESTIA_GAS = _gas ? parseInt(_gas) : undefined;
 export const CELESTIA_MAX_GAS_PRICE = _maxGasPrice ? parseFloat(_maxGasPrice) : undefined;
 export const CELESTIA_TX_PRIORITY = _txPriority ? parseInt(_txPriority) : undefined;
 
-// Root-recency window — the default lives in network-windows.ts: 3600 s, the
-// window the ledger-8 zswap crate hardcodes. Env overrides.
+// Root-recency window — the default lives in network-windows.ts: the ledger-9
+// `global_ttl`, 1209600 s (14 days), the same on every network. Env overrides.
 //
 // A shielded (zswap) offer has NO TTL: it is fillable only while the Merkle
 // root its `Input`/`Transient` proves against is still in the chain's
@@ -98,8 +105,8 @@ export const ROOT_WINDOW_SECONDS = resolveRootWindowSeconds(
 // OFFER_TTL_SECONDS is only the fallback lifetime of an offer with no shielded
 // root, no intent and no DUST spend (none exists for a well-formed two-sided
 // offer). It no longer caps offers (00056): an unshielded offer lives until
-// its intent TTL (up to 14 days), a shielded one until its root leaves the
-// window. Setting it logs a startup warning saying so. See network-windows.ts.
+// its intent TTL, a shielded one until its root leaves the window. Setting it
+// logs a startup warning saying so. See network-windows.ts.
 export const OFFER_TTL_SECONDS = resolveOfferTtlSeconds(
   ROOT_WINDOW_SECONDS,
   getEnv("OFFER_TTL_SECONDS"),

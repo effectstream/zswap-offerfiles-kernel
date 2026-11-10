@@ -9,6 +9,8 @@
 //   6. Polls /v1/offers/status until status = "live" (landed in Celestia + indexed).
 //
 // Env overrides:
+//   MIDNIGHT_NODE_HTTP=<url>      Midnight node RPC (default on undeployed:
+//                                 http://localhost:9944; required elsewhere)
 //   WALLET_SEED=<64-hex>          maker wallet seed
 //   GIVE_TOKEN=<64-hex>           token color to give
 //   WANT_TOKEN=<64-hex>           token color to want
@@ -18,7 +20,7 @@
 //   TTL_MINUTES=30
 
 import { writeFileSync } from "node:fs";
-import { config, get, post, header } from "./config.ts";
+import { config, get, post, header, midnightNodeUrl } from "./config.ts";
 import { buildWalletAndWaitForFunds } from "@effectstream/midnight-contracts";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 
@@ -35,7 +37,7 @@ const networkUrls = {
   id:          midnightCfg.networkId as any,
   indexer:     midnightCfg.indexerUri,
   indexerWS:   midnightCfg.indexerWsUri,
-  node:        midnightCfg.indexerUri,
+  node:        midnightNodeUrl(),
   proofServer: midnightCfg.proofServerUri,
 };
 
@@ -88,11 +90,13 @@ if (available < GIVE_AMOUNT) {
 // ── 5. Build offer ────────────────────────────────────────────────────────────
 console.log("\nBuilding offer (proving…)");
 const ttl = new Date(Date.now() + TTL_MS);
-const address = state.address.coinPublicKeyString();
+// The want leg is paid to the maker's own shielded address: the address
+// object, which the wallet SDK reads the coin and encryption keys from.
+const address = await wallet.shielded.getAddress();
 
 const recipe = await wallet.initSwap(
   { shielded: { [GIVE_TOKEN]: GIVE_AMOUNT } },
-  [{ type: "shielded", outputs: [{ type: WANT_TOKEN, amount: WANT_AMOUNT, receiverAddress: address }] } as any],
+  [{ type: "shielded", outputs: [{ type: WANT_TOKEN, amount: WANT_AMOUNT, receiverAddress: address }] }],
   { ttl, payFees: false },
 );
 const offerFinalized = await wallet.finalizeTransaction(recipe.transaction);

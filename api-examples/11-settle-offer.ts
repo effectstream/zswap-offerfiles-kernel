@@ -8,10 +8,12 @@
 //   5. Polls the nullifier set until the offer is ARCHIVED (CONSUMED).
 //
 // Env overrides:
+//   MIDNIGHT_NODE_HTTP=<url> Midnight node RPC (default on undeployed:
+//                           http://localhost:9944; required elsewhere)
 //   TAKER_SEED=<64-hex>     taker wallet seed (must have enough NIGHT for dust fees)
 //   OFFER_BLOB=swapoffer1… specific offer to settle; defaults to first open offer
 
-import { config, get, post, header } from "./config.ts";
+import { config, get, post, header, midnightNodeUrl } from "./config.ts";
 import { adoptInWallet, buildWalletAndWaitForFunds, unwrapInWallet } from "@effectstream/midnight-contracts";
 import { type FinalizedTransaction, Transaction } from "@midnightntwrk/ledger-v9";
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
@@ -29,7 +31,7 @@ const networkUrls = {
   id:          midnightCfg.networkId as any,
   indexer:     midnightCfg.indexerUri,
   indexerWS:   midnightCfg.indexerWsUri,
-  node:        midnightCfg.indexerUri,
+  node:        midnightNodeUrl(),
   proofServer: midnightCfg.proofServerUri,
 };
 

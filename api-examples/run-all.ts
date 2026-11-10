@@ -8,7 +8,7 @@
 // runs sequentially, with a configurable pause between wallet operations.
 //
 // Env overrides (passed through to child scripts):
-//   MIDNIGHT_NETWORK_ID  NODE_URL  BATCHER_URL
+//   MIDNIGHT_NETWORK_ID  NODE_URL  BATCHER_URL  MIDNIGHT_NODE_HTTP
 //   WALLET_SEED  TAKER_SEED  WALLET_OPS
 //   GIVE_TOKEN  WANT_TOKEN  GIVE_AMOUNT  WANT_AMOUNT  TTL_MINUTES
 

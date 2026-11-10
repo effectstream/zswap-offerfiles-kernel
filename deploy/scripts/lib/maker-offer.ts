@@ -6,15 +6,10 @@
 //     PLACEHOLDER blob. Its own header says so: those offers are DISPLAY-real
 //     and "NOT settle-able". A book built from them can be quoted but never
 //     filled — a green smoke covering for a broken stack.
-//   * `api-examples/10-submit-offer.ts` builds a real offer but is stale against
-//     the current wallet SDK: it passes `state.address.coinPublicKeyString()`
-//     (a STRING) as `receiverAddress`, and the SDK now dereferences
-//     `receiverAddress.coinPublicKey.toHexString()`, so it dies with
-//     "TypeError: undefined is not an object". The maintained path
-//     (`packages/tests/two-wallet-swap-e2e.ts`) passes the address OBJECT from
-//     `wallet.shielded.getAddress()`. This module follows the maintained one.
-//     Fixing the api-example itself would be source scope, not deployment
-//     scope, so the defect is recorded in the plan instead.
+//   * `api-examples/10-submit-offer.ts` builds the same kind of offer for a
+//     person to run by hand. The wallet SDK dereferences
+//     `receiverAddress.coinPublicKey`, so both pass the address OBJECT from
+//     `wallet.shielded.getAddress()`, never `coinPublicKeyString()`.
 //
 // The offer is intentionally UNBALANCED — it GIVES `giveAmount` of `giveToken`
 // and WANTS `wantAmount` of `wantToken` routed back to the maker. That is what

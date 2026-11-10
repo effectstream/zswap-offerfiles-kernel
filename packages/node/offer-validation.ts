@@ -24,7 +24,7 @@ import {
   type OfferValidationStatus,
   type OfferValidationVerdict,
   type ValidatedOfferSemantics,
-} from "@zswap-da/solver-core/validation-contract";
+} from "@zswap-da/api-contracts/validation-contract";
 import {
   getReferenceState,
   validateZswapOffer,

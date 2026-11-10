@@ -17,6 +17,7 @@
     "@effectstream/mip-zswap-offer": "0.4.0",
     "@effectstream/utils": "0.300.2",
     "@midnightntwrk/ledger-v9": "1.0.0",
+    "@zswap-da/api-contracts": "workspace:*",
     "@zswap-da/solver-core": "workspace:*",
     "@zswap-da/validator": "workspace:*",
     "rxjs": "^7.8.2"

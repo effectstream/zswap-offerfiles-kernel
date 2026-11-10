@@ -6,25 +6,21 @@
   "exports": {
     ".": "./mod.ts",
     "./admission-policy": "./admission-policy.ts",
-    "./amount": "./amount.ts",
     "./api-client": "./api-client.ts",
     "./batcher": "./batcher.ts",
-    "./exact-files-contract": "./exact-files-contract.ts",
     "./fee-sizing": "./fee-sizing.ts",
     "./wallet": "./wallet.ts",
     "./ladder-derivation": "./ladder-derivation.ts",
     "./whole-offer-balance": "./whole-offer-balance.ts",
     "./ladder-schema": "./ladder-schema.ts",
-    "./offer-updates-contract": "./offer-updates-contract.ts",
-    "./receipt-client": "./receipt-client.ts",
     "./relay-ws-contract": "./relay-ws-contract.ts",
-    "./status-contract": "./status-contract.ts",
-    "./validation-contract": "./validation-contract.ts"
+    "./status-contract": "./status-contract.ts"
   },
   "scripts": {
     "test": "bun test"
   },
   "dependencies": {
+    "@zswap-da/api-contracts": "workspace:*",
     "@effectstream/midnight-contracts": "0.300.2",
     "@effectstream/mip-zswap-offer": "0.4.0",
     "@midnightntwrk/ledger-v9": "1.0.0",

@@ -58,6 +58,7 @@ WORKDIR /app
 # `--frozen-lockfile` refuses the install.
 COPY package.json bun.lock ./
 COPY docs/package.json                                              docs/
+COPY packages/api-contracts/package.json                            packages/api-contracts/
 COPY packages/batcher/package.json                                  packages/batcher/
 COPY packages/contracts-celestia/package.json                       packages/contracts-celestia/
 COPY packages/midnight-infra/package.json                           packages/midnight-infra/

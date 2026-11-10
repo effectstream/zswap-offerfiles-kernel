@@ -14,14 +14,14 @@ import {
   parseExactFilesRequest,
   parseExactFilesResponse,
   type ExactFilesResponse,
-} from "./exact-files-contract.ts";
+} from "@zswap-da/api-contracts/exact-files-contract";
 import {
   MAX_OFFER_UPDATES_FRAME_BYTES,
   OFFER_UPDATES_PATH,
   OFFER_UPDATES_READY_SEQ,
   decodeOfferUpdatesFrame,
   followsInSequence,
-} from "./offer-updates-contract.ts";
+} from "@zswap-da/api-contracts/offer-updates-contract";
 
 const API = process.env["ZSWAP_API"] ?? "http://127.0.0.1:9999";
 

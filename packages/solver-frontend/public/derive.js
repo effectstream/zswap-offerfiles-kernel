@@ -25,7 +25,7 @@
 /**
  * Base units per coin for every token this stack mints or registers (00024).
  * Mirrors `known_tokens.decimals DEFAULT 6` and `DEFAULT_TOKEN_DECIMALS` in
- * `packages/solver-core/amount.ts` — copied, not imported, because this file is
+ * `packages/api-contracts/amount.ts` — copied, not imported, because this file is
  * loaded by the browser with no build step (FR-008).
  */
 export const DEFAULT_TOKEN_DECIMALS = 6;

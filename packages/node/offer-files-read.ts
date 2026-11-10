@@ -37,7 +37,7 @@ import {
   parseExactFilesResponse,
   type ExactFilesEntry,
   type ExactFilesResponse,
-} from "@zswap-da/solver-core/exact-files-contract";
+} from "@zswap-da/api-contracts/exact-files-contract";
 import { offerHashFromBlob } from "@zswap-da/offer-guard";
 
 import { exactFilesReadTimeoutMs } from "./env.ts";

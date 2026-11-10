@@ -16,7 +16,7 @@ import {
 import {
   canonicalRelayExtrinsicHash,
   getOfferConsumptionEvidence,
-} from "../../packages/solver-core/receipt-client.ts";
+} from "../../packages/api-contracts/receipt-client.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
 import { postMakerOffer, type PostedOffer } from "./lib/maker-offer.ts";
 

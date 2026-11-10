@@ -11,8 +11,8 @@ import {
   MAX_MODELLED_TAKER_INPUTS,
   type FeeSizingStandInSpec,
 } from "@zswap-da/solver-core/fee-sizing";
-import type { ExactFilesResponse } from "@zswap-da/solver-core/exact-files-contract";
-import type { OfferValidationVerdict } from "@zswap-da/solver-core/validation-contract";
+import type { ExactFilesResponse } from "@zswap-da/api-contracts/exact-files-contract";
+import type { OfferValidationVerdict } from "@zswap-da/api-contracts/validation-contract";
 import type { Imbalance } from "@zswap-da/solver-core/batcher";
 import type { SwapMessage } from "@zswap-da/solver-core/relay-ws-contract";
 

@@ -41,7 +41,7 @@ import {
   midnightNetworkConfig,
   redactBlockfrostProjectId,
 } from "@effectstream/midnight-contracts/midnight-env";
-import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/solver-core/amount";
+import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/api-contracts/amount";
 import { submitBlobViaBatcher } from "./batcher-client.ts";
 import { getReferenceState, validateZswapOffer, verifyOfferCrypto } from "@zswap-da/validator";
 import {

@@ -23,10 +23,12 @@ funds: NO-GO").
 **Repository validation scope.** There are two strict, no-emit TypeScript gates,
 and `bun run typecheck` runs both.
 
-- `bun run typecheck:backend` covers the 27 production `packages/node` roots
-  only; it excludes node tests and the grand-E2E entrypoint, builds the real
-  dependency graph without modifying it, and fails all node-owned or fileless
-  compiler diagnostics.
+- `bun run typecheck:backend` covers the 28 production `packages/node` roots
+  (it excludes node tests and the grand-E2E entrypoint) and
+  `packages/api-contracts`, the wire contracts the node serves, production and
+  test sources alike. Each package is its own program; the gate builds the real
+  dependency graph without modifying it and fails every diagnostic owned by a
+  gated package, and every fileless one.
 - `bun run typecheck:solver` covers the solver: `packages/solver`,
   `packages/solver-core` and `packages/validator` — **production and test
   sources alike** — plus every other first-party file that imports the solver's

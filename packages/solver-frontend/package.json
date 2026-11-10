@@ -11,6 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@zswap-da/api-contracts": "workspace:*",
     "@zswap-da/solver-core": "workspace:*"
   }
 }

@@ -9,7 +9,7 @@ import {
 import {
   OFFER_UPDATES_PROTOCOL,
   OFFER_UPDATES_SCHEMA_VERSION,
-} from "./offer-updates-contract.ts";
+} from "@zswap-da/api-contracts/offer-updates-contract";
 
 // The update-stream CLIENT, driven through an explicit socket double.
 //

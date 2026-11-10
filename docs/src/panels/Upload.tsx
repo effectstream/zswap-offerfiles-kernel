@@ -5,7 +5,7 @@ import { buildMakerOfferBlob } from '../wallet/makerOffer'
 import { preflightLaceIndexer } from '../wallet/wallet'
 import type { WalletApp } from '../wallet/useWalletApp'
 import { BusyButton, MipNpmLink } from './shared'
-import { baseUnitsToCoins } from '../../../packages/solver-core/amount'
+import { baseUnitsToCoins } from '../../../packages/api-contracts/amount'
 
 export function UploadPanel({
   blob,

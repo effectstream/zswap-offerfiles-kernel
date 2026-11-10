@@ -158,7 +158,7 @@ serves — never the colour's own display decimals. NIGHT is seeded with
 The external canonical records state their real scales: BTC variants use 8,
 ETH uses 18, and stablecoins use 6 decimals. Legacy/local registrations still
 default to 6 when a caller omits the field; canonical import always supplies it.
-`coinsToBaseUnits` / `baseUnitsToCoins` in `packages/solver-core/amount.ts` are
+`coinsToBaseUnits` / `baseUnitsToCoins` in `packages/api-contracts/amount.ts` are
 the one place the conversion lives; amounts on the wire and on chain stay
 integer base units.
 
@@ -857,6 +857,7 @@ zswap-offerfile-kernel/
 │   ├── node/                                 # @zswap-da/node
 │   ├── database/                             # @zswap-da/database
 │   ├── validator/                            # @zswap-da/validator (shared offer validation)
+│   ├── api-contracts/                        # @zswap-da/api-contracts (wire contracts of the kernel API)
 │   ├── batcher/                              # @zswap-da/batcher
 │   ├── solver/                               # @zswap-da/solver (book mirror, ladders, swap-job settlement)
 │   ├── solver-core/                          # @zswap-da/solver-core (shared clients and ladder derivation)
@@ -882,7 +883,8 @@ monorepo at
 | `midnight-infra/` | `package.json` (Midnight node, indexer and proof-server process scripts) |
 | `contracts-celestia/` | `package.json` (`celestia-{node,bridge,fund}:*` scripts), `fund-bridge.ts` |
 | `solver/` | `solver.{dev,preview,mainnet}.ts` (per-network entrypoints), `env.ts`, `src/launch.ts` (the `start:solver` configuration contract), `src/run.ts` (`runSolver`), `src/book-sync.ts`, `src/ladder-source.ts`, `src/relay-client.ts`, `src/swap-job-executor.ts`, `src/stock.ts`, `src/operation-journal.ts` |
-| `solver-core/` | `api-client.ts` (kernel REST/SSE + exact files), `ladder-derivation.ts`, `admission-policy.ts` (one typed policy for publication and admission), `relay-ws-contract.ts`, `receipt-client.ts`, `batcher.ts`, `wallet.ts` |
+| `api-contracts/` | the versioned wire contracts the node serves and its clients parse: `amount.ts` (whole coins ⇄ base units), `receipt-client.ts` (bounded relay and backend receipt reads), `exact-files-contract.ts` (`POST /v1/offers/files`), `offer-updates-contract.ts` (`GET /v1/offers/updates`), `validation-contract.ts` (offer validation verdicts) |
+| `solver-core/` | `api-client.ts` (kernel REST/SSE + exact files), `ladder-derivation.ts`, `admission-policy.ts` (one typed policy for publication and admission), `relay-ws-contract.ts`, `batcher.ts`, `wallet.ts` |
 | `offer-guard/` | `mod.ts` (offer hash, guard ladder, dedup store), `public-networks.ts` (supported networks, endpoint / dev-seed / reference-parameter rules, log redaction), `sponsorship.ts` (`evaluateSponsorship()` — the ONE fee-sponsorship rule, shared by the quote, the node pre-check and the batcher) |
 | `price-feed/` | `price-feed.{dev,preview,mainnet}.ts`, `src/config.ts`, `src/coingecko.ts` (one asset per request, key as a header), `src/cycle.ts` (spacing, 429 stop, status row), `src/run.ts` (`--once` vs loop, retry ladder, exit codes) |
 | `tests/` | `run-tests.ts`, `start.test.ts` (test orchestrator), `helpers.ts`, `lib/db.ts`, `infra/{celestia,midnight}-ready.test.ts`, `stm/{zswap-flow,api,multi-token,unshielded-only,root-unknown}.test.ts` |

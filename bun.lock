@@ -52,6 +52,10 @@
         "vite-plugin-wasm": "^3.4.1",
       },
     },
+    "packages/api-contracts": {
+      "name": "@zswap-da/api-contracts",
+      "version": "0.1.0",
+    },
     "packages/batcher": {
       "name": "@zswap-da/batcher",
       "version": "0.1.0",
@@ -127,9 +131,9 @@
         "@noble/hashes": "^1.8.0",
         "@scure/base": "^2.0.0",
         "@sinclair/typebox": "0.34.41",
+        "@zswap-da/api-contracts": "workspace:*",
         "@zswap-da/database": "workspace:*",
         "@zswap-da/offer-guard": "workspace:*",
-        "@zswap-da/solver-core": "workspace:*",
         "@zswap-da/validator": "workspace:*",
         "effection": "^3.5.0",
         "rxjs": "^7.8.2",
@@ -137,6 +141,7 @@
       },
       "devDependencies": {
         "@types/ws": "8.18.1",
+        "@zswap-da/solver-core": "workspace:*",
         "fastify": "^5.0.0",
         "pg": "^8.16.3",
       },
@@ -173,6 +178,7 @@
         "@effectstream/mip-zswap-offer": "0.4.0",
         "@effectstream/utils": "0.300.2",
         "@midnightntwrk/ledger-v9": "1.0.0",
+        "@zswap-da/api-contracts": "workspace:*",
         "@zswap-da/solver-core": "workspace:*",
         "@zswap-da/validator": "workspace:*",
         "rxjs": "^7.8.2",
@@ -191,6 +197,7 @@
         "@midnight-ntwrk/midnight-js-contracts": "5.0.0",
         "@midnightntwrk/ledger-v9": "1.0.0",
         "@midnightntwrk/wallet-sdk-address-format": "4.0.0",
+        "@zswap-da/api-contracts": "workspace:*",
         "rxjs": "^7.8.2",
       },
     },
@@ -198,6 +205,7 @@
       "name": "@zswap-da/solver-frontend",
       "version": "0.1.0",
       "dependencies": {
+        "@zswap-da/api-contracts": "workspace:*",
         "@zswap-da/solver-core": "workspace:*",
       },
     },
@@ -1154,6 +1162,8 @@
     "@xhmikosr/downloader": ["@xhmikosr/downloader@15.2.0", "", { "dependencies": { "@xhmikosr/archive-type": "^7.1.0", "@xhmikosr/decompress": "^10.2.0", "content-disposition": "^0.5.4", "defaults": "^2.0.2", "ext-name": "^5.0.0", "file-type": "^20.5.0", "filenamify": "^6.0.0", "get-stream": "^6.0.1", "got": "^13.0.0" } }, "sha512-lAqbig3uRGTt0sHNIM4vUG9HoM+mRl8K28WuYxyXLCUT6pyzl4Y4i0LZ3jMEsCYZ6zjPZbO9XkG91OSTd4si7g=="],
 
     "@xhmikosr/os-filter-obj": ["@xhmikosr/os-filter-obj@3.0.0", "", { "dependencies": { "arch": "^3.0.0" } }, "sha512-siPY6BD5dQ2SZPl3I0OZBHL27ZqZvLEosObsZRQ1NUB8qcxegwt0T9eKtV96JMFQpIz1elhkzqOg4c/Ri6Dp9A=="],
+
+    "@zswap-da/api-contracts": ["@zswap-da/api-contracts@workspace:packages/api-contracts"],
 
     "@zswap-da/batcher": ["@zswap-da/batcher@workspace:packages/batcher"],
 

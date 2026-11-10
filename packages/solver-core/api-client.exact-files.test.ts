@@ -9,11 +9,11 @@ import {
   EXACT_FILES_SCHEMA_VERSION,
   MAX_EXACT_FILES_RESPONSE_BYTES,
   type ExactFilesResponse,
-} from "./exact-files-contract.ts";
+} from "@zswap-da/api-contracts/exact-files-contract";
 import {
   OFFER_VALIDATION_SCHEMA_VERSION,
   type OfferValidationVerdict,
-} from "./validation-contract.ts";
+} from "@zswap-da/api-contracts/validation-contract";
 
 const BLOB = readFileSync(
   new URL("../validator/fixtures/valid-offer.bech32", import.meta.url),

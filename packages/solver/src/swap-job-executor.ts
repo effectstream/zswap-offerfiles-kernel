@@ -46,11 +46,11 @@ import {
   getRelayJobStatus,
   type OfferConsumptionResponse,
   type RelayJobStatus,
-} from "@zswap-da/solver-core/receipt-client";
+} from "@zswap-da/api-contracts/receipt-client";
 import {
   MAX_EXACT_FILES_PER_READ,
   type ExactFilesResponse,
-} from "@zswap-da/solver-core/exact-files-contract";
+} from "@zswap-da/api-contracts/exact-files-contract";
 import {
   deriveLadder,
   MAX_SETTLEMENT_AMOUNT,

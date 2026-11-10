@@ -1,5 +1,5 @@
 import { NIGHT_COLOR } from '../wallet/token-colors'
-import { baseUnitsToCoins } from '../../../packages/solver-core/amount.ts'
+import { baseUnitsToCoins } from '../../../packages/api-contracts/amount.ts'
 import { FAUCET_NETWORK, FAUCET_URL } from '../config'
 import type { WalletApp } from '../wallet/useWalletApp'
 

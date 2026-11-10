@@ -39,7 +39,7 @@ const {
   OFFER_UPDATES_PATH,
   OFFER_UPDATES_PROTOCOL,
   decodeOfferUpdatesFrame,
-} = await import("@zswap-da/solver-core/offer-updates-contract");
+} = await import("@zswap-da/api-contracts/offer-updates-contract");
 const { openOfferUpdatesStream } = await import("@zswap-da/solver-core/api-client");
 
 const BLOCK_HEIGHT = 42;

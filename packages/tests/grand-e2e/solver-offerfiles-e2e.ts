@@ -108,6 +108,14 @@ const E0_SERVICES = [
 ] as const;
 const E1_FOUNDATION_SERVICES = [...E0_SERVICES, "telemetry-relay"] as const;
 const REAL_E1_ALLOWED_UNTRACKED_PATHS = Object.freeze([
+  "packages/api-contracts/fixtures/offer-validation/v1/request.json",
+  "packages/api-contracts/fixtures/offer-validation/v1/verdict-expired-before-archive.json",
+  "packages/api-contracts/fixtures/offer-validation/v1/verdict-live-but-invalid.json",
+  "packages/api-contracts/fixtures/offer-validation/v1/verdict-not-indexed.json",
+  "packages/api-contracts/fixtures/offer-validation/v1/verdict-unsupported-profile.json",
+  "packages/api-contracts/fixtures/offer-validation/v1/verdict-valid.json",
+  "packages/api-contracts/validation-contract.test.ts",
+  "packages/api-contracts/validation-contract.ts",
   "packages/node/offer-liveness.ts",
   "packages/node/offer-validation.test.ts",
   "packages/node/offer-validation.ts",
@@ -115,14 +123,6 @@ const REAL_E1_ALLOWED_UNTRACKED_PATHS = Object.freeze([
   "packages/solver-core/api-client.sync-health.test.ts",
   "packages/solver-core/api-client.exact-files.test.ts",
   "packages/solver-core/discovery-boundary.test.ts",
-  "packages/solver-core/fixtures/offer-validation/v1/request.json",
-  "packages/solver-core/fixtures/offer-validation/v1/verdict-expired-before-archive.json",
-  "packages/solver-core/fixtures/offer-validation/v1/verdict-live-but-invalid.json",
-  "packages/solver-core/fixtures/offer-validation/v1/verdict-not-indexed.json",
-  "packages/solver-core/fixtures/offer-validation/v1/verdict-unsupported-profile.json",
-  "packages/solver-core/fixtures/offer-validation/v1/verdict-valid.json",
-  "packages/solver-core/validation-contract.test.ts",
-  "packages/solver-core/validation-contract.ts",
   "packages/solver/backend-currentness.characterization.test.ts",
   "packages/solver/backend-currentness.integration.test.ts",
   "packages/solver/src/swap-job-executor.ts",
@@ -154,9 +154,9 @@ const REAL_E1_ALLOWED_UNTRACKED_PATHS = Object.freeze([
   "packages/validator/liveness.ts",
 ]);
 const REAL_E1_REQUIRED_SOURCE_PATHS = Object.freeze([
+  "packages/api-contracts/validation-contract.ts",
   "packages/node/offer-liveness.ts",
   "packages/node/offer-validation.ts",
-  "packages/solver-core/validation-contract.ts",
   "packages/solver/src/swap-job-executor.ts",
   "packages/tests/grand-e2e/lib/solver-offerfiles-celestia.bun.lock",
   "packages/tests/grand-e2e/lib/solver-offerfiles-celestia.package.json",

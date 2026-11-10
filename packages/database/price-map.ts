@@ -169,7 +169,7 @@ export function resolveAssetId(
 
   // The literal mirrors `known_tokens.decimals DEFAULT 6` in 000-init.sql —
   // this package IS the registry layer, so the schema is its authority, not the
-  // DEFAULT_TOKEN_DECIMALS constant the scripts share (@zswap-da/solver-core/
+  // DEFAULT_TOKEN_DECIMALS constant the scripts share (@zswap-da/api-contracts/
   // amount). Reached only when a CALLER hands over a partial token: the column
   // is NOT NULL, so a real row always carries its own value.
   const decimals = override?.decimals ?? token.decimals ?? 6;

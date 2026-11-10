@@ -5,7 +5,7 @@
 //                                          you'd copy into your own app
 // See also `api-examples/` at the repo root for runnable scripts per endpoint.
 import { API_BASE, BATCHER_URL } from './config'
-import { DEFAULT_TOKEN_DECIMALS } from '../../packages/solver-core/amount.ts'
+import { DEFAULT_TOKEN_DECIMALS } from '../../packages/api-contracts/amount.ts'
 
 export type MidnightConfig = {
   indexerUri: string

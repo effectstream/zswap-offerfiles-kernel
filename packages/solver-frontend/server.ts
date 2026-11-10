@@ -40,7 +40,7 @@
  */
 import { join } from "node:path";
 
-import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/solver-core/amount";
+import { DEFAULT_TOKEN_DECIMALS } from "@zswap-da/api-contracts/amount";
 import {
   isStatusSectionError,
   statusContractVersion,

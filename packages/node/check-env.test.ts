@@ -127,11 +127,22 @@ describe("check-env.ts — the public-network contract", () => {
 
   test("SYNC_HEALTH_* thresholds: defaults and set values are shown; a malformed one fails by name", () => {
     const labels = staticChecks(map(complete("preprod"))).map((r) => r.label);
-    expect(labels).toContain("SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS — 4 (default)");
+    expect(labels).toContain("SYNC_HEALTH_MAX_NTP_LAG_BLOCKS — 2 (default)");
     expect(labels).toContain("SYNC_HEALTH_HYSTERESIS_SAMPLES — 3 (default)");
-    const set = staticChecks(map({ ...complete("preprod"), SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: "30" }));
-    expect(set.map((r) => r.label)).toContain("SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS — 30");
+    const set = staticChecks(map({ ...complete("preprod"), SYNC_HEALTH_MAX_NTP_LAG_BLOCKS: "3" }));
+    expect(set.map((r) => r.label)).toContain("SYNC_HEALTH_MAX_NTP_LAG_BLOCKS — 3");
     expect(set.filter((r) => !r.ok)).toEqual([]);
+    // Per-chain block-lag limits are not settings: a leftover one, even
+    // malformed, neither fails nor shows.
+    const leftover = staticChecks(map({
+      ...complete("preprod"),
+      SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS: "four",
+      SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: "0",
+    }));
+    expect(leftover.filter((r) => !r.ok)).toEqual([]);
+    expect(leftover.map((r) => r.label).filter((l) => l.includes("_LAG_BLOCKS"))).toEqual([
+      "SYNC_HEALTH_MAX_NTP_LAG_BLOCKS — 2 (default)",
+    ]);
     const bad = staticChecks(map({ ...complete("preprod"), SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS: "0" })).filter((r) => !r.ok);
     expect(bad.map((r) => r.label)).toEqual(["SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS"]);
     expect(bad[0]!.hint).toContain("must be an integer from 1 to 86400 (default 180)");

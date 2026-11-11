@@ -7,8 +7,6 @@ import {
   deriveSyncStatus,
   evaluateSyncVerdict,
   fetchJsonWithDeadline,
-  MAX_CELESTIA_LAG_BLOCKS,
-  MAX_MIDNIGHT_LAG_BLOCKS,
   parseCelestiaTip,
   parseMidnightTip,
   parseTipTimeMs,
@@ -62,15 +60,46 @@ test("overall sync status requires all three protocol positions", () => {
   expect(deriveSyncStatus({ ...healthy, celestiaCurrent: null })).toBe("syncing");
 });
 
-test("lagged Midnight or Celestia prevents readiness even when NTP is current", () => {
-  expect(deriveSyncStatus({
-    ...healthy,
-    midnightTip: healthy.midnightCurrent + MAX_MIDNIGHT_LAG_BLOCKS + 1,
-  })).toBe("syncing");
-  expect(deriveSyncStatus({
-    ...healthy,
-    celestiaTip: healthy.celestiaCurrent + MAX_CELESTIA_LAG_BLOCKS + 1,
-  })).toBe("syncing");
+// A public node between two ten-minute NTP blocks, as measured on preprod: NTP
+// at its tip, both tips seconds old, and the applied chain positions standing
+// still since the last NTP block while the tips move on.
+const publicBetweenNtpBlocks = (midnightBehind: number, celestiaBehind: number) => {
+  const nowMs = 1_794_347_760_000;
+  return {
+    ntpCurrent: 4,
+    ntpLagSeconds: 0,
+    ntpBlockMs: 600_000,
+    midnightCurrent: 3_368_191,
+    midnightTip: 3_368_191 + midnightBehind,
+    celestiaCurrent: 8_912_004,
+    celestiaTip: 8_912_004 + celestiaBehind,
+    midnightTipTimeMs: nowMs - 4_000,
+    celestiaTipTimeMs: nowMs - 19_000,
+    nowMs,
+  };
+};
+
+test("a public node between NTP blocks is ok however far its applied chain positions trail the tips", () => {
+  for (const [midnightBehind, celestiaBehind] of [[53, 76], [100, 100], [130, 130]] as const) {
+    const verdict = evaluateSyncVerdict(publicBetweenNtpBlocks(midnightBehind, celestiaBehind));
+    expect(verdict.status, `midnight ${midnightBehind} / celestia ${celestiaBehind} behind`).toBe("ok");
+    expect(verdict.reasons).toEqual([]);
+  }
+});
+
+test("a node more than the NTP-lag limit behind is syncing even when the chain positions are at their tips", () => {
+  const atTips = publicBetweenNtpBlocks(0, 0);
+  // The limit is 2 NTP blocks of 600 s.
+  expect(deriveSyncStatus({ ...atTips, ntpLagSeconds: 1_200 })).toBe("ok");
+  const behind = evaluateSyncVerdict({ ...atTips, ntpLagSeconds: 1_800 });
+  expect(behind.status).toBe("syncing");
+  expect(behind.reasons).toEqual([{
+    source: "ntp",
+    rule: "lag",
+    message: "NTP is 1800 s behind wall-clock (limit 1200 s)",
+    lag_seconds: 1_800,
+    max_lag_seconds: 1_200,
+  }]);
 });
 
 test("no finalized NTP block is an error; an NTP lag is syncing", () => {
@@ -158,11 +187,9 @@ test("health query tasks never overlap on a single pg client", async () => {
 
 // ── env thresholds, freshness, hysteresis ──
 
-test("sync-health env: unset or blank takes the defaults 12 / 4 / 2 blocks, 180 / 180 s, 3 samples", () => {
+test("sync-health env: unset or blank takes the defaults 2 NTP blocks, 180 / 180 s, 3 samples", () => {
   expect(resolveSyncHealthConfig({})).toEqual({ config: DEFAULT_SYNC_HEALTH_CONFIG, problems: [] });
   expect(DEFAULT_SYNC_HEALTH_CONFIG).toEqual({
-    maxMidnightLagBlocks: 12,
-    maxCelestiaLagBlocks: 4,
     maxNtpLagBlocks: 2,
     maxMidnightTipAgeSeconds: 180,
     maxCelestiaTipAgeSeconds: 180,
@@ -174,17 +201,13 @@ test("sync-health env: unset or blank takes the defaults 12 / 4 / 2 blocks, 180 
 
 test("sync-health env: a set value replaces its default", () => {
   const { config, problems } = resolveSyncHealthConfig({
-    SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS: "40",
-    SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: " 30 ",
-    SYNC_HEALTH_MAX_NTP_LAG_BLOCKS: "12",
+    SYNC_HEALTH_MAX_NTP_LAG_BLOCKS: " 12 ",
     SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS: "600",
     SYNC_HEALTH_MAX_CELESTIA_TIP_AGE_SECONDS: "900",
     SYNC_HEALTH_HYSTERESIS_SAMPLES: "1",
   });
   expect(problems).toEqual([]);
   expect(config).toEqual({
-    maxMidnightLagBlocks: 40,
-    maxCelestiaLagBlocks: 30,
     maxNtpLagBlocks: 12,
     maxMidnightTipAgeSeconds: 600,
     maxCelestiaTipAgeSeconds: 900,
@@ -192,22 +215,25 @@ test("sync-health env: a set value replaces its default", () => {
   });
 });
 
-test.each(["0", "-1", "1.5", "1e3", "abc", "0x10", "100001"])(
+test.each(["0", "-1", "1.5", "1e3", "abc", "0x10", "10001"])(
   "sync-health env: %j is refused, naming the variable",
   (value) => {
-    const { problems } = resolveSyncHealthConfig({ SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS: value });
+    const { problems } = resolveSyncHealthConfig({ SYNC_HEALTH_MAX_NTP_LAG_BLOCKS: value });
     expect(problems).toEqual([
-      `SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS must be an integer from 1 to 100000 (default 12), got "${value}"`,
+      `SYNC_HEALTH_MAX_NTP_LAG_BLOCKS must be an integer from 1 to 10000 (default 2), got "${value}"`,
     ]);
   },
 );
 
-test("lag thresholds come from the config, not constants", () => {
-  const config = { ...DEFAULT_SYNC_HEALTH_CONFIG, maxMidnightLagBlocks: 30, maxCelestiaLagBlocks: 10, maxNtpLagBlocks: 5 };
-  expect(deriveSyncStatus({ ...healthy, midnightTip: healthy.midnightCurrent + 30 }, config)).toBe("ok");
-  expect(deriveSyncStatus({ ...healthy, midnightTip: healthy.midnightCurrent + 31 }, config)).toBe("syncing");
-  expect(deriveSyncStatus({ ...healthy, celestiaTip: healthy.celestiaCurrent + 10 }, config)).toBe("ok");
-  expect(deriveSyncStatus({ ...healthy, celestiaTip: healthy.celestiaCurrent + 11 }, config)).toBe("syncing");
+test("sync-health env: per-chain block-lag limits are not settings: a leftover value is ignored, even a malformed one", () => {
+  expect(resolveSyncHealthConfig({
+    SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS: "four",
+    SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: "0",
+  })).toEqual({ config: DEFAULT_SYNC_HEALTH_CONFIG, problems: [] });
+});
+
+test("the NTP-lag threshold comes from the config, not a constant", () => {
+  const config = { ...DEFAULT_SYNC_HEALTH_CONFIG, maxNtpLagBlocks: 5 };
   // NTP limit is the block multiple times the block time: 5 × 1 s.
   expect(deriveSyncStatus({ ...healthy, ntpLagSeconds: 5 }, config)).toBe("ok");
   expect(deriveSyncStatus({ ...healthy, ntpLagSeconds: 6 }, config)).toBe("syncing");
@@ -218,19 +244,13 @@ test("every failed rule is a reason naming its source and numbers", () => {
     ...healthy,
     ntpLagSeconds: 3,
     midnightCurrent: null,
-    celestiaTip: healthy.celestiaCurrent + 9,
+    celestiaTip: null,
   });
   expect(verdict.status).toBe("syncing");
   expect(verdict.reasons).toEqual([
     { source: "ntp", rule: "lag", message: "NTP is 3 s behind wall-clock (limit 2 s)", lag_seconds: 3, max_lag_seconds: 2 },
     { source: "midnight", rule: "position_unknown", message: "the node's midnight position is unknown" },
-    {
-      source: "celestia",
-      rule: "lag",
-      message: "celestia is 9 blocks behind its tip (limit 4)",
-      lag_blocks: 9,
-      max_lag_blocks: 4,
-    },
+    { source: "celestia", rule: "tip_unknown", message: "the celestia tip could not be read" },
   ]);
   expect(evaluateSyncVerdict({ ...healthy, ntpCurrent: 0 }).reasons.map((r) => r.rule)).toEqual(["no_finalized_block"]);
 });

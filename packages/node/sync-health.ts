@@ -9,9 +9,10 @@
 // 60 s to limit outbound calls.
 //
 // Two verdicts come out of one sample:
-//   * the per-sample verdict: heights, NTP lag and tip freshness, judged on
-//     this sample alone. /v1/health/sync reports it, and offer validation
-//     refuses on it, so a node that is behind fails closed at once.
+//   * the per-sample verdict: known positions and tips, NTP lag and tip
+//     freshness, judged on this sample alone. /v1/health/sync reports it,
+//     and offer validation refuses on it, so a node that is behind fails
+//     closed at once.
 //   * the published verdict of /v1/health: the per-sample verdict damped by
 //     hysteresis, so one slow upstream read does not flip `ok`. It changes
 //     only after SYNC_HEALTH_HYSTERESIS_SAMPLES consecutive samples disagree
@@ -144,12 +145,16 @@ export interface ReadinessInput {
   nowMs?: number;
 }
 
-// Liveness sets are unsafe to use when either source chain position is
-// unknown or behind. Permit the configured parallel delays plus a small block
-// cushion, but never report ready solely because NTP itself is current.
-// These are the defaults; SYNC_HEALTH_* env overrides them.
-export const MAX_MIDNIGHT_LAG_BLOCKS = DEFAULT_SYNC_HEALTH_CONFIG.maxMidnightLagBlocks;
-export const MAX_CELESTIA_LAG_BLOCKS = DEFAULT_SYNC_HEALTH_CONFIG.maxCelestiaLagBlocks;
+// How far a parallel chain trails its tip is not judged by a block count.
+// The node applies Midnight and Celestia blocks once per NTP block, and only
+// after each chain has delivered blocks past that NTP block's end time, so
+// between two NTP blocks the applied positions stand still while the tips move
+// on: with BLOCK_TIME_MS = 600000 and ~6 s chain blocks they trail by up to
+// ~100 blocks on a node that is current. A chain that stops delivering holds
+// back the next NTP block instead, which the NTP-lag rule reports; a chain
+// whose tip stops moving is caught by the tip-age rule, and an unknown
+// position or tip is never `ok`. `current` and `lag_blocks` in
+// /v1/health/sync remain diagnostics.
 
 export type SyncSource = "ntp" | "midnight" | "celestia" | "node";
 
@@ -158,8 +163,6 @@ export interface SyncReason {
   source: SyncSource;
   rule: "no_finalized_block" | "position_unknown" | "tip_unknown" | "lag" | "stale" | "state_unreadable";
   message: string;
-  lag_blocks?: number;
-  max_lag_blocks?: number;
   lag_seconds?: number;
   max_lag_seconds?: number;
   age_seconds?: number;
@@ -249,24 +252,15 @@ export function evaluateSyncVerdict(
   }
 
   const chains = [
-    ["midnight", midnightCurrent, midnightTip, thresholds.maxMidnightLagBlocks],
-    ["celestia", celestiaCurrent, celestiaTip, thresholds.maxCelestiaLagBlocks],
+    ["midnight", midnightCurrent, midnightTip],
+    ["celestia", celestiaCurrent, celestiaTip],
   ] as const;
-  for (const [source, current, tip, maxLag] of chains) {
+  for (const [source, current, tip] of chains) {
     if (!knownHeight(current)) {
       reasons.push({ source, rule: "position_unknown", message: `the node's ${source} position is unknown` });
     }
     if (!knownHeight(tip)) {
       reasons.push({ source, rule: "tip_unknown", message: `the ${source} tip could not be read` });
-    }
-    if (knownHeight(current) && knownHeight(tip) && tip - current > maxLag) {
-      reasons.push({
-        source,
-        rule: "lag",
-        message: `${source} is ${tip - current} blocks behind its tip (limit ${maxLag})`,
-        lag_blocks: tip - current,
-        max_lag_blocks: maxLag,
-      });
     }
     const fresh = freshness[source];
     if (fresh.state === "stale") {
@@ -702,9 +696,10 @@ export function createSyncHealth(deps: SyncHealthDeps) {
     },
 
     /** Validation runs this after proof verification. Unlike the public health
-     * cache, it re-reads both external chain tips so a tip that advanced during
-     * proof work cannot be hidden behind a previously healthy cached response.
-     * It is not a sample of the published verdict. */
+     * cache, it re-reads both external chain tips so a tip that became
+     * unreadable or stale during proof work cannot be hidden behind a
+     * previously healthy cached response. It is not a sample of the published
+     * verdict. */
     async getFreshSyncStatus(dbConn: any) {
       return (await computeSample(dbConn, true)).response;
     },

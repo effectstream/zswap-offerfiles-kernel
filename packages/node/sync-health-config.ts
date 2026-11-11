@@ -5,10 +5,6 @@
 // profile can validate these values before env.ts, config.preview.ts or
 // midnight-env are evaluated, and exit 78 naming the variable.
 //
-//   SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS      12   Midnight blocks the node may
-//                                                 trail the indexer tip
-//   SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS       4   Celestia blocks the node may
-//                                                 trail the RPC's network head
 //   SYNC_HEALTH_MAX_NTP_LAG_BLOCKS            2   NTP blocks (BLOCK_TIME_MS
 //                                                 each) the node may trail
 //                                                 wall-clock
@@ -29,10 +25,11 @@
 // are cached 60 s, so the hysteresis counts tip reads, not HTTP polls. One
 // light-node stall spans at most two consecutive tip reads (the read that
 // times out, then the read while the node catches up), so three are required.
+//
+// There is no block-count limit per chain: see the verdict rules in
+// sync-health.ts. Any other SYNC_HEALTH_* variable is not read.
 
 export interface SyncHealthConfig {
-  readonly maxMidnightLagBlocks: number;
-  readonly maxCelestiaLagBlocks: number;
   readonly maxNtpLagBlocks: number;
   readonly maxMidnightTipAgeSeconds: number;
   readonly maxCelestiaTipAgeSeconds: number;
@@ -48,8 +45,6 @@ interface Setting {
 }
 
 export const SYNC_HEALTH_SETTINGS: readonly Setting[] = Object.freeze([
-  { name: "SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS", key: "maxMidnightLagBlocks", defaultValue: 12, max: 100_000 },
-  { name: "SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS", key: "maxCelestiaLagBlocks", defaultValue: 4, max: 100_000 },
   { name: "SYNC_HEALTH_MAX_NTP_LAG_BLOCKS", key: "maxNtpLagBlocks", defaultValue: 2, max: 10_000 },
   { name: "SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS", key: "maxMidnightTipAgeSeconds", defaultValue: 180, max: 86_400 },
   { name: "SYNC_HEALTH_MAX_CELESTIA_TIP_AGE_SECONDS", key: "maxCelestiaTipAgeSeconds", defaultValue: 180, max: 86_400 },
@@ -97,8 +92,7 @@ export function resolveSyncHealthConfig(
 /** One line for the startup log. */
 export function describeSyncHealthConfig(config: SyncHealthConfig): string {
   return (
-    `max lag midnight ${config.maxMidnightLagBlocks} / celestia ${config.maxCelestiaLagBlocks} / ` +
-    `ntp ${config.maxNtpLagBlocks} blocks; max tip age midnight ${config.maxMidnightTipAgeSeconds} s / ` +
+    `max ntp lag ${config.maxNtpLagBlocks} blocks; max tip age midnight ${config.maxMidnightTipAgeSeconds} s / ` +
     `celestia ${config.maxCelestiaTipAgeSeconds} s; hysteresis ${config.hysteresisSamples} samples`
   );
 }

@@ -53,14 +53,12 @@ x-celestia-endpoints: &celestia-endpoints
   # The bridge runs with --rpc.skip-auth (as @effectstream/celestia does), so
   # there is deliberately no token to distribute.
   CELESTIA_AUTH_TOKEN: ""
-  # How often the kernel's Celestia fetcher advances its projection.
+  # How often the kernel's Celestia fetcher advances its position.
   #
-  # `packages/node/env.ts` defaults this to 6000 ms for a devnet, which is one
-  # poll per six Celestia blocks at the packaged 1s cadence — so between polls
-  # the projection falls further behind than `MAX_CELESTIA_LAG_BLOCKS = 4`
-  # tolerates. The cadence itself is the real fix (see CELESTIA_BLOCK_TIME on
-  # the celestia service); matching the poll to the block time on top of it
-  # removes the remaining sawtooth, which costs one local RPC per second.
+  # `packages/node/env.ts` defaults this to 6000 ms for a devnet, which assumes
+  # 6 s Celestia blocks; this stack makes one every 3 s (CELESTIA_BLOCK_TIME on
+  # the celestia service). Polling every second keeps the fetched position
+  # close to the head, at the cost of one local RPC per second.
   CELESTIA_POLLING_INTERVAL_MS: ${CELESTIA_POLLING_INTERVAL_MS:-1000}
 
 x-kernel-image: &kernel-image
@@ -184,10 +182,8 @@ services:
       CELESTIA_HOME: /data/celestia-app
       CELESTIA_BRIDGE_HOME: /data/celestia-bridge
       CELESTIA_FORCE_NO_BBR: "1"
-      # Settlement-critical: at the packaged wrapper's 1s the kernel's Celestia
-      # projection never gets inside MAX_CELESTIA_LAG_BLOCKS = 4, so every read
-      # gated on sync health (for example POST /v1/offers/files) is permanently
-      # 503. Full reasoning in images/celestia/entrypoint.sh.
+      # 3s instead of the packaged wrapper's 1s, the cadence the COW solver's
+      # acceptance harness pins. Reasoning in images/celestia/entrypoint.sh.
       CELESTIA_BLOCK_TIME: ${CELESTIA_BLOCK_TIME:-3s}
     volumes:
       - celestia-data:/data

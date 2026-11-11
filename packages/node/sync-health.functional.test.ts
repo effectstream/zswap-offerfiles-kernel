@@ -59,6 +59,8 @@ interface StubState {
 }
 
 let clockMs = 0;
+/** Start time of the seeded NTP chain: block NTP_HEIGHT is current until NTP_BLOCK_MS after its start. */
+let ntpAnchorMs = 0;
 const indexer: StubState = { height: MIDNIGHT_CURRENT, timeMs: null, httpStatus: 200, hits: 0 };
 const celestia: StubState = { height: CELESTIA_CURRENT, timeMs: null, httpStatus: 200, hits: 0 };
 let indexerServer: ReturnType<typeof Bun.serve> | undefined;
@@ -145,11 +147,12 @@ beforeAll(async () => {
   for (const migration of migrationTable) await client.query(migration.sql);
   // NTP at its tip for hours of fake clock: one-hour blocks anchored so that
   // block 42 is the current one.
+  ntpAnchorMs = clockMs - NTP_HEIGHT * NTP_BLOCK_MS;
   await client.query(
     `INSERT INTO effectstream.sync_protocol_config_snapshot
        (protocol_name, network_type, immutable_config)
      VALUES ('ntp-validation', 'ntp', $1::jsonb)`,
-    [JSON.stringify({ startTime: clockMs - NTP_HEIGHT * NTP_BLOCK_MS, blockTimeMS: NTP_BLOCK_MS })],
+    [JSON.stringify({ startTime: ntpAnchorMs, blockTimeMS: NTP_BLOCK_MS })],
   );
   await client.query(
     `INSERT INTO effectstream.effectstream_blocks
@@ -210,7 +213,7 @@ describe("sync verdict over stub upstreams (fake clock)", () => {
     expect(recovered.hysteresis.disagreeing_samples).toBe(0);
   });
 
-  test.serial("three consecutive lagging samples flip /v1/health to syncing, naming the source and the lag", async () => {
+  test.serial("three consecutive failing samples flip /v1/health to syncing, naming the source", async () => {
     healthy();
     const health = newSyncHealth();
     expect((await health.getHealthVerdict(client)).status).toBe("ok");
@@ -218,17 +221,13 @@ describe("sync verdict over stub upstreams (fake clock)", () => {
     for (let sample = 1; sample <= 3; sample++) {
       nextTipRound();
       healthy();
-      celestia.height = CELESTIA_CURRENT + 20;
+      celestia.httpStatus = 503;
       const verdict = await health.getHealthVerdict(client);
       seen.push(verdict.status);
       expect(verdict.raw_status).toBe("syncing");
-      expect(verdict.reasons).toEqual([{
-        source: "celestia",
-        rule: "lag",
-        message: "celestia is 20 blocks behind its tip (limit 4)",
-        lag_blocks: 20,
-        max_lag_blocks: 4,
-      }]);
+      expect(verdict.reasons).toEqual([
+        { source: "celestia", rule: "tip_unknown", message: "the celestia tip could not be read" },
+      ]);
     }
     expect(seen).toEqual(["ok", "ok", "syncing"]);
 
@@ -307,7 +306,7 @@ describe("sync verdict over stub upstreams (fake clock)", () => {
     expect((await health.getHealthVerdict(client)).status).toBe("ok");
     nextTipRound();
     healthy();
-    celestia.height = CELESTIA_CURRENT + 20;
+    celestia.httpStatus = 503;
     const hitsBefore = { indexer: indexer.hits, celestia: celestia.hits };
     // Twelve polls 5 s apart: each one past the 5 s response cache, all
     // inside one 60 s tip round.
@@ -325,11 +324,6 @@ describe("sync verdict over stub upstreams (fake clock)", () => {
 
   test.serial("thresholds from config replace the defaults", async () => {
     healthy();
-    celestia.height = CELESTIA_CURRENT + 20;
-    const tolerant = newSyncHealth({ ...DEFAULT_SYNC_HEALTH_CONFIG, maxCelestiaLagBlocks: 25 });
-    expect((await tolerant.getHealthVerdict(client)).raw_status).toBe("ok");
-
-    healthy();
     indexer.timeMs = clockMs - 40_000;
     const strict = newSyncHealth({ ...DEFAULT_SYNC_HEALTH_CONFIG, maxMidnightTipAgeSeconds: 30 });
     expect((await strict.getHealthVerdict(client)).reasons.map((r) => `${r.source}:${r.rule}`))
@@ -342,6 +336,56 @@ describe("sync verdict over stub upstreams (fake clock)", () => {
     healthy();
     celestia.httpStatus = 503;
     expect((await immediate.getHealthVerdict(client)).status).toBe("syncing");
+  });
+
+  test.serial("applied chain positions one NTP block behind their tips read ok on every route; lag_blocks stays a diagnostic", async () => {
+    // A public node late in a ten-minute NTP block: both chains have made
+    // about 100 blocks since the node last applied them, NTP is current and
+    // both tips are seconds old.
+    healthy();
+    indexer.height = MIDNIGHT_CURRENT + 100;
+    celestia.height = CELESTIA_CURRENT + 100;
+    const health = newSyncHealth();
+    const verdict = await health.getHealthVerdict(client);
+    expect(verdict).toMatchObject({ status: "ok", synced: true, raw_status: "ok", reasons: [] });
+    const sync = await health.getSyncStatus(client);
+    expect(sync.status).toBe("ok");
+    expect(sync.midnight).toMatchObject({ current: MIDNIGHT_CURRENT, tip: MIDNIGHT_CURRENT + 100, lag_blocks: 100 });
+    expect(sync.celestia).toMatchObject({ current: CELESTIA_CURRENT, tip: CELESTIA_CURRENT + 100, lag_blocks: 100 });
+    expect((await health.getFreshSyncStatus(client)).status).toBe("ok");
+  });
+
+  test.serial("NTP more than two NTP blocks behind wall-clock is syncing on every route, with the chains at their tips", async () => {
+    const start = clockMs;
+    try {
+      // The stored NTP block stays at its height while wall-clock reaches the
+      // start of the second, then the third NTP block after it.
+      clockMs = ntpAnchorMs + (NTP_HEIGHT + 2) * NTP_BLOCK_MS;
+      healthy();
+      const atLimit = newSyncHealth();
+      expect((await atLimit.getHealthVerdict(client)).raw_status).toBe("ok");
+
+      clockMs = ntpAnchorMs + (NTP_HEIGHT + 3) * NTP_BLOCK_MS;
+      healthy();
+      const behind = newSyncHealth();
+      const verdict = await behind.getHealthVerdict(client);
+      expect(verdict.raw_status).toBe("syncing");
+      expect(verdict.reasons).toEqual([{
+        source: "ntp",
+        rule: "lag",
+        message: "NTP is 10800 s behind wall-clock (limit 7200 s)",
+        lag_seconds: 10_800,
+        max_lag_seconds: 7_200,
+      }]);
+      expect((await behind.getSyncStatus(client)).status).toBe("syncing");
+      expect((await behind.getFreshSyncStatus(client)).status).toBe("syncing");
+
+      healthy();
+      const tolerant = newSyncHealth({ ...DEFAULT_SYNC_HEALTH_CONFIG, maxNtpLagBlocks: 3 });
+      expect((await tolerant.getHealthVerdict(client)).raw_status).toBe("ok");
+    } finally {
+      clockMs = start;
+    }
   });
 });
 
@@ -393,8 +437,10 @@ describe("GET /v1/health with SYNC_HEALTH_* env (child process)", () => {
       PGLITE_DATA_DIR: "memory://",
       TEST_PGLITE_PORT: String(await randomFreePortAtLeast10000()),
       SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS: "30",
-      SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: "2",
+      SYNC_HEALTH_MAX_CELESTIA_TIP_AGE_SECONDS: "1",
       SYNC_HEALTH_HYSTERESIS_SAMPLES: "5",
+      // Not a setting: the node starts and Celestia, 3 blocks behind, is not judged by it.
+      SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: "2",
     });
     const line = child.stdout.split("\n").find((l) => l.startsWith("RESULT "));
     expect(child.exitCode, `${child.stdout}\n${child.stderr}`).toBe(0);
@@ -405,10 +451,9 @@ describe("GET /v1/health with SYNC_HEALTH_* env (child process)", () => {
     expect(body.status).toBe("syncing");
     expect(body.synced).toBe(false);
     expect(body.raw_status).toBe("syncing");
-    expect(body.reasons.map((r: any) => `${r.source}:${r.rule}`)).toEqual(["midnight:stale", "celestia:lag"]);
-    expect(body.reasons[1]).toMatchObject({ lag_blocks: 3, max_lag_blocks: 2 });
+    expect(body.reasons.map((r: any) => `${r.source}:${r.rule}`)).toEqual(["midnight:stale", "celestia:stale"]);
     expect(body.freshness.midnight).toMatchObject({ state: "stale", tip_height: MIDNIGHT_CURRENT, max_age_seconds: 30 });
-    expect(body.freshness.celestia).toMatchObject({ state: "fresh", tip_height: CELESTIA_CURRENT + 3 });
+    expect(body.freshness.celestia).toMatchObject({ state: "stale", tip_height: CELESTIA_CURRENT + 3, max_age_seconds: 1 });
     expect(body.hysteresis).toEqual({ samples_to_change: 5, disagreeing_samples: 0 });
     // /v1/health/sync keeps its exact grammar: no new keys.
     const sync = JSON.parse(result.healthSync.body);
@@ -416,6 +461,7 @@ describe("GET /v1/health with SYNC_HEALTH_* env (child process)", () => {
       ["blockL2", "celestia", "midnight", "now", "ntp", "recent_rejections", "sets", "status", "ts"],
     );
     expect(sync.status).toBe("syncing");
+    expect(sync.celestia).toMatchObject({ current: CELESTIA_CURRENT, tip: CELESTIA_CURRENT + 3, lag_blocks: 3 });
   });
 });
 
@@ -430,7 +476,7 @@ const PUBLIC_ENV = {
 
 describe("a malformed SYNC_HEALTH_* value stops the public node with exit 78", () => {
   test.serial.each([
-    ["SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS", "0"],
+    ["SYNC_HEALTH_MAX_CELESTIA_TIP_AGE_SECONDS", "0"],
     ["SYNC_HEALTH_HYSTERESIS_SAMPLES", "-1"],
     ["SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS", "90.5"],
     ["SYNC_HEALTH_MAX_NTP_LAG_BLOCKS", "two"],
@@ -442,22 +488,36 @@ describe("a malformed SYNC_HEALTH_* value stops the public node with exit 78", (
   });
 
   test.serial("main.public.ts refuses before the node starts", async () => {
-    const run = await runChild("main.public.ts", { ...PUBLIC_ENV, SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS: "100001" });
+    const run = await runChild("main.public.ts", { ...PUBLIC_ENV, SYNC_HEALTH_MAX_NTP_LAG_BLOCKS: "10001" });
     expect(run.exitCode, run.stderr).toBe(78);
-    expect(run.stderr).toContain('SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS must be an integer from 1 to 100000 (default 12), got "100001"');
+    expect(run.stderr).toContain('SYNC_HEALTH_MAX_NTP_LAG_BLOCKS must be an integer from 1 to 10000 (default 2), got "10001"');
     expect(run.stdout).not.toContain("Starting ZSwap DA Node");
   });
 
   test.serial("valid values are accepted and printed by the preflight", async () => {
     const run = await runChild("public-network-profile.ts", {
       ...PUBLIC_ENV,
-      SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: "30",
+      SYNC_HEALTH_MAX_NTP_LAG_BLOCKS: "3",
       SYNC_HEALTH_HYSTERESIS_SAMPLES: "6",
     });
     expect(run.exitCode, run.stderr).toBe(0);
     expect(run.stdout).toContain(
-      "[preprod] sync health        : max lag midnight 12 / celestia 30 / ntp 2 blocks; " +
+      "[preprod] sync health        : max ntp lag 3 blocks; " +
         "max tip age midnight 180 s / celestia 180 s; hysteresis 6 samples",
+    );
+  });
+
+  test.serial("a leftover per-chain block-lag limit, even a malformed one, does not stop the preflight", async () => {
+    const run = await runChild("public-network-profile.ts", {
+      ...PUBLIC_ENV,
+      SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS: "four",
+      SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: "0",
+    });
+    expect(run.exitCode, run.stderr).toBe(0);
+    expect(run.stderr).not.toContain("SYNC_HEALTH_MAX_");
+    expect(run.stdout).toContain(
+      "[preprod] sync health        : max ntp lag 2 blocks; " +
+        "max tip age midnight 180 s / celestia 180 s; hysteresis 3 samples",
     );
   });
 });

@@ -225,11 +225,10 @@ Set at least:
 | `EFFECTSTREAM_TRUST_PROXY` | `127.0.0.1` behind the nginx of section 10 |
 | `TOKEN_REGISTRY_NETWORK` | `preprod` |
 | `MIDNIGHT_WALLET_SYNC_TIMEOUT_MS` | `3600000`: a first wallet sync on preprod takes 10 to 55 minutes |
-| `SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS`, `SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS` | `130` each, for the default ten-minute `BLOCK_TIME_MS` (section 12) |
 
 Optional knobs this guide uses: `CELESTIA_RPC_TIMEOUT_MS`,
 `CELESTIA_FETCH_CONCURRENCY` (section 6), `MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS`
-(section 5) and the other `SYNC_HEALTH_*` thresholds (section 12).
+(section 5) and the `SYNC_HEALTH_*` thresholds of the health verdict (section 12).
 
 Never put a secret on a command line or in the checkout. `check-env.ts` reads
 `.env` at the root of the checkout, so link the file there (the link is
@@ -289,9 +288,8 @@ block 1 avoids both.
 **`BLOCK_TIME_MS`** (default 600000, ten minutes) is the NTP chain's block
 time. The node merges the Midnight and Celestia blocks it fetched into one NTP
 block per `BLOCK_TIME_MS`, so a new offer shows up in the book within about
-one NTP block, the health verdict allows an NTP lag of
-`SYNC_HEALTH_MAX_NTP_LAG_BLOCKS` × `BLOCK_TIME_MS`, and the Midnight and
-Celestia lag limits must cover one NTP block of each chain (section 12). It is recorded in the
+one NTP block, and the health verdict allows an NTP lag of
+`SYNC_HEALTH_MAX_NTP_LAG_BLOCKS` × `BLOCK_TIME_MS` (section 12). It is recorded in the
 database on the first boot and the NTP heights already stored were computed
 with it: changing it needs a fresh database. The Midnight fetch step and
 poll (`packages/node/config.preview.ts`: 500 blocks every second, one indexer
@@ -540,31 +538,20 @@ Done by hand, once, before offers are posted (the
 `status` is the undamped per-sample verdict, which offer validation also
 uses. [API.md, `GET /v1/health`](../API.md#get-v1health) has every field.
 
-**Size the lag limits for the NTP block.** The node merges the Midnight and
-Celestia blocks it fetched into its state once per NTP block, and the lag
-rules compare the *merged* positions with the tips. Between two NTP blocks
-the merged positions stand still, so they trail the tips by up to
-`BLOCK_TIME_MS` worth of blocks: with the default ten-minute NTP block and the
-~6 s blocks of Midnight and mocha, up to 100 blocks. The default lag limits
-(`SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS` 12, `SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS`
-4) are sized for the local devnet's one-second NTP blocks: on a public network
-they read `syncing` for all but about the first minute of every NTP block,
-`/v1/health` then stays `syncing`, and the exact-files read
-(`POST /v1/offers/files`, which uses the same verdict) answers 503. Set both
-from the block time, `BLOCK_TIME_MS` / 6000 plus about 30 blocks of margin for
-the merge delay and a light-node stall:
-
-```bash
-SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS=130   # 600000 / 6000 + 30
-SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS=130
-```
-
-A node more than one NTP block behind still reads `syncing`. Keep
-`SYNC_HEALTH_MAX_NTP_LAG_BLOCKS` at 2 (NTP blocks) and the 180 s freshness
-limits. The lag limits also gate offer validation, so do not raise them
-further to hide a slow source; raise `SYNC_HEALTH_HYSTERESIS_SAMPLES` instead
-if single slow reads still flip `/v1/health`. Each value must be a positive
-integer; a malformed one stops the node with exit 78 naming it.
+**Between two NTP blocks.** The node applies the Midnight and Celestia blocks
+it fetched once per NTP block, after each chain has delivered blocks past that
+NTP block's end time. `/v1/health/sync` reports the applied positions
+(`current`) next to the tips, so with the default ten-minute NTP block and the
+~6 s blocks of Midnight and mocha, `lag_blocks` climbs to about 100 before
+each NTP block and drops after it. That is how the node works, and the
+verdict does not judge it. A chain that stops delivering holds back the next
+NTP block, and the verdict turns `syncing` once the NTP lag passes
+`SYNC_HEALTH_MAX_NTP_LAG_BLOCKS` NTP blocks: 20 to 30 minutes after the stall
+at the defaults. A source that cannot be read is `syncing` at once
+(`tip_unknown`), and one whose tip's block time stops moving after the
+freshness limit (180 s). Keep the defaults. Raise `SYNC_HEALTH_HYSTERESIS_SAMPLES` if single slow reads
+still flip `/v1/health`. Each value must be a positive integer; a malformed
+one stops the node with exit 78 naming it.
 
 **Watch the light node from outside.** The sync retries a failing Celestia
 read for ever (section 13), so the node does not stop on its own. Alert when

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 
 // The framework persists every fetched Celestia blob in
 // effectstream.primitive_accounting forever. Because the namespace is

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "../database/test-pglite.ts";
+import { closeTestPglite } from "../database/pglite.test-support.ts";
 
 // Item #15 regression proof: 24 h chart stats must aggregate over EVERY fill
 // in the window, not the display query's LIMIT 120. Seeds >120 fills at known

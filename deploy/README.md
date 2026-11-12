@@ -150,3 +150,9 @@ this value.
 and rejects removed services (the local funding services and the COW solver
 services). Focused poster unit tests run in the pinned `oven/bun:1.3.11`
 container. See `scripts/README.md` for script ownership.
+
+The kernel image ships no test code: `images/kernel/Dockerfile.dockerignore`
+leaves out test files, test helpers, test fixtures and the e2e suite.
+`images/kernel/image.test-gate.ts` checks a built image from the inside (no
+test-only file, and every program the image runs resolves its imports); CI runs
+it on the amd64 image, and the command for a local image is in its header.

@@ -1534,8 +1534,9 @@ export interface IGetOpenOffersPageResult {
 //     known_roots.first_seen_ms: the block in which THIS NODE first observed
 //     the proof root. A replica started at a later MIDNIGHT_START_BLOCK records
 //     a later value and orders the book differently. The determinism suite
-//     cannot see this either — main.grand-b.ts uses startBlockHeight 1 on every
-//     primitive, so both instances agree by construction, not by guarantee.
+//     cannot see this either — main.grand-b.test-child.ts uses
+//     startBlockHeight 1 on every primitive, so both instances agree by
+//     construction, not by guarantee.
 //     It is also proof-root age, not publication time, so "newest first" did
 //     not mean what the API says it means.
 //

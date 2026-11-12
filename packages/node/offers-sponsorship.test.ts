@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { closeTestPglite } from "../database/test-pglite.ts";
+import { closeTestPglite } from "../database/pglite.test-support.ts";
 
 // POST /v1/offers' fee-sponsorship pre-check, over HTTP, through the REAL
 // apiRouter on a real fastify instance backed by PGlite with the real

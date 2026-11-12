@@ -5,8 +5,9 @@
 # context that fetched from a remote would build different source than the one
 # under review).
 #
-# The image carries the whole bun workspace and ships one entrypoint per
-# component. NOTHING here starts the
+# The image carries the bun workspace without its test code (test files, test
+# helpers, fixtures and the e2e suite; see Dockerfile.dockerignore) and ships
+# one entrypoint per component. NOTHING here starts the
 # in-repo orchestrator: `bun run dev` / `launchMidnight()` / `launchCelestia()`
 # kill live listeners on 9944/8088/6300 (`stopProcessAtPort`). Every entrypoint
 # is a single `exec`d process so
@@ -70,8 +71,8 @@ COPY packages/validator/package.json                                packages/val
 RUN bun install --frozen-lockfile
 
 # The rest of the source. `.dockerignore` (see Dockerfile.dockerignore next to
-# this file) keeps node_modules — 839 MB in a working checkout — out of the
-# context entirely.
+# this file) keeps node_modules — 839 MB in a working checkout — and all test
+# code out of the context entirely.
 COPY . .
 
 # Entrypoints last: editing one must not invalidate the install or the compile.

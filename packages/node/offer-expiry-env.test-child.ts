@@ -14,7 +14,7 @@
 
 const mode = process.argv[2] ?? "env";
 
-const env = await import("../env.ts");
+const env = await import("./env.ts");
 const summary: Record<string, unknown> = {
   network: env.MIDNIGHT_NETWORK_ID,
   offerTtlSeconds: env.OFFER_TTL_SECONDS,
@@ -25,15 +25,15 @@ const summary: Record<string, unknown> = {
 if (mode === "ingest") {
   const database = await import("@zswap-da/database");
   const { bytesToLatin1 } = await import("@zswap-da/offer-guard");
-  const { gameStateTransitions } = await import("../state-machine.ts");
-  const { signedUnshieldedOffer } = await import("../../validator/signed-offer.testkit.ts");
+  const { gameStateTransitions } = await import("./state-machine.ts");
+  const { signedUnshieldedOffer } = await import("../validator/signed-offer.testkit.ts");
 
   const BLOCK_TIME_MS = Date.parse("2026-08-14T12:00:00.000Z");
   const offer = await signedUnshieldedOffer(new Date(BLOCK_TIME_MS + 2 * 3_600_000));
   let inserted: Record<string, unknown> | null = null;
   let rejected: unknown = null;
 
-  const { eventBus, markBlockCommitted, __resetEventGateForTests } = await import("../event-bus.ts");
+  const { eventBus, markBlockCommitted, __resetEventGateForTests } = await import("./event-bus.ts");
   __resetEventGateForTests();
   eventBus.on("app_event", (event: any) => {
     if (event.type === "offer_rejected") rejected = event.code;

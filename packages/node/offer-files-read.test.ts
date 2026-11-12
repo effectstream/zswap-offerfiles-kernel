@@ -29,7 +29,7 @@ const {
   isNullifierSpent,
   migrationTable,
 } = await import("@zswap-da/database");
-const { closeTestPglite } = await import("../database/test-pglite.ts");
+const { closeTestPglite } = await import("../database/pglite.test-support.ts");
 const {
   getReferenceState,
   validateZswapOffer,

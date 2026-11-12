@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 
 // Verifies the content-addressed offer identity added by 005-offer-hash.sql:
 // hash-aware insert, hash lookups (open + archived), the blob-free list page,

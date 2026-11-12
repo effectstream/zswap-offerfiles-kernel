@@ -28,7 +28,7 @@ const priorUpdatesMax = process.env["API_UPDATES_MAX_CONNECTIONS"];
 process.env["API_UPDATES_MAX_CONNECTIONS"] = "2";
 
 const { migrationTable } = await import("@zswap-da/database");
-const { closeTestPglite } = await import("../database/test-pglite.ts");
+const { closeTestPglite } = await import("../database/pglite.test-support.ts");
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const fastify = (await import("fastify")).default;

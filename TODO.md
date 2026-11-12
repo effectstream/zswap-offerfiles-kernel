@@ -40,7 +40,7 @@ Not meant to be published:
 
 - The COW solver's tests reach into kernel internals through the submodule:
   its book-mirror test and its release-hardening e2e harness import
-  `packages/database/test-pglite.ts`, `packages/database/mod.ts`,
+  `packages/database/pglite.test-support.ts`, `packages/database/mod.ts`,
   `packages/node/offer-consumption-read.ts`, `packages/node/api.ts`,
   `packages/node/event-bus.ts` and `packages/node/sync-health.ts`. These are
   not meant to be published as they are. Those tests have to move onto
@@ -190,6 +190,14 @@ repository no longer contains it. Everything below happens there.
   port. The mainnet dry-run default and `SOLVER_MAINNET_LIVE_TRADING_ACK` stay.
 - [ ] Switch from the kernel submodule to the published npm packages (see
   "Publish the backend packages to npm", step 6).
+- [ ] Follow the PGlite test helper's new name when the kernel submodule is
+  bumped. Test-only files here carry `.test` in their name, so
+  `packages/database/test-pglite.ts` is now
+  `packages/database/pglite.test-support.ts`. Two solver files import it
+  through the submodule: `packages/solver/offer-updates-mirror.test.ts` and
+  `packages/tests/grand-e2e/solver-release-hardening-e2e.ts`. Each import is a
+  one-line path change; without it the solver's unit suite fails to load after
+  the bump.
 - [ ] Merge `effectstream/cow-solver` PR #1
   (https://github.com/effectstream/cow-solver/pull/1). It wires this
   repository in as a git submodule and makes the solver build and test on its

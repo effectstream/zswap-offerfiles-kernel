@@ -41,7 +41,7 @@ const {
   releaseAppInputSavepoint,
 } = await import("@zswap-da/database");
 const { declaredMarkers } = await import("./marker-dedup.ts");
-const { closeTestPglite } = await import("../database/test-pglite.ts");
+const { closeTestPglite } = await import("../database/pglite.test-support.ts");
 const {
   eventBus,
   markBlockCommitted,

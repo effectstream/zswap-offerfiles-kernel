@@ -1,6 +1,7 @@
-// Child-process body for ../sync-health.functional.test.ts. In a subdirectory
-// so the strict backend typecheck (packages/node/*.ts) does not see its
-// untyped `pg` import — like the *.test.ts files it serves.
+// Child-process body for sync-health.functional.test.ts. The `.test-child.ts`
+// name keeps it out of `bun test` collection, out of the kernel image and out
+// of the strict backend typecheck (its untyped `pg` import, like the *.test.ts
+// files it serves).
 //
 // Runs in its own process because the Midnight endpoints, CELESTIA_RPC_URL and
 // the SYNC_HEALTH_* thresholds are read once, at module load. The parent
@@ -17,8 +18,8 @@ const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const fastify = (await import("fastify")).default;
 const { migrationTable } = await import("@zswap-da/database");
-const { closeTestPglite } = await import("../../database/test-pglite.ts");
-const { apiRouter } = await import("../api.ts");
+const { closeTestPglite } = await import("../database/pglite.test-support.ts");
+const { apiRouter } = await import("./api.ts");
 
 const NTP_HEIGHT = 42;
 const NTP_BLOCK_MS = 60_000;

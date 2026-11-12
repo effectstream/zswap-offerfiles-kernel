@@ -17,7 +17,7 @@ const { getMigrations } = await import("@effectstream/db/version");
 const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const { migrationTable } = await import("@zswap-da/database");
-const { closeTestPglite } = await import("../database/test-pglite.ts");
+const { closeTestPglite } = await import("../database/pglite.test-support.ts");
 const { createSyncHealth } = await import("./sync-health.ts");
 const { DEFAULT_SYNC_HEALTH_CONFIG } = await import("./sync-health-config.ts");
 
@@ -424,7 +424,7 @@ describe("GET /v1/health with SYNC_HEALTH_* env (child process)", () => {
     celestia.height = CELESTIA_CURRENT + 3;
     celestia.timeMs = realNow - 2_000;
     celestia.httpStatus = 200;
-    const child = await runChild("test-support/sync-health-child.ts", {
+    const child = await runChild("sync-health.test-child.ts", {
       MIDNIGHT_NETWORK_ID: "undeployed",
       MIDNIGHT_INDEXER_HTTP: `http://127.0.0.1:${indexerServer!.port}/api/v4/graphql`,
       MIDNIGHT_INDEXER_WS: `ws://127.0.0.1:${indexerServer!.port}/api/v4/graphql/ws`,

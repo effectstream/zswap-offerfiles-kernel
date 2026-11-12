@@ -33,7 +33,7 @@ const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const { migrationTable, isKnownRootLive, pruneKnownRoots, getOfferRootTiming } =
   await import("@zswap-da/database");
-const { closeTestPglite } = await import("./test-pglite.ts");
+const { closeTestPglite } = await import("./pglite.test-support.ts");
 
 const BLOCK_MS = 6_000;
 const RUNS = 20;

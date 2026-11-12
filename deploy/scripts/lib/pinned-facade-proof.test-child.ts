@@ -1,4 +1,4 @@
-// Child-process body for ../proof-deadline.test.ts: builds the offer poster's
+// Child-process body for proof-deadline.test.ts: builds the offer poster's
 // pinned-coin wallet facade (the real `buildPinnedWallet`) against a proof
 // server URL the parent controls, then asks the facade's own proving service
 // to prove a real unproven ledger-9 transaction (one shielded output, so one
@@ -17,7 +17,7 @@ import {
   ZswapSecretKeys,
 } from "@midnightntwrk/ledger-v9";
 
-import { buildPinnedWallet } from "../pinned-wallet.ts";
+import { buildPinnedWallet } from "./pinned-wallet.ts";
 
 const proofServer = process.env["TEST_PROOF_SERVER_URL"] ?? "";
 const closedPort = process.env["TEST_CLOSED_PORT"] ?? "1";

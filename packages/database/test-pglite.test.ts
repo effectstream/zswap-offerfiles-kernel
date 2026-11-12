@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { closeTestPglite, type TestPgliteHandle } from "./test-pglite.ts";
+import { closeTestPglite, type TestPgliteHandle } from "./pglite.test-support.ts";
 
 test("PGlite teardown delegates protocol draining to the owning handle", async () => {
   const events: string[] = [];

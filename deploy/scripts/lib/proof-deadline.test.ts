@@ -69,7 +69,7 @@ async function runChild(file: string, env: Record<string, string>, args: string[
 describe("the offer poster's wallet facade (real SDK prover, silent proof server)", () => {
   test("a proof request fails at the deadline, naming the proof server, after reaching /prove", async () => {
     const before = proveRequests.length;
-    const run = await runChild(join(HERE, "test-support", "pinned-facade-proof-child.ts"), {
+    const run = await runChild(join(HERE, "pinned-facade-proof.test-child.ts"), {
       MIDNIGHT_NETWORK_ID: "undeployed",
       TEST_PROOF_SERVER_URL: `http://127.0.0.1:${silentProver.port}`,
       TEST_CLOSED_PORT: String(closedPort),
@@ -89,7 +89,7 @@ describe("the offer poster's wallet facade (real SDK prover, silent proof server
   }, 120_000);
 
   test("without an explicit deadline the facade uses MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS", async () => {
-    const run = await runChild(join(HERE, "test-support", "pinned-facade-proof-child.ts"), {
+    const run = await runChild(join(HERE, "pinned-facade-proof.test-child.ts"), {
       MIDNIGHT_NETWORK_ID: "undeployed",
       MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS: "1000",
       TEST_PROOF_SERVER_URL: `http://127.0.0.1:${silentProver.port}`,

@@ -366,9 +366,11 @@ run_expect_gate public-token-registry-mainnet-nothing-to-import 0 \
     --entrypoint sh "${KERNEL_IMG}" -c "${DB_PROBE} sleep 1; exec /usr/local/bin/entrypoint-token-registry.sh"
 
 # G8s — the entrypoint selection harness passes with the image's own bash/bun
-# (undeployed still execs main.dev.ts / batcher.dev.ts).
+# (undeployed still execs main.dev.ts / batcher.dev.ts). The image ships no
+# test files, so the test comes from this checkout through a read-only mount.
 run_expect_gate public-entrypoint-selection-harness 0 " 0 fail" -- \
-  "${KRUN[@]}" --entrypoint bun "${KERNEL_IMG}" test deploy/scripts/lib/kernel-entrypoints.test.ts
+  "${KRUN[@]}" -v "$(pwd)/scripts/lib/kernel-entrypoints.test.ts:/app/deploy/scripts/lib/kernel-entrypoints.test.ts:ro" \
+  --entrypoint bun "${KERNEL_IMG}" test deploy/scripts/lib/kernel-entrypoints.test.ts
 
 {
   echo

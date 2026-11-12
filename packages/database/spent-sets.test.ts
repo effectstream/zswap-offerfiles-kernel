@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 
 // Verifies the nullifiers table (merged from seen_nullifiers + spent_nullifiers)
 // and its queries end-to-end against an in-memory PGlite served over the pg wire

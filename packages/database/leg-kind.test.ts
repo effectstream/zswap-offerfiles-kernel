@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 
 // Item #8: SHIELDED/UNSHIELDED tags on offer legs (MIP-0006 TokenLeg.type).
 // Two properties matter: the widened uniqueness lets the same color appear on

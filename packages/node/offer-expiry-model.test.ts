@@ -31,7 +31,7 @@ process.env["PGLITE_DATA_DIR"] ??= "memory://";
 const database = await import("@zswap-da/database");
 const effectstreamDb = await import("@effectstream/db");
 const { migrationTable } = database;
-const { closeTestPglite } = await import("../database/test-pglite.ts");
+const { closeTestPglite } = await import("../database/pglite.test-support.ts");
 const { eventBus, markBlockCommitted, __resetEventGateForTests } = await import("./event-bus.ts");
 const { getReferenceState, validateZswapOffer } = await import("@zswap-da/validator");
 const { signedUnshieldedOffer, withIntent } = await import("../validator/signed-offer.testkit.ts");
@@ -544,7 +544,7 @@ describe("T4 — determinism: replay gives an identical verdict and row", () => 
 describe("T4 — startup: the node's env resolves reference parameters or fails", () => {
   const child = (env: Record<string, string>, mode = "env") => {
     const result = Bun.spawnSync({
-      cmd: [process.execPath, "run", "packages/node/test-support/offer-expiry-env-child.ts", mode],
+      cmd: [process.execPath, "run", "packages/node/offer-expiry-env.test-child.ts", mode],
       cwd: REPO_ROOT,
       env: { ...process.env, DB_USER: "postgres", DB_NAME: "postgres", PGLITE_DATA_DIR: "memory://", ...env },
       stdout: "pipe",

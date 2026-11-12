@@ -242,7 +242,10 @@ solver.
 The public networks run the kernel's API node, batcher and offer poster as
 separate processes (the kernel image's entrypoints, or one systemd unit per
 program), plus a one-shot that imports the network's token registry into the
-kernel database. This repository does not deploy them: there is no compose
+kernel database. **[`deploy/PRODUCTION.md`](deploy/PRODUCTION.md) is the
+step-by-step guide for a native production host** (systemd, Postgres with
+`pg_ivm`, proof server, Celestia light node, nginx; no orchestrator, no
+Compose). This repository does not deploy them: there is no compose
 file and no database service for a public network. You run the processes, a
 proof server (9.0.1) and the Postgres.
 

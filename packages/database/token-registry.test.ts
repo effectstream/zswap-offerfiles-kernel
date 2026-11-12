@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createServer } from "node:net";
 import pg from "pg";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 import { migrationTable } from "./migration-order.ts";
 import { tokenPriceFromAsset } from "./price-map.ts";
 import {

@@ -16,5 +16,5 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": ["./*.ts"],
-  "exclude": ["./*.test.ts", "./main.grand-b.ts"]
+  "exclude": ["./*.test.ts", "./*.test-*.ts"]
 }

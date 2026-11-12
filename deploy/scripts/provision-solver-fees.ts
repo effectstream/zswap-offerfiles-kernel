@@ -17,6 +17,7 @@ import {
   unshieldedBalances,
   waitForSync,
 } from "../../packages/kernel-client/wallet.ts";
+import { walletTimeoutProblems } from "../../packages/kernel-client/wallet-timeouts.ts";
 import { ensureSolverDustReady } from "./lib/solver-provision.ts";
 
 globalThis.WebSocket = WebSocket;
@@ -25,6 +26,13 @@ globalThis.WebSocket = WebSocket;
 installLogRedaction(redactBlockfrostProjectId);
 
 const log = (message: string): void => console.log(`[provision-external] ${message}`);
+
+// A malformed wallet timeout stops the script before it opens a wallet.
+const timeoutProblems = walletTimeoutProblems(process.env);
+if (timeoutProblems.length > 0) {
+  for (const problem of timeoutProblems) console.error(`[provision-external] ${problem}`);
+  process.exit(78);
+}
 const HEX_TOKEN = /^[0-9a-f]{64}$/;
 const NIGHT = "0".repeat(64);
 

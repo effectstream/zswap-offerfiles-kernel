@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 
 // Item #19 phase 1: fill-vs-cancel classification from nullifier tx grouping.
 // Settlement is atomic — a fill consumes ALL of an offer's inputs in ONE

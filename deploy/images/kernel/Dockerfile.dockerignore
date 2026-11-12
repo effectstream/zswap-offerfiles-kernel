@@ -26,3 +26,21 @@ docs/node_modules
 # The deployment's own generated state must never enter an image layer.
 deploy/.env
 deploy/**/.env
+
+# Test code is not part of the runtime. Every file that only tests use carries
+# `.test` in its name (`*.test.ts`, `*.test-<role>.ts`, `*.testkit.ts`,
+# `*.pgtest.ts`), and benchmarks end in `*.bench.ts`; none of them, no test
+# fixture and no part of the e2e suite enters the image. The e2e suite's
+# manifest stays: the Dockerfile copies every workspace manifest before
+# `bun install --frozen-lockfile`. deploy/images/kernel/image.test-gate.ts
+# checks the built image against this list.
+**/*.test.ts
+**/*.test-*.ts
+**/*.testkit.ts
+**/*.pgtest.ts
+**/*.bench.ts
+packages/tests
+!packages/tests/package.json
+packages/api-contracts/fixtures
+packages/database/fixtures
+packages/validator/fixtures

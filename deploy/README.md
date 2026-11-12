@@ -17,7 +17,9 @@ them. A mainnet kernel does not start yet: its ledger-9 reference parameters
 are not pinned.
 Real funds stay NO-GO for this backend until its first ledger-9 version is
 ready for review; the repository owner then reviews the NO-GO.
-See the repository README, "Running on preview, preprod and mainnet".
+See the repository README, "Running on preview, preprod and mainnet", and
+[`PRODUCTION.md`](PRODUCTION.md) for running them natively under systemd (no
+orchestrator, no Compose).
 `GATES_ONLY=public ./gates.sh` runs the offline public-network gates (G8)
 against the kernel image.
 
@@ -148,3 +150,9 @@ this value.
 and rejects removed services (the local funding services and the COW solver
 services). Focused poster unit tests run in the pinned `oven/bun:1.3.11`
 container. See `scripts/README.md` for script ownership.
+
+The kernel image ships no test code: `images/kernel/Dockerfile.dockerignore`
+leaves out test files, test helpers, test fixtures and the e2e suite.
+`images/kernel/image.test-gate.ts` checks a built image from the inside (no
+test-only file, and every program the image runs resolves its imports); CI runs
+it on the amd64 image, and the command for a local image is in its header.

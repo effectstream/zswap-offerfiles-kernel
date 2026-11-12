@@ -7,7 +7,7 @@ process.env["DB_USER"] ??= "postgres";
 process.env["DB_NAME"] ??= "postgres";
 process.env["PGLITE_DATA_DIR"] ??= "memory://";
 
-import { closeTestPglite } from "../database/test-pglite.ts";
+import { closeTestPglite } from "../database/pglite.test-support.ts";
 import { CoinGeckoError, type AssetQuote, type BatchResult } from "./src/coingecko.ts";
 import { chunkIds, runCycle, type CycleDeps } from "./src/cycle.ts";
 

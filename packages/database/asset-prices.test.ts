@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 
 // The schema half of the price model: the seeds shipped in 000-init.sql, the
 // rule that protects a `manual` override from the feed, and the per-base-unit

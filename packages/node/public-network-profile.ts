@@ -32,11 +32,15 @@
 //                             @zswap-da/validator; a supported network that is
 //                             not pinned yet is refused with the reason
 //
+//   * VALIDATED when set, refused by name (exit 78) when malformed: the
+//     SYNC_HEALTH_* thresholds of the sync verdict (sync-health-config.ts).
+//
 // ORDER MATTERS. env.ts, config.preview.ts and midnight-env read the
 // environment when they are first evaluated (midnight-env also throws at
 // import without a Blockfrost token), so the profile must run before any of
 // them is loaded. This file therefore imports nothing that reads env at load
-// time: only the pure network-windows.ts and offer-guard's public-networks.ts.
+// time: only the pure network-windows.ts, sync-health-config.ts and
+// offer-guard's public-networks.ts.
 // main.public.ts imports `public-network-env.ts` directly after the
 // onchain-runtime side-effect import and before everything else.
 //
@@ -56,6 +60,11 @@ import {
 } from "@zswap-da/offer-guard/public-networks";
 
 import { resolveRootWindowSeconds } from "./network-windows.ts";
+import {
+  describeSyncHealthConfig,
+  resolveSyncHealthConfig,
+  type SyncHealthConfig,
+} from "./sync-health-config.ts";
 
 /**
  * Block 1 of each public network, in ms: the NTP anchor, so the NTP chain
@@ -106,6 +115,7 @@ export interface PublicNodeProfile {
     readonly celestiaRpcOrigin: string | undefined;
     readonly midnightEndpoints: "blockfrost-defaults" | "partial-overrides" | "overrides";
     readonly rootWindowSeconds: number;
+    readonly syncHealth: SyncHealthConfig;
   };
 }
 
@@ -270,6 +280,10 @@ export function resolvePublicNodeProfile(env: EnvMap): PublicNodeProfile {
 
   const rootWindowSeconds = resolveRootWindowSeconds(networkId, read(env, "ROOT_WINDOW_SECONDS"));
 
+  // ── sync verdict thresholds: optional, validated when set ──
+  const syncHealth = resolveSyncHealthConfig(env);
+  problems.push(...syncHealth.problems);
+
   return {
     defaults,
     unset,
@@ -285,6 +299,7 @@ export function resolvePublicNodeProfile(env: EnvMap): PublicNodeProfile {
       celestiaRpcOrigin: redactedOrigin(rpcUrl),
       midnightEndpoints,
       rootWindowSeconds,
+      syncHealth: syncHealth.config,
     },
   };
 }
@@ -316,6 +331,7 @@ export function describePublicNodeProfile(profile: PublicNodeProfile): string[] 
     `Celestia RPC       : ${r.celestiaRpcOrigin ?? "(missing)"} (auth: ${r.celestiaAuth})`,
     `Midnight endpoints : ${r.midnightEndpoints}`,
     `root window        : ${r.rootWindowSeconds} s`,
+    `sync health        : ${describeSyncHealthConfig(r.syncHealth)}`,
   ];
 }
 

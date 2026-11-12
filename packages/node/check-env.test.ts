@@ -125,6 +125,41 @@ describe("check-env.ts — the public-network contract", () => {
     expect(failed({ ...complete(network), BATCHER_STORAGE_DIR: "batcher-data" })).toEqual([...np, "BATCHER_STORAGE_DIR"]);
   });
 
+  test("SYNC_HEALTH_* thresholds: defaults and set values are shown; a malformed one fails by name", () => {
+    const labels = staticChecks(map(complete("preprod"))).map((r) => r.label);
+    expect(labels).toContain("SYNC_HEALTH_MAX_NTP_LAG_BLOCKS — 2 (default)");
+    expect(labels).toContain("SYNC_HEALTH_HYSTERESIS_SAMPLES — 3 (default)");
+    const set = staticChecks(map({ ...complete("preprod"), SYNC_HEALTH_MAX_NTP_LAG_BLOCKS: "3" }));
+    expect(set.map((r) => r.label)).toContain("SYNC_HEALTH_MAX_NTP_LAG_BLOCKS — 3");
+    expect(set.filter((r) => !r.ok)).toEqual([]);
+    // Per-chain block-lag limits are not settings: a leftover one, even
+    // malformed, neither fails nor shows.
+    const leftover = staticChecks(map({
+      ...complete("preprod"),
+      SYNC_HEALTH_MAX_MIDNIGHT_LAG_BLOCKS: "four",
+      SYNC_HEALTH_MAX_CELESTIA_LAG_BLOCKS: "0",
+    }));
+    expect(leftover.filter((r) => !r.ok)).toEqual([]);
+    expect(leftover.map((r) => r.label).filter((l) => l.includes("_LAG_BLOCKS"))).toEqual([
+      "SYNC_HEALTH_MAX_NTP_LAG_BLOCKS — 2 (default)",
+    ]);
+    const bad = staticChecks(map({ ...complete("preprod"), SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS: "0" })).filter((r) => !r.ok);
+    expect(bad.map((r) => r.label)).toEqual(["SYNC_HEALTH_MAX_MIDNIGHT_TIP_AGE_SECONDS"]);
+    expect(bad[0]!.hint).toContain("must be an integer from 1 to 86400 (default 180)");
+  });
+
+  test("wallet sync wait and proof deadline: defaults shown, set values shown, a malformed one fails by name", () => {
+    const labels = staticChecks(map(complete("preprod"))).map((r) => r.label);
+    expect(labels).toContain("MIDNIGHT_WALLET_SYNC_TIMEOUT_MS — 180000 (default)");
+    expect(labels).toContain("MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS — 600000 (default)");
+    const set = staticChecks(map({ ...complete("preprod"), MIDNIGHT_WALLET_SYNC_TIMEOUT_MS: "3600000" }));
+    expect(set.map((r) => r.label)).toContain("MIDNIGHT_WALLET_SYNC_TIMEOUT_MS — 3600000");
+    expect(set.filter((r) => !r.ok)).toEqual([]);
+    const bad = staticChecks(map({ ...complete("preprod"), MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS: "10m" })).filter((r) => !r.ok);
+    expect(bad.map((r) => r.label)).toEqual(["MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS"]);
+    expect(bad[0]!.hint).toContain("must be an integer number of milliseconds from 1000 to 86400000 (default 600000)");
+  });
+
   test("every other wallet seed in the file is refused when it is a dev seed", () => {
     expect(
       failed({

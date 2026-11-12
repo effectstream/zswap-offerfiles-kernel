@@ -1,8 +1,8 @@
-// main.grand-b.ts carries its own copy of config.dev.ts's ConfigBuilder chain,
-// because it must pin the NTP anchor from an env var instead of deriving it
-// from its own (empty) database. That copy is what makes the grand-e2e
-// determinism phase meaningful: instance B is only a valid replica of instance
-// A if both nodes are configured identically.
+// main.grand-b.test-child.ts carries its own copy of config.dev.ts's
+// ConfigBuilder chain, because it must pin the NTP anchor from an env var
+// instead of deriving it from its own (empty) database. That copy is what
+// makes the grand-e2e determinism phase meaningful: instance B is only a valid
+// replica of instance A if both nodes are configured identically.
 //
 // Nothing enforces that. Add a primitive to config.dev.ts, or change a
 // delayMs, and grand-b keeps the old shape — at which point p7a compares two
@@ -12,9 +12,10 @@
 // So compare the two at the source level. A runtime import is not an option —
 // config.dev.ts queries the database at module load to derive its start time.
 //
-// If this test fails, port the config.dev.ts change into main.grand-b.ts. The
-// deeper fix is to delete the duplication: export a `buildConfig(startTime)`
-// from config.dev.ts and have both entrypoints call it.
+// If this test fails, port the config.dev.ts change into
+// main.grand-b.test-child.ts. The deeper fix is to delete the duplication:
+// export a `buildConfig(startTime)` from config.dev.ts and have both
+// entrypoints call it.
 
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
@@ -56,16 +57,16 @@ const INTENDED = [
   { dev: "name:mainSyncProtocolName", grandB: 'name:"mainNtp"' },
 ];
 
-describe("main.grand-b.ts config must not drift from config.dev.ts", () => {
+describe("main.grand-b.test-child.ts config must not drift from config.dev.ts", () => {
   const dev = configChain(read("./config.dev.ts"));
-  const grandB = configChain(read("./main.grand-b.ts"));
+  const grandB = configChain(read("./main.grand-b.test-child.ts"));
 
   test("the intended differences are present and unchanged", () => {
     const devSrc = dev.join("");
     const grandBSrc = grandB.join("");
     for (const { dev: d, grandB: g } of INTENDED) {
       expect(devSrc.includes(d), `config.dev.ts should still contain: ${d}`).toBe(true);
-      expect(grandBSrc.includes(g), `main.grand-b.ts should still contain: ${g}`).toBe(true);
+      expect(grandBSrc.includes(g), `main.grand-b.test-child.ts should still contain: ${g}`).toBe(true);
     }
   });
 
@@ -88,7 +89,7 @@ describe("main.grand-b.ts config must not drift from config.dev.ts", () => {
       [...src.matchAll(/PrimitiveType[A-Za-z]+/g)].map((m) => m[0]).sort();
     // The determinism claim rests on this: a primitive present on one side only
     // means one node ingests a class of chain events the other never sees.
-    expect(new Set(primitives(read("./main.grand-b.ts")))).toEqual(
+    expect(new Set(primitives(read("./main.grand-b.test-child.ts")))).toEqual(
       new Set(primitives(read("./config.dev.ts"))),
     );
   });
@@ -96,7 +97,7 @@ describe("main.grand-b.ts config must not drift from config.dev.ts", () => {
   test("the ZswapChainState.tryApply guard is on every entrypoint", () => {
     // Not cosmetic: without it a tryApply throw propagates and the STF diverges,
     // so an entrypoint missing it would process the same chain differently.
-    for (const f of ["main.dev.ts", "main.public.ts", "main.grand-b.ts"]) {
+    for (const f of ["main.dev.ts", "main.public.ts", "main.grand-b.test-child.ts"]) {
       expect(read(`./${f}`), `${f} is missing the tryApply guard`).toContain(
         "ZswapChainState.prototype.tryApply",
       );

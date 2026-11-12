@@ -68,6 +68,12 @@ import {
 import { DustAddress } from "@midnightntwrk/wallet-sdk-address-format";
 import { type CoinSelection, chooseCoin } from "@midnightntwrk/wallet-sdk-capabilities";
 import { makeIndexerChainVersionProbe } from "@midnightntwrk/wallet-sdk-capabilities/chainVersion";
+import {
+  type AnyVersionUnboundTransaction,
+  type AnyVersionUnprovenTransaction,
+  makeDefaultVersionedProvingService,
+  type VersionedProvingService,
+} from "@midnightntwrk/wallet-sdk-capabilities/proving";
 import { DustWallet } from "@midnightntwrk/wallet-sdk-dust-wallet";
 import { type DefaultConfiguration, WalletFacade } from "@midnightntwrk/wallet-sdk-facade";
 import { HDWallet, Roles } from "@midnightntwrk/wallet-sdk-hd";
@@ -94,6 +100,8 @@ import {
   type WalletSyncMode,
 } from "@effectstream/midnight-contracts/wallet-info";
 import type { WalletResult } from "@effectstream/midnight-contracts/types";
+
+import { withProvingDeadline } from "../../../packages/kernel-client/wallet-timeouts.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -400,6 +408,19 @@ function buildDustWallet(
   return DustWallet(dustConfig as any).startWithSeed(seed, dustParameters);
 }
 
+/** The facade's default proving service (one proof server for every ledger
+ *  version, routed by the fork schedule), built from the public capability. */
+function defaultProvingService(
+  config: { provingServerUrl?: URL; forks: unknown },
+): VersionedProvingService<AnyVersionUnboundTransaction, AnyVersionUnprovenTransaction> {
+  // deno-lint-ignore no-explicit-any -- Either from the SDK's effect copy, read structurally.
+  const built: any = makeDefaultVersionedProvingService(config as never, config.forks as never);
+  if (built?._tag !== "Right") {
+    throw new Error(`no proving service: ${built?.left?.message ?? "unknown configuration error"}`);
+  }
+  return built.right;
+}
+
 /** Upstream `buildUnshieldedWallet`. */
 function buildUnshieldedWallet(config: DefaultConfiguration, keystore: UnshieldedKeystore) {
   return UnshieldedWallet({
@@ -434,7 +455,11 @@ export async function buildPinnedWallet(
   networkId: NetworkId.NetworkId,
   syncMode: WalletSyncMode = "all",
   dustSerializedState?: string | null,
-  options?: { stopAuxWalletsImmediately?: boolean },
+  options?: {
+    stopAuxWalletsImmediately?: boolean;
+    /** Deadline of one proof request; MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS when absent. */
+    proofRequestTimeoutMs?: number;
+  },
 ): Promise<PinnedWalletResult> {
   const shieldedSeed = deriveSeedForRole(seed, Roles.Zswap);
   const dustSeed = deriveSeedForRole(seed, Roles.Dust);
@@ -463,6 +488,17 @@ export async function buildPinnedWallet(
       buildUnshieldedWallet(walletConfig, unshieldedKeystore),
     dust: (walletConfig) =>
       buildDustWallet(walletConfig, dustSeed, dustSerializedState),
+    // The SDK's default proof-server client, with a deadline on each request:
+    // the SDK has none, and a proof server that accepts a request and never
+    // answers would otherwise hold a build for ever. On the deadline the
+    // facade's own failure path releases the coins the transaction booked.
+    provingService: (walletConfig) =>
+      withProvingDeadline(defaultProvingService(walletConfig), {
+        proofServerUrl: networkUrls.proofServer,
+        ...(options?.proofRequestTimeoutMs !== undefined
+          ? { timeoutMs: options.proofRequestTimeoutMs }
+          : {}),
+      }),
   });
 
   // wallet-sdk 2.0.0 starts every wallet from its role seed: each ledger

@@ -37,24 +37,15 @@ BRIDGE_FUND_FEES="${CELESTIA_BRIDGE_FUND_FEES:-2000utia}"
 # constants below.
 #
 # `@effectstream/celestia@0.103.1` hardcodes `--delayed-precommit-timeout 1s`,
-# giving ~1 block/s. The kernel's Celestia projection cannot hold that: it runs
-# a persistent ~10-13 block deficit, while `deriveSyncStatus` calls anything
-# past `MAX_CELESTIA_LAG_BLOCKS = 4` "syncing". Everything gated on
-# `requireCurrentBackend` then refuses — including `POST /v1/offers/files`, the
-# read a settling client makes at job time to rebuild a maker's exact bytes, so
-# such a client can never settle anything.
-# Measured at 1s: 60/60 exact-files reads answered 503 "backend is not
-# synchronized".
-#
-# 3s is the established answer to the same problem: the COW solver's acceptance
-# harness (`packages/tests/grand-e2e/lib/solver-offerfiles-real-e1.ts` in
-# https://github.com/effectstream/cow-solver) pins
-# `celestiaBlockTime: "3s"` with the note that at 1s the backend "could never
-# stay inside the production threshold MAX_CELESTIA_LAG_BLOCKS = 4 — see e2e
-# open question E1-Q4", and calls 3s the cadence "matching current Celestia
-# mainnet". The same source records that `timeout_commit` in config.toml is
-# deprecated and INERT on celestia-app 6.4.10, so this flag is the only control
-# that works.
+# giving ~1 block/s. This image defaults to 3s, the cadence the COW solver's
+# acceptance harness (`packages/tests/grand-e2e/lib/solver-offerfiles-real-e1.ts`
+# in https://github.com/effectstream/cow-solver) pins as
+# `celestiaBlockTime: "3s"` and calls the one "matching current Celestia
+# mainnet". The kernel applies a Celestia block 12 s after its block time
+# (`delayMs` in packages/node/config.dev.ts), so its applied position trails
+# the head by about 4 blocks at 3s instead of 12 at 1s. The same source records
+# that `timeout_commit` in config.toml is deprecated and INERT on celestia-app
+# 6.4.10, so this flag is the only control that works.
 CELESTIA_BLOCK_TIME="${CELESTIA_BLOCK_TIME:-3s}"
 
 log() { echo "[celestia] $*" >&2; }

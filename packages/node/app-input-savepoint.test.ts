@@ -8,7 +8,7 @@ import type { StartConfig, StartConfigGameStateTransitions } from "@effectstream
 import { AddressType } from "@effectstream/utils";
 
 import { migrationTable, recordOfferRejection } from "@zswap-da/database";
-import { closeTestPglite } from "../database/test-pglite.ts";
+import { closeTestPglite } from "../database/pglite.test-support.ts";
 import { failStopAppInput } from "./app-input-savepoint.ts";
 
 process.env["DB_USER"] ??= "postgres";

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "../database/test-pglite.ts";
+import { closeTestPglite } from "../database/pglite.test-support.ts";
 
 // The limiter's budget and exemptions come from env. A silent break here is
 // invisible in normal use — the API keeps answering — so the wiring is pinned:

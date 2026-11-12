@@ -1,10 +1,15 @@
 # TODO
 
-Open work for this repository, written 2026-11-10. Three sections:
+Open work for this repository, written 2026-11-10. Four sections:
 
 1. [Publish the backend packages to npm](#publish-the-backend-packages-to-npm)
 2. [COW solver follow-ups (`effectstream/cow-solver`)](#cow-solver-follow-ups-effectstreamcow-solver)
 3. [Kernel follow-ups](#kernel-follow-ups)
+4. [Upstream (effectstream)](#upstream-effectstream)
+
+The items added on 2026-11-10, after the kernel's first production host ran
+it on preprod, carry what that host showed, so that each one can be acted on
+without the host's notes.
 
 ## Publish the backend packages to npm
 
@@ -35,7 +40,7 @@ Not meant to be published:
 
 - The COW solver's tests reach into kernel internals through the submodule:
   its book-mirror test and its release-hardening e2e harness import
-  `packages/database/test-pglite.ts`, `packages/database/mod.ts`,
+  `packages/database/pglite.test-support.ts`, `packages/database/mod.ts`,
   `packages/node/offer-consumption-read.ts`, `packages/node/api.ts`,
   `packages/node/event-bus.ts` and `packages/node/sync-health.ts`. These are
   not meant to be published as they are. Those tests have to move onto
@@ -185,6 +190,14 @@ repository no longer contains it. Everything below happens there.
   port. The mainnet dry-run default and `SOLVER_MAINNET_LIVE_TRADING_ACK` stay.
 - [ ] Switch from the kernel submodule to the published npm packages (see
   "Publish the backend packages to npm", step 6).
+- [ ] Follow the PGlite test helper's new name when the kernel submodule is
+  bumped. Test-only files here carry `.test` in their name, so
+  `packages/database/test-pglite.ts` is now
+  `packages/database/pglite.test-support.ts`. Two solver files import it
+  through the submodule: `packages/solver/offer-updates-mirror.test.ts` and
+  `packages/tests/grand-e2e/solver-release-hardening-e2e.ts`. Each import is a
+  one-line path change; without it the solver's unit suite fails to load after
+  the bump.
 - [ ] Merge `effectstream/cow-solver` PR #1
   (https://github.com/effectstream/cow-solver/pull/1). It wires this
   repository in as a git submodule and makes the solver build and test on its
@@ -203,6 +216,24 @@ repository no longer contains it. Everything below happens there.
   - it ports the 13 solver and relay launch gates that this repository's
     `deploy/gates.sh` dropped with the solver.
 - [ ] Deploy the solver. It is not deployed anywhere today.
+- [ ] Keep the solver's wallet state across restarts, together with the kernel
+  item "Keep wallet state across restarts" below. On the production host every
+  solver restart resynced its wallet from genesis, about 55 minutes on preprod,
+  and the solver quoted nothing meanwhile.
+- [ ] Do not withdraw the ladder on a single health flip. The solver reads
+  `GET /v1/health/sync`, whose `status` is the latest sample's own verdict, and
+  withdrew its whole ladder each time one slow light-node read made it
+  `syncing`. Either read the damped verdict the kernel now publishes on
+  `GET /v1/health` (`status` changes only after `SYNC_HEALTH_HYSTERESIS_SAMPLES`
+  consecutive tip reads disagree; `raw_status`, `reasons` and `hysteresis` say
+  why), or damp on the solver side with the same rule.
+- [ ] Add a migration note for the removed `SOLVER_LADDER_CONFIG` to the
+  solver's README or changelog. A deployment whose environment still set it
+  crash-looped about 80 times before anyone noticed; the note says what replaces
+  it and that the variable must be deleted.
+- [ ] Say in the solver's README that its monitor has no authentication of its
+  own and must be deployed behind one (the production host put nginx basic
+  auth in front of it).
 
 ## Kernel follow-ups
 
@@ -228,3 +259,114 @@ repository no longer contains it. Everything below happens there.
   run today. Until 2026-09-08 the kernel had such a minter, built on the mint
   circuits of the `offer-files` contract; it was removed when the kernel became
   contract-free.
+- [ ] Make the Midnight sync's step and poll settable: `MIDNIGHT_STEP_SIZE` and
+  `MIDNIGHT_POLLING_INTERVAL_MS`, validated by the public-network profile and
+  `check-env.ts` (exit 78 naming the variable), with conservative defaults for
+  hosted indexers. Today `packages/node/config.preview.ts`, which the public
+  node runs, hard-codes `stepSize: 500` and `pollingInterval: 1000` for the
+  parallel Midnight protocol. Upstream `MidnightFetcher.readData` sends one
+  GraphQL request per block, all heights of a step in parallel, so one catch-up
+  step is 500 concurrent requests to Blockfrost: rate limits and the plan's
+  request quota. The production host had to patch it down to a step of 10 and
+  a poll of 6000 ms. Size the defaults from Blockfrost's limits, and document
+  them in `deploy/PRODUCTION.md`. The upstream fix is in "Upstream
+  (effectstream)" below.
+- [ ] Keep wallet state across restarts. Every kernel wallet tool (the offer
+  poster, maker-offer, `read-wallet`, the DUST provisioning script, and the
+  COW solver through `@zswap-da/kernel-client`) builds its facade from the seed
+  and resyncs from genesis: 10 to 55 minutes per start on preprod. The wallet
+  SDK can save and restore wallet state (each wallet's `serializeState()`, and
+  `ShieldedWallet(…).restore`, `UnshieldedWallet(…).restore`,
+  `DustWallet(…).restore`; the batcher already restores its DUST state from
+  `BATCHER_STORAGE_DIR/dust-state`). Save the shielded, unshielded and DUST
+  state on a persistent volume after each sync, restore it at start, and fall
+  back to a full sync when the saved state is from another network or ledger
+  version. Share the code with the solver (kernel-client). Until then
+  `MIDNIGHT_WALLET_SYNC_TIMEOUT_MS` lets the first sync finish.
+- [ ] Let the operator supply the token list. Preview and preprod import no
+  token names today: the published registry files are still in the 1.x format,
+  and the import (`packages/database/import-token-registry.ts`) accepts only
+  2.x documents, so the web app shows hex colours. The registry write route
+  has no authentication and stays off (`ENABLE_TOKEN_REGISTRY`). Options: read a
+  local file, or a URL from env, in the 2.x registry format through the
+  existing import; or put authentication on the write route.
+- [ ] A "start from now" bootstrap for a fresh database. Today the operator
+  reads the Midnight tip (height and block time) and the light node's head and
+  sets `MIDNIGHT_START_BLOCK`, `NTP_START_TIME` and `CELESTIA_START_HEIGHT` by
+  hand (`deploy/PRODUCTION.md`, "First start"). A one-shot command that reads
+  both tips, refuses a non-empty database, and prints or writes those three
+  values removes that step. It must not change `BLOCK_TIME_MS`, which a
+  database keeps for its whole life.
+- [ ] Bound the batcher's NIGHT-bootstrap proof. `packages/batcher/night-utxo-bootstrap.ts`
+  proves its self-split with `finalizeRecipe` on the batcher-sdk wallet and no
+  deadline, so a proof server that never answers holds the batcher's start.
+  Apply `MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS` there with
+  `@zswap-da/kernel-client/wallet-timeouts` (the batcher does not depend on
+  kernel-client yet), or get the hook upstream.
+- [ ] Forward the new optional variables in `deploy/compose.yml`
+  (`SYNC_HEALTH_*` to the kernel; `MIDNIGHT_WALLET_SYNC_TIMEOUT_MS` and
+  `MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS` to the poster and the one-shot scripts).
+  Compose lists each service's environment explicitly, so today those
+  services run with the defaults whatever `.env` says. The native deployment
+  (`deploy/PRODUCTION.md`) reads them from its env files.
+
+## Upstream (effectstream)
+
+Changes that belong in `effectstream/effectstream` (the runtime, the sync
+protocols and the batcher this kernel runs on) or in the Midnight wallet SDK.
+The paths are effectstream's, as of 0.300.3. The kernel carries a stop-gap for
+each where it can; it is named in the item.
+
+- [ ] Celestia: classify "below Tail" as fatal.
+  `packages/node-sdk/sync/src/sync-protocols/celestia/CelestiaClient.ts`
+  `rpc()` retries every error except `blob: not found`, with a backoff capped
+  at 30 s. A light node that pruned the heights the node still needs answers
+  `requested header … is below Tail` for ever: the production host logged more
+  than 61,000 attempts while `/v1/health` said `syncing`. Treat below-Tail /
+  pruned answers as fatal (exit non-zero with the reason, or report an error
+  state with the reason) instead of retrying. Kernel stop-gap: the recovery
+  runbook and the external light-node watchdog in `deploy/PRODUCTION.md`.
+- [ ] Midnight fetcher: bound the requests.
+  `packages/node-sdk/sync/src/sync-protocols/midnight/fetcher.ts` `readData`
+  sends one GraphQL request per height, all heights of a step in parallel
+  (`all(heights.map(...))`), and does not back off on 403, 429 or 503. Bound the
+  concurrency, prefer range queries where the indexer has them, and back off on
+  those statuses. Kernel stop-gap: the kernel follow-up "Make the Midnight
+  sync's step and poll settable".
+- [ ] Batcher: never report a landed transaction as failed.
+  `packages/batcher/adapters/midnight-balancing-adapter.ts`
+  (`waitForSingleReceipt`) polls the indexer every second, calls
+  `response.json()` without checking the HTTP status (hence "Failed to parse
+  JSON" on an HTML 403 or 503 page), never backs off, and throws on its timeout
+  (at least 300 s per hash). `packages/batcher/core/storage.ts`
+  (`incrementRetryCount`) then drops the input after 3 retries. On the
+  production host a trade that landed on chain was reported as failed this
+  way. Check the status and back off; before re-submitting or dropping an
+  input, look its transaction hash up on chain; expose each input's final
+  state.
+- [ ] Batcher: an asynchronous `/send-input`. `packages/batcher/core/batcher.ts`
+  returns `null` for `confirmationLevel: "no-wait"` (no input id), and the
+  routes in `packages/batcher/server/batcher-server.ts` are `/health`,
+  `/status`, `/queue-stats`, `/send-input` and `/force-batch`: nothing reports
+  one input's state. So a client that needs the outcome holds `/send-input`
+  open with `wait-receipt` for minutes. Add a mode that returns an input id at
+  once, and a status route for that id. Kernel stop-gap: the reverse-proxy
+  timeouts in `deploy/PRODUCTION.md`.
+- [ ] Proof requests need deadlines. The wallet SDK's HTTP prover client
+  (`@midnightntwrk/wallet-sdk-prover-client`, `HttpProverClient`) has no
+  timeout and takes no `AbortSignal`, so a proof server that accepts a request
+  and never answers (an out-of-memory kill of a worker looks like that) holds
+  the caller for ever. Upstream changes, by owner:
+  - Midnight wallet SDK: a timeout or an `AbortSignal` on proof requests;
+  - effectstream `buildWalletFacade` (`@effectstream/midnight-contracts`): accept
+    a `provingService` factory or a proof deadline, as `WalletFacade.init` does;
+  - effectstream `registerNightForDust`, and the batcher's
+    `MidnightBalancingAdapter` (`@effectstream/batcher-sdk`): a deadline on the
+    proofs they request.
+
+  Kernel stop-gap: `MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS` bounds the proofs the
+  kernel's own code requests (the offer poster's facade, maker-offer,
+  kernel-client `transferShielded`). The proof-server binary itself needs
+  nothing: the 9.0.0-rc.6 asset needed a dynamic-loader wrapper on Debian, and
+  9.0.1 from `effectstream/binaries` 0.3.120 runs on stock Debian 13 (the
+  kernel's proof-server image checks it with `ldd` and `--help` at build).

@@ -74,13 +74,19 @@ jobs:
             --file deploy/images/kernel/Dockerfile \
             --tag "$KERNEL_IMAGE" \
             .
-      - name: Verify architecture and contract-free runtime image
+      # The image gate checks, inside the image, that no test-only file shipped
+      # and that every program the image runs resolves its imports. The gate
+      # script is not in the image; it comes from this checkout.
+      - name: Verify architecture, contract-free and test-free runtime image
         run: |
           test "$(docker image inspect "$KERNEL_IMAGE" --format '{{.Architecture}}')" = "amd64"
           docker run --rm --platform linux/amd64 --entrypoint sh "$KERNEL_IMAGE" -lc '
             test ! -e /app/packages/contracts-midnight
             test -f /app/packages/midnight-infra/package.json
           '
+          docker run --rm --platform linux/amd64 --network none \
+            -v "$GITHUB_WORKSPACE/deploy/images/kernel/image.test-gate.ts:/opt/image-gate/image.test-gate.ts:ro" \
+            --entrypoint bun "$KERNEL_IMAGE" /opt/image-gate/image.test-gate.ts
 
   typecheck-playground:
     name: Typecheck docs playground (tsc)

@@ -114,7 +114,7 @@ export async function p7Determinism(db: Client): Promise<DeterminismOutcome> {
     );
     if (!pgliteUp) throw new Error("pglite B did not come up");
 
-    nodeBProc = Bun.spawn(["bun", "run", "packages/node/main.grand-b.ts"], {
+    nodeBProc = Bun.spawn(["bun", "run", "packages/node/main.grand-b.test-child.ts"], {
       cwd: REPO_ROOT,
       env: {
         ...process.env,

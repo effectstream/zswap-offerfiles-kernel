@@ -60,7 +60,7 @@ import {
 
 const startTimeRaw = process.env["GRAND_NTP_START_TIME"];
 if (!startTimeRaw || !Number.isFinite(Number(startTimeRaw))) {
-  throw new Error("main.grand-b.ts requires GRAND_NTP_START_TIME (ms epoch of instance A's NTP anchor)");
+  throw new Error("main.grand-b.test-child.ts requires GRAND_NTP_START_TIME (ms epoch of instance A's NTP anchor)");
 }
 const launchStartTime = Number(startTimeRaw);
 

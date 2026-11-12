@@ -1,6 +1,7 @@
-// Child-process body for ../served-endpoints-redaction.test.ts. In a
-// subdirectory so the strict backend typecheck (packages/node/*.ts) does not
-// see its untyped `pg` import — like the *.test.ts files it serves.
+// Child-process body for served-endpoints-redaction.test.ts. The
+// `.test-child.ts` name keeps it out of `bun test` collection, out of the
+// kernel image and out of the strict backend typecheck (its untyped `pg`
+// import, like the *.test.ts files it serves).
 //
 // Runs in its own process because `@effectstream/midnight-contracts` resolves
 // the endpoints once, at module load: the parent sets token-bearing
@@ -16,8 +17,8 @@ const { startPglite } = await import("@effectstream/db/start-pglite");
 const pg = (await import("pg")).default;
 const fastify = (await import("fastify")).default;
 const { migrationTable } = await import("@zswap-da/database");
-const { closeTestPglite } = await import("../../database/test-pglite.ts");
-const { apiRouter } = await import("../api.ts");
+const { closeTestPglite } = await import("../database/pglite.test-support.ts");
+const { apiRouter } = await import("./api.ts");
 
 const handle = await startPglite(port);
 const client = new pg.Client({ host: "127.0.0.1", port, user: "postgres", database: "postgres" });

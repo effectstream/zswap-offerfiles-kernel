@@ -9,10 +9,12 @@
 //
 // This runs the kernel's OWN currentness code against the kernel's OWN database
 // and prints each input, so the answer is a measurement rather than a guess.
-// The thing to watch is `cel(lag=…)` against `MAX_CELESTIA_LAG_BLOCKS = 4`:
-// `/v1/health/sync` serves a CACHED status whose external tips are up to 60 s
-// old and can read "ok" while the fresh recompute the read actually uses reads
-// "syncing".
+// The things to watch are `ntp(lag_s=…)` against the NTP-lag limit and the
+// fresh status: `/v1/health/sync` serves a CACHED status whose external tips
+// are up to 60 s old and can read "ok" while the fresh recompute the read
+// actually uses reads "syncing" (a tip that became unreadable or stale). The
+// `mid(lag=…)` / `cel(lag=…)` columns are diagnostics: the node applies both
+// chains once per NTP block, so they grow between NTP blocks on a current node.
 //
 //   docker compose exec -T kernel bun run deploy/scripts/probe-backend-currentness.ts
 //

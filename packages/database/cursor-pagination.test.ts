@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 
 // Keyset pagination: pages must cover the book exactly once — no duplicates,
 // no gaps — including across rows that SHARE a celestia_height (offers

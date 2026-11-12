@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { closeTestPglite } from "../database/test-pglite.ts";
+import { closeTestPglite } from "../database/pglite.test-support.ts";
 
 // HTTP-level tests: the REAL apiRouter registered on a real fastify instance
 // over in-memory PGlite with the real migrations — no route copies, no mocks.

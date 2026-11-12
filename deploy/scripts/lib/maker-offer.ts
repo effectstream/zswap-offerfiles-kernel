@@ -23,6 +23,7 @@
 // settling party pays only the fee.
 
 import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
+import { midnightNetworkConfig as net } from "@effectstream/midnight-contracts/midnight-env";
 
 // RELATIVE, not the `@zswap-da/kernel-client/wallet` specifier the in-package
 // scripts use. Bun links workspace packages into their DEPENDENTS'
@@ -32,6 +33,7 @@ import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 // finds no `@zswap-da` at all. The npm dependencies DO resolve from there, so
 // only the first-party imports need the relative form.
 import { shieldedKeys, waitForSync } from "../../../packages/kernel-client/wallet.ts";
+import { withProofDeadline } from "../../../packages/kernel-client/wallet-timeouts.ts";
 import { KernelApi } from "./kernel-api.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -132,7 +134,12 @@ export async function postMakerOffer(opts: PostMakerOfferOptions): Promise<Poste
     // payFees:false — an Offer File is settled by whoever takes it.
     { ttl: new Date(Date.now() + ttlMs), payFees: false },
   );
-  const finalized = await maker.wallet.finalizeTransaction(recipe.transaction);
+  // Bounded by MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS: the facade proves at the
+  // proof server and the SDK has no deadline of its own.
+  const finalized = await withProofDeadline(
+    () => maker.wallet.finalizeTransaction(recipe.transaction),
+    { proofServerUrl: net.proofServer },
+  );
   const blob = OfferFiles.encode(finalized.serialize());
   log(`encoded blob: ${blob.slice(0, 32)}… (${blob.length} chars)`);
 

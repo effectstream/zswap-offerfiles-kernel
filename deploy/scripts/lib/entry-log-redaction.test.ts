@@ -5,7 +5,7 @@
 // lose (the wallet SDK's RPC client does), outside the entry's own redaction.
 //
 // Each entry runs as a child process under a preload
-// (`test-support/print-token-url-at-exit.ts`) that prints a token-bearing
+// (`print-token-url-at-exit.test-preload.ts`) that prints a token-bearing
 // Blockfrost URL through console.log, console.error and a raw stderr write
 // when the process exits. Each entry is driven to an early exit that needs no
 // network beyond this host (a missing required setting, a
@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 // may live under a path with a space in it.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..", "..");
-const PRELOAD = join(HERE, "test-support", "print-token-url-at-exit.ts");
+const PRELOAD = join(HERE, "print-token-url-at-exit.test-preload.ts");
 
 const TOKEN = "logGuardTestProjectId000000000000";
 const REDACTED = "project_id=<redacted>";

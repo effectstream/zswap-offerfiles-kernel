@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer } from "node:net";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 
 // The prune index for the 14-day root window: created by 000-init.sql on a
 // fresh database, and by the startup ensure on one that synced before it.

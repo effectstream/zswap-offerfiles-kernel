@@ -33,8 +33,8 @@ say() { echo "[$(date +%H:%M:%S)] $*"; }
 # 10001); those are not ours to signal and must not be touched.
 reap_orphans() {
   local pat pid
-  # main.grand-b.ts is the one that hurts most and was missing: p7a spawns a
-  # SECOND full node replaying the chain from height 1, and it is by far the
+  # main.grand-b.test-child.ts is the one that hurts most and was missing: p7a
+  # spawns a SECOND full node replaying the chain from height 1, and it is by far the
   # heaviest thing this suite runs (measured: load average 17 on a 16-core box
   # while it replays). A run killed during p7a — which a session teardown does —
   # leaves that replica running indefinitely, quietly loading every subsequent
@@ -48,7 +48,7 @@ reap_orphans() {
   # three identical bootstrap failures whose real cause was one SASL line deep in
   # stack.log. A stale PGlite of our own produces the same symptom.
   for pat in 'packages/batcher/[b]atcher[.]dev[.]ts' '[p]rovision-batcher-dust.ts' \
-             '[i]ndexer-standalone' 'packages/node/main[.]grand-b[.]ts' \
+             '[i]ndexer-standalone' 'packages/node/main[.]grand-b[.]test-child[.]ts' \
              'packages/node/main[.]dev[.]ts' '[s]tart-pglite'; do
     for pid in $(pgrep -u "$(id -u)" -f "$pat" 2>/dev/null); do
       say "reaping orphan $pid ($pat)"; kill "$pid" 2>/dev/null

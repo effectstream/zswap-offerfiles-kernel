@@ -29,7 +29,7 @@ const {
   isNullifierSpent,
   migrationTable,
 } = await import("@zswap-da/database");
-const { closeTestPglite } = await import("../database/test-pglite.ts");
+const { closeTestPglite } = await import("../database/pglite.test-support.ts");
 const {
   getReferenceState,
   validateZswapOffer,
@@ -120,8 +120,10 @@ let apiPort = 0;
 let latestApiSocket: any = null;
 let originalFetch: typeof fetch = globalThis.fetch;
 let batcherSubmissions = 0;
-let midnightTip = 100;
-let celestiaTip = 200;
+const midnightTip = 100;
+const celestiaTip = 200;
+/** false: the stub indexer and Celestia RPC answer 503, so both tips are unknown. */
+let tipsReadable = true;
 let raceArmed = false;
 let boundOfferReads = 0;
 let proxiedQueryCount = 0;
@@ -286,6 +288,7 @@ beforeAll(async () => {
         headers: { "content-type": "application/json" },
       });
     }
+    if (!tipsReadable) return new Response("unavailable", { status: 503 });
     const body = String(init?.body ?? "");
     const json = body.includes("header.NetworkHead")
       ? { jsonrpc: "2.0", id: 1, result: { header: { height: String(celestiaTip) } } }
@@ -648,15 +651,13 @@ describe("POST /v1/offers/files currentness, races, and side effects", () => {
 
   test.serial("rechecks uncached aggregate currentness after proof verification", async () => {
     expect(onlyEntry(await readFiles(requestFor())).verdict.code).toBe("VALID");
-    midnightTip = 10_000;
-    celestiaTip = 20_000;
+    tipsReadable = false;
     try {
       const response = await readFiles(requestFor());
       expect(response.statusCode).toBe(503);
       expect(response.json().error).toBe("FILES_UNAVAILABLE");
     } finally {
-      midnightTip = 100;
-      celestiaTip = 200;
+      tipsReadable = true;
       resetSyncHealthCacheForTest();
     }
   });

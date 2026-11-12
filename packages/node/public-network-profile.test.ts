@@ -7,6 +7,7 @@ import { MIP6_NAMESPACE_ID_SUFFIX_HEX } from "@zswap-da/offer-guard";
 import { UNPINNED_REFERENCE_PARAMETERS } from "@zswap-da/validator/reference-parameters";
 
 import { ROOT_WINDOW_DEFAULT_S } from "./network-windows.ts";
+import { DEFAULT_SYNC_HEALTH_CONFIG } from "./sync-health-config.ts";
 import {
   applyPublicNodeProfile,
   describeMidnightEndpoints,
@@ -84,6 +85,7 @@ describe("public-network node profile — resolution", () => {
       celestiaRpcOrigin: "https://celestia.example.invalid:26658",
       midnightEndpoints: "blockfrost-defaults",
       rootWindowSeconds: ROOT_WINDOW_DEFAULT_S,
+      syncHealth: DEFAULT_SYNC_HEALTH_CONFIG,
     });
   });
 

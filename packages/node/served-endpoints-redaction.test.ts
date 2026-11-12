@@ -1,7 +1,7 @@
 // What the public API serves never carries the Blockfrost project token:
 // GET /v1/midnight/config shows the endpoints as `project_id=<redacted>`, and
 // /v1/health and /v1/health/sync carry no endpoint at all. The routes run in
-// a child process (test-support/served-endpoints-child.ts) whose endpoint
+// a child process (served-endpoints.test-child.ts) whose endpoint
 // overrides embed a token, plain and among other query parameters.
 
 import { describe, expect, test } from "bun:test";
@@ -23,7 +23,7 @@ function freePort(): number {
 const closedPort = freePort();
 
 describe("served endpoints are redacted", () => {
-  const child = Bun.spawnSync([process.execPath, "run", join(HERE, "test-support", "served-endpoints-child.ts")], {
+  const child = Bun.spawnSync([process.execPath, "run", join(HERE, "served-endpoints.test-child.ts")], {
     cwd: HERE,
     env: {
       PATH: process.env["PATH"] ?? "",

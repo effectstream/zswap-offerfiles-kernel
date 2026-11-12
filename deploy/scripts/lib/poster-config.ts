@@ -51,6 +51,13 @@ import {
   publicDevSeedProblem,
   unsupportedNetworkProblem,
 } from "../../../packages/offer-guard/public-networks.ts";
+import {
+  PROOF_REQUEST_TIMEOUT_ENV,
+  proofRequestTimeoutMs,
+  WALLET_SYNC_TIMEOUT_ENV,
+  WalletTimeoutConfigError,
+  walletSyncTimeoutMs,
+} from "../../../packages/kernel-client/wallet-timeouts.ts";
 
 export interface GiveRange {
   minBase: bigint;
@@ -112,7 +119,10 @@ export interface PosterConfig {
   readonly journalReset: boolean;
 
   // ── budgets ──────────────────────────────────────────────────────────────
+  /** POSTER_SYNC_TIMEOUT_MS, else MIDNIGHT_WALLET_SYNC_TIMEOUT_MS, else 180 s. */
   readonly syncTimeoutMs: number;
+  /** MIDNIGHT_PROOF_REQUEST_TIMEOUT_MS, else 10 min: the deadline of one proof request. */
+  readonly proofRequestTimeoutMs: number;
   /** Bounded `ROOT_UNKNOWN` / `UTXO_NOT_LIVE` retries on `POST /v1/offers`. */
   readonly postRetries: number;
   readonly postRetryMs: number;
@@ -176,6 +186,17 @@ function readInt(env: EnvMap, key: string, fallback: number, opts: { min?: numbe
     throw new ConfigError("MALFORMED", `${key} must be an integer >= ${min}, got ${raw}`, key);
   }
   return value;
+}
+
+/** The shared wallet timeouts (kernel-client's wallet-timeouts.ts), with a
+ *  malformed value reported as this service's configuration error. */
+function walletTimeout(env: EnvMap, key: typeof WALLET_SYNC_TIMEOUT_ENV | typeof PROOF_REQUEST_TIMEOUT_ENV): number {
+  try {
+    return key === WALLET_SYNC_TIMEOUT_ENV ? walletSyncTimeoutMs(env) : proofRequestTimeoutMs(env);
+  } catch (err) {
+    if (err instanceof WalletTimeoutConfigError) throw new ConfigError("MALFORMED", err.message, key);
+    throw err;
+  }
 }
 
 function readBigint(env: EnvMap, key: string, fallback: bigint, opts: { min?: bigint } = {}): bigint {
@@ -558,7 +579,8 @@ export async function parsePosterConfig(env: EnvMap): Promise<PosterConfig> {
     journalFile: readString(env, "POSTER_JOURNAL_FILE", "/var/lib/offer-poster/journal.json"),
     journalReset: readBool(env, "POSTER_JOURNAL_RESET", false),
 
-    syncTimeoutMs: readInt(env, "POSTER_SYNC_TIMEOUT_MS", 180_000, { min: 1 }),
+    syncTimeoutMs: readInt(env, "POSTER_SYNC_TIMEOUT_MS", walletTimeout(env, WALLET_SYNC_TIMEOUT_ENV), { min: 1 }),
+    proofRequestTimeoutMs: walletTimeout(env, PROOF_REQUEST_TIMEOUT_ENV),
     postRetries: readInt(env, "POSTER_POST_RETRIES", 24, { min: 1 }),
     postRetryMs: readInt(env, "POSTER_POST_RETRY_MS", 5_000, { min: 1 }),
     liveTries: readInt(env, "POSTER_LIVE_TRIES", 40, { min: 1 }),

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { closeTestPglite } from "./test-pglite.ts";
+import { closeTestPglite } from "./pglite.test-support.ts";
 
 // Verifies the 002-liveness-sets migration + the created_unshielded / known_roots
 // queries end-to-end against an in-memory PGlite over the pg wire protocol — no

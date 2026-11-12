@@ -15,6 +15,7 @@ import { redactBlockfrostProjectId } from "@effectstream/midnight-contracts/midn
 
 import { installLogRedaction } from "../../packages/offer-guard/public-networks.ts";
 import { buildWallet } from "../../packages/kernel-client/wallet.ts";
+import { walletTimeoutProblems } from "../../packages/kernel-client/wallet-timeouts.ts";
 import { KernelApi } from "./lib/kernel-api.ts";
 import { postMakerOfferWithWallet, resolveExplicitTokens } from "./lib/maker-offer.ts";
 
@@ -24,6 +25,13 @@ globalThis.WebSocket = WebSocket;
 installLogRedaction(redactBlockfrostProjectId);
 
 const log = (msg: string) => console.log(`[maker-offer] ${msg}`);
+
+// A malformed wallet timeout stops the script before it opens a wallet.
+const timeoutProblems = walletTimeoutProblems(process.env);
+if (timeoutProblems.length > 0) {
+  for (const problem of timeoutProblems) console.error(`[maker-offer] ${problem}`);
+  process.exit(78);
+}
 
 const api = new KernelApi(
   process.env["ZSWAP_API"] ?? process.env["NODE_URL"] ?? "http://kernel:9999",

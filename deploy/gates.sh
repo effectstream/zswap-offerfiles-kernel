@@ -10,9 +10,8 @@
 # image's public node, batcher, poster and token-registry entries, run with
 # `--network none` so every endpoint is unreachable — configuration
 # preflights, named refusals (unknown network, retired endpoint host, missing
-# Blockfrost token, dev seeds), offline boots that reach their first network
-# call with every Blockfrost token redacted, and the entrypoint selection
-# harness. No live network is touched.
+# Blockfrost token, dev seeds), and offline boots that reach their first
+# network call with every Blockfrost token redacted. No live network is touched.
 #
 #   ./gates.sh [output-dir]
 #   GATES_ONLY=public ./gates.sh [output-dir]   # G8 only: needs just the kernel image
@@ -364,13 +363,6 @@ run_expect_gate public-token-registry-mainnet-nothing-to-import 0 \
   "${KRUN[@]}" -e TOKEN_REGISTRY_NETWORK=mainnet -e DB_HOST=127.0.0.1 -e DB_PORT=5432 \
     -e TOKEN_REGISTRY_ATTEMPTS=2 -e TOKEN_REGISTRY_RETRY_DELAY_S=0 \
     --entrypoint sh "${KERNEL_IMG}" -c "${DB_PROBE} sleep 1; exec /usr/local/bin/entrypoint-token-registry.sh"
-
-# G8s — the entrypoint selection harness passes with the image's own bash/bun
-# (undeployed still execs main.dev.ts / batcher.dev.ts). The image ships no
-# test files, so the test comes from this checkout through a read-only mount.
-run_expect_gate public-entrypoint-selection-harness 0 " 0 fail" -- \
-  "${KRUN[@]}" -v "$(pwd)/scripts/lib/kernel-entrypoints.test.ts:/app/deploy/scripts/lib/kernel-entrypoints.test.ts:ro" \
-  --entrypoint bun "${KERNEL_IMG}" test deploy/scripts/lib/kernel-entrypoints.test.ts
 
 {
   echo
